@@ -169,6 +169,8 @@ export class TurnsPart {
           }
         },
         turnLimit: (turn) => this.#turnLimit(name, ticket, iteration, cwd, start, turn),
+        // The session ended a stream stuck after its result; the turn goes on with that result.
+        streamStuck: (waitedS) => this.#store.jobs.appendEvent(name, ticket, { ts: now(), iteration, type: 'turn_stream_stuck', waited_s: waitedS }),
         message: async (message: SDKMessage) => {
           // No image bytes in events.jsonl: a Read of an image returns them.
           await this.#store.jobs.appendEvent(name, ticket, { ts: now(), iteration, message: withoutImageData(message) });

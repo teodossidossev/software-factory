@@ -1836,7 +1836,8 @@ own job only, section Live smoke test), `settingSources: ["user",
 nothing outside the sandbox; the hooks given to `query()`, the file-tool guard among them, still
 run, which `sf smoke`'s Sandbox step shows on the real CLI), only the built-in tools of
 `IMPLEMENTER_TOOLS` in `src/rules.ts` as `tools` (`Bash`, `Read`, `Edit`, `Write`, `NotebookEdit`,
-`Glob`, `Grep`, `Skill`, `Task`, `Agent`, `TaskOutput`, `TaskStop`, `TodoWrite`, `ToolSearch`; a
+`Glob`, `Grep`, `Skill`, `Task`, `Agent`, `TodoWrite`, `ToolSearch`; the background-task tools
+`TaskOutput`, `TaskStop` and `Monitor` are denied by name, SF-196; a
 name the installed CLI lacks is simply absent; sub-agents draw their tools from the session's, so
 no other tool a Claude Code release adds, such as `Workflow`, `CronCreate` or `SendMessage`,
 exists in the session or its sub-agents), `strictMcpConfig: true` with `mcpServers: {}` (no MCP
@@ -1849,7 +1850,8 @@ and the like), should a sub-agent be offered more than the session's tools; the 
 turn, MR preparation included), the file-tool guard as its `hooks` (SF-123, below), a
 filtered environment (no `SF_*`, no inherited Claude Code session markers; the cloud providers'
 `AWS_*`, `GOOGLE_*` and `CLOUD_ML_*` only when `CLAUDE_CODE_USE_BEDROCK` or `CLAUDE_CODE_USE_VERTEX`
-is set, SF-123) and, unless `SF_SANDBOX=off`, the sandbox
+is set, SF-123) with Claude Code's Bash settings on top (`SESSION_SHELL_ENV` of `src/session.ts`,
+below), and, unless `SF_SANDBOX=off`, the sandbox
 `{enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false, filesystem: {disabled: false}, network: {allowedDomains:
 ["registry.npmjs.org", ...SF_SANDBOX_DOMAINS], allowLocalBinding: true, allowAllUnixSockets: true}}`.
 Local binding and Unix sockets are allowed so that the repository's own tests, which start servers on
@@ -1870,6 +1872,25 @@ Claude Code ignores a command's `dangerouslyDisableSandbox`, and a project's `.c
 (which the Implementer can write in its worktree) can neither switch the sandbox off nor widen it,
 so the path denials below hold for every Bash command. A repository whose checks cannot run inside
 the sandbox needs `SF_SANDBOX=off`.
+
+**A turn waits for its commands** (SF-196). Claude Code keeps a session's stream open while a
+background task runs, so a turn whose Implementer left one behind (a test suite with
+`run_in_background`, a loop waiting for a line in its output) never ended. Every Implementer
+session's environment (`SESSION_SHELL_ENV`, `src/session.ts`) sets
+`CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, `BASH_DEFAULT_TIMEOUT_MS=1200000` (20 minutes) and
+`BASH_MAX_TIMEOUT_MS=3600000` (60 minutes, a slow suite of a workspace under load). The first turns
+background tasks off at the source: in the bundled Claude Code (2.1.316) it also turns off the move
+to the background of a foreground command past its timeout (SF-193 hung on that), and the command
+fails at its timeout instead. As a second layer the file-tool guard refuses a Bash call with
+`run_in_background: true` ("Run commands in the foreground: a factory turn waits for its commands.
+Give a long command a `timeout` (up to 60 minutes).", `BACKGROUND_REFUSAL`), `TaskOutput`,
+`TaskStop` and `Monitor` are outside the allow list, and the factory's rules sent with every prompt
+say so. The safety net: when a turn's `result` has come and its stream has not ended 2 minutes later
+(`STREAM_GRACE_MS`), the session records `{ts, iteration, type: "turn_stream_stuck", waited_s}` in
+the job's `events.jsonl` (`sf watch`: "the turn's result came but Claude Code did not end within
+120 s …"), ends Claude Code as an aborted turn does, and the turn finishes with that result. The net
+starts at the result, never before; a `close()` meanwhile (abort, hand-over) still ends the turn
+as closed.
 
 **The Implementer's wrapper** (SF-181, `src/session-wrapper.ts`). With the sandbox on, every
 `query()` of the Implementer session (its first, Fix, Tests Fix and MR text turns) passes

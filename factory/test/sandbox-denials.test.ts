@@ -14,7 +14,7 @@ import { gateEnvironment } from '../src/gate.js';
 import { saveRegistry } from '../src/registry.js';
 import { DENIED_TOOLS } from '../src/rules.js';
 import {
-  absoluteRule, claudeProjectName, claudeUserSettings, cliRuleList, type DenialScope, FACTORY_MCP_SERVER, FILE_GUARD, gateWrapper, gateWrapperFor, HOME_CREDENTIALS, installDir,
+  absoluteRule, BACKGROUND_REFUSAL, claudeProjectName, claudeUserSettings, cliRuleList, type DenialScope, FACTORY_MCP_SERVER, FILE_GUARD, gateWrapper, gateWrapperFor, HOME_CREDENTIALS, installDir,
   PATH_DENIAL_UNREPRESENTABLE, type PathDenials, pathDenials, prepareTaskChecksDir, taskChecksDir, USER_SETTINGS_WEAKEN_SANDBOX, userSettingsWeakening, withSandboxDenials,
 } from '../src/sandbox-denials.js';
 import { type IdleOutcome, ImplementerSession, sessionEnvironment, withSandboxEnvDenials } from '../src/session.js';
@@ -808,6 +808,17 @@ test('the file-tool guard (SF-123): writes only in the own worktree outside its 
     ['Grep', { pattern: 'x', path: 'src' }], ['Glob', { pattern: '**/*.ts', path: 'src' }], ['Read', { file_path: '/etc/hostname' }], ['Bash', { command: 'cat ~/.kube/config' }],
   ] as const) {
     assert.equal(await ask(tool, input), undefined, `${tool} ${JSON.stringify(input)}`);
+  }
+});
+
+test('the guard refuses a Bash call in the background (SF-196): a factory turn waits for its commands; a foreground one passes', async () => {
+  const l = await homeLayout('denials-background');
+  const ask = async (input: unknown): Promise<string | undefined> => guard(await pathDenials(homeScope(l)), l.own, 'Bash', input);
+  const refused = await ask({ command: 'npm test', run_in_background: true });
+  assert.equal(refused, 'Run commands in the foreground: a factory turn waits for its commands. Give a long command a `timeout` (up to 60 minutes).');
+  assert.equal(refused, BACKGROUND_REFUSAL);
+  for (const input of [{ command: 'npm test' }, { command: 'npm test', run_in_background: false }, { command: 'npm test', timeout: 3_600_000 }]) {
+    assert.equal(await ask(input), undefined, JSON.stringify(input));
   }
 });
 

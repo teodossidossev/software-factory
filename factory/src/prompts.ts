@@ -10,6 +10,7 @@ export const FACTORY_PROMPT_RULES = `Rules from the Software Factory:
 - Write your own changes to files with Edit and Write only, never through an inline script, \`sed -i\` or a shell redirection: the factory checks every Edit and Write. Running the repository's own tools (formatter, code generator, package manager) is fine.
 - At the start of every turn, write the turn's steps as a checklist in .software-factory/<ticket>.steps.md: 3 to 12 lines \`- [ ] step\` (in a Fix turn, the fixes). Tick a step \`- [x]\` as soon as it is done, and keep the file current.
 - While working, run the tests of the files you change; run the repository's full test suite once, before the report.
+- Run every command in the foreground and wait for it; give a long one a timeout (up to 60 minutes). Never run a command in the background or a loop that waits for a file.
 - End your turn with a report in this form, as your last message:
   # Report: <ticket>, iteration <N>
   ## Done        (what was built or changed, by responsibility)

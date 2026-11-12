@@ -35,7 +35,7 @@ function resultText(content: unknown): string {
 export interface DescribedEvent {
   ts: string | null;
   iteration: number | null;
-  // "prompt", "state", "notify_failed", "placeholders_removed", "review", "review_failed" (Claude's or the gate's), "gate_overridden" (the user accepted over the stopped gate), "gate_level", "simplify" and "simplify_chosen", "interrupted" and "task_changed", "attachments", "turn_limit_continued", "sandbox_lock_removed", "mr_edited", "gate_event" (a Codex event of the gate), "review_message" (a message of the Claude review), or the SDK message type ("assistant", "user", "result", "system", ...).
+  // "prompt", "state", "notify_failed", "placeholders_removed", "review", "review_failed" (Claude's or the gate's), "gate_overridden" (the user accepted over the stopped gate), "gate_level", "simplify" and "simplify_chosen", "interrupted" and "task_changed", "attachments", "turn_limit_continued", "turn_stream_stuck", "sandbox_lock_removed", "mr_edited", "gate_event" (a Codex event of the gate), "review_message" (a message of the Claude review), or the SDK message type ("assistant", "user", "result", "system", ...).
   type: string;
   lines: string[];
 }
@@ -165,6 +165,10 @@ function recordLines(record: Record<string, unknown>): string[] {
   if (record.type === 'turn_limit_continued') {
     const changed = typeof record.changed_paths === 'number' ? `, ${record.changed_paths} changed ${record.changed_paths === 1 ? 'path' : 'paths'}` : '';
     return [`${prefix} turn limit of ${String(record.max_turns)} steps reached while making progress${changed}; the factory went on by itself (${String(record.continued)} of ${String(record.allowed)})`];
+  }
+  // A turn's stream stayed open after its result; the factory ended Claude Code and kept the result.
+  if (record.type === 'turn_stream_stuck') {
+    return [`${prefix} the turn's result came but Claude Code did not end within ${String(record.waited_s)} s (a background task kept it); the factory ended it and kept the result`];
   }
   // The sandbox's leftover config lock, removed by the factory.
   if (record.type === 'sandbox_lock_removed') {

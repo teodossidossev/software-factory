@@ -92,14 +92,15 @@ const ALL_GIT_COMMANDS = [
 export const ENV_FILE_RULES = ['Read', 'Edit', 'Write'].flatMap((tool) => [`${tool}(**/.env)`, `${tool}(**/.env.*)`]);
 // The only built-in tools of the Implementer's session and its sub-agents (the tools option of its
 // query()); a name the installed Claude Code does not have is simply absent. No MCP server loads.
+// No tool of background tasks (TaskOutput, TaskStop, Monitor): a factory turn runs none.
 export const IMPLEMENTER_TOOLS = [
-  'Bash', 'Read', 'Edit', 'Write', 'NotebookEdit', 'Glob', 'Grep', 'Skill', 'Task', 'Agent', 'TaskOutput', 'TaskStop', 'TodoWrite', 'ToolSearch',
+  'Bash', 'Read', 'Edit', 'Write', 'NotebookEdit', 'Glob', 'Grep', 'Skill', 'Task', 'Agent', 'TodoWrite', 'ToolSearch',
 ];
 // Tools outside IMPLEMENTER_TOOLS a Claude Code release has offered a session, denied by name as
 // well, should a sub-agent be offered more than the session's tools.
 const OUTSIDE_TOOLS = [
   'RemoteTrigger', 'CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup', 'PushNotification', 'SendMessage', 'SendToProject',
-  'SendToProjectContext', 'ListAgents', 'Workflow', 'DesignSync', 'ExitWorktree', 'ReportFindings', 'Monitor',
+  'SendToProjectContext', 'ListAgents', 'Workflow', 'DesignSync', 'ExitWorktree', 'ReportFindings', 'Monitor', 'TaskOutput', 'TaskStop',
 ];
 // Every turn, MR preparation included, on top of IMPLEMENTER_TOOLS: every mutating Git command is
 // the factory's or the user's; .git and .env files are off limits; no web tool, which the sandbox

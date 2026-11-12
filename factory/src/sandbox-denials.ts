@@ -506,8 +506,9 @@ export async function pathDenials(scope: DenialScope): Promise<PathDenials> {
   return { tools: [...tools], sandbox, claudeTmp, kept, hooks: guardHooksOf(guard) };
 }
 
-// The text every refusal of the file-tool guard starts with (the smoke looks for it).
+// The text every path refusal of the file-tool guard starts with (the smoke looks for it); BACKGROUND_REFUSAL: its refusal of a Bash call in the background.
 export const FILE_GUARD = "The factory's file-tool guard";
+export const BACKGROUND_REFUSAL = 'Run commands in the foreground: a factory turn waits for its commands. Give a long command a `timeout` (up to 60 minutes).';
 
 // The file tools that write, and the ones that read, by name.
 const WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
@@ -699,15 +700,15 @@ async function searchEscape(guard: FileGuard, dir: string): Promise<string | und
   return undefined;
 }
 
-// Why the guard refuses a tool call, or undefined when it passes. A write tool passes only
-// when every target, links resolved, is in the own worktree outside its .git and its agent
-// configuration (.claude, .mcp.json, .codex); a read tool is
-// refused when a target lies in the home directory outside the kept paths and the session's own
-// Claude Code project folders. Every other tool passes. Never throws: a call it fails to check is
+// Why the guard refuses a tool call, or undefined when it passes. A write tool passes only when every
+// target, links resolved, is in the own worktree outside its .git and its agent configuration (.claude,
+// .mcp.json, .codex); a read tool is refused when a target lies in the home directory outside the kept
+// paths and the session's own Claude Code project folders; a Bash call with run_in_background true is
+// refused (BACKGROUND_REFUSAL). Every other call passes. Never throws: a call it fails to check is
 // refused (Claude Code would take a hook that throws as no decision).
 export async function fileGuardReason(guard: FileGuard, tool: string, input: unknown, cwd: string | undefined): Promise<string | undefined> {
   if (!WRITE_TOOLS.has(tool) && !READ_TOOLS.has(tool)) {
-    return undefined;
+    return tool === 'Bash' && (input as { run_in_background?: unknown } | null)?.run_in_background === true ? BACKGROUND_REFUSAL : undefined;
   }
   try {
     const base = cwd ?? guard.worktree;

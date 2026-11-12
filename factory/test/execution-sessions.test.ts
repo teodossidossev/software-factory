@@ -11,7 +11,7 @@ import { JobStore } from '../src/jobs.js';
 import { prepareClaudeState } from '../src/session-wrapper.js';
 import { initToolsProblem } from '../src/live-smoke.js';
 import { DENIED_TOOLS, IMPLEMENTER_TOOLS } from '../src/rules.js';
-import { IMPLEMENTER_SESSION_TOOLS, SMOKE_PROBE_RULE, SMOKE_TOOLS, sessionAllowedTools } from '../src/session.js';
+import { IMPLEMENTER_SESSION_TOOLS, SESSION_SHELL_ENV, SMOKE_PROBE_RULE, SMOKE_TOOLS, sessionAllowedTools } from '../src/session.js';
 import { call, fakeLog, newEnv, newRepo, putTask, runCli, script, serve, stop, temp, waitFor, jobPrompt } from './support/harness.js';
 
 test('permission_mode_mismatch ends in needs_human; a restart turns working jobs into needs_human and sf say resumes them', async () => {
@@ -102,9 +102,12 @@ test('the smoke\'s session (SF-104, SF-109, SF-110): an sf serve whose state dir
   assert.ok(denied(smoke!.argv)?.includes('Bash(git commit:*)'));
   // Both sessions: the allowed tools only and no MCP server (strict, no --mcp-config); the init
   // messages the factory records list nothing else.
+  // Both, through the wrapper (SF-196): no background task, a 20-minute Bash default and a 60-minute cap.
   for (const entry of [smoke!, real!]) {
     assert.deepEqual(entry.argv.filter((arg) => /^--(tools|strict-mcp-config|mcp-config)\b/.test(arg)), [`--tools=${IMPLEMENTER_TOOLS.join(',')}`, '--strict-mcp-config']);
+    assert.deepEqual(entry.shell, { BASH_DEFAULT_TIMEOUT_MS: '1200000', BASH_MAX_TIMEOUT_MS: '3600000', CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1' });
   }
+  assert.deepEqual(SESSION_SHELL_ENV, smoke!.shell);
   const events = await readFile(join(env.state, 'jobs', 'app', 'P-1', 'events.jsonl'), 'utf8');
   const inits = events.split('\n').filter((line) => line !== '').map((line) => JSON.parse(line).message).filter((message) => message?.type === 'system' && message.subtype === 'init');
   assert.deepEqual(inits.map((message) => message.tools), [IMPLEMENTER_TOOLS, IMPLEMENTER_TOOLS]);
@@ -113,8 +116,9 @@ test('the smoke\'s session (SF-104, SF-109, SF-110): an sf serve whose state dir
 
 test('the Implementer\'s tools: IMPLEMENTER_TOOLS only, no MCP server; DENIED_TOOLS keeps the web, worktree and MCP tools out', () => {
   assert.deepEqual(IMPLEMENTER_SESSION_TOOLS, { tools: IMPLEMENTER_TOOLS, strictMcpConfig: true, mcpServers: {} });
-  assert.deepEqual(IMPLEMENTER_TOOLS, ['Bash', 'Read', 'Edit', 'Write', 'NotebookEdit', 'Glob', 'Grep', 'Skill', 'Task', 'Agent', 'TaskOutput', 'TaskStop', 'TodoWrite', 'ToolSearch']);
-  for (const tool of ['EnterWorktree', 'WebFetch', 'WebSearch', 'mcp__*', 'Workflow', 'CronCreate', 'SendMessage', 'ExitWorktree', 'Monitor']) {
+  assert.deepEqual(IMPLEMENTER_TOOLS, ['Bash', 'Read', 'Edit', 'Write', 'NotebookEdit', 'Glob', 'Grep', 'Skill', 'Task', 'Agent', 'TodoWrite', 'ToolSearch']);
+  // No background task to watch or stop (SF-196): TaskOutput, TaskStop and Monitor are denied by name.
+  for (const tool of ['EnterWorktree', 'WebFetch', 'WebSearch', 'mcp__*', 'Workflow', 'CronCreate', 'SendMessage', 'ExitWorktree', 'Monitor', 'TaskOutput', 'TaskStop']) {
     assert.ok(DENIED_TOOLS.includes(tool) && !IMPLEMENTER_TOOLS.includes(tool), tool);
   }
   // The smoke's allowed file tools are among them.

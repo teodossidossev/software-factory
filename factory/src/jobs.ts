@@ -472,10 +472,11 @@ export type EventRecord = { ts: string; iteration: number } & (
   | { type: 'attachments'; images: Array<{ name: string; type: string; bytes: number; sha256: string }> }
   // The Task file changed while the job was paused: the sha256 the job had, and the new one.
   | { type: 'task_changed'; from: string | null; to: string }
-  // An Implementer turn ended at the turn limit while making progress, and the factory sent a
-  // continuation: its number in the chain, the chain's allowance, the turn's maxTurns, the
-  // worktree's changed paths and the turn's tool calls.
+  // An Implementer turn ended at the turn limit while making progress and the factory sent a continuation: its
+  // number in the chain, the chain's allowance, the turn's maxTurns, the worktree's changed paths and tool calls.
   | { type: 'turn_limit_continued'; continued: number; allowed: number; max_turns: number; changed_paths: number; tool_calls: number }
+  // A turn's stream stayed open waited_s seconds after its result: Claude Code ended, the result kept.
+  | { type: 'turn_stream_stuck'; waited_s: number }
   // The merge request on the Git host: opened, reused (already open for the branch),
   // merged by the factory, or found merged or closed on the host by sf mr status.
   // mr_state, not state: a record with state is a state change.

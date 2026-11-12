@@ -25,6 +25,7 @@ import { appendFix, mayTouch, parseFrontMatter, readTask, TASK_DIR, taskScope } 
 import { TicketHistory } from '../ticket-history.js';
 import { usageLimit, type UsageLimit } from '../usage-limit.js';
 import type { RunnerRequest } from '../runner.js';
+import { jobSkills } from '../skills.js';
 import type { JobStorePort, LivePort, LockPort, RunnerPort, SettingsPort, StopPort } from './ports.js';
 import { checkNotInCheckout, cutOffError } from './errors.js';
 import { changeNote } from './prompts.js';
@@ -145,6 +146,9 @@ export class TurnsPart {
         // real job's state directory.
         allowCommands: probe !== undefined ? [probe] : undefined,
         smokeMode: probe !== undefined,
+        // The skills folder the job's start recorded (else the snapshot link), bound read-only under
+        // the wrapper of each turn: a later sync does not change the skills of this job.
+        skills: () => jobSkills(this.#settings.config.stateDir, this.#store.jobs.eventsPath(name, ticket)),
         // Built by the session's first turn, again for every session the factory creates, with
         // the session's own temporary folder kept; under the wrapper (the sandbox on) its skills readable.
         pathDenials: (sessionTmp) => pathDenials({

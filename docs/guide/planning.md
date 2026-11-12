@@ -18,8 +18,9 @@ directory, mode 0600); `sf mcp-url --rotate` makes a new one, which a running `s
 once ([Configuration](configuration.md#the-mcp-token-mcp-token)). Any MCP client with the URL can
 use the tools. The server's instructions are the Handbook's Quick start followed by a
 `## Planning method` section: two lines on how to plan (look facts up yourself, write the Task file
-only after the user confirms), then the factory's copy of the grilling skill
-(`factory/skills/grilling/SKILL.md`, without its front matter). `SF_PLAN_SKILL` names another skill
+only after the user confirms), then your installed grilling skill, as `sf serve` copied it at its
+start into its skills snapshot (`<state dir>/skills/grilling/SKILL.md`, without its front matter;
+an update reaches planning at the next start). `SF_PLAN_SKILL` names another skill
 file, and an empty value turns the section off. A missing file leaves the Quick start alone, and
 `sf serve` logs one warning at start.
 
@@ -79,7 +80,7 @@ Then, for every ticket:
    opens ChatGPT with the first message filled in (the connector, `guide`, the ticket, the
    workspace, your words, the names of the images, and what to do). Press Enter if it is not sent
    by itself. (A message too long for a link is offered to copy.)
-5. ChatGPT grills you on the ticket, by the factory's copy of the grilling skill (the server's
+5. ChatGPT grills you on the ticket, by your installed grilling skill (the server's
    instructions carry it). It looks facts up itself in the repository (`read_file`, `search`) and
    the images (`read_attachment`), and asks you in rounds: numbered questions, each with its
    recommended answer ("yes" accepts it), only the decisions only you can make. When you confirm

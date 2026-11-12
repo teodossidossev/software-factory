@@ -15,7 +15,6 @@
     "build": "node scripts/build.mjs",
     "start": "node dist/src/cli.js serve",
     "check-code": "node scripts/check-code.mjs",
-    "sync-skills": "node scripts/sync-skills.mjs",
     "test": "npm run check-code && npm run build && node scripts/run-tests.mjs unit",
     "browsers": "playwright install chromium",
     "test:browser": "npm run build && node scripts/check-browser.mjs && node scripts/run-tests.mjs browser"

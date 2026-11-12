@@ -118,6 +118,7 @@ export function processEnv(env: Env): NodeJS.ProcessEnv {
     HOME: env.home,
     SF_CONFIG_DIR: env.config,
     SF_STATE_DIR: env.state,
+    SF_SKILLS_DIR: skillsSourceDir(),
     SF_PORT: '0',
     SF_DASHBOARD_PORT: '0',
     SF_CLAUDE: FAKE,
@@ -167,10 +168,30 @@ export function processEnv(env: Env): NodeJS.ProcessEnv {
   };
 }
 
-// The package's own code-review skill, and the review_method review.json and gate.json have with it.
-export const OWN_REVIEW_SKILL = fileURLToPath(new URL('../../../skills/code-review/SKILL.md', import.meta.url));
-export async function ownReviewMethod(): Promise<{ path: string; sha256: string }> {
-  return { path: OWN_REVIEW_SKILL, sha256: createHash('sha256').update(await readFile(OWN_REVIEW_SKILL)).digest('hex') };
+// The fake installed skills (SF_SKILLS_DIR of every sf process and of this one, made by the before
+// hook): each listed skill's SKILL.md with a front matter and a body, and the lock file next to the
+// folder, every skill at hash <name>-hash.
+export const FAKE_SKILLS: Record<string, string> = {
+  implement: 'Implement the work described by the user in the spec or tickets.',
+  tdd: 'Test-driven development: red, then green.',
+  'code-review': 'Two-axis review of the diff: Standards and Spec.',
+  grilling: 'Interview the user relentlessly about every aspect of the plan.',
+};
+export const skillsSourceDir = (): string => join(temp, 'agents', 'skills');
+async function writeFakeSkills(): Promise<void> {
+  for (const [name, body] of Object.entries(FAKE_SKILLS)) {
+    await mkdir(join(skillsSourceDir(), name), { recursive: true });
+    await writeFile(join(skillsSourceDir(), name, 'SKILL.md'), `---\nname: ${name}\ndescription: The fake ${name} skill\n---\n\n${body}\n`);
+  }
+  const lock = { version: 3, skills: Object.fromEntries(Object.keys(FAKE_SKILLS).map((name) => [name, { skillFolderHash: `${name}-hash` }])) };
+  await writeFile(join(temp, 'agents', '.skill-lock.json'), JSON.stringify(lock));
+  process.env.SF_SKILLS_DIR = skillsSourceDir();
+}
+
+// The review_method review.json and gate.json have with the snapshot's code-review skill (the fake's).
+export async function ownReviewMethod(env: Env): Promise<{ path: string; sha256: string }> {
+  const source = join(skillsSourceDir(), 'code-review', 'SKILL.md');
+  return { path: join(env.state, 'skills', 'code-review', 'SKILL.md'), sha256: createHash('sha256').update(await readFile(source)).digest('hex') };
 }
 
 export async function newEnv(name: string, extra: Record<string, string> = {}, options: { realBwrap?: boolean } = {}): Promise<Env & { proc: string }> {
@@ -485,6 +506,7 @@ before(async () => {
   temp = await realpath(await mkdtemp(join(tmpdir(), 'sf-exec-')));
   removeOnExit(temp);
   await mkdir(join(temp, 'tmp'));
+  await writeFakeSkills();
   fakeCodex = join(temp, 'fake-codex');
   await writeFile(fakeCodex, `#!/bin/sh\nexec '${process.execPath}' '${FAKE_CODEX_SCRIPT}' "$@"\n`);
   await chmod(fakeCodex, 0o755);

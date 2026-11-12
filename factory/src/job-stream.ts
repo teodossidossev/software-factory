@@ -7,6 +7,7 @@ import { createReadStream } from 'node:fs';
 import { createInterface } from 'node:readline';
 import type { GateRecord, IterationMeta, JobStore, ReviewRecord, SimplifyRecord } from './jobs.js';
 import type { LedgerEntry } from './ledger.js';
+import { skillsText } from './skills.js';
 import { canonicalStop, type StopCode, type StopKind, STOPS } from './stops.js';
 import { CONTINUE_PROMPT } from './turn-limit.js';
 import { describeEvent, limitStateText, shortInput } from './watch.js';
@@ -374,6 +375,9 @@ async function drafts(raw: string, record: Record<string, unknown>, it: number, 
       exit_code: numberOrNull(record.exit_code), timed_out: record.timed_out === true, ms: numberOrNull(record.duration_ms),
       reason: typeof record.reason === 'string' ? record.reason : null, tail: cut(typeof record.tail === 'string' ? record.tail : ''), tail_truncated: record.tail_truncated === true,
     }];
+  }
+  if (record.type === 'skills') {
+    return [{ t: 'note', who: 'factory', text: skillsText({ versions: Object.fromEntries(Object.entries(asRecord(record.versions)).map(([name, hash]) => [name, String(hash)])), missing: Array.isArray(record.missing) ? record.missing.map(String) : [], ...(typeof record.error === 'string' ? { error: record.error } : {}) }) }];
   }
   if (record.type === 'skill_missing') {
     const skill = String(record.skill);

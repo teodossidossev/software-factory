@@ -56,7 +56,7 @@ export interface DenialScope {
   worktree?: string | undefined;
   // The session's own temporary folder (makeSessionTmp), kept readable and writable.
   sessionTmp?: string | undefined;
-  // The Implementer in its bwrap wrapper, whose <config dir>/skills is the factory's read-only copy.
+  // The Implementer in its bwrap wrapper, whose <config dir>/skills is the skills snapshot, read-only.
   wrappedSkills?: boolean | undefined;
   // A Task check's own folder (its check-* folder under the Task checks' parent), kept readable and writable.
   checkFolder?: string | undefined;
@@ -719,7 +719,7 @@ export async function fileGuardReason(guard: FileGuard, tool: string, input: unk
     if ('unreadable' in found) {
       return `${FILE_GUARD} refuses this ${tool}: the path ${found.unreadable} cannot be checked (give a plain absolute path, no ~).`;
     }
-    // A read in the skills folder passes by the path given, unresolved: in the wrapper it is the factory's copy.
+    // A read in the skills folder passes by the path given, unresolved: in the wrapper it is the skills snapshot.
     const checked = (path: string): boolean => WRITE_TOOLS.has(tool) || !guard.skills.some((dir) => within(path, dir));
     for (const path of found.paths.filter(checked)) {
       const real = await realTarget(path);

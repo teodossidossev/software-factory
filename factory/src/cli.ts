@@ -7,10 +7,9 @@
 // cost and yield, reading the state directory directly), `sf smoke` (the live smoke test,
 // src/live-smoke.ts: its own sf processes on a throwaway repository and state) and `sf
 // run`, the job's runner that sf serve starts (src/runner.ts), and `sf digest [--now]`
-// (the morning digest, through the socket of sf serve), `sf service` (sf serve as a
-// systemd user service, src/service.ts) and `sf update` (the install updated, drained
-// first, src/update.ts) and `sf guard` (the guard, src/guard.ts: run here, no sf
-// serve needed; `sf guard install-hook` writes the pre-push hook).
+// (the morning digest, through the socket of sf serve), `sf service` (sf serve as a systemd user
+// service, src/service.ts) and `sf update` (the install updated, drained first, src/update.ts) and
+// `sf guard` (the guard, src/guard.ts: run here, no sf serve needed; `sf guard install-hook` writes the pre-push hook).
 // Exit codes: 0 ok, 1 error, 2 usage.
 import { spawn } from 'node:child_process';
 import { basename, dirname, join, relative, resolve } from 'node:path';
@@ -51,6 +50,7 @@ import { Setup } from './setup.js';
 import { handoverLines, limitLine, type StatusRow, statusRows } from './status.js';
 import { fileSummaryLines } from './patch.js';
 import { prepareTaskChecksDir } from './sandbox-denials.js';
+import { serveSkills } from './skills.js';
 import { factoryRoots, OrphanWatch, reapOrphanedSandboxes } from './sandbox-reaper.js';
 import { reapThenScan, upkeep } from './recovery.js';
 import { KEEP_AWAKE_COMMAND, KEEP_AWAKE_EVERY_MS, KeepAwake } from './keep-awake.js';
@@ -152,7 +152,7 @@ async function serve(options: { tunnel?: 'off' } = {}): Promise<{ dashboard: URL
   const healthOn = healthSetting();
   const keepAwakeOn = keepAwakeSetting();
   const tunnelOn = tunnelSetting() === 'auto' && options.tunnel !== 'off';
-  const handbook = await loadHandbook();
+  const handbook = await serveSkills(config.stateDir).then(() => loadHandbook());
   if (handbook.planSkill === undefined && process.env.SF_PLAN_SKILL !== '') {
     console.error(`warning: no planning skill at ${planSkillPath()}; the instructions are the Quick start alone`);
   }

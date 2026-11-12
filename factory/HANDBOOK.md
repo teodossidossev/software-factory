@@ -244,6 +244,11 @@ Its tools are an allow list: `Bash`, `Read`, `Edit`, `Write`, `NotebookEdit`, `G
 `Skill`, `Task`/`Agent` (sub-agents, with the same tools), `TaskOutput`, `TaskStop`, `TodoWrite`
 and `ToolSearch`; no web tool and no MCP server. It changes files with Edit and Write only, never
 through a script; plan nothing that needs another tool.
+At the start of every turn the Implementer writes the turn's steps as a checklist in
+`.software-factory/<ticket>.steps.md` (3 to 12 lines `- [ ] step`; in a Fix turn, the fixes) and
+ticks each one (`- [x]`) as soon as it is done: the board shows them with the job's phase and when
+it is likely ready. The file stays out of the commit, the Patch and the reviews, as the MR text's
+`<ticket>.mr.md` does.
 The user reviews a job in their own checkout through the factory's Hand over to my checkout; you
 never create, switch or check out branches for that.
 

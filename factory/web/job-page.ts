@@ -88,7 +88,7 @@ function renderHead(): void {
     el('span', '', `${money(job.cost_usd)}${running ? ' so far' : ''} (Claude, est.)`), el('span', '', `${dur(end - Date.parse(job.created_at))} elapsed`), branch);
   // What the ticket waits for, who waits for it, and a cycle it is part of.
   t2.append(...dependencyLines(keyOf(job), dependencyGraph(), 'span').lines);
-  keepFocus(byId('jhead'), () => byId('jhead').replaceChildren(backButton, t1, tools, t2));
+  keepFocus(byId('jhead'), () => byId('jhead').replaceChildren(backButton, t1, tools, t2, ...progressBlock(job, nowLine(job).what, false)));
 }
 
 // The job has its MR text (written at Clean): the Merge request screen applies.

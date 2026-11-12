@@ -79,6 +79,22 @@ when the branch exists already (`branch_exists`), a worktree of the ticket is le
 9. **Ready**: the factory hands the job over to your checkout (`handed_over`), or leaves it in
    `ready_for_human_review`; you are notified. See [Review and merge](review-and-merge.md).
 
+**How far a running job is.** At the start of every turn the Implementer writes its steps as a
+checklist in `.software-factory/APP-12.steps.md` of the worktree (in a Fix turn, the fixes) and
+ticks each one when it is done; the file never reaches the commit, the Patch or a review. A running
+card (Implementing or Reviewing) shows, instead of a Now line: a ring with the steps done (`5/7`;
+hover it for the tool calls so far), **Now** (or **Fix round N · now**, or the reviewer's name) with
+the current step (the first not ticked) in words, the four phases as chips (Code, Claude, Codex, MR
+text: done, now, ahead; Claude struck through on a job without the Claude review), **Ready around
+15:04–15:28**, and **Show the N steps**, which opens the list in the card (done struck through, the
+current one bold; it stays open until you reload the page). The range comes from the factory's own
+history: the quartiles of a working turn and the medians of the reviews and the MR text of the
+workspace's finished jobs (every workspace's while it has fewer than 10), with one more fix round on
+the top while the job has had none; before the factory has any history of its own, it starts from
+typical durations (a working turn 10 to 32 min, a review 2 min, the MR text 1 min). Without a steps
+file the card still shows the phase and the range. The job's page shows the same block in its
+header, the steps always open.
+
 The limits that stop the loop for you: `SF_MAX_ITERATIONS` fix sections (5), `SF_GATE_MAX_ROUNDS`
 gate fix rounds (5), `SF_GATE_MAX_TOKENS` gate tokens (5,000,000), and the ledger's own stops
 (escalations, disputes, churn). See [When a job stops](when-a-job-stops.md).

@@ -575,6 +575,7 @@ function jobCard(job: JobRow): HTMLLIElement {
   const item = boardCard(key, job.workspace);
   item.dataset.open = key;
   item.append(cardRow(job), el('div', 'title', titleOf(job)));
+  const progress = RUNNING.includes(job.state) ? progressBlock(job, nowLine(job).what, true) : [];
   if (job.state === 'waiting_limit') {
     // Parked on a usage limit, holding its slot; once the reset passed under the rule wait,
     // the user resumes it.
@@ -587,6 +588,9 @@ function jobCard(job: JobRow): HTMLLIElement {
     } else {
       item.append(el('div', 'parked', `Waiting for limits · resets at ${limitClock(job) ?? '—'}`), el('div', 'meta', `Iteration ${shownIteration(job)} · parked, holds its slot`));
     }
+  } else if (progress.length > 0) {
+    // The steps, the phase and when it is likely ready, in place of the Now line and the iteration.
+    item.append(...progress);
   } else if (RUNNING.includes(job.state)) {
     const now = nowLine(job);
     const line = el('div', 'now');

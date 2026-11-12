@@ -437,3 +437,86 @@ async function answerOf(response: Response): Promise<unknown> {
 function cxData(): CxData {
   return { index: null, stamp: null, loading: null, lists: new Map(), sides: new Map(), diffs: new Map(), focusTree: false };
 }
+
+// ---------- A running job's progress (variant C of docs/design/job-progress/prototype.html) ----------
+
+const PROGRESS_PHASES: readonly ProgressPhase[] = ['code', 'claude', 'codex', 'mr_text'];
+const PHASE_CHIPS: Readonly<Record<ProgressPhase, string>> = { code: 'Code', claude: 'Claude', codex: 'Codex', mr_text: 'MR text' };
+const PHASE_NOW: Readonly<Record<ProgressPhase, string>> = { code: 'Now', claude: 'Claude review', codex: 'Codex gate', mr_text: 'MR text' };
+// The cards whose steps the user opened, by key, until the page reloads.
+const openSteps = new Set<string>();
+
+// The ring of the steps done: "5/7" on a circle filled as far; its title the job's tool calls.
+function stepsRing(done: number, total: number, calls: string): SVGElement {
+  const length = 2 * Math.PI * 14;
+  const ring = svgEl('svg', { class: 'ring', viewBox: '0 0 34 34', role: 'img', 'aria-label': `${done} of ${total} steps` });
+  ring.append(svgEl('title', {}, calls), svgEl('circle', { class: 'bg', cx: 17, cy: 17, r: 14 }),
+    svgEl('circle', { class: 'fg', cx: 17, cy: 17, r: 14, 'stroke-dasharray': length.toFixed(2), 'stroke-dashoffset': (length * (1 - done / total)).toFixed(2) }),
+    svgEl('text', { x: 17, y: 21, 'text-anchor': 'middle' }, `${done}/${total}`));
+  return ring;
+}
+
+// A running job's progress block, none without progress: the ring of the steps (none without
+// steps), Now (Fix round N · now, or the reviewer) with the current step (the first not done, in
+// every phase) or else fallback, the phase chips, Ready around (the estimate's range) and the steps
+// (done struck through, the current one bold): on a card behind Show the N steps (kept open per card
+// in openSteps), on the job page always open.
+function progressBlock(job: JobRow, fallback: string, onCard: boolean): HTMLElement[] {
+  const progress = job.progress;
+  if (typeof progress !== 'object' || progress === null) {
+    return [];
+  }
+  const { steps, phase } = progress;
+  const current = steps.findIndex((step) => !step.done);
+  const calls = counted(typeof job.tool_calls === 'number' ? job.tool_calls : 0, 'tool call');
+  const text = current >= 0 ? steps[current]!.text : fallback;
+  const words = el('span', 't', text);
+  words.setAttribute('title', text);
+  const now = el('div', 'cnow');
+  now.append(el('span', 'k', phase === 'code' && progress.fix_round > 0 ? `Fix round ${progress.fix_round} · now` : PHASE_NOW[phase]), words);
+  const wrap = el('div', steps.length > 0 ? 'cwrap' : 'cwrap bare');
+  if (steps.length > 0) {
+    wrap.append(stepsRing(steps.filter((step) => step.done).length, steps.length, calls));
+  } else {
+    now.setAttribute('title', calls);
+  }
+  wrap.append(now);
+  const chips = el('div', 'phasechips');
+  const at = PROGRESS_PHASES.indexOf(phase);
+  PROGRESS_PHASES.forEach((name, index) => {
+    const off = name === 'claude' && job.claude_review === false;
+    chips.append(el('span', off ? 'off' : index < at ? 'done' : index === at ? 'now' : '', PHASE_CHIPS[name]));
+  });
+  const block = el('div', 'prog');
+  const [from, to] = [localTime(progress.ready_from).slice(11, 16), localTime(progress.ready_to).slice(11, 16)];
+  const eta = el('div', 'eta', 'Ready around ');
+  eta.append(el('b', '', from === to ? from : `${from}–${to}`));
+  block.append(wrap, chips, eta);
+  if (steps.length === 0) {
+    return [block];
+  }
+  const list = el('ul', 'todo');
+  steps.forEach((step, index) => {
+    const item = el('li');
+    item.append(el('span', 'm', step.done ? '✓' : index === current ? '›' : '·'), el('span', step.done ? 'd' : index === current ? 'n' : '', step.text));
+    list.append(item);
+  });
+  if (onCard) {
+    const key = keyOf(job);
+    const label = (): string => (openSteps.has(key) ? 'Hide the steps' : `Show the ${steps.length} steps`);
+    const more = button('more', label());
+    list.hidden = !openSteps.has(key);
+    // The list opens in the card: the click does not open the job's page.
+    more.addEventListener('click', (event) => {
+      event.stopPropagation();
+      if (!openSteps.delete(key)) {
+        openSteps.add(key);
+      }
+      list.hidden = !openSteps.has(key);
+      more.textContent = label();
+    });
+    block.append(more);
+  }
+  block.append(list);
+  return [block];
+}

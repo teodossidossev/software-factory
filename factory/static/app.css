@@ -82,6 +82,36 @@ code, pre, .mono { font-family: var(--mono); }
 .card .act { margin-top: 4px; display: flex; gap: 8px; }
 .card .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--s-working); display: inline-block; animation: pulse 1.6s infinite; flex: none; align-self: center; }
 @keyframes pulse { 50% { opacity: .3; } }
+/* A running job's progress (variant C of docs/design/job-progress/prototype.html): the ring of the
+   steps, Now with the current step, the phase chips, Ready around, the steps on demand. */
+.prog { display: grid; gap: 4px; margin-top: 2px; min-width: 0; }
+.prog .eta { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.prog .eta b { color: var(--fg); font-weight: 600; }
+.cwrap { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 8px; align-items: center; }
+.cwrap.bare { grid-template-columns: minmax(0, 1fr); }
+.ring { width: 34px; height: 34px; }
+.ring circle { fill: none; stroke-width: 4; }
+.ring .bg { stroke: var(--border); }
+.ring .fg { stroke: var(--s-working); stroke-linecap: round; transform: rotate(-90deg); transform-origin: 50% 50%; }
+.ring text { font: 700 10px var(--mono); fill: var(--fg); }
+.cnow { font-size: 12px; min-width: 0; }
+.cnow .k { color: var(--muted); }
+.cnow .t { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.phasechips { display: flex; gap: 4px; flex-wrap: wrap; }
+.phasechips span { font: 10px var(--mono); border: 1px solid var(--border); border-radius: 999px; padding: 0 6px; color: var(--muted); }
+.phasechips span.done { color: var(--s-ready); border-color: var(--s-ready); }
+.phasechips span.now { color: var(--accent-fg); background: var(--s-working); border-color: var(--s-working); font-weight: 700; }
+.phasechips span.off { text-decoration: line-through; opacity: .6; }
+.prog .more { display: block; margin: 0; font-size: 11px; color: var(--accent); cursor: pointer; background: none; border: 0; padding: 0; text-align: left; }
+.todo { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 2px; font-size: 12px; }
+.todo[hidden] { display: none; }
+.todo li { display: flex; gap: 6px; align-items: baseline; min-width: 0; }
+.todo li span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.todo .d { color: var(--muted); text-decoration: line-through; }
+.todo .n { font-weight: 600; }
+.todo .m { width: 12px; flex: none; font: 11px var(--mono); }
+.jhead .prog { grid-column: 2 / -1; max-width: 720px; }
+.jhead .todo { max-height: 12em; overflow-y: auto; }
 
 /* Job view: a full page */
 #job { position: fixed; inset: 0; display: flex; flex-direction: column; background: var(--bg); z-index: 6;
@@ -103,7 +133,7 @@ code, pre, .mono { font-family: var(--mono); }
 .jhead .tools { grid-row: span 2; display: flex; gap: 8px; align-items: center; }
 .scr { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .streamwrap { flex: 1; overflow-y: auto; min-height: 0; padding-block: 8px 24px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
-@media (max-width: 767px) { .jhead { grid-template-columns: minmax(0, 1fr) auto; } .jhead .back { grid-row: auto; } .jhead .t1 { grid-column: 1 / -1; order: 3; } .jhead .t2 { grid-column: 1 / -1; order: 4; } .jhead .tools { grid-row: auto; grid-column: 1 / -1; order: 5; } }
+@media (max-width: 767px) { .jhead { grid-template-columns: minmax(0, 1fr) auto; } .jhead .back { grid-row: auto; } .jhead .t1 { grid-column: 1 / -1; order: 3; } .jhead .t2 { grid-column: 1 / -1; order: 4; } .jhead .tools { grid-row: auto; grid-column: 1 / -1; order: 5; } .jhead .prog { grid-column: 1 / -1; order: 6; } }
 
 /* Stream */
 #stream { list-style: none; margin: 0; padding: 0; font-size: 13px; }

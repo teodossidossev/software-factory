@@ -494,6 +494,92 @@ test('board client: a running card: the Now line and the tool calls, the cost so
   assert.deepEqual(['app/W', 'app/C', 'app/S', 'app/P'].map((key) => buttons(card(page, key)).filter((element) => element.classList.contains('primary')).length), [0, 0, 0, 0]);
 });
 
+// A running job's progress as the server sends it (src/progress.ts): ready 15:04-15:28 in Sofia.
+const progress = (extra: Record<string, unknown> = {}) => ({
+  steps: [{ text: 'Read the Task', done: true }, { text: 'Write the parser', done: true }, { text: 'Board card', done: false }, { text: 'Tests', done: false }],
+  phase: 'code', fix_round: 0, ready_from: '2026-11-11T13:04:00.000Z', ready_to: '2026-11-11T13:28:00.000Z', ...extra,
+});
+
+test('board client: a running card with steps shows the ring, Now with the current step, the phase chips and the clock range, and opens its list in the card', async () => {
+  const running = job('W', 'working', { tool_calls: 14, progress: progress(), now: { who: 'Implementer', what: 'Read x', ts: null } });
+  const page = await openBoard([running], []);
+  const item = card(page, 'app/W');
+  // In place of the Now line and the iteration meta (the chip of the phase now is a span).
+  assert.equal(item.all().some((element) => element.tagName === 'DIV' && element.classList.contains('now')), false);
+  assert.equal(part(item, 'meta') === undefined, true);
+  const ring = part(item, 'ring')!;
+  assert.equal(ring.getAttribute('aria-label'), '2 of 4 steps');
+  assert.deepEqual(ring.children.map((child) => [(child as FakeElement).tagName.toLowerCase(), (child as FakeElement).textContent]), [['title', '14 tool calls'], ['circle', ''], ['circle', ''], ['text', '2/4']]);
+  assert.equal(part(item, 'cnow')!.textContent, 'NowBoard card');
+  assert.equal(part(item, 't')!.getAttribute('title'), 'Board card');
+  assert.deepEqual(part(item, 'phasechips')!.children.map((chip) => [(chip as FakeElement).className, (chip as FakeElement).textContent]), [['now', 'Code'], ['', 'Claude'], ['', 'Codex'], ['', 'MR text']]);
+  assert.equal(part(item, 'eta')!.textContent, 'Ready around 15:04–15:28');
+  // The list: closed until Show the 4 steps; the click opens it in the card, not the job's page.
+  const list = part(item, 'todo')!;
+  assert.equal(list.hidden, true);
+  const more = button(item, 'Show the 4 steps')!;
+  more.click();
+  await page.flush();
+  assert.equal(page.$('job').hidden, true);
+  assert.equal(list.hidden, false);
+  assert.equal(more.textContent, 'Hide the steps');
+  assert.deepEqual(list.children.map((row) => (row as FakeElement).children.map((span) => `${(span as FakeElement).className}:${(span as FakeElement).textContent}`).join(' ')),
+    ['m:✓ d:Read the Task', 'm:✓ d:Write the parser', 'm:› n:Board card', 'm:· :Tests']);
+  // The open list stays open when the board is drawn again, until the page reloads.
+  page.streams.at(-1)!.emit('jobs', { jobs: [running] });
+  await page.flush();
+  assert.equal(part(card(page, 'app/W'), 'todo')!.hidden, false);
+  button(card(page, 'app/W'), 'Hide the steps')!.click();
+  assert.equal(part(card(page, 'app/W'), 'todo')!.hidden, true);
+});
+
+test('board client: a running card without steps has no ring but its phase and range; a fix round and a review name their phase', async () => {
+  const bare = job('B', 'working', { tool_calls: 3, progress: progress({ steps: [], ready_from: '2026-11-11T13:04:00.000Z', ready_to: '2026-11-11T13:04:00.000Z' }), now: { who: 'Implementer', what: 'Bash npm test', ts: null } });
+  const fixing = job('F', 'working', { fixes: 2, progress: progress({ fix_round: 2 }) });
+  const review = job('R', 'awaiting_review', { iteration: 2, claude_review: false, progress: progress({ phase: 'codex' }), now: { who: 'Codex gate', what: 'reviewing iteration 2', ts: null } });
+  const ranged = job('G', 'working', { progress: progress({ steps: [] }) });
+  const page = await openBoard([bare, fixing, review, ranged], []);
+  // Without a steps file, with a history: the phase and the range.
+  assert.equal(part(card(page, 'app/G'), 'eta')!.textContent, 'Ready around 15:04–15:28');
+  assert.equal(part(card(page, 'app/G'), 'phasechips')!.children.map((chip) => (chip as FakeElement).className).join(','), 'now,,,');
+  const item = card(page, 'app/B');
+  assert.equal(part(item, 'ring') === undefined, true);
+  assert.equal(part(item, 'cwrap')!.className, 'cwrap bare');
+  assert.equal(part(item, 'cnow')!.textContent, 'NowBash npm test');
+  assert.equal(part(item, 'cnow')!.getAttribute('title'), '3 tool calls');
+  assert.equal(part(item, 'phasechips')!.children.length, 4);
+  // One time when the range is a point; without steps, no list and no button.
+  assert.equal(part(item, 'eta')!.textContent, 'Ready around 15:04');
+  assert.equal(part(item, 'todo') === undefined, true);
+  assert.equal(buttons(item).length, 0);
+  assert.equal(part(card(page, 'app/F'), 'cnow')!.textContent, 'Fix round 2 · nowBoard card');
+  // In review, the reviewer's name with the first step not done; the steps as the file has them: only the
+  // done ones struck through, the current one bold. The Claude chip is off without the Claude review.
+  const reviewing = card(page, 'app/R');
+  assert.equal(part(reviewing, 'cnow')!.textContent, 'Codex gateBoard card');
+  assert.equal(part(reviewing, 'ring')!.getAttribute('aria-label'), '2 of 4 steps');
+  assert.deepEqual(part(reviewing, 'todo')!.children.map((row) => (row as FakeElement).children.map((span) => `${(span as FakeElement).className}:${(span as FakeElement).textContent}`).join(' ')),
+    ['m:✓ d:Read the Task', 'm:✓ d:Write the parser', 'm:› n:Board card', 'm:· :Tests']);
+  // All steps done: the reviewer's own words.
+  const allDone = progress({ phase: 'codex', steps: [{ text: 'a', done: true }] });
+  page.streams.at(-1)!.emit('jobs', { jobs: [bare, fixing, { ...review, progress: allDone }, ranged] });
+  await page.flush();
+  assert.equal(part(card(page, 'app/R'), 'cnow')!.textContent, 'Codex gatereviewing iteration 2');
+  assert.deepEqual(part(card(page, 'app/R'), 'phasechips')!.children.map((chip) => (chip as FakeElement).className), ['done', 'off', 'now', '']);
+});
+
+test('board client: the job page shows the progress block in its head with the steps always open', async () => {
+  const running = job('W', 'working', { tool_calls: 14, progress: progress() });
+  const page = await openBoard([running], [], [workspace('app')], '#app/W');
+  page.streams.at(-1)!.emit('job', detail(running));
+  await page.flush();
+  const block = part(page.$('jhead'), 'prog')!;
+  assert.equal(part(block, 'cnow')!.textContent, 'NowBoard card');
+  assert.equal(part(block, 'todo')!.hidden, false);
+  assert.equal(part(block, 'more') === undefined, true);
+  assert.equal(part(block, 'eta')!.textContent, 'Ready around 15:04–15:28');
+});
+
 // The stop codes of factory/src and their card: kind, reason, the one button; the counts from stop.
 const STOP_CARDS: Array<[string, 'decision' | 'error', string, string, Record<string, unknown>?]> = [
   ['simplify_offered', 'decision', 'Simplification offered', 'Simplify or skip', { stop: { items: [{}, {}], saves_lines: 15 } }],

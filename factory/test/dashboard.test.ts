@@ -317,8 +317,11 @@ test('dashboard: jobs, job detail, report, patch and mr endpoints; bad names are
     assert.equal(list.headers['content-type'], 'application/json; charset=utf-8');
     const { jobs: all } = JSON.parse(list.body);
     assert.deepEqual(all.map((job: Job) => [job.ticket, job.state]), [['T-0', 'failed'], ['T-1', 'awaiting_review']]);
-    assert.deepEqual(Object.keys(all[1]).sort(), ['actions', 'availability', 'base', 'branch', 'claude_review', 'cost_usd', 'created_at', 'deleted', 'error', 'files', 'fixes', 'gate', 'gate_fixes', 'gate_tokens', 'handoff_skipped', 'handover', 'iteration', 'limit', 'mr', 'mr_attempts', 'mr_conflict_turn', 'mr_host', 'now', 'paused', 'prepared_commit', 'review', 'review_ended_at', 'state', 'stop', 'stop_code', 'stop_group', 'stop_kind', 'task_changed', 'ticket', 'title', 'tool_calls', 'turn_limit', 'undeclared', 'updated_at', 'workspace', 'worktree']);
+    assert.deepEqual(Object.keys(all[1]).sort(), ['actions', 'availability', 'base', 'branch', 'claude_review', 'cost_usd', 'created_at', 'deleted', 'error', 'files', 'fixes', 'gate', 'gate_fixes', 'gate_tokens', 'handoff_skipped', 'handover', 'iteration', 'limit', 'mr', 'mr_attempts', 'mr_conflict_turn', 'mr_host', 'now', 'paused', 'prepared_commit', 'progress', 'review', 'review_ended_at', 'state', 'stop', 'stop_code', 'stop_group', 'stop_kind', 'task_changed', 'ticket', 'title', 'tool_calls', 'turn_limit', 'undeclared', 'updated_at', 'workspace', 'worktree']);
     assert.deepEqual(all[0].error, { code: 'start_failed', message: 'Git failed.' });
+    // The running job's progress (no worktree: no steps; the Claude review ahead), none for the failed one.
+    assert.deepEqual({ ...all[1].progress, ready_from: typeof all[1].progress.ready_from, ready_to: typeof all[1].progress.ready_to }, { steps: [], phase: 'claude', fix_round: 0, ready_from: 'string', ready_to: 'string' });
+    assert.equal(all[0].progress, null);
 
     const detail = JSON.parse((await fetchRaw(new URL('api/jobs/app/T-1', base))).body);
     assert.equal(detail.job.branch, 'T-1-demo');

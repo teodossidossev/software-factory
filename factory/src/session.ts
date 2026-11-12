@@ -113,7 +113,20 @@ export interface SessionOptions {
   // sandbox runs and the allow rules of the settings loaded; the sandbox, the path denials and every
   // other option stay a real job's. Without it (every real job): auto, the classifier.
   smokeMode?: boolean | undefined;
+  // How long a turn's stream may stay open after its result (default STREAM_GRACE_MS); tests shorten it.
+  streamGraceMs?: number | undefined;
 }
+
+// After a turn's result, Claude Code ends its stream unless something keeps it alive (a background
+// task, which SESSION_SHELL_ENV turns off): past this grace time the session ends the process,
+// keeps the result and tells the streamStuck hook.
+export const STREAM_GRACE_MS = 120_000;
+
+// Claude Code's Bash tool in every Implementer session: no background task (run_in_background nor
+// the move to the background of a command past its timeout; the guard refuses run_in_background
+// too), a 20-minute default timeout and a 60-minute cap (a slow suite of a workspace, under load).
+// A factory turn is synchronous: it waits for its commands.
+export const SESSION_SHELL_ENV = { BASH_DEFAULT_TIMEOUT_MS: '1200000', BASH_MAX_TIMEOUT_MS: '3600000', CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1' } as const;
 
 // How long after a query's end its orphaned sandboxes are looked for: the query is aborted
 // as it ends, and Claude Code's process, whose sandboxes are orphaned only once it has exited, may
@@ -202,6 +215,9 @@ export interface SessionHooks {
   prompt(prompt: string, continued: number, images?: ImageRef[]): Promise<void>;
   // A turn ended at maxTurns; without this hook it fails with max_turns as any failed turn.
   turnLimit?(turn: LimitedTurn): Promise<LimitAnswer>;
+  // A turn's stream stayed open the grace time after its result (waitedS: that time in seconds); the
+  // session then ends Claude Code and the turn finishes with the result.
+  streamStuck?(waitedS: number): Promise<void>;
   // The queue is empty after one or more turns.
   idle(outcome: IdleOutcome): Promise<void>;
 }
@@ -494,7 +510,7 @@ export class ImplementerSession {
         maxTurns: this.#options.maxTurns,
         // A known startup failure (such as an unavailable sandbox) then ends with a result message.
         // Claude Code keeps its temporary files and sockets in the session's own folder.
-        env: { ...environment, CLAUDE_CODE_STARTUP_FAILURE_RESULTS: '1', CLAUDE_CODE_TMPDIR: this.#tmp },
+        env: { ...environment, ...SESSION_SHELL_ENV, CLAUDE_CODE_STARTUP_FAILURE_RESULTS: '1', CLAUDE_CODE_TMPDIR: this.#tmp },
         ...(this.#sessionId !== undefined ? { resume: this.#sessionId } : {}),
         ...(sandbox !== undefined ? { sandbox } : {}),
         // The file-tool guard, in every permission mode.
@@ -506,6 +522,18 @@ export class ImplementerSession {
     });
     let text = '';
     let result: SDKResultMessage | undefined;
+    // The safety net, started by the first result: a stream still open after the grace time is
+    // stuck; the hook is told, then the process ended, and the turn finishes with its result.
+    const graceMs = this.#options.streamGraceMs ?? STREAM_GRACE_MS;
+    let grace: NodeJS.Timeout | undefined;
+    let stuck = false;
+    const endStuckStream = async (): Promise<void> => {
+      if (!abortController.signal.aborted) {
+        stuck = true;
+        await this.#hooks.streamStuck?.(Math.ceil(graceMs / 1000)).catch((error: unknown) => console.error(error));
+        abortController.abort();
+      }
+    };
     try {
       for await (const message of turn) {
         await this.#hooks.message(message);
@@ -520,9 +548,14 @@ export class ImplementerSession {
         if (message.type === 'result') {
           result = message;
           input.done();
+          grace ??= setTimeout(() => void endStuckStream(), graceMs);
         }
       }
     } catch (error) {
+      // The safety net ended a stuck stream after its result: the turn goes on with that result.
+      if (stuck && result !== undefined) {
+        return this.#finished(text, result);
+      }
       // A failure of the wrapper before the result fails the turn as the sandbox's; the session's own
       // refusals (TurnError) and a turn it aborted (closed) stand as they are.
       const wrapped = error instanceof TurnError || abortController.signal.aborted ? undefined : await this.#wrapperFailure(wrapper, result !== undefined);
@@ -536,6 +569,7 @@ export class ImplementerSession {
       }
       throw error;
     } finally {
+      clearTimeout(grace);
       input.done();
       // Ends the child process when the turn stopped early (a mismatch or an error).
       abortController.abort();
@@ -544,6 +578,12 @@ export class ImplementerSession {
     if (result === undefined) {
       throw (await this.#wrapperFailure(wrapper, false)) ?? new TurnError('session_failed', 'The Implementer ended the turn without a result.');
     }
+    return this.#finished(text, result);
+  }
+
+  // The turn's outcome from its result: a sandbox that was not available, a failed result or the
+  // turn limit throw; a success gives its text (the last assistant text, else the result's).
+  #finished(text: string, result: SDKResultMessage): TurnResult {
     if (result.subtype !== 'success' && result.startup_failure_reason === 'sandbox_required_unavailable') {
       throw new TurnError(SANDBOX_UNAVAILABLE, result.errors.join('; ') || 'The sandbox is not available.');
     }

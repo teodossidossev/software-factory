@@ -221,7 +221,7 @@ export async function turnsStarted(env: Env, count: number): Promise<void> {
 // A user message's blocks as the fake logs them (SF-065): only when one is not text.
 export type LoggedBlock = { type: 'text'; text: string } | { type: 'image'; media_type: string; bytes: number; sha256: string };
 
-export async function fakeLog(env: Env): Promise<Array<{ argv: string[]; prompt: string; sessionId: string; cwd: string; env: string[]; tmpdir?: { path: string; mode: number | null }; blocks?: LoggedBlock[] }>> {
+export async function fakeLog(env: Env): Promise<Array<{ argv: string[]; prompt: string; sessionId: string; cwd: string; env: string[]; shell: Record<string, string>; tmpdir?: { path: string; mode: number | null }; blocks?: LoggedBlock[] }>> {
   return (await readFile(join(env.home, 'fake-claude.log'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
 }
 

@@ -30,6 +30,8 @@
 // PreToolUse hooks first like a probe, SF-123: a denied one's result is the hook's reason) and can
 // end like the real CLI at its turn limit (SF-069): the error_max_turns result with the CLI's
 // error text, then exit code 1, on which the SDK throws "Claude Code returned an error result".
+// It can also keep its stream open after the result (holdOpen, SF-196), as the real CLI does while a
+// background task runs. The log keeps the values of the Bash tool's settings (shell, SF-196).
 // A user message with a block that is not text (the images of SF-065) is logged with its blocks too:
 // each text block's text, each image block's media type, size and sha256 (never its bytes).
 // An Implementer's init lists the tools it was given, as the real CLI does: the --tools list, else
@@ -82,6 +84,10 @@ interface Turn {
   calls?: Array<{ tool: string; input: Record<string, unknown> }>;
   // Implementer runs only (SF-069): the turn ends at the turn limit (--max-turns) instead of a success.
   maxTurns?: boolean;
+  // Implementer runs only (SF-196): after its result the run does not exit when its input closes, as
+  // the real CLI stays while a background task runs; only a kill ends it. Its pid goes to
+  // $HOME/fake-claude.held once its input closed.
+  holdOpen?: boolean;
 }
 
 const CLEAN = { verdict: 'clean', summary: 'Looks right.', items: [], accepted_sensitive: [] };
@@ -250,6 +256,9 @@ function giveStructuredOutput(output: unknown): Promise<string | undefined> {
   return hookedCall('so1', 'StructuredOutput', output as Record<string, unknown>, () => 'Structured output provided successfully');
 }
 
+// The settings of Claude Code's Bash tool whose values the log keeps (SF-196).
+const SHELL_SETTINGS = ['BASH_DEFAULT_TIMEOUT_MS', 'BASH_MAX_TIMEOUT_MS', 'CLAUDE_CODE_DISABLE_BACKGROUND_TASKS'];
+
 // What the log keeps of a user message's blocks.
 type LoggedBlock = { type: 'text'; text: string } | { type: 'image'; media_type: string; bytes: number; sha256: string } | { type: string };
 
@@ -257,7 +266,8 @@ async function run(prompt: string, blocks?: LoggedBlock[]): Promise<void> {
   // The session's own temporary folder (CLAUDE_CODE_TMPDIR) and its mode while the run lasts.
   const tmp = process.env.CLAUDE_CODE_TMPDIR;
   const tmpdir = tmp === undefined ? undefined : { path: tmp, mode: existsSync(tmp) ? statSync(tmp).mode & 0o777 : null };
-  appendFileSync(join(home, `${name}.log`), `${JSON.stringify({ argv, prompt, sessionId, cwd: process.cwd(), env: Object.keys(process.env).sort(), ...(tmpdir !== undefined ? { tmpdir } : {}), ...(blocks !== undefined ? { blocks } : {}) })}\n`);
+  const shell = Object.fromEntries(SHELL_SETTINGS.filter((key) => process.env[key] !== undefined).map((key) => [key, process.env[key]]));
+  appendFileSync(join(home, `${name}.log`), `${JSON.stringify({ argv, prompt, sessionId, cwd: process.cwd(), env: Object.keys(process.env).sort(), shell, ...(tmpdir !== undefined ? { tmpdir } : {}), ...(blocks !== undefined ? { blocks } : {}) })}\n`);
   if (review) {
     void runReview();
     return;
@@ -413,4 +423,11 @@ async function released(): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
 }
-lines.on('close', () => setTimeout(() => void released().then(() => setTimeout(() => process.exit(0), 50)), turn.delayMs ?? 0));
+lines.on('close', () => {
+  if (turn.holdOpen === true) {
+    writeFileSync(join(home, 'fake-claude.held'), String(process.pid));
+    setInterval(() => undefined, 1_000);
+    return;
+  }
+  setTimeout(() => void released().then(() => setTimeout(() => process.exit(0), 50)), turn.delayMs ?? 0);
+});

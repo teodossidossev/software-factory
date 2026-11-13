@@ -453,6 +453,18 @@ textarea.mdedit.fld { font: 12.5px/1.5 var(--mono); padding: 8px; border: 1px so
 [hidden]:not([hidden=until-found i]) { display: none !important; }
 .bhint { margin: 12px 0 0; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); color: var(--muted); font-size: 13px; }
 .col .linkish { margin-top: 8px; }
+/* The Coordinator card above the columns (coordinator.js): compact; an accent border while a question is open. */
+.coord { margin: 12px max(16px, env(safe-area-inset-right, 0px)) 0 max(16px, env(safe-area-inset-left, 0px)); padding: 8px 12px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); display: grid; gap: 6px; font-size: 13px; }
+.coord.asks { border-color: var(--accent); box-shadow: inset 3px 0 var(--accent); }
+.coord-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.coord-head h2 { margin: 0; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.coord-status { overflow-wrap: anywhere; }
+.coord-age { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.coord-chat { margin-left: auto; text-decoration: none; }
+.coord-none { margin: 0; }
+.coord-qs { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.coord-q { display: flex; gap: 10px; align-items: baseline; }
+.coord-qtext { white-space: pre-wrap; overflow-wrap: anywhere; flex: 1; }
 #toast { z-index: 60; display: flex; gap: 10px; align-items: baseline; }
 #toast.err { background: var(--del); color: var(--bg); border-radius: var(--radius); }
 .toast-x { all: unset; cursor: pointer; opacity: .8; }

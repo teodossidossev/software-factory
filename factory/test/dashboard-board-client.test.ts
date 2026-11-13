@@ -1565,3 +1565,81 @@ test('board client (SF-119): a chip pointing into a folded column unfolds it (st
   assert.deepEqual([folded(page), stored.get('sf-board-folded'), foldOf(page, 'implementing').getAttribute('aria-expanded'), page.document.activeElement],
     [[], '[]', 'true', card(page, 'web/W-1')]);
 });
+
+// The Coordinator card (coordinator.js): the board with api/coordinator answered by the test's
+// current state, and the stream's opening events.
+async function openCoordinator(answer: () => unknown): Promise<Page> {
+  const page = await loadPage(STATIC_DIR, (path) => (path === 'api/jobs' ? { jobs: [] } : path === 'api/coordinator' ? answer() : undefined));
+  page.document.dispatch('DOMContentLoaded');
+  await page.flush();
+  const stream = page.streams.at(-1)!;
+  stream.emit('open');
+  stream.emit('jobs', { jobs: [] });
+  stream.emit('workspaces', { workspaces: [workspace('app')] });
+  stream.emit('tickets', { tickets: [], archived: [] });
+  await page.flush();
+  return page;
+}
+
+test('board client: the Coordinator card reads api/coordinator on each coordinator event (no timer); empty, status only, questions and the link; muted after two hours; every text as text', async () => {
+  const EMPTY = { version: 1, status: null, questions: [], link: null, next_question: 1 };
+  let shown: unknown = EMPTY;
+  const page = await openCoordinator(() => shown);
+  const coord = page.$('coord');
+  const reads = (): number => page.requests.filter((request) => request.path === 'api/coordinator').length;
+  const changed = async (state: unknown): Promise<void> => {
+    shown = state;
+    page.streams.at(-1)!.emit('coordinator', {});
+    await page.flush();
+  };
+  const timers = page.timers.length;
+  // Hidden until the stream's first coordinator event (sent on connect) and its read.
+  assert.deepEqual([coord.hidden, reads()], [true, 0]);
+  await changed(EMPTY);
+  assert.deepEqual([coord.hidden, reads(), coord.textContent, coord.classList.contains('asks')], [false, 1, 'The coordinator has not reported (sf coordinator)', false]);
+  assert.ok(part(coord, 'coord-none')!.classList.contains('muted'));
+
+  // The status only: its text and its age; no question, no link.
+  await changed({ ...EMPTY, status: { text: 'Planning SF-210', at: minutesAgo(3) } });
+  assert.equal(reads(), 2);
+  assert.equal(part(coord, 'coord-status')!.textContent, 'Planning SF-210');
+  assert.equal(part(coord, 'coord-status')!.classList.contains('muted'), false);
+  assert.equal(part(coord, 'coord-age')!.textContent, '3 min ago');
+  assert.deepEqual([part(coord, 'coord-qs'), coord.all().filter((element) => element.tagName === 'A').length, coord.classList.contains('asks')], [undefined, 0, false]);
+
+  // Questions and the link: the accent border, the questions in the order asked with their ages,
+  // a question's markup shown as text, Open the chat in a new tab without the opener.
+  await changed({
+    ...EMPTY, status: { text: 'Waiting for you', at: minutesAgo(1) }, link: 'https://claude.ai/chat/abc-123',
+    questions: [{ id: 'q1', text: 'Merge SF-204 first?', at: minutesAgo(90) }, { id: 'q3', text: '<script>alert(1)</script><b>x</b>', at: minutesAgo(2) }],
+  });
+  assert.equal(coord.classList.contains('asks'), true);
+  const rows = coord.all().filter((element) => element.classList.contains('coord-q'));
+  assert.deepEqual(rows.map((row) => [part(row, 'coord-qtext')!.textContent, part(row, 'coord-age')!.textContent]), [['Merge SF-204 first?', '1 h ago'], ['<script>alert(1)</script><b>x</b>', '2 min ago']]);
+  assert.ok(coord.all().every((element) => element.tagName !== 'SCRIPT' && element.tagName !== 'B'));
+  const chat = coord.all().find((element) => element.tagName === 'A')!;
+  assert.deepEqual([chat.textContent, chat.href, chat.target, chat.rel], ['Open the chat', 'https://claude.ai/chat/abc-123', '_blank', 'noopener noreferrer']);
+
+  // Older than two hours: muted, "quiet since <time>" (the local time, as the health panel's since).
+  const old = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
+  await changed({ ...EMPTY, status: { text: 'Idle', at: old } });
+  assert.equal(part(coord, 'coord-status')!.classList.contains('muted'), true);
+  const age = part(coord, 'coord-age')!;
+  assert.match(age.textContent, /^quiet since (\d\d:\d\d|\d{4}-\d\d-\d\d \d\d:\d\d)$/);
+  assert.equal(age.all().find((element) => element.tagName === 'TIME')?.getAttribute('datetime'), old);
+  assert.equal(coord.classList.contains('asks'), false);
+
+  // A link that is not claude.ai's is never a link, whatever the server sends.
+  for (const link of ['https://claude.ai.evil.com/x', 'javascript:alert(1)', 'http://claude.ai/x', 'https://user@claude.ai/x', 'https://evil.com/']) {
+    await changed({ ...EMPTY, status: { text: 'x', at: minutesAgo(1) }, link });
+    assert.equal(coord.all().filter((element) => element.tagName === 'A').length, 0, link);
+  }
+  // A board render renders the card again (its ages follow the board's refresh); no timer of its own.
+  await changed({ ...EMPTY, status: { text: 'Planning', at: minutesAgo(5) } });
+  const before = part(coord, 'coord-status');
+  page.streams.at(-1)!.emit('jobs', { jobs: [] });
+  await page.flush();
+  assert.notEqual(part(coord, 'coord-status'), before);
+  assert.equal(part(coord, 'coord-status')!.textContent, 'Planning');
+  assert.equal(page.timers.length, timers);
+});

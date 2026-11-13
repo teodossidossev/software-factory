@@ -16,6 +16,7 @@ import {
 import { POST_ROUTES, type RouteName } from '../src/dashboard-routes.js';
 import { FactoryError } from '../src/errors.js';
 import { explanationPath } from '../src/explain.js';
+import { askQuestion, readCoordinator, setLink, setStatus } from '../src/coordinator.js';
 import { type EventRecord, type Job, JobStore } from '../src/jobs.js';
 import { buildPatch, fileChanges } from '../src/patch.js';
 import { saveRegistry } from '../src/registry.js';
@@ -85,8 +86,9 @@ test('dashboard: token, static files with the security headers, 404 and 405 with
       assert.equal(reply.headers['content-security-policy'], CSP, path);
     }
     // SF-137: the dashboard's scripts, in load order (SF-153: health.js before main.js; SF-160: the
-    // top bar's header.js before board.js; SF-202: the Skills page's skills.js after setup.js).
-    assert.deepEqual([...DASHBOARD_SCRIPTS], ['core.js', 'job-screens.js', 'job-page.js', 'header.js', 'board.js', 'routing.js', 'ticket-page.js', 'reports.js', 'review-page.js', 'setup.js', 'skills.js', 'health.js', 'main.js']);
+    // top bar's header.js before board.js; SF-202: the Skills page's skills.js after setup.js; the
+    // board's Coordinator card, coordinator.js, right after board.js).
+    assert.deepEqual([...DASHBOARD_SCRIPTS], ['core.js', 'job-screens.js', 'job-page.js', 'header.js', 'board.js', 'coordinator.js', 'routing.js', 'ticket-page.js', 'reports.js', 'review-page.js', 'setup.js', 'skills.js', 'health.js', 'main.js']);
     // SF-136: every script of DASHBOARD_SCRIPTS is served as JavaScript, each with its own text (its
     // header names it); SF-137: none is longer than 2,500 lines.
     for (const file of DASHBOARD_SCRIPTS) {
@@ -199,6 +201,47 @@ test('dashboard (SF-153): GET api/health is the checks\' last result; the stream
       await stream.next('tickets');
       dashboard.healthChanged();
       assert.ok(stream.events.every((event) => event.event !== 'health'));
+    } finally {
+      stream.close();
+    }
+  });
+});
+
+test('dashboard: GET api/coordinator answers the coordinator\'s file (empty without); no write route; the stream sends coordinator on connect and on coordinatorChanged', async () => {
+  await withDashboard('dash-coordinator', fakeActions(), async (dashboard, { state }) => {
+    const base = dashboard.url;
+    const read = async (): Promise<unknown> => {
+      const reply = await fetchRaw(new URL('api/coordinator', base));
+      assert.deepEqual([reply.status, reply.headers['content-type'], reply.headers['content-security-policy']], [200, 'application/json; charset=utf-8', CSP]);
+      return JSON.parse(reply.body);
+    };
+    assert.deepEqual(await read(), { version: 1, status: null, questions: [], link: null, next_question: 1 });
+    await setStatus(state, 'Planning SF-210', new Date('2026-11-13T09:00:00.000Z'));
+    await askQuestion(state, 'Merge <b>SF-204</b> first?', new Date('2026-11-13T09:01:00.000Z'));
+    await setLink(state, 'https://claude.ai/chat/abc');
+    assert.deepEqual(await read(), {
+      version: 1, status: { text: 'Planning SF-210', at: '2026-11-13T09:00:00.000Z' },
+      questions: [{ id: 'q1', text: 'Merge <b>SF-204</b> first?', at: '2026-11-13T09:01:00.000Z' }], link: 'https://claude.ai/chat/abc', next_question: 2,
+    });
+    // Nothing on the dashboard writes it.
+    for (const path of ['api/coordinator', 'api/coordinator/status', 'api/coordinator/ask', 'api/coordinator/link']) {
+      for (const method of ['POST', 'PUT', 'DELETE'] as const) {
+        const reply = await fetchRaw(new URL(path, base), { method, headers: { origin: `http://127.0.0.1:${base.port}`, 'content-type': 'application/json' }, body: '{"text":"x"}' });
+        assert.ok([404, 405].includes(reply.status), `${method} ${path}: ${reply.status}`);
+      }
+    }
+    assert.equal((await readCoordinator(state)).questions.length, 1);
+    assert.deepEqual([(await fetchRaw(new URL('api/coordinator?x=1', base))).status, (await fetchRaw(new URL('api/coordinator/x', base))).status], [404, 404]);
+    const stream = await openStream(new URL('api/stream', base));
+    try {
+      assert.deepEqual(await stream.next('coordinator'), {}, 'on connect: the card reads its state');
+      await stream.next('tickets');
+      const opening = stream.events.length;
+      dashboard.coordinatorChanged();
+      dashboard.coordinatorChanged();
+      assert.deepEqual(await stream.next('coordinator'), {});
+      await new Promise((done) => setTimeout(done, 100));
+      assert.deepEqual(stream.events.slice(opening).map((event) => event.event), ['coordinator'], 'two changes in one tick: one event, and nothing else');
     } finally {
       stream.close();
     }
@@ -1010,7 +1053,7 @@ test('dashboard (SF-040): no reviewer or subscription in the data; the subscript
     try {
       // The opening events, in order, up to the job; no subscriptions among them.
       await stream.next('job');
-      assert.deepEqual(stream.events.map((item) => item.event), ['jobs', 'workspaces', 'tickets', 'job']);
+      assert.deepEqual(stream.events.map((item) => item.event), ['jobs', 'coordinator', 'workspaces', 'tickets', 'job']);
     } finally {
       stream.close();
     }

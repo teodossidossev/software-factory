@@ -1,9 +1,10 @@
 // The dashboard's reads: the GET route table (the page's files, the JSON payloads, a job's
 // detail, Stream, MR text, Merge request screen, Changes and iteration files, the Stats page, the
-// digests, the health checks, the planned ticket page, a Task file, a ticket's images, a
-// workspace's merge requests) and the Task check's GET. Nothing here changes anything; every
+// digests, the health checks, the coordinator's state, the planned ticket page, a Task file, a
+// ticket's images, a workspace's merge requests) and the Task check's GET. Nothing here changes anything; every
 // answer is written through the context.
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { readCoordinator } from './coordinator.js';
 import { type DashboardContext, iterationParam, jobKey, matchPath, noQuery } from './dashboard-context.js';
 import { jobDetail, planOf, ticketEntry, ticketsPayload, workspacesPayload } from './dashboard-payloads.js';
 import { mergeRequestThreadsRead, openMergeRequestsRead } from './dashboard-routes.js';
@@ -54,6 +55,8 @@ export function readHandlers(ctx: DashboardContext) {
     { pattern: 'api/stats', handler: ({ res, query }) => statsView(res, query) },
     // The health checks' last result.
     { pattern: 'api/health', when: (query) => health !== undefined && noQuery(query), handler: ({ res }) => sendJson(res, 200, health!.list()) },
+    // The coordinator's state (src/coordinator.ts), which only sf coordinator writes.
+    { pattern: 'api/coordinator', when: noQuery, handler: async ({ res }) => sendJson(res, 200, await readCoordinator(ctx.stateDir)) },
     // The installed skills, the agent roles' choice and the coordinator's (sf skills; without the
     // coordinator checkout's path), and one skill's SKILL.md, read from the skills' source folder (a
     // name that is not an installed skill's is refused).

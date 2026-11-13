@@ -1059,6 +1059,7 @@ function renderBoard(): void {
   }
   byId('board-hint').textContent = hint;
   byId('board-hint').hidden = hint === '';
+  renderCoordinator();
   if (focused !== null) {
     document.querySelector<HTMLElement>(`#cols .card${focused}`)?.focus();
   }

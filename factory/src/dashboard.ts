@@ -78,7 +78,7 @@ const SECURITY_HEADERS = {
 // The dashboard's script: classic scripts that share the page's globals, in load order.
 // dashboard.html has one deferred <script> per entry, in this order; nothing at the top level of a
 // file uses a name defined in a later one.
-export const DASHBOARD_SCRIPTS = ['core.js', 'job-screens.js', 'job-page.js', 'header.js', 'board.js', 'routing.js', 'ticket-page.js', 'reports.js', 'review-page.js', 'setup.js', 'skills.js', 'health.js', 'main.js'] as const;
+export const DASHBOARD_SCRIPTS = ['core.js', 'job-screens.js', 'job-page.js', 'header.js', 'board.js', 'coordinator.js', 'routing.js', 'ticket-page.js', 'reports.js', 'review-page.js', 'setup.js', 'skills.js', 'health.js', 'main.js'] as const;
 export type DashboardScript = (typeof DASHBOARD_SCRIPTS)[number];
 // The files of each entry of DASHBOARD_SCRIPTS, in load order: url, the file
 // served, is the build output dist/web/<name>.js; source, the file written by hand, is
@@ -182,6 +182,9 @@ export interface RunningDashboard {
   refreshJob(workspace: string, ticket: string): void;
   // A health check's status changed: every open page gets the checks again.
   healthChanged(): void;
+  // The coordinator's state changed (an sf coordinator write): every open page is told, and its
+  // Coordinator card reads GET api/coordinator again.
+  coordinatorChanged(): void;
   close(): Promise<void>;
 }
 
@@ -577,6 +580,9 @@ export async function startDashboard(
       for (const stream of streams) {
         send(stream, 'health', list);
       }
+    },
+    coordinatorChanged() {
+      feed.changed({ coordinator: true });
     },
     async close() {
       for (const stream of streams) {

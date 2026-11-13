@@ -1,4 +1,5 @@
-// The commands that go to sf serve over its socket, in one table: for each, its name, its
+// The commands that go to sf serve over its socket, in one table (sf coordinator's entries are
+// written in src/coordinator.ts and spread into it): for each, its name, its
 // arguments and flags as the help shows them, its help description, whether it answers while sf
 // update drains or builds, and the call it makes in sf serve. The CLI (src/cli.ts) builds its help
 // lines, its argument check and its socket call from it; sf serve's socket handler
@@ -6,6 +7,7 @@
 // applies the update gate and calls run. The CLI shows the answer with answerLines, at the end.
 import { parseArgs } from 'node:util';
 import type { Digests } from './digest-run.js';
+import { COORDINATOR_ANSWERS, COORDINATOR_COMMANDS } from './coordinator.js';
 import { FactoryError } from './errors.js';
 import type { Execution } from './execution.js';
 import type { OpenRequest, ReviewThread } from './forge-comments.js';
@@ -225,6 +227,8 @@ export const COMMANDS = {
     description: 'Switch an installed skill on or off for an agent role, one choice shared by all workspaces; jobs started afterwards use it, a running job keeps its own',
     run: (_s, [role = '', skill = '', on = '']) => switchSkill(stateDir(), role, skill, on === 'on'),
   },
+  // sf coordinator: the dashboard's Coordinator card (src/coordinator.ts); each write tells the pages.
+  ...COORDINATOR_COMMANDS,
 
   // The requests of sf's own steps, no command of their own.
   // sf info: whether sf serve answers; sf service install: which process does.
@@ -424,8 +428,8 @@ export function socketCommand(name: string): Command | undefined {
 
 // ------------------------------------------------------------------ the CLI's output
 
-type Result = Record<string, unknown>;
-interface Answer {
+export type Result = Record<string, unknown>;
+export interface Answer {
   lines: string[];
   // sf exits 1.
   failed: boolean;
@@ -564,6 +568,7 @@ const ANSWERS = new Map<Command, (result: Result, flags: Flags) => Answer>([
   [COMMANDS.mrComments, (result) => ({ lines: threadLines(result), failed: false })],
   [COMMANDS.skills, (result) => ({ lines: skillsLines(result as unknown as SkillsView), failed: false })],
   [COMMANDS.skillsSet, (result) => ({ lines: skillsLines(result as unknown as SkillsView), failed: false })],
+  ...COORDINATOR_ANSWERS,
   [COMMANDS.abort, (result, flags) => ({
     lines: [
       ...resultLines(result),

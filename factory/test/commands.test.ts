@@ -11,6 +11,7 @@ import { callSocket } from '../src/ipc.js';
 import { now } from '../src/jobs.js';
 import { startTime } from '../src/pid-lock.js';
 import { markerPath, writeMarker } from '../src/update.js';
+import { openStream } from './support/dashboard-client.js';
 import { newEnv, runCli, serve, stop } from './support/harness.js';
 
 const E2E = { timeout: 120_000 };
@@ -115,7 +116,8 @@ test('a wrong argument count gives the command\'s one message, from the CLI (exi
     const args = wrongCount(command);
     return args === undefined ? [] : [runCli(env, [...words(command), ...args]).then((result) => ({ command, result }))];
   }));
-  assert.ok(fromCli.length >= CLI_COMMANDS.length - 1);
+  // Every count is right only for those whose arguments may all be left out (their --clear instead).
+  assert.deepEqual(CLI_COMMANDS.filter((command) => wrongCount(command) === undefined).map((command) => command.name), ['queue hold', 'coordinator status', 'coordinator link']);
   for (const { command, result } of fromCli) {
     assert.equal(result.code, 2, `${command.name}: ${result.stderr}`);
     assert.ok(result.stderr.startsWith(`sf: ${usageMessage(command)}\n\nUsage:\n`), `${command.name}: ${result.stderr.slice(0, 200)}`);
@@ -155,7 +157,7 @@ test('while sf update drains or builds, a command not open while updating is ref
       }
     }
     assert.deepEqual(COMMAND_LIST.filter((command) => command.openWhileUpdating === true).map(socketName).sort(),
-      ['check', 'digest-latest', 'mcp-port', 'mr-comments', 'mr-list', 'mr-status', 'pause', 'ping', 'queue-list', 'serve-busy', 'skills']);
+      ['check', 'coordinator', 'digest-latest', 'mcp-port', 'mr-comments', 'mr-list', 'mr-status', 'pause', 'ping', 'queue-list', 'serve-busy', 'skills']);
     // From the CLI: refused with exit 1; the open pause reaches the job (there is none).
     const accept = await runCli(env, ['accept', 'app', 'T-1']);
     assert.equal(accept.code, 1);
@@ -165,6 +167,48 @@ test('while sf update drains or builds, a command not open while updating is ref
     assert.doesNotMatch(pause.stderr, /being updated/);
   } finally {
     await rm(markerPath(env.state), { force: true });
+    await stop(served);
+  }
+});
+
+test('sf coordinator: the writes go through sf serve, which tells the open pages (a coordinator event) after each; the read prints the state; refusals exit 1', E2E, async () => {
+  const env = await newEnv('commands-coordinator');
+  const offline = await runCli(env, ['coordinator', 'status', 'Planning']);
+  assert.equal(offline.code, 1);
+  assert.match(offline.stderr, /sf serve is not running/);
+  const served = await serve(env);
+  const stream = await openStream(new URL('api/stream', served.dashboard!));
+  try {
+    await stream.next('coordinator');
+    const events = (): number => stream.events.filter((event) => event.event === 'coordinator').length;
+    const write = async (args: string[]): Promise<string> => {
+      const before = events();
+      const result = await runCli(env, ['coordinator', ...args]);
+      assert.equal(result.code, 0, result.stderr);
+      await stream.seen('coordinator', () => events() > before);
+      return result.stdout;
+    };
+    assert.match(await write(['status', 'Planning', 'SF-210']), /^status: Planning SF-210 {2}\(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\)\nquestions: none\nlink: none\n$/);
+    assert.equal(await write(['ask', 'Merge SF-204 first?']), 'q1\n');
+    assert.equal(await write(['ask', 'Which base?']), 'q2\n');
+    await write(['answered', 'q1']);
+    assert.match(await write(['link', 'https://claude.ai/chat/abc']), /link: https:\/\/claude\.ai\/chat\/abc\n$/);
+    const shown = await runCli(env, ['coordinator']);
+    assert.equal(shown.code, 0, shown.stderr);
+    assert.match(shown.stdout, /^status: Planning SF-210 .*\nquestions:\n {2}q2 {2}\S+ \S+ {2}Which base\?\nlink: https:\/\/claude\.ai\/chat\/abc\n$/);
+    const before = events();
+    for (const [args, message] of [
+      [['link', 'https://claude.ai.evil.com/x'], /must be an https:\/\/claude\.ai\/ URL/], [['answered', 'q1'], /no open question "q1"; open: q2/],
+      [['status', 'x'.repeat(301)], /301 characters; at most 300/], [['status', 'x', '--clear'], /needs the status or --clear/],
+    ] as const) {
+      const refused = await runCli(env, ['coordinator', ...args]);
+      assert.equal(refused.code, 1, args.join(' '));
+      assert.match(refused.stderr, message, args.join(' '));
+    }
+    assert.equal(await write(['status', '--clear']), `status: none\nquestions:\n${shown.stdout.split('\n')[2]}\nlink: https://claude.ai/chat/abc\n`);
+    assert.equal(events(), before + 1, 'only the writes that went through tell the pages');
+  } finally {
+    stream.close();
     await stop(served);
   }
 });

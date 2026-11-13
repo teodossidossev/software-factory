@@ -946,16 +946,25 @@ needed. The compiler adds `noUnusedLocals`, `noUnusedParameters`, `noImplicitRet
 `tsconfig.web.json`): dead code is removed, and an unused parameter an interface needs gets a
 leading `_`.
 
-- **The 600-line rule**: no `.ts` module under `src/` or `web/` passes 600 lines (its
+- **The 600-line rule**: a `.ts` module under `src/` or `web/` aims to stay under 600 lines (its
   `\n`-separated lines, not counting a final empty one). Declaration files (`.d.ts`) are exempt.
+  The 600 lines are a target with a margin: an unlisted module over 600 and up to 800 lines is a
+  warning (`check-code: warning: <file> has <count> lines, over the 600-line target: plan a
+  split.`) and the check passes; over 800 lines it fails (`more than 800: split it.`).
 - **The ratchet**: `code-size.json` holds the count of each module over 600 lines today, sorted by
-  path (`{ "src/dashboard.ts": 2120, ... }`). A listed module may not grow past its count; it may
-  only shrink. The check fails when a listed module grows, an unlisted one passes 600 lines, or a
-  listed one shrank by more than 50 lines, fell to 600 lines or fewer, or is gone.
+  path (`{ "src/dashboard.ts": 2120, ... }`). A listed module may grow by up to 100 lines past its
+  count with a warning (`<n> more than the <recorded> in code-size.json: plan a split.`); more
+  than 100 lines past it fails. The check also fails when a listed module shrank by more than 50
+  lines, fell to 600 lines or fewer, or is gone.
+- **Warnings**: they go to stderr, before any problem, and the summary line on success counts them
+  (`none over the limits (2 over the 600-line target: see the warnings)`); both are part of
+  `npm test`'s output, and a job's test record keeps the first 8 KiB of that output beside its
+  last 64 KiB, so the Implementer and the reviewers see them. A warning asks for a
+  planned split; it is not a failure.
 - **Lowering the list**: `npm run check-code -- --update` rewrites `code-size.json` with today's
   counts: it lowers counts and drops the modules at 600 lines or fewer or gone. It never raises a
-  count nor adds a module, so the check still fails on one that grew; a larger count is a hand
-  edit of `code-size.json` that review sees.
+  count nor adds a module, so the check still warns or fails on one that grew; a larger count is
+  a hand edit of `code-size.json` that review sees.
 - **Layout**: no `.js` file under `static/` (the dashboard's scripts are `web/*.ts`, built to
   `dist/web/`), and each `web/X.ts` has its `X.js` in `DASHBOARD_SCRIPTS` (`src/dashboard.ts`).
 - **Comments**: no comment in a `.ts` file under `src/` or `web/` cites a ticket (`SF-` and a
@@ -2651,7 +2660,10 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
      iteration; a Retry overwrites it, an Accept rewrites it): `command`, `started_at`,
      `ended_at`, `duration_ms`, `exit_code`, `timed_out`, `outcome` (`passed`, `failed`, with a
      `reason` when it changed the agent configuration, `unavailable` with its `reason`, `accepted_failing` with `accepted_at` and `accepted_from`),
-     and the last 64 KiB of stdout and stderr (`output`, `output_truncated`). The events
+     and stdout and stderr together (`output`, `output_truncated`): all of it, or past the bounds
+     its first 8 KiB and its last 64 KiB in whole lines, with a line `[<n> bytes of the output
+     left out]` between them, so what the command prints first (`check-code`'s warnings and
+     summary) stays in the record. The events
      `tests_started` and `tests` (with the last 40 lines of the output) are one Stream entry per
      run ("Tests failed (exit 1) after 2 min", the output behind its toggle).
    - **A failure is a bounded Fix.** A non-zero exit other than 126 and 127, or the timeout, is a

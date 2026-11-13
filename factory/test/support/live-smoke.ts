@@ -1,5 +1,6 @@
-// The shared part of the end-to-end tests of `sf smoke` (SF-090; test/live-smoke.test.ts and, since
-// SF-152, test/live-smoke-halt.test.ts, split so that no file runs near run-tests' per-file limit):
+// The shared part of the end-to-end tests of `sf smoke` (SF-090; test/live-smoke.test.ts,
+// test/live-smoke-halt.test.ts, test/live-smoke-sandbox.test.ts and test/live-smoke-gate.test.ts,
+// split so that no file runs near run-tests' per-file limit):
 // the fake turns and reviews of a clean run, sf smoke run as the user would, and what a run must
 // leave behind.
 import assert from 'node:assert/strict';

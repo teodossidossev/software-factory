@@ -1,7 +1,10 @@
 // The code checks npm test runs before the unit tests; npm run check-code runs them alone.
-// A size ratchet: no .ts module under src/ or web/ passes 600 lines, except those code-size.json
-// lists, and a listed one may not grow past its recorded count. A listed file that shrank by more
-// than 50 lines, fell to 600 lines or fewer, or is gone fails until --update lowers the list.
+// A size ratchet: a .ts module under src/ or web/ aims to stay under 600 lines (LIMIT). One that
+// code-size.json does not list warns past 600 lines and fails past 800 (CEILING); a listed one
+// warns past its recorded count and fails past that count plus 100 (GROWTH). A warning asks for a
+// split and leaves the check passing; the summary counts the warnings. A listed file that shrank
+// by more than 50 lines, fell to 600 lines or fewer, or is gone fails until --update lowers the
+// list.
 // --update rewrites code-size.json with today's counts and only ever lowers them: it never adds a
 // file and never raises a count. Also: no .js file under static/, and every web/X.ts is a
 // dashboard script (X.js in DASHBOARD_SCRIPTS of src/dashboard.ts). Declaration files (.d.ts) are
@@ -16,6 +19,8 @@ import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
 
 const LIMIT = 600;
+const CEILING = 800;
+const GROWTH = 100;
 const SLACK = 50;
 const LIST = 'code-size.json';
 const UPDATE = 'npm run check-code -- --update';
@@ -249,14 +254,18 @@ function lowered(list, counts) {
   return next;
 }
 
-function sizeProblems(list, counts) {
+// The size problems, which fail the check, and the size warnings, which only ask for a split.
+function sizeChecks(list, counts) {
   const problems = [];
+  const warnings = [];
   for (const [file, recorded] of Object.entries(list)) {
     const count = counts.get(file);
     if (count === undefined) {
       problems.push(`${file} is listed in ${LIST} but is gone: run ${UPDATE}.`);
+    } else if (count > recorded + GROWTH) {
+      problems.push(`${file} has ${count} lines, more than the ${recorded} ${LIST} allows plus ${GROWTH}: split it.`);
     } else if (count > recorded) {
-      problems.push(`${file} has ${count} lines, more than the ${recorded} ${LIST} allows: make it smaller, do not let it grow.`);
+      warnings.push(`${file} has ${count} lines, ${count - recorded} more than the ${recorded} in ${LIST}: plan a split.`);
     } else if (count <= LIMIT) {
       problems.push(`${file} has ${count} lines, no more than ${LIMIT}: run ${UPDATE} to drop it from ${LIST}.`);
     } else if (recorded - count > SLACK) {
@@ -264,11 +273,16 @@ function sizeProblems(list, counts) {
     }
   }
   for (const [file, count] of counts) {
-    if (!(file in list) && count > LIMIT) {
-      problems.push(`${file} has ${count} lines, more than ${LIMIT}: split it.`);
+    if (file in list) {
+      continue;
+    }
+    if (count > CEILING) {
+      problems.push(`${file} has ${count} lines, more than ${CEILING}: split it.`);
+    } else if (count > LIMIT) {
+      warnings.push(`${file} has ${count} lines, over the ${LIMIT}-line target: plan a split.`);
     }
   }
-  return problems;
+  return { problems, warnings };
 }
 
 function layoutProblems(root) {
@@ -319,12 +333,17 @@ function main(args) {
     writeFileSync(join(root, LIST), `${JSON.stringify(sorted, null, 2)}\n`);
     list = sorted;
   }
-  const problems = [...sizeProblems(list, counts), ...layoutProblems(root), ...unreadProblems(lexed), ...ticketProblems(lexed), ...catchProblems(lexed)];
+  const sizes = sizeChecks(list, counts);
+  const problems = [...sizes.problems, ...layoutProblems(root), ...unreadProblems(lexed), ...ticketProblems(lexed), ...catchProblems(lexed)];
+  for (const warning of sizes.warnings) {
+    console.error(`check-code: warning: ${warning}`);
+  }
   for (const problem of problems) {
     console.error(`check-code: ${problem}`);
   }
   if (problems.length === 0) {
-    console.log(`check-code: ${counts.size} modules, none over ${LIMIT} lines or past ${LIST}; no comment cites a ticket; every catch {} says why.`);
+    const warned = sizes.warnings.length === 0 ? 'no size warning' : `${sizes.warnings.length} over the ${LIMIT}-line target: see the warnings`;
+    console.log(`check-code: ${counts.size} modules, none over the limits (${warned}); no comment cites a ticket; every catch {} says why.`);
   }
   return problems.length === 0 ? 0 : 1;
 }

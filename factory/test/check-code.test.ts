@@ -1,7 +1,8 @@
 // The code checks of npm test (SF-144), scripts/check-code.mjs run on temporary package trees: the
-// size ratchet of code-size.json, which --update only ever lowers, no script under static/, and
-// every web/*.ts a dashboard script, no comment that cites a ticket, and every catch without a binding
-// saying on its line why any failure there is fine.
+// size limits (a warning past the 600-line target or a listed count, a failure past 800 lines or
+// that count plus 100) and the ratchet of code-size.json, which --update only ever lowers, no
+// script under static/, every web/*.ts a dashboard script, no comment that cites a ticket, and
+// every catch without a binding saying on its line why any failure there is fine.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -59,22 +60,40 @@ test('check-code: a tree within its list passes, and the working directory is th
   });
 });
 
-test('check-code: a listed file that grew past its count fails', async () => {
-  await withTree({ 'src/big.ts': lines(701) }, { 'src/big.ts': 700 }, async (root) => {
+test('check-code: a listed file that grew by up to 100 lines past its count passes with a warning; by 101 it fails', async () => {
+  for (const grown of [1, 100]) {
+    await withTree({ 'src/big.ts': lines(700 + grown) }, { 'src/big.ts': 700 }, async (root) => {
+      const run = check(root);
+      assert.equal(run.code, 0, run.stderr);
+      assert.match(run.stderr, new RegExp(`^check-code: warning: src/big\\.ts has ${700 + grown} lines, ${grown} more than the 700 in code-size\\.json: plan a split\\.$`, 'm'));
+    });
+  }
+  await withTree({ 'src/big.ts': lines(801) }, { 'src/big.ts': 700 }, async (root) => {
     const run = check(root);
     assert.equal(run.code, 1);
-    assert.match(run.stderr, /src\/big\.ts has 701 lines, more than the 700/);
+    assert.match(run.stderr, /^check-code: src\/big\.ts has 801 lines, more than the 700 code-size\.json allows plus 100: split it\.$/m);
+    assert.doesNotMatch(run.stderr, /warning/);
   });
 });
 
-test('check-code: an unlisted file of 601 lines fails; one of 600 passes; a final line without \\n counts', async () => {
-  await withTree({ 'src/new.ts': lines(601) }, {}, async (root) => {
+test('check-code: an unlisted file of 601 or 800 lines passes with a warning; one of 801 fails; one of 600 passes without; a final line without \\n counts', async () => {
+  for (const count of [601, 800]) {
+    await withTree({ 'src/new.ts': lines(count) }, {}, async (root) => {
+      const run = check(root);
+      assert.equal(run.code, 0, run.stderr);
+      assert.match(run.stderr, new RegExp(`^check-code: warning: src/new\\.ts has ${count} lines, over the 600-line target: plan a split\\.$`, 'm'));
+    });
+  }
+  await withTree({ 'src/new.ts': lines(801) }, {}, async (root) => {
     const run = check(root);
     assert.equal(run.code, 1);
-    assert.match(run.stderr, /src\/new\.ts has 601 lines, more than 600/);
+    assert.match(run.stderr, /^check-code: src\/new\.ts has 801 lines, more than 800: split it\.$/m);
+    assert.doesNotMatch(run.stderr, /warning/);
   });
   await withTree({ 'src/edge.ts': lines(600) }, null, async (root) => {
-    assert.equal(check(root).code, 0);
+    const run = check(root);
+    assert.equal(run.code, 0);
+    assert.equal(run.stderr, '');
   });
   await withTree({ 'src/edge.ts': `${lines(600)}y;` }, null, async (root) => {
     assert.match(check(root).stderr, /src\/edge\.ts has 601 lines/);
@@ -106,14 +125,32 @@ test('check-code: a listed file that is gone or at 600 lines or fewer fails unti
   });
 });
 
-test('check-code: --update never raises a count nor adds a file, and the check still fails', async () => {
-  await withTree({ 'src/b.ts': lines(800), 'src/a.ts': lines(700), 'src/new.ts': lines(650) }, { 'src/b.ts': 750, 'src/a.ts': 710 }, async (root) => {
+test('check-code: --update never raises a count nor adds a file, and the check still warns and fails', async () => {
+  const files = { 'src/c.ts': lines(900), 'src/b.ts': lines(800), 'src/a.ts': lines(700), 'src/new.ts': lines(650), 'src/huge.ts': lines(850) };
+  await withTree(files, { 'src/c.ts': 750, 'src/b.ts': 750, 'src/a.ts': 710 }, async (root) => {
     const run = check(root, '--update');
     assert.equal(run.code, 1);
-    assert.match(run.stderr, /src\/b\.ts has 800 lines, more than the 750/);
-    assert.match(run.stderr, /src\/new\.ts has 650 lines, more than 600/);
+    assert.match(run.stderr, /src\/c\.ts has 900 lines, more than the 750 code-size\.json allows plus 100/);
+    assert.match(run.stderr, /src\/huge\.ts has 850 lines, more than 800/);
+    assert.match(run.stderr, /warning: src\/b\.ts has 800 lines, 50 more than the 750/);
+    assert.match(run.stderr, /warning: src\/new\.ts has 650 lines, over the 600-line target/);
     const written = await readFile(join(root, 'code-size.json'), 'utf8');
-    assert.equal(written, '{\n  "src/a.ts": 700,\n  "src/b.ts": 750\n}\n', 'sorted, lowered, never raised');
+    assert.equal(written, '{\n  "src/a.ts": 700,\n  "src/b.ts": 750,\n  "src/c.ts": 750\n}\n', 'sorted, lowered, never raised');
+  });
+});
+
+test('check-code: the summary counts the size warnings, and says none when there are none', async () => {
+  await withTree({ 'src/big.ts': lines(720), 'src/new.ts': lines(650) }, { 'src/big.ts': 700 }, async (root) => {
+    const run = check(root);
+    assert.equal(run.code, 0, run.stderr);
+    assert.equal(run.stderr.split('\n').filter((line) => line.startsWith('check-code: warning: ')).length, 2);
+    assert.match(run.stdout, /^check-code: 5 modules, none over the limits \(2 over the 600-line target: see the warnings\); no comment cites a ticket; every catch \{\} says why\.$/m);
+  });
+  await withTree({ 'src/big.ts': lines(700) }, { 'src/big.ts': 700 }, async (root) => {
+    const run = check(root);
+    assert.equal(run.code, 0, run.stderr);
+    assert.equal(run.stderr, '');
+    assert.match(run.stdout, /^check-code: 4 modules, none over the limits \(no size warning\); no comment cites a ticket; every catch \{\} says why\.$/m);
   });
 });
 

@@ -25,8 +25,10 @@ import { FactoryError } from './errors.js';
 // (tests_failed).
 export const TEST_FIX_ROUNDS = 2;
 
-// The output a record keeps: its last 64 KiB.
+// The output a record keeps: its last 64 KiB and, when that is not all of it, its first 8 KiB, so
+// what a test command prints first (a code check's warnings and summary) stays in the record.
 export const MAX_TESTS_OUTPUT_BYTES = 64 * 1024;
+export const MAX_TESTS_OUTPUT_HEAD_BYTES = 8 * 1024;
 
 // What a Fix section quotes of the output: its last 150 lines, at most 12 KiB.
 export const FIX_TAIL_LINES = 150;
@@ -68,7 +70,9 @@ export interface TestsRecord {
   outcome: TestsOutcome;
   // unavailable: why the command could not run.
   reason?: string;
-  // The last MAX_TESTS_OUTPUT_BYTES of stdout and stderr together, as they came.
+  // stdout and stderr together, as they came: all of it, or past the bounds its first
+  // MAX_TESTS_OUTPUT_HEAD_BYTES and its last MAX_TESTS_OUTPUT_BYTES in whole lines, with a line
+  // between them saying how many bytes were left out (KeptOutput).
   output: string;
   output_truncated: boolean;
   // accepted_failing: when the user accepted, and what the run's outcome was.
@@ -267,31 +271,57 @@ export function testEnvironment(env: NodeJS.ProcessEnv = process.env): NodeJS.Pr
   };
 }
 
-// The last bytes of the output, kept as it comes.
-class Tail {
-  readonly #limit: number;
+// The output a record keeps, as it comes: all of it within the bounds; past them its first
+// headLimit bytes cut back to a whole line, a line saying how many bytes were left out, and its
+// last tailLimit bytes cut forward to a whole line (a part with no line end is kept whole).
+export class KeptOutput {
+  readonly #headLimit: number;
+  readonly #tailLimit: number;
+  #head: Buffer[] = [];
+  #headBytes = 0;
   #chunks: Buffer[] = [];
   #bytes = 0;
+  #dropped = 0;
   truncated = false;
 
-  constructor(limit: number) {
-    this.#limit = limit;
+  constructor(headLimit: number, tailLimit: number) {
+    this.#headLimit = headLimit;
+    this.#tailLimit = tailLimit;
   }
 
   push(chunk: Buffer): void {
+    const room = this.#headLimit - this.#headBytes;
+    if (room > 0) {
+      this.#head.push(chunk.subarray(0, room));
+      this.#headBytes += Math.min(room, chunk.length);
+      chunk = chunk.subarray(room);
+    }
+    if (chunk.length === 0) {
+      return;
+    }
     this.#chunks.push(chunk);
     this.#bytes += chunk.length;
-    while (this.#bytes - this.#chunks[0]!.length >= this.#limit) {
+    while (this.#bytes - this.#chunks[0]!.length >= this.#tailLimit) {
+      this.#dropped += this.#chunks[0]!.length;
       this.#bytes -= this.#chunks.shift()!.length;
-      this.truncated = true;
     }
   }
 
   text(): string {
-    const all = Buffer.concat(this.#chunks);
-    const cut = all.length > this.#limit;
-    this.truncated ||= cut;
-    return cleanOutput((cut ? all.subarray(all.length - this.#limit) : all).toString('utf8'));
+    const head = Buffer.concat(this.#head);
+    let tail = Buffer.concat(this.#chunks);
+    if (this.#dropped === 0 && tail.length <= this.#tailLimit) {
+      return cleanOutput(Buffer.concat([head, tail]).toString('utf8'));
+    }
+    this.truncated = true;
+    tail = tail.subarray(tail.length - this.#tailLimit);
+    const tailStart = tail.indexOf(0x0a) + 1;
+    const kept = tailStart > 0 && tailStart < tail.length ? tail.subarray(tailStart) : tail;
+    const headEnd = head.lastIndexOf(0x0a) + 1;
+    const first = headEnd > 0 ? head.subarray(0, headEnd) : head;
+    const left = this.#headBytes + this.#dropped + this.#bytes - first.length - kept.length;
+    const gap = `${first.length > 0 && headEnd === 0 ? '\n' : ''}[${left} bytes of the output left out]\n`;
+    return cleanOutput(`${first.toString('utf8')}${gap}${kept.toString('utf8')}`);
   }
 }
 
@@ -354,7 +384,7 @@ export async function runTestCommand(run: TestRun): Promise<TestsResult> {
 // The run in bwrap itself, with the worktree and the hidden paths prepared, until the deadline (ms of
 // the clock); finish makes the record of how it ended.
 async function sandboxed(run: TestRun, cwd: string, hidden: readonly HiddenMount[], limit: { clock: () => number; deadline: number }, finish: (fields: Ending) => TestsResult): Promise<TestsResult> {
-  const output = new Tail(MAX_TESTS_OUTPUT_BYTES);
+  const output = new KeptOutput(MAX_TESTS_OUTPUT_HEAD_BYTES, MAX_TESTS_OUTPUT_BYTES);
   let stderr = '';
   let started = false;
   let timedOut = false;

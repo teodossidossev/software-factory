@@ -250,7 +250,8 @@ test('dashboard (SF-103): the digest list and one digest, a manual run and diges
 });
 
 test('dashboard: GET api/skills, the installed skills and the roles\' lists; GET api/skills/<name>, a skill\'s SKILL.md, refused for a path or a name not installed; PUT api/skills/roles/<role> as sf skills set', async () => {
-  await withDashboard('dash-skills', fakeActions(), async (dashboard, store) => {
+  // A temp registry without the coordinator workspace: never the machine's.
+  await withCoordinatorEnv('dash-skills-config', () => withDashboard('dash-skills', fakeActions(), async (dashboard, store) => {
     const base = dashboard.url;
     const view = JSON.parse((await fetchRaw(new URL('api/skills', base))).body) as { skills: Array<{ name: string; description: string | null }>; roles: Record<string, string[]>; missing: string[] };
     assert.deepEqual(view.skills.map((skill) => [skill.name, skill.description]), [['code-review', 'The fake code-review skill'], ['grilling', 'The fake grilling skill'], ['implement', 'The fake implement skill'], ['tdd', 'The fake tdd skill']]);
@@ -280,6 +281,60 @@ test('dashboard: GET api/skills, the installed skills and the roles\' lists; GET
     }
     assert.equal((await act(base, 'api/skills/roles/planner', { skills: [] })).status, 405);
     assert.equal((await act(base, 'api/skills/roles/planner', { skills: [] }, { headers: { origin: 'http://evil.example' }, method: 'PUT' })).status, 403);
+  }));
+});
+
+// The coordinator's column reads the registry of process.env's SF_CONFIG_DIR: a temp one for work,
+// with the coordinator workspace "sf", both restored after.
+async function withCoordinatorEnv(config: string, work: () => Promise<void>): Promise<void> {
+  const saved = { config: process.env.SF_CONFIG_DIR, workspace: process.env.SF_COORDINATOR_WORKSPACE };
+  process.env.SF_CONFIG_DIR = join(temp, config);
+  process.env.SF_COORDINATOR_WORKSPACE = 'sf';
+  try {
+    await work();
+  } finally {
+    for (const [key, value] of [['SF_CONFIG_DIR', saved.config], ['SF_COORDINATOR_WORKSPACE', saved.workspace]] as const) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
+}
+
+test('dashboard: GET api/skills has the coordinator\'s column (or why not), never the checkout\'s path; PUT api/skills/roles/coordinator writes its settings file and answers the new view', async () => {
+  await withCoordinatorEnv('dash-coordinator-config', async () => {
+    await withDashboard('dash-coordinator', fakeActions(), async (dashboard, store) => {
+      const base = dashboard.url;
+      const none = JSON.parse((await fetchRaw(new URL('api/skills', base))).body) as { coordinator: unknown };
+      assert.deepEqual(none.coordinator, { error: { code: 'no_coordinator_workspace', message: 'No coordinator workspace (SF_COORDINATOR_WORKSPACE): "sf" is not registered.' } });
+      const refused = await act(base, 'api/skills/roles/coordinator', { skills: [] }, { method: 'PUT' });
+      assert.equal(JSON.parse(refused.body).error.code, 'no_coordinator_workspace');
+
+      const repo = join(temp, 'dash-coordinator-repo');
+      await mkdir(join(repo, '.claude'), { recursive: true });
+      git(repo, 'init', '-q');
+      await saveRegistry({ workspaces: { sf: { read_checkout: repo } } }, process.env.SF_CONFIG_DIR);
+      const settings = join(repo, '.claude', 'settings.local.json');
+      await writeFile(settings, JSON.stringify({ permissions: { allow: [] }, skillOverrides: { grilling: 'name-only', 'plugin:x': 'off' } }));
+      const read = await fetchRaw(new URL('api/skills', base));
+      assert.deepEqual(JSON.parse(read.body).coordinator, { workspace: 'sf', skills: { 'code-review': 'on', grilling: 'name-only', implement: 'on', tdd: 'on' } });
+      assert.ok(!read.body.includes(repo), 'no checkout path reaches the page');
+      // The list of skills on: implement off; grilling (not in it, name-only) left as it is.
+      const put = await act(base, 'api/skills/roles/coordinator', { skills: ['code-review', 'tdd'] }, { method: 'PUT' });
+      assert.equal(put.status, 200, put.body);
+      assert.deepEqual(JSON.parse(put.body).result.coordinator, { workspace: 'sf', skills: { 'code-review': 'on', grilling: 'name-only', implement: 'off', tdd: 'on' } });
+      assert.ok(!put.body.includes(repo));
+      assert.deepEqual(JSON.parse(await readFile(settings, 'utf8')), { permissions: { allow: [] }, skillOverrides: { grilling: 'name-only', 'plugin:x': 'off', implement: 'off' } });
+      // The job roles' storage is not touched.
+      await assert.rejects(stat(join(store.state, 'skill-roles.json')), { code: 'ENOENT' });
+      // An unreadable file: refused with its code, the file unchanged.
+      await writeFile(settings, '{ nope');
+      const unreadable = await act(base, 'api/skills/roles/coordinator', { skills: [] }, { method: 'PUT' });
+      assert.equal(JSON.parse(unreadable.body).error.code, 'coordinator_settings_unreadable');
+      assert.equal(await readFile(settings, 'utf8'), '{ nope');
+    });
   });
 });
 

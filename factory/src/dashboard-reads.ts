@@ -12,7 +12,7 @@ import { sendJson, statusOf } from './http.js';
 import { lineEntries, type StreamEntry, streamContext } from './job-stream.js';
 import type { Job } from './jobs.js';
 import { WORKSPACE_NAME_PATTERN } from './registry.js';
-import { skillsView, skillText } from './skills.js';
+import { skillsForClients, skillsView, skillText } from './skills.js';
 import { STATS_DAYS, type StatsDays } from './stats.js';
 import type { CheckRecord } from './task-check.js';
 import { followLines } from './watch.js';
@@ -54,9 +54,10 @@ export function readHandlers(ctx: DashboardContext) {
     { pattern: 'api/stats', handler: ({ res, query }) => statsView(res, query) },
     // The health checks' last result.
     { pattern: 'api/health', when: (query) => health !== undefined && noQuery(query), handler: ({ res }) => sendJson(res, 200, health!.list()) },
-    // The installed skills and the agent roles' choice (sf skills), and one skill's SKILL.md, read
-    // from the skills' source folder (a name that is not an installed skill's is refused).
-    { pattern: 'api/skills', when: noQuery, handler: async ({ res }) => sendJson(res, 200, await skillsView(ctx.stateDir)) },
+    // The installed skills, the agent roles' choice and the coordinator's (sf skills; without the
+    // coordinator checkout's path), and one skill's SKILL.md, read from the skills' source folder (a
+    // name that is not an installed skill's is refused).
+    { pattern: 'api/skills', when: noQuery, handler: async ({ res }) => sendJson(res, 200, skillsForClients(await skillsView(ctx.stateDir))) },
     { pattern: 'api/skills/*', when: noQuery, handler: ({ res, params: [name] }) => hostRead(res, skillText(name!)) },
     // The morning digest: the list, newest first, and one stored record.
     { pattern: 'api/digests', when: (query) => digests !== undefined && noQuery(query), handler: async ({ res }) => sendJson(res, 200, await digests!.list()) },

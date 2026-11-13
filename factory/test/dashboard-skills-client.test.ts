@@ -25,6 +25,7 @@ function payload(extra: Record<string, unknown> = {}) {
     ],
     roles: ROLES,
     missing: ['old-skill'],
+    coordinator: { workspace: 'software-factory', skills: { 'code-review': 'on', grilling: 'name-only', implement: 'on', tdd: 'off' } },
     ...extra,
   };
 }
@@ -94,13 +95,13 @@ test('skills client: #skills, the Skills tab and the page select open the page a
   reads(page)[0]!.respond(200, payload());
   await page.flush();
 
-  assert.deepEqual(heads(page), ['Skill', 'Implementer · 2', 'Claude review · 1', 'Codex gate · 1', 'Task check · 0', 'Planner (ChatGPT) · 2Applies to the next planning request']);
+  assert.deepEqual(heads(page), ['Skill', 'Implementer · 2', 'Claude review · 1', 'Codex gate · 1', 'Task check · 0', 'Planner (ChatGPT) · 2Applies to the next planning request', 'Coordinator (Claude Code) · 2']);
   assert.deepEqual(rows(page).map((row) => row.querySelector('[data-sk-open]')!.textContent), ['code-review', 'grilling', 'implement', 'tdd']);
   assert.deepEqual(rows(page).map(boxes), [
-    [false, true, true, false, false],
-    [false, false, false, false, true],
-    [true, false, false, false, false],
-    [true, false, false, false, false],
+    [false, true, true, false, false, true],
+    [false, false, false, false, true, false],
+    [true, false, false, false, false, true],
+    [true, false, false, false, false, false],
   ]);
   // The description's first line, the whole on hover; the source and the updated date, muted.
   const first = rows(page)[0]!;
@@ -184,6 +185,41 @@ test('skills client: a refused PUT and a network error put the box back, show th
   reads(page)[3]!.respond(200, payload({ roles: { ...ROLES, implementer: ['tdd'] } }));
   await page.flush();
   assert.deepEqual([box(page, 'grilling for Codex gate').checked, box(page, 'grilling for Task check').checked, message(page)], [true, false, undefined]);
+});
+
+test('skills client: the coordinator\'s column, last: a click PUTs its list of skills on; a name-only box is indeterminate and a click sets it on; a refusal puts the box back; a column not read has no boxes', async () => {
+  const page = await openSkills();
+  const grilling = box(page, 'grilling for Coordinator (Claude Code)');
+  assert.deepEqual([grilling.checked, grilling.indeterminate, grilling.getAttribute('title')], [false, true, 'name-only in Claude Code\'s skillOverrides; a click switches it on']);
+  assert.equal(box(page, 'tdd for Coordinator (Claude Code)').indeterminate, false);
+  assert.match(root(page).querySelector('.sk-coordinator')!.textContent, /^The coordinator's choice is Claude Code's skillOverrides in the software-factory checkout's \.claude\/settings\.local\.json; it applies to the next Claude Code session there \(or after \/skills\)\.$/);
+  // An on box clicked: off, the list without it (grilling, name-only, is not in the list: left as it is).
+  click(box(page, 'implement for Coordinator (Claude Code)'));
+  await page.flush();
+  assert.deepEqual([puts(page)[0]!.path, puts(page)[0]!.body], ['api/skills/roles/coordinator', '{"skills":["code-review"]}']);
+  assert.equal(box(page, 'grilling for Coordinator (Claude Code)').indeterminate, true);
+  const stored = { workspace: 'software-factory', skills: { 'code-review': 'on', grilling: 'name-only', implement: 'off', tdd: 'off' } };
+  puts(page)[0]!.respond(200, { ok: true, result: payload({ coordinator: stored }) });
+  await page.flush();
+  assert.equal(heads(page)[6], 'Coordinator (Claude Code) · 1');
+  // The indeterminate box clicked: on, it joins the list.
+  click(box(page, 'grilling for Coordinator (Claude Code)'));
+  await page.flush();
+  assert.equal(puts(page)[1]!.body, '{"skills":["code-review","grilling"]}');
+  assert.deepEqual([box(page, 'grilling for Coordinator (Claude Code)').checked, box(page, 'grilling for Coordinator (Claude Code)').indeterminate], [true, false]);
+  // Refused: the box back as it was, the message, the list read again.
+  puts(page)[1]!.respond(500, { ok: false, error: { code: 'coordinator_settings_unreadable', message: 'the software-factory checkout\'s .claude/settings.local.json is not changed: it is not JSON.' } });
+  await page.flush();
+  assert.deepEqual([box(page, 'grilling for Coordinator (Claude Code)').checked, box(page, 'grilling for Coordinator (Claude Code)').indeterminate], [false, true]);
+  assert.equal(message(page), 'grilling for Coordinator (Claude Code) was not switched on: the software-factory checkout\'s .claude/settings.local.json is not changed: it is not JSON.');
+  assert.equal(reads(page).length, 2);
+
+  // No coordinator workspace: the reason in the head's title and below the table, no boxes.
+  const none = await openSkills(payload({ coordinator: { error: { code: 'no_coordinator_workspace', message: 'No coordinator workspace (SF_COORDINATOR_WORKSPACE): "software-factory" is not registered.' } } }));
+  const head = root(none).querySelectorAll('.sk-table th').at(-1)!;
+  assert.deepEqual([head.textContent, head.getAttribute('title')], ['Coordinator (Claude Code)', 'No coordinator workspace (SF_COORDINATOR_WORKSPACE): "software-factory" is not registered.']);
+  assert.deepEqual(rows(none).map((row) => boxes(row).length), [5, 5, 5, 5]);
+  assert.match(root(none).querySelector('.sk-coordinator')!.textContent, /^Coordinator \(Claude Code\): No coordinator workspace/);
 });
 
 test('skills client: the filter hides the rows whose name and description miss it; the missing list with its boxes to switch it off', async () => {

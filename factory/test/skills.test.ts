@@ -1,13 +1,15 @@
 // The agents' skills (src/skills.ts): the user's installed ones, copied verbatim into a snapshot
 // under the state directory when the lock file's hashes change, never edited, swapped whole.
 import assert from 'node:assert/strict';
-import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, readlink, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, readlink, realpath, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mock, test } from 'node:test';
+import { saveRegistry } from '../src/registry.js';
 import { chosenSkills, rolesOf, writeRoles } from '../src/skill-roles.js';
 import {
-  implementerSkills, jobSkills, MAX_SKILL_BLOCKS_BYTES, MAX_SKILL_TEXT_BYTES, recordSkills, setRoleSkills, skillBlocks, type SkillsEvent, skillsLines, skillsSnapshot, skillsSource,
+  implementerSkills, jobSkills, MAX_SKILL_BLOCKS_BYTES, MAX_SKILL_TEXT_BYTES, recordSkills, setRoleSkills, skillBlocks, type SkillsEvent, skillsForClients, skillsLines, skillsSnapshot, skillsSource,
   skillsText, skillsView, skillText, switchSkill, syncSkills,
 } from '../src/skills.js';
 
@@ -27,7 +29,8 @@ async function fixture(name: string): Promise<{ root: string; source: string; st
   }
   const lock = (hashes: Record<string, string>) => writeFile(join(root, 'agents', '.skill-lock.json'), JSON.stringify({ version: 3, skills: Object.fromEntries(Object.entries(hashes).map(([skill, hash]) => [skill, { skillFolderHash: hash, source: 'x' }])) }));
   await lock(Object.fromEntries(AGENT_SKILLS.map((skill) => [skill, `${skill}-1`])));
-  return { root, source, state: join(root, 'state'), env: { HOME: join(root, 'home'), SF_SKILLS_DIR: source }, lock };
+  // SF_CONFIG_DIR: the coordinator's column reads a registry, this temp one (none: no coordinator workspace).
+  return { root, source, state: join(root, 'state'), env: { HOME: join(root, 'home'), SF_SKILLS_DIR: source, SF_CONFIG_DIR: join(root, 'config') }, lock };
 }
 
 const snapshotFile = (state: string, ...path: string[]): Promise<string> => readFile(join(skillsSnapshot(state), ...path), 'utf8');
@@ -426,7 +429,9 @@ test('sf skills: the installed skills with source, updated and description, each
   assert.match(lines.find((line) => line.startsWith('extra'))!, /^extra +owner\/extra +2026-11-10 +- +- +- +- +- +The extra skill$/);
   // No updatedAt and no description: a dash, and nothing.
   assert.match(lines.find((line) => line.startsWith('code-review'))!, /^code-review +x +- +on +on +on +- +-$/);
-  assert.equal(lines.at(-1), 'missing: gone (chosen for planner, not installed)');
+  assert.equal(lines.at(-2), 'missing: gone (chosen for planner, not installed)');
+  // No coordinator workspace: no column, one line saying why.
+  assert.equal(lines.at(-1), 'coordinator: No coordinator workspace (SF_COORDINATOR_WORKSPACE): "software-factory" is not registered.');
   // sf skills set: on adds at the end, off takes out; the file is written with mode 0600 and the snapshot synced at once.
   const after = await switchSkill(state, 'task_check', 'extra', true, env);
   assert.deepEqual(after.roles.task_check, ['extra']);
@@ -439,6 +444,35 @@ test('sf skills: the installed skills with source, updated and description, each
   await assert.rejects(switchSkill(state, 'planner', 'nope', true, env), { code: 'skill_not_installed', message: /Not an installed skill: nope; installed: code-review, extra, grilling, implement, tdd, unused/ });
   await assert.rejects(switchSkill(state, 'planner', 'nope', false, env), { code: 'skill_not_installed' });
   await assert.rejects(setRoleSkills(state, 'codex_gate', ['../agents'], env), { code: 'skill_not_installed' });
+});
+
+test('sf skills: the coordinator column after the roles (on, -, the override), its settings file; sf skills set coordinator changes that key only, skill-roles.json untouched', async () => {
+  const fixed = await fixture('coordinator');
+  const { root, state, env } = fixed;
+  await mkdir(state, { recursive: true });
+  const repo = join(await realpath(root), 'repo');
+  await mkdir(join(repo, '.claude'), { recursive: true });
+  execFileSync('git', ['init', '-q', repo]);
+  await saveRegistry({ workspaces: { 'software-factory': { read_checkout: repo } } }, env.SF_CONFIG_DIR);
+  const settings = join(repo, '.claude', 'settings.local.json');
+  await writeFile(settings, JSON.stringify({ env: { A: '1' }, skillOverrides: { grilling: 'name-only' } }));
+  const lines = skillsLines(await skillsView(state, env));
+  assert.match(lines[0]!, /^skill +source +updated +implementer +claude_review +codex_gate +task_check +planner +coordinator +description$/);
+  assert.match(lines.find((line) => line.startsWith('grilling'))!, /^grilling +x +- +on +- +- +- +on +name-only$/);
+  assert.equal(lines.at(-1), `coordinator: Claude Code's skillOverrides in ${settings}; it applies to the next Claude Code session there (or after /skills).`);
+  const view = await switchSkill(state, 'coordinator', 'tdd', false, env);
+  assert.deepEqual(view.coordinator, { workspace: 'software-factory', checkout: repo, settings, skills: { 'code-review': 'on', grilling: 'name-only', implement: 'on', tdd: 'off' } });
+  assert.match(skillsLines(view).find((line) => line.startsWith('tdd'))!, /^tdd +x +- +on +- +- +- +- +-$/);
+  assert.deepEqual(JSON.parse(await readFile(settings, 'utf8')), { env: { A: '1' }, skillOverrides: { grilling: 'name-only', tdd: 'off' } });
+  // The job roles' choice is not touched: no skill-roles.json, every role its default.
+  await assert.rejects(stat(join(state, 'skill-roles.json')), { code: 'ENOENT' });
+  assert.deepEqual(view.roles, DEFAULT_ROLES);
+  // The list form (PUT): grilling stays name-only; tdd on again.
+  assert.deepEqual(((await setRoleSkills(state, 'coordinator', ['tdd', 'implement', 'code-review'], env)).coordinator as { skills: unknown }).skills, { 'code-review': 'on', grilling: 'name-only', implement: 'on', tdd: 'on' });
+  assert.deepEqual(JSON.parse(await readFile(settings, 'utf8')), { env: { A: '1' }, skillOverrides: { grilling: 'name-only' } });
+  await assert.rejects(switchSkill(state, 'coordinator', 'nope', true, env), { code: 'skill_not_installed' });
+  // The dashboard's form: no absolute path.
+  assert.deepEqual(skillsForClients(view).coordinator, { workspace: 'software-factory', skills: { 'code-review': 'on', grilling: 'name-only', implement: 'on', tdd: 'off' } });
 });
 
 test('a skill\'s SKILL.md for the API: an installed skill\'s text; a path, .. or a name not installed is refused before anything is read', async () => {

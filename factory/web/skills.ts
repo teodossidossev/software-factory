@@ -3,19 +3,23 @@
 // per installed skill (GET api/skills) with a checkbox per agent role; a click sends the role's new
 // list at once (PUT api/skills/roles/<role>), every box disabled while it is sent; a refusal
 // or a network error puts the box back, shows the message next to the table and reads the list
-// again. The skills a role chose that are not installed are listed below the table, with their
-// boxes to switch them off. A skill's name opens its SKILL.md (GET api/skills/<name>) in a side
+// again. The last column is the coordinator's, the Claude Code session in the factory's own checkout:
+// its list is the skills that are on in Claude Code's skillOverrides there (PUT
+// api/skills/roles/coordinator sends it the same way); a name-only or user-invocable-only skill is an
+// indeterminate box with the value in its title, which a click sets on; a column the server could
+// not read has the reason in its head's title and no boxes. The skills a role chose that are not
+// installed are listed below the table, with their boxes to switch them off. A skill's name opens its SKILL.md (GET api/skills/<name>) in a side
 // panel as plain text, never as HTML. A classic script, loaded in order with defer, sharing the
 // page's globals with the others. This file has no import or export on purpose: the compiler keeps
 // it a script, so its top-level names stay the page's globals.
 'use strict';
 
-// A role's column: the role and its head.
+// A column: the role (an agent role, or the coordinator) and its head.
 interface SkColumn {
-  role: SkillRole;
+  role: SkillRole | 'coordinator';
   head: string;
 }
-// The roles' columns, in order (src/skill-roles.ts ROLES).
+// The agent roles' columns, in order (src/skill-roles.ts ROLES).
 const SK_ROLES: readonly SkColumn[] = [
   { role: 'implementer', head: 'Implementer' },
   { role: 'claude_review', head: 'Claude review' },
@@ -23,6 +27,8 @@ const SK_ROLES: readonly SkColumn[] = [
   { role: 'task_check', head: 'Task check' },
   { role: 'planner', head: 'Planner (ChatGPT)' },
 ];
+// The table's columns: the roles', then the coordinator's.
+const SK_COLUMNS: readonly SkColumn[] = [...SK_ROLES, { role: 'coordinator', head: 'Coordinator (Claude Code)' }];
 
 // The Skills page: the list as last read (or as the last PUT answered), a read's error, the read
 // under way, the filter, the PUT under way (its role and the list sent; one at a time, so no two
@@ -34,7 +40,7 @@ const sk: {
   error: string | null;
   load: number;
   filter: string;
-  sending: { role: SkillRole; skills: string[] } | null;
+  sending: { role: SkColumn['role']; skills: string[] } | null;
   message: string | null;
   panelSkill: string | null;
   text: SkillText | null;
@@ -88,8 +94,24 @@ async function loadSkills(): Promise<void> {
   renderSkills();
 }
 
-// The role's list the page shows: the one being sent, else the one stored.
-const shownList = (data: SkillsPayload, role: SkillRole): string[] => (sk.sending?.role === role ? sk.sending.skills : data.roles[role]);
+// A column's stored list: a role's, or the coordinator's skills that are on (none when its column
+// could not be read).
+function storedList(data: SkillsPayload, role: SkColumn['role']): string[] {
+  if (role !== 'coordinator') {
+    return data.roles[role];
+  }
+  const coordinator = data.coordinator;
+  return 'error' in coordinator ? [] : Object.keys(coordinator.skills).filter((name) => coordinator.skills[name] === 'on');
+}
+
+// The column's list the page shows: the one being sent, else the one stored.
+const shownList = (data: SkillsPayload, role: SkColumn['role']): string[] => (sk.sending?.role === role ? sk.sending.skills : storedList(data, role));
+
+// A skill's coordinator override that is neither on nor off (name-only, user-invocable-only); null otherwise.
+function partialOverride(data: SkillsPayload, name: string): string | null {
+  const value = 'error' in data.coordinator ? undefined : data.coordinator.skills[name];
+  return value === 'name-only' || value === 'user-invocable-only' ? value : null;
+}
 
 // A box clicked: the role's list with the skill added at its end or taken out, sent at once; the
 // role's boxes show that list and every box is disabled until the answer. The answer is the list
@@ -102,7 +124,7 @@ async function switchSkill(column: SkColumn, name: string, on: boolean): Promise
     renderSkills();
     return;
   }
-  const list = data.roles[column.role].filter((other) => other !== name);
+  const list = storedList(data, column.role).filter((other) => other !== name);
   const skills = on ? [...list, name] : list;
   sk.sending = { role: column.role, skills };
   sk.message = null;
@@ -165,11 +187,17 @@ function skillMatches(skill: SkillRow): boolean {
   return filter === '' || skill.name.toLowerCase().includes(filter) || (skill.description ?? '').toLowerCase().includes(filter);
 }
 
-// A role's box for a skill, labelled for screen readers; disabled while a list is sent.
+// A column's box for a skill, labelled for screen readers; disabled while a list is sent. The
+// coordinator's box of a skill neither on nor off is indeterminate, the value in its title.
 function skillBox(column: SkColumn, name: string, data: SkillsPayload): HTMLInputElement {
   const box = el('input', 'sk-box');
   box.type = 'checkbox';
   box.checked = shownList(data, column.role).includes(name);
+  const partial = column.role === 'coordinator' && !box.checked ? partialOverride(data, name) : null;
+  if (partial !== null) {
+    box.indeterminate = true;
+    box.setAttribute('title', `${partial} in Claude Code's skillOverrides; a click switches it on`);
+  }
   box.disabled = sk.sending !== null;
   box.setAttribute('aria-label', `${name} for ${column.head}`);
   box.dataset.sk = `box:${column.role}:${name}`;
@@ -183,10 +211,14 @@ function skillsTable(data: SkillsPayload): HTMLElement {
   const table = el('table', 'sk-table');
   const headRow = el('tr');
   headRow.append(el('th', '', 'Skill'));
-  for (const { role, head } of SK_ROLES) {
-    const th = el('th', 'sk-role', `${head} · ${shownList(data, role).length}`);
+  const unread = 'error' in data.coordinator ? data.coordinator.error.message : null;
+  for (const { role, head } of SK_COLUMNS) {
+    const th = el('th', 'sk-role', role === 'coordinator' && unread !== null ? head : `${head} · ${shownList(data, role).length}`);
     if (role === 'planner') {
       th.append(el('span', 'sk-note', 'Applies to the next planning request'));
+    }
+    if (role === 'coordinator' && unread !== null) {
+      th.setAttribute('title', unread);
     }
     headRow.append(th);
   }
@@ -212,9 +244,11 @@ function skillsTable(data: SkillsPayload): HTMLElement {
       cell.append(el('div', 'sk-meta muted', meta.join(' · ')));
     }
     row.append(cell);
-    for (const column of SK_ROLES) {
+    for (const column of SK_COLUMNS) {
       const td = el('td', 'sk-role');
-      td.append(skillBox(column, skill.name, data));
+      if (column.role !== 'coordinator' || unread === null) {
+        td.append(skillBox(column, skill.name, data));
+      }
       row.append(td);
     }
     tbody.append(row);
@@ -230,7 +264,7 @@ function skillsTable(data: SkillsPayload): HTMLElement {
 function skillsMissing(data: SkillsPayload): HTMLElement {
   const list = el('ul', 'sk-missing');
   for (const name of data.missing) {
-    const roles = SK_ROLES.filter(({ role }) => data.roles[role].includes(name));
+    const roles = SK_ROLES.filter(({ role }) => storedList(data, role).includes(name));
     const item = el('li');
     item.append(el('span', 'sk-missing-text', `Chosen but not installed: ${name} (${roles.map(({ head }) => head).join(', ')})`));
     for (const column of roles) {
@@ -317,6 +351,10 @@ function renderSkills(): void {
       body.append(message);
     }
     body.append(data.skills.length > 0 ? skillsTable(data) : el('p', 'muted fs13', 'No skills installed: npx skills add <source> installs one.'));
+    const coordinator = data.coordinator;
+    body.append(el('p', 'muted fs13 sk-coordinator', 'error' in coordinator
+      ? `Coordinator (Claude Code): ${coordinator.error.message}`
+      : `The coordinator's choice is Claude Code's skillOverrides in the ${coordinator.workspace} checkout's .claude/settings.local.json; it applies to the next Claude Code session there (or after /skills).`));
     if (data.missing.length > 0) {
       body.append(skillsMissing(data));
     }

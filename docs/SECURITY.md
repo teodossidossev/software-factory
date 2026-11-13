@@ -52,7 +52,8 @@ refused), and the factory's test command passed in a sandbox without network on 
     ones you switch on with `sf skills set` (by default `implement`, `tdd`, `code-review`,
     `grilling` for the Implementer). The factory only reads `~/.agents/skills` and its lock file:
     it installs nothing (`npx skills add` in your terminal does) and never writes into `~/.agents`,
-    `~/.claude` or a workspace's checkout. The chosen skills are copied verbatim into the factory's
+    `~/.claude` or a workspace's checkout, with one exception: the `skillOverrides` key of the
+    coordinator checkout's `.claude/settings.local.json` (below). The chosen skills are copied verbatim into the factory's
     skills snapshot in its state directory when their lock file's hashes change, and never edited.
     Only the Implementer's chosen skills are mounted, each read-only, where Claude Code looks for
     the user's skills, over an empty read-only folder: the job can read them but not change them or
@@ -67,6 +68,21 @@ refused), and the factory's test command passed in a sandbox without network on 
     write by any session, is refused there.
     Without `bwrap` a job's turn stops; it never runs unwrapped. `SF_SANDBOX=off` turns the
     wrapper off with the rest of the sandbox, which opens the link swap again.
+- **The coordinator's skills change one key of one file.** The Skills page's Coordinator column
+  and `sf skills set coordinator` switch the skills of your own Claude Code session in the checkout
+  of the workspace `SF_COORDINATOR_WORKSPACE` (`software-factory` by default) through Claude Code's
+  `skillOverrides` in `<checkout>/.claude/settings.local.json`. The factory writes that key only:
+  it sets a skill to `"off"` or removes its entry (and the empty `skillOverrides`), keeps every
+  other key and entry in value and order, and never writes a permission, an environment variable,
+  a hook or any other setting. The file is read again before each change and replaced atomically
+  with its own mode (a new one 0600, a new `.claude` 0700). A file that is not a JSON object, or
+  whose `skillOverrides` is not one, is refused (`coordinator_settings_unreadable`), never
+  overwritten; a `.claude` or a settings file that is a symlink, or a `.claude` that is not the
+  checkout's own, is refused (`coordinator_settings_unsafe`). The file is reached only through one
+  handle on `.claude`, opened without following a link and checked to be the checkout's own: the
+  read, the temporary file and the rename all go through it (`/proc/self/fd/<fd>`), so a `.claude`
+  swapped for a link during a change cannot send the write out of the checkout. Only installed
+  skills' names can be switched. The dashboard never gets the checkout's path.
 - **Sandboxes do not outlive their session.** Sandbox processes left behind by a finished session
   are ended.
 - **Tests run before every merge request.** In the factory's own workspace, typecheck and the unit

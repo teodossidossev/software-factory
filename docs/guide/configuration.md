@@ -147,6 +147,7 @@ effect and says only whether each token is set.
 | `SF_STATE_DIR` | `${XDG_STATE_HOME:-~/.local/state}/software-factory` | path | Jobs, the queue, the socket `sf.sock`, the dashboard token, the MCP token. The socket path must fit 107 bytes (`socket_path_too_long`). |
 | `SF_WORKTREE_ROOT` | `<state dir>/worktrees` | absolute path | Where each job's worktree is created: `<root>/<workspace>/<ticket>`. |
 | `SF_CONFIG_DIR` | `${XDG_CONFIG_HOME:-~/.config}/software-factory` | path | `workspaces.json`, `auth.env` and `rules/`. |
+| `SF_COORDINATOR_WORKSPACE` | `software-factory` | a workspace name | The workspace whose checkout holds your coordinating Claude Code session: the Skills page's Coordinator column and `sf skills set coordinator` switch its skills in `<checkout>/.claude/settings.local.json` ([The Skills page](#the-skills-page)). Not registered: the column has no boxes (`no_coordinator_workspace`). |
 | `SF_ENV_FILE` | `<config dir>/auth.env` | path, or empty for none | The environment file (above). |
 | `SF_HANDBOOK` | `factory/HANDBOOK.md` | path | The Handbook served to the Context owner. |
 | `SF_TUNNEL_SCRIPT` | `scripts/sf-tunnel.sh` of the clone | path | The tunnel script `sf up` starts. |
@@ -435,7 +436,7 @@ method (the planner with the Quick start alone). The `<skill>` blocks of one pro
 64 KiB; a skill past that is named in the record (`skills_omitted`), not sent.
 
 ```sh
-sf skills                                  # the installed skills: source, updated, description, on/- per role; then the chosen ones not installed
+sf skills                                  # the installed skills: source, updated, description, on/- per role and the coordinator; then the chosen ones not installed
 sf skills set codex_gate grilling on       # add a skill to a role
 sf skills set implementer implement off    # take one out
 ```
@@ -462,6 +463,24 @@ switch it off. A click on a skill's name shows its `SKILL.md` as plain text in a
 or Esc). As with `sf skills set`, a change applies to the jobs started after it (running jobs keep
 their skills) and, for the Planner column, to the next planning request. The page installs
 nothing: `npx skills add <source>` in a terminal does.
+
+The last column, **Coordinator (Claude Code)**, is your own Claude Code session in the factory's
+checkout: the checkout of the workspace `SF_COORDINATOR_WORKSPACE` (`software-factory` by
+default). It is not a role and not in `skill-roles.json`: its boxes are Claude Code's own
+per-project switch, `skillOverrides` in that checkout's `.claude/settings.local.json` (personal,
+not committed), the same key Claude Code's `/skills` menu writes, read again on every Refresh. A
+click switches one skill on (its entry removed) or off (`"off"`); a skill set to `name-only` or
+`user-invocable-only` shows as an indeterminate box with the value in its title, and a click sets
+it on. Every other key of the file, and the entries of other names (plugin skills), are kept as
+they are. A file that is not JSON (or whose `skillOverrides` is not an object), or a `.claude` or
+settings file that is a symlink, is refused and never overwritten. A change applies to the next
+Claude Code session there, or after `/skills`. Without that workspace the column has no boxes and
+says why. From a terminal:
+
+```sh
+sf skills set coordinator grilling off     # the coordinator's Claude Code session hides grilling
+sf skills set coordinator grilling on      # and shows it again
+```
 
 ## Coding rules
 

@@ -17,11 +17,16 @@
 // A job is pinned to its snapshot and its choice: its skills event records the folder the link
 // named at its start and each role's list, every wrapper of the job binds that folder's skills of
 // the job's Implementer (jobSkills), and the cleanup keeps the folders the jobs not yet archived recorded.
-// Nothing here writes into the skills' source, ~/.claude or a workspace's checkout.
+// Nothing here writes into the skills' source, ~/.claude or a workspace's checkout, with one
+// exception: the coordinator's column (src/coordinator-skills.ts) changes the skillOverrides key of
+// the coordinator checkout's .claude/settings.local.json, Claude Code's own per-project switch.
 import { randomBytes } from 'node:crypto';
 import { appendFile, cp, mkdir, open, readdir, readFile, readlink, rename, rm, stat, symlink, unlink, utimes, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
+import {
+  COORDINATOR, type CoordinatorColumn, coordinatorForClients, coordinatorSkills, type CoordinatorSkills, setCoordinatorSkills, switchCoordinatorSkill,
+} from './coordinator-skills.js';
 import { FactoryError } from './errors.js';
 import { JobStore } from './jobs.js';
 import { chosenSkills, isRole, readRoles, type Role, ROLES, type RoleSkills, rolesOf, SKILL_NAME, withRole, writeRoles } from './skill-roles.js';
@@ -381,24 +386,35 @@ export async function installedSkills(env: NodeJS.ProcessEnv = process.env): Pro
   return skills;
 }
 
-// sf skills and GET api/skills: the installed skills, each role's list, and the chosen skills that
-// are not installed.
+// sf skills and GET api/skills: the installed skills, each role's list, the chosen skills that
+// are not installed, and the coordinator's column (src/coordinator-skills.ts, read from its file
+// each time; never in skill-roles.json).
 export interface SkillsView {
   skills: InstalledSkill[];
   roles: RoleSkills;
   missing: string[];
+  coordinator: CoordinatorSkills;
 }
 
 export async function skillsView(stateDir: string, env: NodeJS.ProcessEnv = process.env): Promise<SkillsView> {
   const [skills, roles] = await Promise.all([installedSkills(env), readRoles(stateDir)]);
-  return { skills, roles, missing: chosenSkills(roles).filter((name) => !skills.some((skill) => skill.name === name)) };
+  const coordinator = await coordinatorSkills(skills.map((skill) => skill.name), env);
+  return { skills, roles, missing: chosenSkills(roles).filter((name) => !skills.some((skill) => skill.name === name)), coordinator };
 }
+
+// The view for the dashboard: the coordinator's column without its absolute paths.
+export const skillsForClients = (view: SkillsView): Omit<SkillsView, 'coordinator'> & { coordinator: CoordinatorColumn } => ({ ...view, coordinator: coordinatorForClients(view.coordinator) });
 
 // Changes one role's list (sf skills set, PUT api/skills/roles/<role>), checked as withRole does
 // (asked: the names checked, the list's by default), writes the file and syncs at once, so the
 // snapshot holds the new union; a sync that fails is its warning line, the choice stays written.
+// The coordinator's list is the skills that are on, written to its settings file instead (setCoordinatorSkills).
 export async function setRoleSkills(stateDir: string, role: string, skills: readonly string[], env: NodeJS.ProcessEnv = process.env, asked: readonly string[] = skills): Promise<SkillsView> {
   const installed = (await installedSkills(env)).map((skill) => skill.name);
+  if (role === COORDINATOR) {
+    await setCoordinatorSkills(skills, installed, env);
+    return skillsView(stateDir, env);
+  }
   const roles = withRole(await readRoles(stateDir), role, skills, installed, asked);
   await mkdir(stateDir, { recursive: true, mode: 0o700 });
   await writeRoles(stateDir, roles);
@@ -406,23 +422,40 @@ export async function setRoleSkills(stateDir: string, role: string, skills: read
   return skillsView(stateDir, env);
 }
 
-// sf skills set <role> <skill> on|off: the role's list with the skill added at its end, or taken out.
+// sf skills set <role> <skill> on|off: the role's list with the skill added at its end, or taken out;
+// for the coordinator, that skill's override alone (switchCoordinatorSkill).
 export async function switchSkill(stateDir: string, role: string, skill: string, on: boolean, env: NodeJS.ProcessEnv = process.env): Promise<SkillsView> {
+  if (role === COORDINATOR) {
+    await switchCoordinatorSkill(skill, on, (await installedSkills(env)).map((installed) => installed.name), env);
+    return skillsView(stateDir, env);
+  }
   const list = isRole(role) ? (await readRoles(stateDir))[role] : [];
   return setRoleSkills(stateDir, role, on ? [...list, skill] : list.filter((name) => name !== skill), env, [skill]);
 }
 
 // sf skills: one row per installed skill (its name, source, the date it was updated, on or - for each
-// role, its description), then the chosen skills that are not installed, with the roles that chose them.
+// role, then the coordinator's state: on, - or the override, its description), then the chosen skills
+// that are not installed, with the roles that chose them, and the coordinator's settings file (or
+// why it has no column).
 export function skillsLines(view: SkillsView): string[] {
+  const coordinator = 'error' in view.coordinator ? undefined : view.coordinator;
+  const state = (name: string): string[] => {
+    const value = coordinator?.skills[name] ?? 'on';
+    return coordinator === undefined ? [] : [value === 'on' ? 'on' : value === 'off' ? '-' : value];
+  };
   const rows = [
-    ['skill', 'source', 'updated', ...ROLES, 'description'],
-    ...view.skills.map((skill) => [skill.name, skill.source ?? '-', skill.updated?.slice(0, 10) ?? '-', ...ROLES.map((role) => (view.roles[role].includes(skill.name) ? 'on' : '-')), skill.description ?? '']),
+    ['skill', 'source', 'updated', ...ROLES, ...(coordinator === undefined ? [] : [COORDINATOR]), 'description'],
+    ...view.skills.map((skill) => [
+      skill.name, skill.source ?? '-', skill.updated?.slice(0, 10) ?? '-', ...ROLES.map((role) => (view.roles[role].includes(skill.name) ? 'on' : '-')), ...state(skill.name), skill.description ?? '',
+    ]),
   ];
   const widths = rows[0]!.map((_, column) => Math.max(...rows.map((row) => row[column]!.length)));
   return [
     ...(view.skills.length === 0 ? ['No skills installed (npx skills add installs one).'] : rows.map((row) => row.map((cell, column) => cell.padEnd(widths[column]!)).join('  ').trimEnd())),
     ...view.missing.map((name) => `missing: ${name} (chosen for ${ROLES.filter((role) => view.roles[role].includes(name)).join(', ')}, not installed)`),
+    'error' in view.coordinator
+      ? `coordinator: ${view.coordinator.error.message}`
+      : `coordinator: Claude Code's skillOverrides in ${view.coordinator.settings}; it applies to the next Claude Code session there (or after /skills).`,
   ];
 }
 

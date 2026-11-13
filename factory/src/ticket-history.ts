@@ -67,7 +67,8 @@ function recordedText(event: HistoryEvent): string {
     case 'edited':
       return 'Edited by you';
     case 'fix_added':
-      return event.fix !== undefined ? `Fix ${event.fix} added by the factory` : 'A Fix added by the factory';
+      // by you: the Fix of your Must fix, which the factory wrote.
+      return `${event.fix !== undefined ? `Fix ${event.fix}` : 'A Fix'} added by the factory${event.by === 'you' ? ' for your Must fix' : ''}`;
   }
 }
 

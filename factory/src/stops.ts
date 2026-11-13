@@ -8,7 +8,7 @@
 // `other`. Pure: the caller reads the facts (the ledger, the last review and gate, the Git host).
 import type { DashboardAction } from './dashboard-routes.js';
 import { claudeReviews, type GateRecord, type Job, type JobState, PAUSABLE_STATES, RESTARTABLE_STATES, RESUMABLE_STATES, type ReviewRecord, statesWith, TERMINAL_STATES } from './jobs.js';
-import type { LedgerEntry } from './ledger.js';
+import type { Decision, LedgerEntry } from './ledger.js';
 import { actedVerdict, type ReviewItem } from './review.js';
 import { usageLimit } from './usage-limit.js';
 
@@ -46,6 +46,9 @@ const ABORT = action('abort', 'Abort…');
 const RESTART = action('restart', 'Restart…');
 const ACCEPT = action('accept', 'Accept and prepare MR', 'clean_review');
 const RETRY = action('retry', 'Retry', 'retryable');
+// The buttons of a ledger entry to settle (sf settle <id> accept|fix): the page's SETTLE_LABELS
+// (web/board.ts) has the same words, and the explanation's answers name them.
+export const SETTLE_LABELS: Readonly<Record<Decision, string>> = { accept: 'Accept risk', fix: 'Must fix' };
 
 const row = (kind: StopKind, actions: StopAction[], extra: Partial<Omit<StopRow, 'kind' | 'actions'>> = {}): StopRow => ({
   kind, aliases: [], group: null, settle: null, actions, ...extra,

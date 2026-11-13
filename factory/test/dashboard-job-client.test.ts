@@ -660,11 +660,11 @@ test('job client (SF-106): a matching explanation is a box above the stop panel 
   assert.deepEqual(items.map((item) => item.all().filter((node) => node.textContent === 'Recommended').length), [1, 0]);
   assert.deepEqual(parts(page), [panel[0]!, box.textContent, 'Details']);
   assert.equal(blockOf(page).all().some((node) => node.textContent === panel[1]), false);
-  // Details opens the technical content below the box, as it was.
+  // Details opens the technical content below the box, as it was, and the raw message (SF-203).
   (blockOf(page).children[2] as FakeElement).click();
   await page.flush();
   assert.deepEqual(parts(page).slice(0, 3), [panel[0]!, box.textContent, 'Hide details']);
-  assert.deepEqual(texts(blockOf(page).children[3] as FakeElement), panel.slice(1));
+  assert.deepEqual(texts(blockOf(page).children[3] as FakeElement), [...panel.slice(1), 'The Implementer escalated R1.']);
 });
 
 test('job client (SF-106): an explanation that arrives with a new detail on an open page redraws the stop block: none → pending → written, without a reload', async () => {

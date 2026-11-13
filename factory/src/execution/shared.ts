@@ -95,6 +95,9 @@ export interface FixOptions {
   fromStop?: boolean;
   title?: string;
   overLimit?: boolean;
+  // The Fix of the user's Must fix on a resuming settle: written even at SF_MAX_ITERATIONS (the
+  // limit stops the factory's own rounds), counted in fixes, recorded in the history as the user's.
+  byUser?: boolean;
   // The Tests Fix, from preparing_mr: no checkFix, the transition's action is tests, written
   // even at SF_MAX_ITERATIONS, and fixes is not counted (TEST_FIX_ROUNDS bounds it).
   fromTests?: boolean;

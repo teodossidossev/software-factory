@@ -1677,7 +1677,12 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   open entries with ids; the stop's message counts the open blocker and major findings, and the
   stop panel lists them (`ledgerStopEntries`). The stop can be accepted whatever the last verdict
   (`sf accept`, SF-115, SF-131). An `sf say` turn publishes an iteration but writes no Fix section,
-  so it does not count.
+  so it does not count. The Fix of your *Must fix* on a stop that resumes (`escalated`,
+  `review_disputed`) is written even at the limit (SF-203): the limit stops the factory's own rounds,
+  not one you decided. It counts in `fixes`, its section's lead line names the settlement ("The
+  user settled the stop (escalated): R5 to fix."), the ticket's history records it `by: "you"`
+  ("Fix N added by the factory for your Must fix"), and the next reviewer fix after it stops with
+  `iteration_limit` as usual. Each such settle waives the limit for its one Fix.
 - The fix path appends `## Fix N` to the Task file of the checkout, copies it into the worktree
   and runs `/implement .software-factory/<ticket>.md Fix N` in the same session (`resume`). From
   `ready_for_human_review` it first reopens a worktree from the branch (`git worktree add <path>
@@ -3840,7 +3845,8 @@ with `write_task` instead. A save makes the last plan check stale.
 `<state dir>/tickets/<workspace>/<ticket>/history.jsonl`, append-only, one line `{ts, kind, by,
 sha256}` (the sha256 of the text written; a Fix section adds its number `fix`): `created` by `you`
 (New ticket), `written` by `context_owner` (`write_task`), `edited` by `you` (Save on the page),
-`fix_added` by `factory` (each `## Fix N`). The page's History merges them, newest first, with what
+`fix_added` by `factory` (each `## Fix N`; by `you` for the Fix of your *Must fix* on a resuming
+stop, "Fix N added by the factory for your Must fix"). The page's History merges them, newest first, with what
 the state directory already has: every Task check (`<state dir>/checks/…`) and every job of the
 ticket, current and archived (`<state dir>/jobs/<ws>/<ticket>/job.json` and
 `<ticket>.<stamp>/job.json`): "Created by you", "Plan written by the Context owner",
@@ -4871,8 +4877,11 @@ stop's own buttons and commands, and the model is given only those (`stopAnswers
 job's page shows for the stop, built from `jobActions` of `src/stops.ts` so they cannot disagree,
 each with its command (`goon` is `sf say <ws> <ticket> "Go on."`, a message `sf say <ws> <ticket>
 "<message>"`, any other `sf <action>`), Accept risk and Must fix per escalated or contested entry
-at a stop whose row has a settlement (`escalated`, `review_disputed`, `review_churn`), Send a
-message and Abort) and told never to name another.
+at a stop whose row has a settlement (`escalated`, `review_disputed`, `review_churn`), labelled with
+the entry's id ("Must fix (R5)"; the words are `SETTLE_LABELS` of `src/stops.ts`, the page's
+buttons' too), Send a message and Abort) and told never to name another. It names a settle button
+by its label and the finding's id, "the Must fix button next to R5", so the words match a button
+the page shows (SF-203).
 
 **The setting**: the optional top-level `explain` of `workspaces.json`, every field optional:
 `"explain": {"on": true, "language": "English", "model": "sonnet"}` (these are the defaults); for
@@ -4910,8 +4919,14 @@ as they are.
 
 **The job page**: the stop panel shows, above its content, a box with the headline in bold, the
 explanation, the choices (the recommended one marked "Recommended"), the recommendation and a small
-line "Explained by <model> · $<cost>"; the technical content (the sentence and what the code shows)
-is below it under Details, collapsed. While it is being written the box says "Explaining…" and the
+line "Explained by <model> · $<cost>". What you act on stays in sight under the box, never folded
+(SF-203): each ledger entry the stop lists (offered to settle in `settle_ids`, open at
+`review_churn`, or settled since the stop), in one line with
+its id, severity, file button, the problem's first line, the note and *Accept risk* / *Must fix*
+(or its decision); a `gate_rounds` or `iteration_limit` stop's findings, one line each with their
+file button; and a `simplify_offered` stop's suggestions. The composer keeps the stop's actions.
+The technical content (the sentence, the full finding texts without the settle buttons and the
+stop's raw message) is below it under Details, collapsed. While it is being written the box says "Explaining…" and the
 panel stays as it is; with no explanation (off, failed, another stop's) the page is as before. The
 job's detail (`GET api/jobs/<ws>/<ticket>`) carries the file only while it is the current stop's;
 after each write the explainer asks the dashboard to refresh the job (`RunningDashboard.refreshJob`),

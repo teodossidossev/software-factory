@@ -149,4 +149,8 @@ test('ticket history: a ticket older than the recording says so once, last: noth
     await later.append('app', ticket, { kind: 'written', by: 'context_owner', sha256: sha('e') });
     assert.deepEqual(texts(await later.timeline('app', ticket, { sha256: sha('e'), mtime: '2026-11-05T09:00:00.000Z' })), ['Plan written by the Context owner', text, OLDER_NOTE], kind);
   }
+  // SF-203: the Fix of the user's Must fix is recorded as the user's.
+  const decided = new TicketHistory(state, clock('2026-11-05T09:00:00.000Z'));
+  await decided.append('app', 'T-must', { kind: 'fix_added', by: 'you', sha256: sha('f'), fix: 4 });
+  assert.deepEqual(texts(await decided.timeline('app', 'T-must', { sha256: sha('f'), mtime: '2026-11-05T09:00:00.000Z' })), ['Fix 4 added by the factory for your Must fix', OLDER_NOTE]);
 });

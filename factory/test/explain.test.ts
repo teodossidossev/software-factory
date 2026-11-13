@@ -16,7 +16,7 @@ import { type Job, JobStore, type ReviewRecord } from '../src/jobs.js';
 import type { LedgerEntry } from '../src/ledger.js';
 import { explainPrompt } from '../src/prompts.js';
 import { saveRegistry } from '../src/registry.js';
-import { jobActions, NO_FACTS, STOP_CODES, STOPS } from '../src/stops.js';
+import { jobActions, NO_FACTS, SETTLE_LABELS, STOP_CODES, STOPS } from '../src/stops.js';
 import type { StructuredOutcome } from '../src/review.js';
 import { newEnv, runCli } from './support/harness.js';
 
@@ -163,6 +163,10 @@ test('explain: a job entering needs_human gets one file with its stop; the input
   // The user's messages of the last two iterations, the rules block cut; not the factory's prompts.
   assert.deepEqual(data.your_messages, [{ iteration: 2, at: '2026-11-06T09:30:00.000Z', text: 'Let the undescribed expressions share one row.' }]);
   assert.ok(data.answers.some((answer) => answer.command === 'sf settle app T-1 R5 accept'));
+  // SF-203: the settle answers name R5 with the page's button labels, and the prompt says how to name them.
+  assert.deepEqual(data.answers.filter((answer) => answer.command.startsWith('sf settle ')).map((answer) => answer.label), [`${SETTLE_LABELS.accept} (R5)`, `${SETTLE_LABELS.fix} (R5)`]);
+  assert.deepEqual(SETTLE_LABELS, { accept: 'Accept risk', fix: 'Must fix' });
+  assert.match(call!.prompt, /\("the Must fix button next to R5"\)/);
 
   const record = await readExplanation(jobs, 'app', 'T-1');
   assert.deepEqual({ ...record, started_at: '', ended_at: typeof record?.ended_at },
@@ -397,7 +401,7 @@ const ALWAYS = [['Send a message', 'sf say app T-1 "<message>"'], ['Abort', 'sf 
 
 test('stopAnswers: a stop the user settles in (escalated, review_disputed, review_churn) lists Accept risk and Must fix per escalated or contested entry with the sf settle commands; every stop ends with Send a message and Abort', () => {
   const ledger = [entry('R1', 'escalated'), entry('R2', 'fixed'), entry('R3', 'contested', { dispute: { reviewer: 'codex', iteration: 2, reason: 'No.' } }), entry('R4', 'open')];
-  const settles = (...ids: string[]) => ids.flatMap((id) => [['Accept risk', `sf settle app T-1 ${id} accept`], ['Must fix', `sf settle app T-1 ${id} fix`]]);
+  const settles = (...ids: string[]) => ids.flatMap((id) => [[`Accept risk (${id})`, `sf settle app T-1 ${id} accept`], [`Must fix (${id})`, `sf settle app T-1 ${id} fix`]]);
   assert.deepEqual(commands(stopped('escalated'), { ledger }), [...settles('R1', 'R3'), ...ALWAYS]);
   assert.deepEqual(commands(stopped('review_disputed'), { ledger: [ledger[2]!], review: CLEAN_REVIEW }), [
     ['Accept and prepare MR', 'sf accept app T-1'], ...settles('R3'), ...ALWAYS,

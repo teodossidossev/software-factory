@@ -84,6 +84,10 @@ const said = (job: JobRow): string => (firstLine(job.error?.message) === '' ? ''
 const resetTime = (job: JobRow): string | null => /resets\s+(.+)$/i.exec(firstLine(job.error?.message))?.[1] ?? null;
 // How the last run of a tests_failed stop ended: "exit 1" or "timed out after 30 min" of its message.
 const testsEnding = (job: JobRow): string | null => /\((exit -?\d+|timed out after [^)]+)\) on iteration/.exec(firstLine(job.error?.message))?.[1] ?? null;
+// The buttons of a ledger entry to settle: the words of src/stops.ts's SETTLE_LABELS, which the
+// explanation's answers name too ("Must fix (R5)").
+const SETTLE_LABELS = { accept: 'Accept risk', fix: 'Must fix' } as const;
+const SETTLE_CHOICE = `${SETTLE_LABELS.accept} or ${SETTLE_LABELS.fix}`;
 
 // The words of each stop for the cards and the job page (its header, its stop block and
 // its composer), keyed by the server's stop_code (the rows of factory/src/stops.ts;
@@ -100,12 +104,12 @@ const STOPS = {
   escalated: {
     reason: 'Question for you',
     button: (job: JobRow) => (stopCount(job) ? `Answer ${counted(stopCount(job) ?? 0, 'question')}` : 'Answer the questions'),
-    sentence: (job: JobRow) => `The Implementer asks you about ${stopCount(job) ? counted(stopCount(job) ?? 0, 'finding') : 'findings'}. Answer each: Accept risk or Must fix.`,
+    sentence: (job: JobRow) => `The Implementer asks you about ${stopCount(job) ? counted(stopCount(job) ?? 0, 'finding') : 'findings'}. Answer each: ${SETTLE_CHOICE}.`,
   },
   review_disputed: {
     reason: 'A reviewer disputes a contest',
     button: (job: JobRow) => (stopCount(job) ? `Settle ${counted(stopCount(job) ?? 0, 'finding')}` : 'Settle the findings'),
-    sentence: (job: JobRow) => `A reviewer reopened ${stopCount(job) ? counted(stopCount(job) ?? 0, 'finding') : 'findings'} the Implementer contested. Settle each: Accept risk or Must fix.`,
+    sentence: (job: JobRow) => `A reviewer reopened ${stopCount(job) ? counted(stopCount(job) ?? 0, 'finding') : 'findings'} the Implementer contested. Settle each: ${SETTLE_CHOICE}.`,
   },
   review_churn: {
     reason: 'Fixes keep making findings',

@@ -14,11 +14,11 @@ import { MAX_MODEL_INPUT_CHARS } from './digest.js';
 import { digestSessionOptions } from './digest-run.js';
 import { jobUserMessages } from './job-stream.js';
 import { claudeReviews, type Job, type JobStore } from './jobs.js';
-import { type LedgerEntry, unsettled } from './ledger.js';
+import { DECISIONS, type LedgerEntry, unsettled } from './ledger.js';
 import { explainPrompt } from './prompts.js';
 import { configDir as defaultConfigDir, explainSettings, type ExplainSettings, loadRegistry } from './registry.js';
 import { runStructuredSession, type StructuredOutcome } from './review.js';
-import { type ActionId, canonicalStop, type JobFacts, jobActions, settleEntries } from './stops.js';
+import { type ActionId, canonicalStop, type JobFacts, jobActions, SETTLE_LABELS, settleEntries } from './stops.js';
 import { parseFrontMatter } from './task-file.js';
 
 export const EXPLANATION_FILE = 'explanation.json';
@@ -151,15 +151,15 @@ export function actionCommand(job: Pick<Job, 'workspace' | 'ticket'>, action: Ac
 
 // The stop's real answers, each a button label and its sf command: the actions the job page shows
 // for the stop (jobActions, without its Send and Abort), Accept risk and Must fix for each entry
-// to settle (settleEntries), and always Send a message and Abort.
+// to settle (settleEntries), labelled with the entry's id as the page shows them side by side
+// ("Must fix (R5)"), and always Send a message and Abort.
 export function stopAnswers(job: Job, facts: StopFacts, now = new Date()): StopAnswer[] {
   const answer = (label: string, command: string): StopAnswer => ({ label, command });
   const actions = jobActions(job, { ...facts, gate: undefined, mrHost: null }, now).actions
     .filter((shown) => shown.action !== 'abort' && !(shown.action === 'say' && shown.label === 'Send'))
     .map((shown) => answer(shown.label.replace(/…$/u, ''), actionCommand(job, shown.action)));
-  const settle = settleEntries(job, facts.ledger, now).flatMap((entry) => [
-    answer('Accept risk', `${actionCommand(job, 'settle')} ${entry.id} accept`), answer('Must fix', `${actionCommand(job, 'settle')} ${entry.id} fix`),
-  ]);
+  const settle = settleEntries(job, facts.ledger, now).flatMap((entry) => DECISIONS.map((decision) => (
+    answer(`${SETTLE_LABELS[decision]} (${entry.id})`, `${actionCommand(job, 'settle')} ${entry.id} ${decision}`))));
   return [...actions, ...settle, answer('Send a message', actionCommand(job, 'say')), answer('Abort', actionCommand(job, 'abort'))];
 }
 

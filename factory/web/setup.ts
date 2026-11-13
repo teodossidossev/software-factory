@@ -178,18 +178,19 @@ function renderWorkspaces(): void {
     }
   }
   renderDigestSettings();
-  // The workspace choice of the form keeps its value while the options are replaced; the
-  // board's filter is the default.
+  // The workspace choice of the form keeps its value while the options are replaced; else the one
+  // the last ticket was created in (in this browser), else the board's filter, else the first.
   const select = byIdAs('ticket-workspace', 'select');
-  const chosen = select.value !== '' ? select.value : state.filter;
+  const chosen = [select.value, store.get(TICKET_WORKSPACE_KEY), state.filter].find((name) => rows.some((row) => row.name === name)) ?? rows[0]?.name ?? '';
   select.replaceChildren(...rows.map((row) => {
     const option = el('option', '', row.name);
     option.value = row.name;
     return option;
   }));
-  select.value = rows.some((row) => row.name === chosen) ? chosen : (rows[0]?.name ?? '');
+  select.value = chosen;
   select.disabled = rows.length === 0;
   byIdAs('ticket-create', 'button').disabled = rows.length === 0 || state.setupPending.has('ticket') || state.setupPending.has('ticket-images');
+  byIdAs('ticket-plan', 'button').disabled = byIdAs('ticket-create', 'button').disabled;
 }
 
 function renderArchived(): void {
@@ -493,7 +494,8 @@ async function removeWorkspace(name: string): Promise<void> {
     ({ level: 'ok', text: `Removed ${fieldOf(data, 'removed')} from the registry; the checkout and its files are untouched.` }));
 }
 
-async function submitTicket(): Promise<void> {
+// plan: Create & plan, which then opens the planning conversation (main.ts) and the ticket's page.
+async function submitTicket(plan = false): Promise<void> {
   const workspace = byIdAs('ticket-workspace', 'select').value;
   const ticket = byIdAs('ticket-key', 'input').value.trim();
   const title = byIdAs('ticket-title', 'input').value.trim();
@@ -502,7 +504,14 @@ async function submitTicket(): Promise<void> {
     setSetupStatus('ticket-status', { level: 'error', text: 'The workspace, the ticket key, the title and the request are all needed.' });
     return;
   }
-  if (state.setupPending.has('ticket-images') || (await newImagesSettled())) {
+  if (state.setupPending.has('ticket') || state.setupPending.has('ticket-images')) {
+    return;
+  }
+  const submission = newTicketSubmission();
+  // Before any wait: a browser blocks a tab opened later. Every failure closes it.
+  const tab = plan ? openPlanningTab() : undefined;
+  if (await newImagesSettled()) {
+    tab?.close();
     return;
   }
   const describe = (data: unknown): Outcome => ({ level: 'ok', text: `Ticket created: ${fieldOf(data, 'path')} in ${fieldOf(data, 'workspace')} (base ${fieldOf(data, 'base')}), an empty skeleton in the Queue. Next: a click on its card opens the conversation; your words are its first message.` });
@@ -513,43 +522,46 @@ async function submitTicket(): Promise<void> {
   const result = await setupRequest('ticket', 'api/tickets', { workspace, ticket, title, request, owner }, 'ticket-status', describe);
   if (result === undefined) {
     releaseNewImages();
+    tab?.close();
+    return;
   }
   // Created: the dialog closes and the new ticket's card is highlighted (a click on it opens its
   // page); a failure keeps the dialog open with the error and the input. Then its images go up; one
-  // that fails leaves the ticket created, and the form stays open saying which and why.
-  if (result !== undefined) {
-    byIdAs('ticket-key', 'input').value = '';
-    byIdAs('ticket-title', 'input').value = '';
-    byIdAs('ticket-request', 'textarea').value = '';
-    const key = `${fieldOf(result, 'workspace') ?? workspace}/${fieldOf(result, 'ticket') ?? ticket}`;
-    state.highlight = key;
-    state.highlightShown = false;
-    let uploaded: { count: number; failed: string[] } = { count: 0, failed: [] };
-    if (sending.length > 0) {
-      state.setupPending.add('ticket-images');
-      setSetupStatus('ticket-status', { level: 'pending', text: `Ticket created; attaching ${counted(sending.length, 'image')}…` });
-      renderSetup();
-      const done = await uploadNewImages(key, sending);
-      uploaded = done;
-      state.setupPending.delete('ticket-images');
-      // Only the images sent leave the form; one pasted meanwhile stays for the next ticket.
-      for (const image of done.sent) {
-        URL.revokeObjectURL(image.url);
-      }
-      state.newImages = state.newImages.filter((image) => !done.sent.includes(image));
-      renderSetup();
+  // that fails leaves the ticket created, and the form stays open saying which and why. Its
+  // workspace is the form's next default.
+  store.set(TICKET_WORKSPACE_KEY, workspace);
+  byIdAs('ticket-key', 'input').value = '';
+  byIdAs('ticket-title', 'input').value = '';
+  byIdAs('ticket-request', 'textarea').value = '';
+  const key = `${fieldOf(result, 'workspace') ?? workspace}/${fieldOf(result, 'ticket') ?? ticket}`;
+  state.highlight = key;
+  state.highlightShown = false;
+  let uploaded: { count: number; failed: string[] } = { count: 0, failed: [] };
+  if (sending.length > 0) {
+    state.setupPending.add('ticket-images');
+    setSetupStatus('ticket-status', { level: 'pending', text: `Ticket created; attaching ${counted(sending.length, 'image')}…` });
+    renderSetup();
+    const done = await uploadNewImages(key, sending);
+    uploaded = done;
+    state.setupPending.delete('ticket-images');
+    // Only the images sent leave the form; one pasted meanwhile stays for the next ticket.
+    for (const image of done.sent) {
+      URL.revokeObjectURL(image.url);
     }
-    releaseNewImages();
-    if (uploaded.failed.length > 0) {
-      setSetupStatus('ticket-status', { level: 'error', text: `Ticket created: ${fieldOf(result, 'path')} in ${fieldOf(result, 'workspace') ?? workspace}. Not attached: ${uploaded.failed.join('; ')}. Add ${uploaded.failed.length === 1 ? 'it' : 'them'} on the ticket's page: paste or drop on its Images card.` });
-      renderBoard();
-      return;
-    }
-    setSetupStatus('ticket-status', null);
-    closeDrawer();
-    const outcome = describe(result);
-    toast(uploaded.count > 0 ? { ...outcome, text: `${outcome.text} ${counted(uploaded.count, 'image')} attached.` } : outcome);
+    state.newImages = state.newImages.filter((image) => !done.sent.includes(image));
+    renderSetup();
   }
+  releaseNewImages();
+  // A newer submission may have the form by now (Create & plan's read is a wait): see finishTicketForm.
+  const note = tab === undefined ? '' : await pointPlanningTab(tab, key);
+  if (uploaded.failed.length > 0) {
+    setSetupStatus(submission === state.ticketSubmits ? 'ticket-status' : 'toast', { level: 'error', text: `Ticket created: ${fieldOf(result, 'path')} in ${fieldOf(result, 'workspace') ?? workspace}. Not attached: ${uploaded.failed.join('; ')}. Add ${uploaded.failed.length === 1 ? 'it' : 'them'} on the ticket's page: paste or drop on its Images card.${note}` });
+    renderBoard();
+    return;
+  }
+  const outcome = describe(result);
+  toast({ ...outcome, text: `${outcome.text}${uploaded.count > 0 ? ` ${counted(uploaded.count, 'image')} attached.` : ''}${note}` });
+  finishTicketForm(submission, plan ? key : null);
 }
 
 // Archive, restore or delete one ticket; one request per ticket at a time, the outcome in the
@@ -663,21 +675,6 @@ async function startTicket(row: TicketKey): Promise<void> {
   renderBoard();
   renderTicket();
   goToStarted();
-}
-
-// The page of a ticket started from it moves to the job's Stream once the new job is on the board
-// (the stream's jobs event may come before or after Start's answer); an earlier failed or aborted
-// job of the ticket is not it.
-function goToStarted(): void {
-  const key = state.goAfterStart;
-  const job = key === null ? null : jobByKey(key);
-  if (key === null || job === null || TERMINAL_STATES.includes(job.state)) {
-    return;
-  }
-  state.goAfterStart = null;
-  if (ui.screen === 'ticket' && ui.ticket === key) {
-    go(key, 'stream');
-  }
 }
 
 // The start may have created the job: Start stays off for the ticket until api/jobs is read

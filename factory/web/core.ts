@@ -180,6 +180,8 @@ interface PageState {
   toastHover: boolean;
   highlight: string | null;
   highlightShown: boolean;
+  openWhenListed: string | null;
+  ticketSubmits: number;
   wantFocus: 'composer' | 'stop' | null;
   jobLandsAfter: unknown[];
   openMenu: string | null;
@@ -266,6 +268,10 @@ const state: PageState = {
   toastHover: false,
   highlight: null,
   highlightShown: false,
+  // The ticket Create & plan made, whose page opens once the stream lists it; and the number of the
+  // latest New ticket submission, the only one whose Create & plan may still open a page.
+  openWhenListed: null,
+  ticketSubmits: 0,
   // Where the job page's focus goes once its detail is shown (a card's button): 'composer', 'stop' or null.
   wantFocus: null,
   // The tickets the live jobs' Task files land after (the tickets payload's
@@ -295,6 +301,8 @@ const state: PageState = {
 // The only URL the page links to: the ChatGPT composer prefilled by the server (the prefix of
 // src/conversation.ts).
 const CHATGPT_PREFILL_URL = 'https://chatgpt.com/?q=';
+// The localStorage key of the workspace the last ticket was created in, the New ticket form's default.
+const TICKET_WORKSPACE_KEY = 'sf-ticket-workspace';
 
 function el<K extends keyof HTMLElementTagNameMap>(tag: K, className?: string, text?: string): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag);

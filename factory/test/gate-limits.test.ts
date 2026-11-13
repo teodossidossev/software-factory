@@ -6,8 +6,11 @@ import assert from 'node:assert/strict';
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { GATE_OUTPUT_FILE, GATE_SANDBOX_UNAVAILABLE, gateArgs, gateEnvironment, type GateOptions, gatePrompt, runGate } from '../src/gate.js';
 import { JobStore } from '../src/jobs.js';
+import { PACKAGE_ROOT } from '../src/package-root.js';
+import { handbookSection } from '../src/prompts.js';
 import { reviewPrompt } from '../src/review.js';
 import { loadHandbook } from '../src/server.js';
 import { fetchRaw } from './support/dashboard-client.js';
@@ -388,6 +391,20 @@ test('the gate prompt carries <user_decisions> as the review does', async () => 
   }
   // The same body after each reviewer's own preamble.
   assert.equal(gate.slice(gate.indexOf('\n\n- Verify the claims')), review.slice(review.indexOf('\n\n- Verify the claims')));
+});
+
+// SF-213: both reviewers are told to list every blocker and major item, not the first one found.
+// The real factory/HANDBOOK.md, not SF_HANDBOOK or a fixture: dropping the rule, or moving it out
+// of `## Review rules`, fails here.
+test('the review prompt and the gate prompt ask for a complete verdict, from the real Handbook', async () => {
+  const handbook = (await loadHandbook(fileURLToPath(new URL('HANDBOOK.md', PACKAGE_ROOT)))).text;
+  const complete = 'A verdict is complete: it lists every blocker and major item the Patch has';
+  const rules = handbookSection(handbook, '## Review rules');
+  assert.match(rules, /\n- A `fix` lists concrete items[^\n]*\n(?: {2}[^\n]*\n)*- A verdict is complete: it lists every blocker and major item the Patch has, not the first one\n/);
+  const input = { ticket: 'G-1', iteration: 1, task: 't', report: 'r', patch: Buffer.from('p'), patchTruncated: false, files: [], handbook };
+  for (const prompt of [reviewPrompt(input), gatePrompt({ ...input, baseCommit: 'abc' })]) {
+    assert.ok(prompt.includes(rules) && prompt.includes(complete), prompt);
+  }
 });
 
 // SF-125: runGate on its own, with a fake bwrap and a fake codex of the test's own (they log to

@@ -198,7 +198,7 @@ test('sf status and the notification of a handed-over job (SF-073): in your chec
 
   assert.ok(NOTIFIED_STATES.includes('handed_over'));
   const note = jobNotification(handed, ['feat(T-1): Demo', '2 files']);
-  assert.deepEqual([note.title, note.body, note.priority], ['T-1: in your checkout', 'in your checkout on T-1-demo\nfeat(T-1): Demo\n2 files', 'default']);
+  assert.deepEqual([note.title, note.body, note.priority], ['T-1: in your checkout', 'in your checkout on T-1-demo\nfeat(T-1): Demo\n2 files', 'high']);
   const skippedNote = jobNotification(skipped, ['feat(T-1): Demo', '2 files']);
   assert.equal(skippedNote.body, 'branch: T-1-demo\nT-1: ready, but your checkout has changes; hand it over when you are ready\nfeat(T-1): Demo');
   // A change to files the user's IDE or tools run: the same lines, with its message.
@@ -229,8 +229,8 @@ test('sf status and the notifications of a job parked on a usage limit (SF-072):
 
   assert.ok(NOTIFIED_STATES.includes('waiting_limit'));
   const note = jobNotification(parked);
-  assert.deepEqual([note.title, note.body, note.priority], ['T-1: waiting for limits', 'Usage limit (Claude): parked until 03:00\nbranch: T-1-demo', 'default']);
-  assert.deepEqual(limitResetNotification(2, 0), { title: 'Usage limit reset', body: 'Usage limit reset: 2 jobs resumed', priority: 'default', tags: 'hourglass' });
+  assert.deepEqual([note.title, note.body, note.priority], ['T-1: waiting for limits', 'Usage limit (Claude): parked until 03:00\nbranch: T-1-demo', 'low']);
+  assert.deepEqual(limitResetNotification(2, 0), { title: 'Usage limit reset', body: 'Usage limit reset: 2 jobs resumed', priority: 'low', tags: 'hourglass' });
   assert.equal(limitResetNotification(0, 1).body, 'Usage limit reset: 1 job waits for you');
 
   const env = await newEnv('status-parked');

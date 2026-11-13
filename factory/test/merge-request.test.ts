@@ -379,7 +379,7 @@ test('the notification of a pushed job names its merge request once opened or me
     updated_at: '2026-11-04T10:00:00.000Z', mr: { host: 'github', number: 7, url: 'https://github.com/acme/app/pull/7', state: 'open' },
   };
   assert.deepEqual(jobNotification(job, [TITLE, 'Merge request #7: https://github.com/acme/app/pull/7']), {
-    title: 'T-1: merge request #7 opened', body: `branch: T-1-x\n${TITLE}\nMerge request #7: https://github.com/acme/app/pull/7`, priority: 'default', tags: 'white_check_mark',
+    title: 'T-1: merge request #7 opened', body: `branch: T-1-x\n${TITLE}\nMerge request #7: https://github.com/acme/app/pull/7`, priority: 'low', tags: 'white_check_mark',
   });
   assert.equal(jobNotification({ ...job, mr: { ...job.mr!, state: 'merged' } }).title, 'T-1: merge request #7 merged');
   assert.equal(jobNotification({ ...job, mr: null }).title, 'T-1: pushed');

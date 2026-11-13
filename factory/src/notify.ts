@@ -1,5 +1,7 @@
 // Notifications to the user: a desktop notification (notify-send) and ntfy (a push service for
-// the phone), for the states that need the user. Best-effort: a failure is reported, never thrown.
+// the phone), for the states that need the user. The ntfy priority says who must act; a workspace's
+// notify setting (full, brief, off) says how much its notifications tell. Best-effort: a failure is
+// reported, never thrown.
 import { spawn } from 'node:child_process';
 import { constants } from 'node:fs';
 import { access } from 'node:fs/promises';
@@ -9,7 +11,7 @@ import { withoutHostTokens } from './forge.js';
 import type { Job, JobState, JobStore } from './jobs.js';
 import { now, statesWith } from './jobs.js';
 import { localTime } from './local-time.js';
-import { HANDOFF_OFF_CODE } from './registry.js';
+import { HANDOFF_OFF_CODE, type NotifyMode } from './registry.js';
 import { type CheckRecord, recordVerdict, severityCounts } from './task-check.js';
 import { turnLimitLine } from './turn-limit.js';
 
@@ -31,8 +33,42 @@ export interface Notification {
   title: string;
   // At most three lines.
   body: string;
-  priority: 'high' | 'default';
+  // The body ntfy sends instead of body (a brief workspace's); the desktop always shows body.
+  ntfyBody?: string;
+  // ntfy's Priority: high when the user must act, low when nothing is to do.
+  priority: 'high' | 'default' | 'low';
   tags: string;
+}
+
+// The states whose notification is high: the job waits for the user (the waiting trait) or failed.
+const ACT_STATES: readonly JobState[] = [...statesWith('waiting'), 'failed'];
+
+// The priority of a job's notification: high when the user must act, low otherwise (pushed,
+// paused, waiting_limit, awaiting_review).
+export function jobPriority(state: JobState): 'high' | 'low' {
+  return ACT_STATES.includes(state) ? 'high' : 'low';
+}
+
+// The workspace's notify setting (src/registry.ts), asked for each notification.
+export type NotifyModeOf = (workspace: string) => Promise<NotifyMode>;
+
+// A factory error code (snake_case); any other text is not a code and is not sent in a brief body.
+const ERROR_CODE = /^[a-z][a-z0-9_]{0,63}$/;
+
+// The one line ntfy sends for a job of a brief workspace: the workspace's name and, when the job
+// has an error, its code; never the branch, a path, the error's message, an MR title or a link.
+export function briefJobBody(job: Job): string {
+  const code = job.error?.code;
+  return code === undefined ? job.workspace : `${job.workspace} · ${ERROR_CODE.test(code) ? code : 'error'}`;
+}
+
+// The notification as the workspace's setting has it: undefined when off (no channel sends it);
+// brief, ntfy sends the brief body; full, as it is.
+export function withNotifyMode(notification: Notification, mode: NotifyMode, brief: string): Notification | undefined {
+  if (mode === 'off') {
+    return undefined;
+  }
+  return mode === 'brief' ? { ...notification, ntfyBody: brief } : notification;
 }
 
 export interface ChannelResult {
@@ -66,7 +102,7 @@ export function jobNotification(job: Job, extra: string[] = []): Notification {
     return {
       title: `${job.ticket}: ${job.state}`,
       body: [`Report and Patch of iteration ${job.iteration} are ready for the reviewers`, ...lines].slice(0, 3).join('\n'),
-      priority: 'default',
+      priority: jobPriority(job.state),
       tags: 'eyes',
     };
   }
@@ -76,7 +112,7 @@ export function jobNotification(job: Job, extra: string[] = []): Notification {
     return {
       title: `${job.ticket}: paused`,
       body: [`branch: ${job.branch}`, step !== undefined && step !== null ? `Paused during the ${step}; Resume goes on from there.` : 'Paused; Resume goes on from there.', ...lines].slice(0, 3).join('\n'),
-      priority: 'default',
+      priority: jobPriority(job.state),
       tags: 'pause_button',
     };
   }
@@ -87,7 +123,7 @@ export function jobNotification(job: Job, extra: string[] = []): Notification {
     return {
       title: `${job.ticket}: waiting for limits`,
       body: [`Usage limit (${limit !== undefined ? PROVIDER_NAMES[limit.provider] : 'unknown'}): parked until ${until ?? 'the reset'}`, `branch: ${job.branch}`, ...lines].slice(0, 3).join('\n'),
-      priority: 'default',
+      priority: jobPriority(job.state),
       tags: 'hourglass',
     };
   }
@@ -96,7 +132,7 @@ export function jobNotification(job: Job, extra: string[] = []): Notification {
     return {
       title: `${job.ticket}: in your checkout`,
       body: [`in your checkout on ${job.branch}`, ...(job.error !== undefined ? [`${job.error.code}: ${job.error.message}`] : []), ...lines].slice(0, 3).join('\n'),
-      priority: 'default',
+      priority: jobPriority(job.state),
       tags: 'eyes',
     };
   }
@@ -110,7 +146,7 @@ export function jobNotification(job: Job, extra: string[] = []): Notification {
   return {
     title: mr !== undefined ? `${job.ticket}: merge request #${mr.number} ${mr.state === 'open' ? 'opened' : mr.state}` : `${job.ticket}: ${job.state}`,
     body: body.join('\n'),
-    priority: job.state === 'needs_human' || job.state === 'failed' ? 'high' : 'default',
+    priority: jobPriority(job.state),
     tags: job.state === 'pushed' ? 'white_check_mark' : job.state === 'ready_for_human_review' ? 'eyes' : 'warning',
   };
 }
@@ -120,7 +156,7 @@ export function jobNotification(job: Job, extra: string[] = []): Notification {
 export function limitResetNotification(resumed: number, waiting: number): Notification {
   const jobs = (count: number): string => `${count} job${count === 1 ? '' : 's'}`;
   const parts = [...(resumed > 0 ? [`${jobs(resumed)} resumed`] : []), ...(waiting > 0 ? [`${jobs(waiting)} ${waiting === 1 ? 'waits' : 'wait'} for you`] : [])];
-  return { title: 'Usage limit reset', body: `Usage limit reset: ${parts.join(', ')}`, priority: 'default', tags: 'hourglass' };
+  return { title: 'Usage limit reset', body: `Usage limit reset: ${parts.join(', ')}`, priority: 'low', tags: 'hourglass' };
 }
 
 // The notification for an automatic Task check that ended not ready ("N blocker, M major ·
@@ -138,14 +174,26 @@ export function taskCheckNotification(record: CheckRecord): Notification | undef
   return { title: `${record.ticket}: plan not ready`, body: `${counts.blocker} blocker, ${counts.major} major · ${record.workspace}`, priority: 'default', tags: 'warning' };
 }
 
-// Sends the notification of an automatic Task check that ended not ready or failed; each failed
-// channel is logged, nothing is stored. Never rejects.
-export async function notifyTaskCheck(record: CheckRecord, config: NotifyConfig, send: typeof sendNotification = sendNotification): Promise<void> {
-  const notification = taskCheckNotification(record);
-  if (notification === undefined) {
+// The one line ntfy sends for a Task check of a brief workspace: a "plan not ready" keeps its body
+// (the counts and the workspace), a "plan check failed" names the workspace only.
+function briefTaskCheckBody(record: CheckRecord, full: Notification): string {
+  return recordVerdict(record) === 'failed' ? record.workspace : full.body;
+}
+
+// Sends the notification of an automatic Task check that ended not ready or failed, as the
+// workspace's notify setting has it (brief: "plan not ready" keeps its body, which holds no text
+// of the repository; "plan check failed" names the workspace only); each failed channel is
+// logged, nothing is stored. Never rejects.
+export async function notifyTaskCheck(record: CheckRecord, config: NotifyConfig, notifyModeOf: NotifyModeOf, send: typeof sendNotification = sendNotification): Promise<void> {
+  const full = taskCheckNotification(record);
+  if (full === undefined) {
     return;
   }
   try {
+    const notification = withNotifyMode(full, await notifyModeOf(record.workspace), briefTaskCheckBody(record, full));
+    if (notification === undefined) {
+      return;
+    }
     for (const result of await send(notification, config)) {
       if (result.status === 'failed') {
         console.error(`${record.workspace}/${record.ticket}: plan-check notification via ${result.channel} failed: ${result.message}`);
@@ -212,7 +260,7 @@ async function ntfy(notification: Notification, config: NotifyConfig): Promise<C
   try {
     const response = await fetch(config.ntfyUrl, {
       method: 'POST',
-      body: notification.body,
+      body: notification.ntfyBody ?? notification.body,
       headers: {
         Title: notification.title,
         Priority: notification.priority,
@@ -237,16 +285,23 @@ export async function sendNotification(notification: Notification, config: Notif
 
 // The listener behind Execution's onStateChange: notifies for the user's states and records each
 // failed channel in the job's events.jsonl. Iterations (awaiting_review) are silent unless
-// SF_NOTIFY_ITERATIONS=on. The promise settles when every channel is done (a job's runner waits for
-// it before it exits); it never rejects.
-export function stateNotifier(config: NotifyConfig, jobs: JobStore): (job: Job, from: JobState | null, lines?: string[]) => Promise<void> {
+// SF_NOTIFY_ITERATIONS=on. The workspace's notify setting is asked for each notification: off sends
+// nothing, brief sends ntfy one line (briefJobBody). The promise settles when every channel is done
+// (a job's runner waits for it before it exits); it never rejects.
+export function stateNotifier(
+  config: NotifyConfig, jobs: Pick<JobStore, 'appendEvent'>, notifyModeOf: NotifyModeOf, send: typeof sendNotification = sendNotification,
+): (job: Job, from: JobState | null, lines?: string[]) => Promise<void> {
   const states = notifiedStates(config);
   return (job, _from, lines) => {
     if (!states.includes(job.state)) {
       return Promise.resolve();
     }
     return (async () => {
-      for (const result of await sendNotification(jobNotification(job, lines), config)) {
+      const notification = withNotifyMode(jobNotification(job, lines), await notifyModeOf(job.workspace), briefJobBody(job));
+      if (notification === undefined) {
+        return;
+      }
+      for (const result of await send(notification, config)) {
         if (result.status === 'failed') {
           await jobs.appendEvent(job.workspace, job.ticket, {
             ts: now(), iteration: job.iteration, type: 'notify_failed', channel: result.channel, message: result.message,

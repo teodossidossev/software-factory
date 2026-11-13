@@ -24,7 +24,8 @@ gate (section Jobs); their fix verdicts become the next Fix section without anyo
 ```sh
 npm install && npm run build      # once, inside factory/
 bin/sf workspace add <name> --read <path> [--handoff checkout|off] [--color <name>]   # the local checkout; every job works in a worktree of it (--work is retired); --color: its colour on the board; again with the same path: changes --handoff/--color
-bin/sf workspace list
+bin/sf workspace list             # also the notify setting when it is not full
+bin/sf workspace notify <name> full|brief|off   # how much the workspace's notifications tell (section Notifications); applies to the next one
 bin/sf workspace remove <name>
 bin/sf digest [--now]             # the morning digest (section Morning digest): the latest digest's period and counts; --now makes one at once and prints its record's path and cost; needs sf serve
 bin/sf explain <ws> <ticket>      # the plain explanation of the job's current stop (section Stop explanations): headline, explanation, choices, recommendation; or "No explanation for the current stop."; no sf serve, no model call
@@ -3485,11 +3486,14 @@ left to come up`); the next attempt, after the 90 s, restarts it.
 ## Notifications
 
 On `ready_for_human_review`, `handed_over`, `needs_human`, `paused`, `waiting_limit` (SF-072), `pushed` and `failed` (iterations are silent unless
-`SF_NOTIFY_ITERATIONS=on`, which adds `awaiting_review` with `Priority: default`, `Tags: eyes` and
+`SF_NOTIFY_ITERATIONS=on`, which adds `awaiting_review` with `Tags: eyes` and
 the body "Report and Patch of iteration N are ready for the reviewers") the
 factory sends a desktop notification (`notify-send --app-name="Software Factory" "<ticket>:
 <state>" <body>`, 5 s, when `notify-send` is on `PATH`) and, with `SF_NTFY_URL` set, one ntfy POST
-(10 s; headers `Title`, `Priority` high for `needs_human` and `failed`, `Tags`). The body has at most
+(10 s; headers `Title`, `Priority`, `Tags`). The `Priority` says who must act (SF-215): `high` when
+the job waits for the user (the `waiting` trait: `needs_human`, `ready_for_human_review`,
+`handed_over`) or `failed`; `low` for `pushed`, `paused`, `waiting_limit`, `awaiting_review` and the
+usage limit reset, where nothing is to do. The body has at most
 three lines: the branch, the error, or the MR title and link when pushed, and the marked paths of
 the iteration on one line. Once the factory opens
 or merges a merge request (SF-048), the title is `<ticket>: merge request #<n> opened` (or `merged`)
@@ -3504,6 +3508,17 @@ the same channels with the same settings: "<ticket>: plan not ready" with "N blo
 default`, `Tags: warning`. A failed channel is logged on `sf serve`'s stderr; nothing is stored. A
 ready, cancelled or manual check is not notified, nor a failed one that a retry of the queue's
 re-checks follows, nor a re-check after a moved base that ends `not_ready` again.
+
+A workspace's `notify` setting (SF-215; `sf workspace notify <name> full|brief|off`, the field
+`notify` of its registry entry) decides how much the notifications of its jobs and Task checks tell.
+`full` (the default) is all of the above. `brief` keeps the ntfy title, priority and tags, and the
+body is one line: the workspace's name, and the error's code when the job has one (a "plan not
+ready" keeps its counts and the workspace; a "plan check failed" names the workspace only). No
+branch, path, error message, MR title or link goes to ntfy. The desktop notification stays full, since
+it does not leave the machine. `off` sends nothing on either channel. The setting is read from the
+registry for each notification, so a change applies to the next one. A registry that cannot be read
+counts as `full`. Health, usage limit reset and digest notifications are not tied to a workspace and
+ignore it.
 
 ntfy is a push notification service: install the ntfy app on the phone and add a topic
 name of your choice, then set `SF_NTFY_URL` to that topic's URL (for example
@@ -5203,7 +5218,11 @@ it; `sf workspace list` shows it. The optional `guard` (SF-122: `true` or `false
 `false`, any other value makes the file invalid) checks the workspace's pushes and MR texts for the
 names, Git hosts, ticket keys and email domains of your other workspaces and your private list
 (section Guard); turn it on for `software-factory` by editing the file (`sf workspace add` does not
-set it; the Edit keeps it). The optional `test_command` (SF-128: 1 to 2000 characters without NUL;
+set it; the Edit keeps it). The optional `notify` (SF-215: `"full"`, `"brief"` or `"off"`, absent is
+`full`, any other value makes the file invalid) decides how much the notifications of the
+workspace's jobs and Task checks tell (section Notifications); `sf workspace notify <name>
+full|brief|off` sets it (`full` removes the key), `sf workspace list` shows it when it is not
+`full`, the dashboard's Edit keeps it. The optional `test_command` (SF-128: 1 to 2000 characters without NUL;
 anything else makes the file invalid) is the command the factory runs in a sandbox on the reviewed
 worktree before the job is ready (section MR preparation, the test step); without it nothing runs.
 Edit the file to set it (`sf workspace add` and the dashboard's form do not show it; the Edit keeps

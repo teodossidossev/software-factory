@@ -1,7 +1,7 @@
 # Configuration
 
 This page lists every setting you can change: the environment file, the workspace registry, the
-rules files, the queue and the Task file's front matter, each with its meaning, default, allowed
+norms, the rules files, the queue and the Task file's front matter, each with its meaning, default, allowed
 values and an example, as the code of this version reads them.
 
 ## Where the settings live
@@ -11,6 +11,7 @@ values and an example, as the code of this version reads them.
 | Environment settings (`SF_*`, tokens) | `~/.config/software-factory/auth.env`, or the environment | by every `sf` command at its start |
 | The MCP token | `~/.local/state/software-factory/mcp-token` | by `sf serve` on every MCP request; printed with `sf mcp-url` |
 | Workspaces | `~/.config/software-factory/workspaces.json` | at every use (an edit applies at once) |
+| The norms (slice size, lead-time targets, decision documents) | `~/.config/software-factory/norms.json` | at every use; shown with `sf norms` ([Norms](#norms-normsjson)) |
 | Your own coding rules | `~/.config/software-factory/rules/<workspace>.md`, `rules/global.md` | at each job's Start |
 | The guard's private list | `~/.config/software-factory/guard-terms.txt` | at every check of the guard ([The guard](#the-guard)) |
 | The queue (order, limit, hold, limit rule) | `~/.local/state/software-factory/queue.json` | by `sf serve`; changed with `sf queue` or the board |
@@ -350,6 +351,43 @@ changes). On the dashboard, the Workspaces drawer adds a workspace (an absolute 
 digest switches; the name stays, and the path cannot change while the workspace has a live job), and
 removes one that has no live job. Its **Morning digest** section sets `at`, `weekdays_only` and
 `language`. The CLI has no flags for the digest's fields: use the drawer or edit the file.
+
+## Norms (norms.json)
+
+`<config dir>/norms.json` holds the numbers and lists you tune by hand, for every workspace at once
+and per workspace. You edit it; no command writes it. Every key is optional:
+
+| Key | Default | Allowed | Meaning |
+| --- | --- | --- | --- |
+| `slice.change_max_lines` | 400 | an integer from 1 to 100000 | the most added plus removed lines, tests included, of a slice that changes behaviour |
+| `slice.change_max_files` | 10 | an integer from 1 to 100000 | the most changed files of such a slice |
+| `slice.min_lines` | 50 | an integer from 1 to 100000 | the size under which such a slice should join its neighbour |
+| `lead_time_hours.small` / `.medium` / `.complex` | 2 / 4 / 8 | a number above 0, at most 1000 | the target from a job's start to its merge request, by the Task's size |
+| `decision_docs` | `GLOSSARY.md`, `docs/adr/**/*.md`, `docs/decisions/**/*.md`, `docs/terminology.md`, `docs/architecture.md` | at most 50 globs relative to the checkout (no leading `/` or `./`, no `..`, no backslash, no braces, parentheses or square brackets: one entry per alternative; `*`, `**` and `?` are fine); `[]` means none | the documents that hold the product's decisions |
+
+```json
+{
+  "version": 1,
+  "slice": { "change_max_lines": 500 },
+  "workspaces": { "web": { "slice": { "change_max_lines": 300 }, "decision_docs": ["docs/adr/*.md"] } }
+}
+```
+
+A value comes from the workspace's entry under `workspaces`, else the top level, else the default;
+`slice` and `lead_time_hours` merge key by key, `decision_docs` replaces the whole list.
+`sf norms [workspace]` (needs `sf serve`) prints each value in force with its source (`default`,
+`file` or `workspace`) and the problems of the whole file, every workspace's entry included.
+Nothing uses the values yet.
+
+How it differs from the environment file:
+
+- **Read at each use**: an edit applies at the next use, without restarting `sf serve`.
+- **Per workspace**: a workspace's entry overrides the top level key by key.
+- **A bad value falls back** to the next source (the top level, then the default) and is listed as
+  a problem by `sf norms`; a file that is missing or not JSON is the defaults. Nothing stops, where a
+  bad environment setting stops `sf serve`.
+
+The reference: [Norms](../../factory/README.md#norms).
 
 ## The guard
 

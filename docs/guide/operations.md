@@ -265,7 +265,7 @@ something logs `sandbox reaper: ended …`, and a failure logs `sandbox reaper: 
 
 | What | Why |
 | --- | --- |
-| `~/.config/software-factory/` | `workspaces.json`, `auth.env` (holds your tokens: keep the backup private), `rules/`, `tunnel-runtime.key` |
+| `~/.config/software-factory/` | `workspaces.json`, `norms.json`, `auth.env` (holds your tokens: keep the backup private), `rules/`, `tunnel-runtime.key` |
 | `.software-factory/` in each workspace's checkout | the Task files, their images, the archived tickets: they are **not in Git** |
 | `~/.local/state/software-factory/` | the jobs' history, `queue.json`, the Task checks, the tickets' history, the morning digests, the dashboard token; worth keeping, not needed to start again (leave out `worktrees/`, `digest/mirrors/` and `sf.sock`) |
 

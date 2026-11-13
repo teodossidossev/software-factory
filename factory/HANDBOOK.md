@@ -27,8 +27,9 @@ queue (`queue_list`) and add a written ticket to it (`queue_add`) when the user 
    numbered rounds, each with your recommended answer; look facts up yourself and ask only what
    only the user can decide. A Task check's `decision` finding (step 4) goes back to the user as
    one more round.
-2. Split the solution into subtasks of about one merge request each (roughly 20-30 files, a soft
-   limit). Each subtask gets one Task file.
+2. Cut the solution into merge requests by the handbook's `## Slicing a solution` (call `guide` to
+   read it); each slice gets one Task file. Show the user the cut, one line per slice (its kind,
+   what it does, its estimated size), and agree on it before you write the Task files.
 3. Write the Task file with `write_task` (format below) only after the user confirmed you agree,
    with a `## Review brief`: you are not there when the reviewers review, so the brief carries what
    they must check and why the plan's decisions were made. Show the user the plan. When the user
@@ -129,6 +130,51 @@ a Task file or a log.
   `--scope project`, which writes the token into the repository's `.mcp.json`; `sf mcp-url --header` prints the URL
   without the token and the `Authorization` header for the header form. After `sf mcp-url
   --rotate` the client needs the new URL.
+
+## Slicing a solution
+
+A merge request is small when a reviewer can hold it in mind: one kind of change, one idea. Do
+not aim at equal line counts; aim at equal review effort. Cut in this order. A slice's kind is one
+of `mechanical`, `preparation`, `change` (steps 3 and 4), `switch` and `cleanup`.
+
+1. **Mechanical** changes, each in a slice of its own: renames, moves, formatting, generated
+   files, lock files, snapshot updates, a codemod. Any size, and nothing else in it; the Task
+   says it is mechanical, so the reviewer can skim.
+2. **Preparation**: the refactoring that makes the change easy (a seam, an extracted function, a
+   moved responsibility) with no change of behaviour: the existing tests pass untouched. A test
+   that pins today's behaviour before a refactoring goes here too.
+3. **The thinnest working path**: the new behaviour for one case, end to end, with its tests.
+   When the new code replaces code in use, build it beside the old (a function, component or
+   service nothing calls yet, or behind a flag the repository already has), so the slice merges
+   safely while the feature is incomplete.
+4. **Widen along one axis per slice**: more paths (variants, entry points), more data (types,
+   sizes, formats), more rules (validation, errors, empty and loading states, permissions), then
+   the interface's polish (texts, layout, accessibility).
+5. **The switch**: the slice that makes the new path the one in use (a route, a call site, the
+   flag). Small by construction.
+6. **Cleanup**: delete the old path, the flag and what only they used, and update the
+   documentation that described them.
+
+Rules:
+
+- Every slice leaves the base branch releasable: it builds, its tests pass, and unfinished work
+  is not reachable by a user.
+- A `change` or `switch` slice stays within about 400 changed lines, tests included, and 10
+  files. One that would be larger is cut again along the next axis of step 4. Mechanical,
+  preparation and cleanup slices have no limit, but hold only their kind.
+- A slice whose description needs "and" between two outcomes is two slices. A `change` slice
+  under about 50 lines joins its neighbour.
+- Tests go with the code they test, never in a slice of their own (step 2's pinning test is the
+  exception).
+- Prefer slices that start from the base branch and can merge in any order. Set `base:` to the
+  previous slice's branch only when a slice needs its code, and `lands_after` only when it must
+  not merge first.
+- One huge slice left over means the switch is still all or nothing: go back to step 3 and build
+  beside the old.
+- When a solution cannot be cut this way (a change that is only safe whole), say why in the Task
+  and get the user's agreement.
+- Each Task says in its first lines which slice it is, "Slice 2 of 5 (change): ...", and lists
+  its siblings with one line each, so the reviewer of one slice sees the whole cut.
 
 ## Task file format
 

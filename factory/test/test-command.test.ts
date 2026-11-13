@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { saveRegistry } from '../src/registry.js';
 import { pathDenials } from '../src/sandbox-denials.js';
 import {
-  bwrapArgs, checksLine, configChangedReason, configFingerprint, durationText, firstChange, hiddenMounts, inlineCommand, lastLines, MAX_TESTS_OUTPUT_BYTES, runTestCommand, testEnvironment,
+  bwrapArgs, checksLine, configChangedReason, configFingerprint, durationText, firstChange, hiddenMounts, inlineCommand, KeptOutput, lastLines, MAX_TESTS_OUTPUT_BYTES, MAX_TESTS_OUTPUT_HEAD_BYTES, runTestCommand, testEnvironment,
   type TestsRecord, testsFixContent, WATCHED_PATH_UNSAFE, watchedPaths,
 } from '../src/test-command.js';
 
@@ -419,12 +419,34 @@ if (process.env[CHILD] !== undefined) {
     assert.equal(record.output, 'loopback true remote false\n', record.output);
   });
 
-  sandboxTest('the output kept is its last 64 KiB', async () => {
-    const record = await recordOf('i=0; while [ $i -lt 9000 ]; do echo "line $i of the long output"; i=$((i+1)); done; exit 1');
+  sandboxTest('the output kept is its first whole lines up to 8 KiB and its last 64 KiB, with a line saying what was left out', async () => {
+    const record = await recordOf('echo "check-code: warning: src/a.ts has 650 lines"; i=0; while [ $i -lt 9000 ]; do echo "line $i of the long output"; i=$((i+1)); done; exit 1');
     assert.equal(record.outcome, 'failed');
     assert.equal(record.output_truncated, true);
-    assert.ok(Buffer.byteLength(record.output) <= MAX_TESTS_OUTPUT_BYTES, String(Buffer.byteLength(record.output)));
+    assert.ok(Buffer.byteLength(record.output) <= MAX_TESTS_OUTPUT_HEAD_BYTES + MAX_TESTS_OUTPUT_BYTES + 100, String(Buffer.byteLength(record.output)));
+    assert.ok(record.output.startsWith('check-code: warning: src/a.ts has 650 lines\nline 0 of the long output\n'));
+    assert.match(record.output, /\n\[\d+ bytes of the output left out\]\n/);
     assert.ok(record.output.endsWith('line 8999 of the long output\n'));
+  });
+
+  test('KeptOutput: all of an output within its bounds; past them its first whole lines, a line saying how many bytes were left out, and its last bytes', () => {
+    const small = new KeptOutput(16, 32);
+    small.push(Buffer.from('first\nsecond\n'));
+    small.push(Buffer.from('third\nfourth\nfifth\n'));
+    assert.equal(small.text(), 'first\nsecond\nthird\nfourth\nfifth\n');
+    assert.equal(small.truncated, false);
+    const long = new KeptOutput(16, 32);
+    long.push(Buffer.from('check-code: ok\nnext line\n'));
+    for (let index = 0; index < 50; index += 1) {
+      long.push(Buffer.from(`row ${String(index).padStart(2, '0')}\n`));
+    }
+    // 375 bytes: the head is the first 16 cut back to a whole line (15), the tail the last 32 cut
+    // forward to a whole line (28).
+    assert.equal(long.text(), 'check-code: ok\n[332 bytes of the output left out]\nrow 46\nrow 47\nrow 48\nrow 49\n');
+    assert.equal(long.truncated, true);
+    const oneLine = new KeptOutput(4, 4);
+    oneLine.push(Buffer.from('abcdefghijkl'));
+    assert.equal(oneLine.text(), 'abcd\n[4 bytes of the output left out]\nijkl');
   });
 
   test('without bwrap on PATH the run is unavailable and nothing runs', async () => {

@@ -150,9 +150,12 @@ test('a failing run is mr_check_failed with its first lines; the worktree is gon
 
 test('a run past the timeout is timed_out and refused; a sandbox that cannot be built is refused; the worktree is gone both times', async () => {
   const w = await world('mc-timeout');
-  const timed = await checkMerge(options(w, 'echo waiting; sleep 5', { timeoutMs: 300 }));
+  // A limit of seconds, not milliseconds: under the load of a full run the sandbox may take longer
+  // than a few hundred ms to reach the echo, and a run killed before it has no output to quote.
+  const timed = await checkMerge(options(w, 'echo waiting; sleep 60', { timeoutMs: 3000 }));
   assert.equal(timed.runs[0]!.outcome, 'timed_out');
-  assert.match(refusalOf(timed)!.message, /^The change fails on main as it is now \([0-9a-f]{12}\): `echo waiting; sleep 5` failed \(timed out after 0 s\):\nwaiting$/);
+  assert.ok(timed.runs[0]!.duration_ms >= 3000 && timed.runs[0]!.duration_ms < 60_000, String(timed.runs[0]!.duration_ms));
+  assert.match(refusalOf(timed)!.message, /^The change fails on main as it is now \([0-9a-f]{12}\): `echo waiting; sleep 60` failed \(timed out after \d+ s\):\nwaiting$/);
   assert.deepEqual(await leftovers(w), []);
   const denied = await checkMerge(options(w, 'exit 0', { hidden: async () => Promise.reject(new FactoryError('sandbox_failed', 'the registry cannot be read')) }));
   assert.equal(denied.runs[0]!.outcome, 'failed');

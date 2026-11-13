@@ -782,6 +782,28 @@ interface ReviewThread {
   comments: Array<{ author: string; body: string; created_at: string }>;
 }
 
+// An agent role whose skills the user chooses: src/skill-roles.ts Role.
+type SkillRole = 'implementer' | 'claude_review' | 'codex_gate' | 'task_check' | 'planner';
+// An installed skill: src/skills.ts InstalledSkill.
+interface SkillRow {
+  name: string;
+  source: string | null;
+  updated: string | null;
+  description: string | null;
+}
+// GET api/skills and the answer of PUT api/skills/roles/<role>: src/skills.ts SkillsView.
+interface SkillsPayload {
+  skills: SkillRow[];
+  roles: Readonly<Record<SkillRole, string[]>>;
+  missing: string[];
+}
+// GET api/skills/<name>: an installed skill's SKILL.md (src/skills.ts skillText).
+interface SkillText {
+  name: string;
+  text: string;
+  truncated: boolean;
+}
+
 // The job created from review comments: src/review-job.ts ReviewJobResult.
 interface ReviewJobResult {
   workspace: string;

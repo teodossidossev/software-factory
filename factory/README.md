@@ -2221,6 +2221,7 @@ user), the factory's prompt rule wins and the sandbox refuses mutating Git.
   installed skill's folder name, a path (`/`, `..`) included, before anything is read; `PUT
   api/skills/roles/<role>` with `{ "skills": [...] }` (strict) replaces the role's list, checked as
   `sf skills set` checks a skill, and answers `{ ok: true, result: <the GET api/skills data> }`.
+  The dashboard's Skills page (section Dashboard, Skills) uses these three routes and no other.
 - **The source**: `~/.agents/skills/<name>` (where the `skills` tool installs them; links
   followed) and its lock file `~/.agents/.skill-lock.json` (`skills.<name>.skillFolderHash`).
   `SF_SKILLS_DIR` names another folder; the lock file is then `.skill-lock.json` next to it. The
@@ -4120,7 +4121,7 @@ retargets a request, and an answer that arrives for another job changes nothing 
 The page is plain HTML, CSS and JavaScript, with no external resources, under
 `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self';
 img-src 'self' blob:` (`blob:` for New ticket's thumbnails before upload, SF-064) and `Cache-Control: no-store`; every value is rendered as text.
-The HTML and the CSS are in `static/`, and nothing else. The page's JavaScript is eleven classic scripts that
+The HTML and the CSS are in `static/`, and nothing else. The page's JavaScript is thirteen classic scripts that
 share its globals, loaded with `defer` in the order of `DASHBOARD_SCRIPTS` (`src/dashboard.ts`,
 SF-136, SF-137); the server serves those and no other script, and none is longer than 2,500 lines.
 The page code lives only in `web/`, in TypeScript (SF-146 to SF-150): each script's source
@@ -4148,6 +4149,7 @@ naming the type, when a type of `web/types.d.ts` has neither.
 - `reports.js`: the morning digest and the Stats page.
 - `review-page.js`: the Merge requests page (a job from review comments) and `leavePages`.
 - `setup.js`: the drawer and the setup (workspaces, new ticket, archived, ticket actions).
+- `skills.js`: the Skills page (each agent role's skills, switched by a click).
 - `health.js`: the factory pill's health dot and words and its popover with the checks.
 - `main.js`: the stream, the job selected, the page's start and loading; it loads last.
 
@@ -4573,6 +4575,37 @@ digest the digest list could not read counts once). A payload is kept 10 s per
 period and workspace; each job directory's numbers are kept until one of its files changes
 (`job.json`, `ledger.json`, `explanation.json`, `task.md` or an iteration directory), each event log
 is read on from where the last read ended, and each check record is kept until it changes.
+
+### Skills
+
+The Skills tab in the header, after Workspaces (or `#skills`, or Skills in the page select below
+1100 px), opens a full page where the user sees the installed skills and switches each agent role's
+skills by clicks (section The agents' skills); it works on the local and the remote dashboard
+alike. It reads `GET api/skills` on open and on Refresh (never on a timer) and uses no route
+outside `api/skills`. Nothing is installed from the page (`npx skills add` in a terminal does); the
+choice is one for all workspaces, and every skill may be switched off.
+
+- **The table**: one row per installed skill, by name: the name (a link to its `SKILL.md`), the
+  first line of its description (the whole on hover), its source and updated date in muted text;
+  then one checkbox column per role, headed Implementer, Claude review, Codex gate, Task check and
+  Planner (ChatGPT), each with the count of the role's skills ("Implementer · 3"); under Planner,
+  "Applies to the next planning request". Each box is labelled "<skill> for <role>" for screen
+  readers. Above the table a filter (by name or description) and the line "Changes apply to jobs
+  started after; running jobs keep their skills." The table scrolls sideways in its own box.
+- **Switching**: a click sends `PUT api/skills/roles/<role>` with the role's new list (the skill
+  added at its end, or taken out) at once; there is no Save button. While it is sent every box is
+  disabled (one switch at a time, so no two answers race) and the role's boxes show the list sent.
+  The answer, the list the server stored, is shown, and a read of `api/skills` under way when it
+  arrives is dropped. Each head's count is the role's whole list, a skill chosen but not installed
+  included. A refusal or a network error puts the box back,
+  shows "<skill> for <role> was not switched on|off: <message>" next to the table and reads `GET
+  api/skills` again, so a box never shows a state the server did not store.
+- **Missing**: each skill a role chose that is not installed is listed below the table as "Chosen
+  but not installed: <name> (<roles>)", with the boxes of those roles to switch it off.
+- **Reading a skill**: a click on a skill's name opens its `SKILL.md` (`GET api/skills/<name>`) in
+  a side panel as plain text (set as text, never parsed as HTML, `white-space: pre-wrap`), with a
+  note when the file was cut at 256 KiB; Close or Esc closes it, the focus back on the name. The
+  next Esc goes back to the board.
 
 ### Phone and tablet
 

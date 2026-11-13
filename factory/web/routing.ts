@@ -59,7 +59,7 @@ const ui: UiState = {
 // The URL hash of the view: #<ws>/<ticket> (the Stream), #<ws>/<ticket>/changes, /mr, /ticket;
 // a new one is a new history entry, so Back and Forward move between them.
 function setHash(): void {
-  const h = ui.screen === 'board' ? '' : ui.screen === 'stats' || ui.screen === 'merge-requests' ? ui.screen : ui.screen === 'digest' ? (dg.id === null ? 'digest' : `digest/${dg.id}`) : ui.screen === 'ticket' ? `${ui.ticket}/ticket` : ui.screen === 'stream' ? ui.job : `${ui.job}/${ui.screen}`;
+  const h = ui.screen === 'board' ? '' : ['stats', 'merge-requests', 'skills'].includes(ui.screen) ? ui.screen : ui.screen === 'digest' ? (dg.id === null ? 'digest' : `digest/${dg.id}`) : ui.screen === 'ticket' ? `${ui.ticket}/ticket` : ui.screen === 'stream' ? ui.job : `${ui.job}/${ui.screen}`;
   if (decodeURIComponent(location.hash.slice(1)) !== h) {
     history.pushState(null, '', `#${h}`);
   }
@@ -197,10 +197,10 @@ function route(): void {
     }
     return;
   }
-  // The Stats and the Merge requests pages.
-  if (hash === 'stats' || hash === 'merge-requests') {
+  // The Stats, the Merge requests and the Skills pages.
+  if (hash === 'stats' || hash === 'merge-requests' || hash === 'skills') {
     if (ui.screen !== hash) {
-      (hash === 'stats' ? openStats : openMergeRequests)();
+      ({ stats: openStats, 'merge-requests': openMergeRequests, skills: openSkills })[hash]();
     }
     return;
   }
@@ -638,6 +638,8 @@ function onKey(event: KeyboardEvent): void {
     event.preventDefault();
     if (state.confirm !== null) {
       closeConfirm();
+    } else if (skillTextShown()) {
+      closeSkillText();
     } else if (ui.screen === 'changes' || ui.screen === 'mr') {
       if (ui.job !== null) {
         go(ui.job, 'stream');

@@ -448,6 +448,21 @@ planning request. `SF_REVIEW_SKILL` and `SF_PLAN_SKILL`, when set, win over the 
 dashboard reads and changes the same choice through `GET api/skills`, `GET api/skills/<name>`
 and `PUT api/skills/roles/<role>` (factory/README.md, section The agents' skills).
 
+### The Skills page
+
+The dashboard's **Skills** tab (after Workspaces; `#skills`) shows the same choice and changes it
+by clicks, on the local and the remote dashboard alike. Each installed skill is a row (its name,
+the first line of its description, its source and updated date) with one checkbox per role:
+Implementer, Claude review, Codex gate, Task check and Planner (ChatGPT), each head with its
+count. A click saves the role's new list at once, with no Save button; the boxes stay disabled
+until the factory answers, and a refusal or a lost connection puts it back with the message next
+to the table. A filter above the table finds a skill by name or description. A skill a role chose
+that is not installed is listed below the table ("Chosen but not installed"), with its boxes to
+switch it off. A click on a skill's name shows its `SKILL.md` as plain text in a side panel (Close
+or Esc). As with `sf skills set`, a change applies to the jobs started after it (running jobs keep
+their skills) and, for the Planner column, to the next planning request. The page installs
+nothing: `npx skills add <source>` in a terminal does.
+
 ## Coding rules
 
 The factory gives the Implementer, both reviewers and the Task check your coding rules as they are:

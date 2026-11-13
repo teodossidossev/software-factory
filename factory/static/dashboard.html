@@ -17,6 +17,7 @@
   <script src="reports.js" defer></script>
   <script src="review-page.js" defer></script>
   <script src="setup.js" defer></script>
+  <script src="skills.js" defer></script>
   <script src="health.js" defer></script>
   <script src="main.js" defer></script>
 </head>
@@ -35,6 +36,7 @@
         <button id="open-merge-requests" type="button" class="tab">Merge requests</button>
         <button id="open-archived" type="button" class="tab">Archived <span id="archived-count" class="count"></span></button>
         <button id="open-workspaces" type="button" class="tab">Workspaces</button>
+        <button id="open-skills" type="button" class="tab">Skills</button>
       </nav>
       <span class="hgap"></span>
       <span class="hbreak"></span>
@@ -45,6 +47,7 @@
         <option value="merge-requests">Merge requests</option>
         <option value="archived" id="page-archived">Archived</option>
         <option value="workspaces">Workspaces</option>
+        <option value="skills">Skills</option>
       </select>
       <select id="workspace-filter" class="hselect" aria-label="Workspace"></select>
       <div class="hwrap" id="health-wrap">
@@ -130,6 +133,9 @@
 
   <!-- The Stats page: what the reviews found, the spend and load, and the warnings. -->
   <section id="stats" hidden aria-label="Stats"></section>
+
+  <!-- The Skills page: each agent role's skills, switched by a click (skills.js). -->
+  <section id="skills" hidden aria-label="Skills"></section>
 
   <!-- The Merge requests page: a job from an open merge request's review comments (review-page.js). -->
   <section id="merge-requests" hidden aria-label="Merge requests"></section>

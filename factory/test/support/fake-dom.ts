@@ -664,10 +664,22 @@ export interface Page {
   location: { hash: string; pathname: string; search: string };
   // The URLs history.pushState was given, in order.
   pushed: string[];
-  window: { dispatch(name: string, event?: Record<string, unknown>): Record<string, unknown> };
+  // window.open: blockPopups set, it returns null, as a browser that blocks the new tab.
+  window: { dispatch(name: string, event?: Record<string, unknown>): Record<string, unknown>; open(url?: string, target?: string): FakeTab | null; blockPopups: boolean };
+  // Every window.open call, in order, with the tab it returned (null: blocked).
+  opened: Array<{ url: string; target: string; tab: FakeTab | null }>;
   // URL.createObjectURL's URLs (blob:fake/1, ...) with their Blobs, and the ones revoked (SF-064).
   objectUrls: Map<string, Blob>;
   revokedUrls: string[];
+}
+
+// A tab window.open returned: its opener (the page's window until the page clears it), its URL,
+// and whether the page closed it.
+export interface FakeTab {
+  opener: unknown;
+  location: { href: string };
+  closed: boolean;
+  close(): void;
 }
 
 // The page's clipboard: text, and with write the ClipboardItems (SF-064's Copy image).
@@ -782,7 +794,19 @@ export async function loadPage(
     });
   const location = { hash: '', pathname: '/d/token/', search: '' };
   const windowListeners = new Map<string, Array<(event: Record<string, unknown>) => void>>();
+  const opened: Page['opened'] = [];
   const window = {
+    blockPopups: false,
+    open: (url = '', target = ''): FakeTab | null => {
+      const tab: FakeTab | null = window.blockPopups ? null : {
+        opener: window, location: { href: url }, closed: false,
+        close() {
+          this.closed = true;
+        },
+      };
+      opened.push({ url, target, tab });
+      return tab;
+    },
     addEventListener: (name: string, listener: (event: Record<string, unknown>) => void): void => {
       windowListeners.set(name, [...(windowListeners.get(name) ?? []), listener]);
     },
@@ -876,6 +900,7 @@ export async function loadPage(
     location,
     pushed,
     window,
+    opened,
     objectUrls,
     revokedUrls,
   };

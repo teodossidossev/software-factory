@@ -35,15 +35,16 @@ function ticket(key: string, extra: Record<string, unknown> = {}) {
   };
 }
 
-// The page with the given jobs loaded and the stream's first workspaces and tickets delivered.
-async function openPage(jobs: ReturnType<typeof job>[], workspaces: ReturnType<typeof workspace>[], tickets: ReturnType<typeof ticket>[], clipboard?: { writeText(text: string): Promise<void> }): Promise<Page> {
+// The page with the given jobs loaded and the stream's first workspaces and tickets delivered;
+// globals: names added to the page's context (a localStorage).
+async function openPage(jobs: ReturnType<typeof job>[], workspaces: ReturnType<typeof workspace>[], tickets: ReturnType<typeof ticket>[], clipboard?: { writeText(text: string): Promise<void> }, globals: Record<string, unknown> = {}): Promise<Page> {
   const page = await loadPage(STATIC_DIR, (path) => {
     if (path === 'api/jobs') {
       return { jobs };
     }
     const match = /^api\/jobs\/([^/]+)\/([^/]+)$/.exec(path);
     return match ? detail(match[2]!) : undefined;
-  }, clipboard);
+  }, clipboard, globals);
   page.document.dispatch('DOMContentLoaded');
   await page.flush();
   const stream = page.streams.at(-1)!;
@@ -657,4 +658,373 @@ test('setup client: Create uploads the images of the moment it was pressed; one 
   posts(page)[2]!.respond(409, { ok: false, error: { code: 'ticket_exists', message: 'exists' } });
   await page.flush();
   assert.deepEqual([thumbs(page).map((row) => row[2]), page.$('ticket-images').querySelector('button')!.disabled, posts(page).length], [['1.gif'], false, 3]);
+});
+
+// A localStorage for the page: its entries, or (refuse) one whose getItem and setItem throw, as a
+// browser that refuses storage.
+function storage(entries: Record<string, string> = {}, refuse = false) {
+  const items = new Map(Object.entries(entries));
+  const check = (): void => {
+    if (refuse) {
+      throw new Error('SecurityError: storage is refused');
+    }
+  };
+  return {
+    items,
+    getItem: (name: string): string | null => (check(), items.get(name) ?? null),
+    setItem: (name: string, value: string): void => (check(), void items.set(name, value)),
+  };
+}
+
+// The New ticket form filled for a ticket of a workspace.
+function fill(page: Page, key: string, workspaceName = 'web'): void {
+  page.$('ticket-workspace').value = workspaceName;
+  page.$('ticket-key').value = key;
+  page.$('ticket-title').value = `Ticket ${key}`;
+  page.$('ticket-request').value = 'Make it so.';
+}
+
+const created = (workspaceName: string, name: string) => ({ ok: true, result: { workspace: workspaceName, ticket: name, path: `.software-factory/${name}.md`, base: 'main' } });
+const createdText = (workspaceName: string, name: string): string => `Ticket created: .software-factory/${name}.md in ${workspaceName} (base main), an empty skeleton in the Queue. Next: a click on its card opens the conversation; your words are its first message.`;
+const pageReads = (page: Page, key: string): FetchRequest[] => page.requests.filter((request) => request.method === 'GET' && request.path === `api/tickets/${key}/page`);
+// The ticket's planned page as the server answers it: only its row matters to Create & plan.
+const answerPage = (request: FetchRequest, row: ReturnType<typeof ticket>): void => request.respond(200, { ticket: row, task: { text: '---\n---\n', sha256: 'a'.repeat(64) }, plan: null, check: null, history: [], queue: null });
+const LINKLESS = 'Open the conversation on the ticket\'s page.';
+const BLOCKED = 'The browser blocked the new tab: open the conversation on the ticket\'s page.';
+
+test('setup client: the New ticket form starts on the workspace of the last ticket created in this browser, else the filter\'s, else the first; storage that throws changes nothing', async () => {
+  // A stored workspace that is registered is the default.
+  const remembered = await openPage([], [workspace('app'), workspace('web')], [], undefined, { localStorage: storage({ 'sf-ticket-workspace': 'web' }) });
+  assert.equal(remembered.$('ticket-workspace').value, 'web');
+
+  // One no longer registered falls through to the board's filter, else to the first workspace.
+  const gone = await openPage([], [workspace('app'), workspace('web')], [], undefined, { localStorage: storage({ 'sf-ticket-workspace': 'old' }) });
+  assert.equal(gone.$('ticket-workspace').value, 'app');
+  gone.$('workspace-filter').value = 'web';
+  gone.$('workspace-filter').dispatch('change');
+  gone.$('ticket-workspace').value = '';
+  gone.streams.at(-1)!.emit('workspaces', { workspaces: [workspace('app'), workspace('web')] });
+  assert.equal(gone.$('ticket-workspace').value, 'web');
+
+  // A create stores its workspace; a refused one stores nothing.
+  const store = storage();
+  const page = await openPage([], [workspace('app'), workspace('web')], [], undefined, { localStorage: store });
+  assert.equal(page.$('ticket-workspace').value, 'app');
+  fill(page, 'W-7');
+  page.$('ticket-form').dispatch('submit');
+  await page.flush();
+  posts(page)[0]!.respond(409, { ok: false, error: { code: 'ticket_exists', message: 'exists' } });
+  await page.flush();
+  assert.deepEqual([...store.items], []);
+  page.$('ticket-form').dispatch('submit');
+  await page.flush();
+  posts(page)[1]!.respond(200, created('web', 'W-7'));
+  await page.flush();
+  assert.deepEqual([...store.items], [['sf-ticket-workspace', 'web']]);
+
+  // Storage that throws: the first workspace, and a create without an error.
+  const refused = await openPage([], [workspace('app'), workspace('web')], [], undefined, { localStorage: storage({}, true) });
+  assert.equal(refused.$('ticket-workspace').value, 'app');
+  fill(refused, 'W-7');
+  refused.$('ticket-form').dispatch('submit');
+  await refused.flush();
+  posts(refused)[0]!.respond(200, created('web', 'W-7'));
+  await refused.flush();
+  assert.deepEqual([refused.$('drawer').hidden, refused.$('toast-text').textContent], [true, createdText('web', 'W-7')]);
+});
+
+test('setup client: Create & plan with ChatGPT opens the tab in the click itself, closes it on a refusal, points it at the conversation once created, then opens the ticket\'s page when it is listed', async () => {
+  const page = await openPage([], [workspace('app'), workspace('web')], []);
+  page.$('open-new-ticket').click();
+  // The button sits after Create, off exactly when Create is.
+  assert.deepEqual([page.$('ticket-plan').textContent, page.$('ticket-plan').type, page.$('ticket-plan').disabled], ['Create & plan', 'button', false]);
+  assert.equal(page.$('ticket-plan').getAttribute('title'), 'Creates the ticket, then opens its planning conversation in a new tab (ChatGPT) or its page (Claude Code)');
+
+  // A field missing: no tab, no request, Create's words.
+  page.$('ticket-plan').click();
+  await page.flush();
+  assert.deepEqual([page.opened, posts(page), page.$('ticket-status').textContent], [[], [], 'The workspace, the ticket key, the title and the request are all needed.']);
+
+  // Refused: the tab opened in the click's own call (before any wait) closes; the form says why and keeps the input.
+  fill(page, 'W-7');
+  page.$('ticket-plan').click();
+  assert.equal(page.opened.length, 1);
+  assert.deepEqual([page.opened[0]!.url, page.opened[0]!.target, page.opened[0]!.tab!.opener], ['', '_blank', null]);
+  await page.flush();
+  assert.equal(page.$('ticket-plan').disabled, true);
+  posts(page)[0]!.respond(409, { ok: false, error: { code: 'ticket_exists', message: 'exists' } });
+  await page.flush();
+  assert.equal(page.opened[0]!.tab!.closed, true);
+  assert.deepEqual([page.$('ticket-status').textContent, page.$('ticket-key').value, page.$('ticket-plan').disabled], ['ticket_exists: exists', 'W-7', false]);
+
+  // Created: the tab gets the server's URL read from the ticket's page; the drawer closes with Create's words.
+  page.$('ticket-plan').click();
+  await page.flush();
+  assert.equal(page.opened.length, 2);
+  posts(page)[1]!.respond(200, created('web', 'W-7'));
+  await page.flush();
+  const row = ticket('web/W-7');
+  assert.equal(pageReads(page, 'web/W-7').length, 1);
+  answerPage(pageReads(page, 'web/W-7')[0]!, row);
+  await page.flush();
+  const tab = page.opened[1]!.tab!;
+  assert.deepEqual([tab.location.href, tab.opener, tab.closed], [row.conversation.url, null, false]);
+  assert.deepEqual([page.$('drawer').hidden, page.$('toast-text').textContent, page.location.hash], [true, createdText('web', 'W-7'), '']);
+  // The ticket's page opens once the stream lists the ticket.
+  page.streams.at(-1)!.emit('tickets', { tickets: [row], archived: [] });
+  await page.flush();
+  assert.equal(page.location.hash, '#web/W-7/ticket');
+
+  // A ticket the board already lists when the answer comes: its page opens at once.
+  page.$('ticket').querySelector('[data-back]')!.click();
+  page.$('open-new-ticket').click();
+  fill(page, 'W-8');
+  page.$('ticket-plan').click();
+  await page.flush();
+  page.streams.at(-1)!.emit('tickets', { tickets: [row, ticket('web/W-8')], archived: [] });
+  posts(page)[2]!.respond(200, created('web', 'W-8'));
+  await page.flush();
+  answerPage(pageReads(page, 'web/W-8')[0]!, ticket('web/W-8'));
+  await page.flush();
+  assert.equal(page.location.hash, '#web/W-8/ticket');
+  assert.equal(page.opened[2]!.tab!.location.href, ticket('web/W-8').conversation.url);
+  // Only a URL of the ChatGPT prefill ever reached a tab.
+  assert.deepEqual(page.opened.filter((entry) => entry.tab!.location.href !== '').map((entry) => entry.tab!.location.href.startsWith(PREFIX)), [true, true]);
+});
+
+test('setup client: Create & plan without a link closes the tab, with a blocked tab reads nothing, and for Claude Code opens no tab; each opens the ticket\'s page', async () => {
+  const page = await openPage([], [workspace('web')], []);
+  page.$('open-new-ticket').click();
+  // A message too long for a link: the tab closes and the toast says where the conversation is.
+  fill(page, 'W-7');
+  page.$('ticket-plan').click();
+  await page.flush();
+  posts(page)[0]!.respond(200, created('web', 'W-7'));
+  await page.flush();
+  answerPage(pageReads(page, 'web/W-7')[0]!, ticket('web/W-7', { conversation: { message: 'x'.repeat(9000), url: null } }));
+  await page.flush();
+  assert.deepEqual([page.opened[0]!.tab!.closed, page.opened[0]!.tab!.location.href], [true, '']);
+  assert.equal(page.$('toast-text').textContent, `${createdText('web', 'W-7')} ${LINKLESS}`);
+  page.streams.at(-1)!.emit('tickets', { tickets: [ticket('web/W-7')], archived: [] });
+  await page.flush();
+  assert.equal(page.location.hash, '#web/W-7/ticket');
+
+  // A read that fails: the same.
+  page.$('ticket').querySelector('[data-back]')!.click();
+  page.$('open-new-ticket').click();
+  fill(page, 'W-8');
+  page.$('ticket-plan').click();
+  await page.flush();
+  posts(page)[1]!.respond(200, created('web', 'W-8'));
+  await page.flush();
+  pageReads(page, 'web/W-8')[0]!.fail();
+  await page.flush();
+  assert.deepEqual([page.opened[1]!.tab!.closed, page.$('toast-text').textContent], [true, `${createdText('web', 'W-8')} ${LINKLESS}`]);
+
+  // The browser blocks the tab: nothing is read, no error, the toast says so, the ticket's page opens.
+  page.$('ticket').querySelector('[data-back]')!.click();
+  page.$('open-new-ticket').click();
+  page.window.blockPopups = true;
+  fill(page, 'W-9');
+  page.$('ticket-plan').click();
+  await page.flush();
+  assert.deepEqual([page.opened.length, page.opened[2]!.tab], [3, null]);
+  posts(page)[2]!.respond(200, created('web', 'W-9'));
+  await page.flush();
+  assert.equal(pageReads(page, 'web/W-9').length, 0);
+  assert.deepEqual([page.$('drawer').hidden, page.$('toast-text').textContent], [true, `${createdText('web', 'W-9')} ${BLOCKED}`]);
+  page.streams.at(-1)!.emit('tickets', { tickets: [ticket('web/W-9')], archived: [] });
+  await page.flush();
+  assert.equal(page.location.hash, '#web/W-9/ticket');
+
+  // Claude Code: no tab; the ticket's page opens, where the planning card has the message to copy.
+  page.$('ticket').querySelector('[data-back]')!.click();
+  page.$('open-new-ticket').click();
+  page.window.blockPopups = false;
+  page.$('owner-chatgpt').checked = false;
+  page.$('owner-claude').checked = true;
+  fill(page, 'W-10');
+  page.$('ticket-plan').click();
+  await page.flush();
+  assert.equal(page.opened.length, 3);
+  posts(page)[3]!.respond(200, created('web', 'W-10'));
+  await page.flush();
+  assert.deepEqual([pageReads(page, 'web/W-10').length, page.$('toast-text').textContent], [0, createdText('web', 'W-10')]);
+  page.streams.at(-1)!.emit('tickets', { tickets: [ticket('web/W-10', { owner: 'claude_code' })], archived: [] });
+  await page.flush();
+  assert.equal(page.location.hash, '#web/W-10/ticket');
+});
+
+test('setup client: a ticket Create & plan made opens only where the create left the user; Create alone opens nothing', async () => {
+  const page = await openPage([], [workspace('web')], []);
+  page.$('open-new-ticket').click();
+  fill(page, 'W-7');
+  page.$('ticket-plan').click();
+  await page.flush();
+  posts(page)[0]!.respond(200, created('web', 'W-7'));
+  await page.flush();
+  answerPage(pageReads(page, 'web/W-7')[0]!, ticket('web/W-7'));
+  await page.flush();
+  // The New ticket drawer opened again before the stream lists it: nothing opens, and the wait is over.
+  page.$('open-new-ticket').click();
+  page.streams.at(-1)!.emit('tickets', { tickets: [ticket('web/W-7')], archived: [] });
+  await page.flush();
+  assert.deepEqual([page.location.hash, page.$('drawer').hidden], ['', false]);
+  page.$('drawer-close').click();
+  page.streams.at(-1)!.emit('tickets', { tickets: [ticket('web/W-7')], archived: [] });
+  await page.flush();
+  assert.equal(page.location.hash, '');
+
+  // Create & plan answered, then Create: the plain create drops the earlier wait; nothing opens.
+  page.$('open-new-ticket').click();
+  fill(page, 'W-8');
+  page.$('ticket-plan').click();
+  await page.flush();
+  posts(page)[1]!.respond(200, created('web', 'W-8'));
+  await page.flush();
+  answerPage(pageReads(page, 'web/W-8')[0]!, ticket('web/W-8'));
+  await page.flush();
+  page.$('open-new-ticket').click();
+  fill(page, 'W-9');
+  page.$('ticket-form').dispatch('submit');
+  await page.flush();
+  posts(page)[2]!.respond(200, created('web', 'W-9'));
+  await page.flush();
+  page.streams.at(-1)!.emit('tickets', { tickets: [ticket('web/W-7'), ticket('web/W-8'), ticket('web/W-9')], archived: [] });
+  await page.flush();
+  assert.equal(page.location.hash, '');
+  assert.equal(page.opened.length, 2);
+});
+
+test('setup client: a create sent while an earlier Create & plan still reads its link replaces it; the earlier one points its tab but opens no page', async () => {
+  const page = await openPage([], [workspace('web')], []);
+  page.$('open-new-ticket').click();
+  const submit = async (key: string, plan: boolean, index: number): Promise<void> => {
+    fill(page, key);
+    if (plan) {
+      page.$('ticket-plan').click();
+    } else {
+      page.$('ticket-form').dispatch('submit');
+    }
+    await page.flush();
+    posts(page)[index]!.respond(200, created('web', key));
+    await page.flush();
+  };
+
+  // Create & plan W-1 waits for its page read; Create W-2 goes in and is answered; then W-1's read answers.
+  await submit('W-1', true, 0);
+  const firstRead = pageReads(page, 'web/W-1')[0]!;
+  await submit('W-2', false, 1);
+  answerPage(firstRead, ticket('web/W-1'));
+  await page.flush();
+  assert.equal(page.opened[0]!.tab!.location.href, ticket('web/W-1').conversation.url);
+  page.streams.at(-1)!.emit('tickets', { tickets: [ticket('web/W-1'), ticket('web/W-2')], archived: [] });
+  await page.flush();
+  assert.equal(page.location.hash, '');
+
+  // Create & plan W-3 waits for its read; Create & plan W-4 goes in and completes; W-3's late read opens nothing.
+  page.$('open-new-ticket').click();
+  await submit('W-3', true, 2);
+  const thirdRead = pageReads(page, 'web/W-3')[0]!;
+  await submit('W-4', true, 3);
+  answerPage(pageReads(page, 'web/W-4')[0]!, ticket('web/W-4'));
+  await page.flush();
+  answerPage(thirdRead, ticket('web/W-3'));
+  await page.flush();
+  assert.deepEqual([page.opened[1]!.tab!.location.href, page.opened[2]!.tab!.location.href], [ticket('web/W-3').conversation.url, ticket('web/W-4').conversation.url]);
+  page.streams.at(-1)!.emit('tickets', { tickets: [ticket('web/W-1'), ticket('web/W-2'), ticket('web/W-3')], archived: [] });
+  await page.flush();
+  assert.equal(page.location.hash, '');
+  page.streams.at(-1)!.emit('tickets', { tickets: [ticket('web/W-1'), ticket('web/W-2'), ticket('web/W-3'), ticket('web/W-4')], archived: [] });
+  await page.flush();
+  assert.equal(page.location.hash, '#web/W-4/ticket');
+
+  // W-5's read answers while the newer W-6 is still being created: the form stays W-6's (its status,
+  // the drawer open), W-5's outcome goes to the toast, and W-6's refusal shows in the form.
+  page.$('ticket').querySelector('[data-back]')!.click();
+  page.$('open-new-ticket').click();
+  await submit('W-5', true, 4);
+  fill(page, 'W-6');
+  page.$('ticket-form').dispatch('submit');
+  await page.flush();
+  answerPage(pageReads(page, 'web/W-5')[0]!, ticket('web/W-5'));
+  await page.flush();
+  assert.deepEqual([page.$('drawer').hidden, page.$('ticket-status').textContent, page.$('toast-text').textContent], [false, 'Sending…', createdText('web', 'W-5')]);
+  posts(page)[5]!.respond(409, { ok: false, error: { code: 'ticket_exists', message: 'exists' } });
+  await page.flush();
+  assert.deepEqual([page.$('drawer').hidden, page.$('ticket-status').textContent, page.$('ticket-key').value], [false, 'ticket_exists: exists', 'W-6']);
+
+  // An image of W-7 not attached, its read answering while the newer W-8 is being created: W-7's words go to the toast.
+  page.$('ticket-form').dispatch('paste', { clipboardData: files(new File([PNG], 'shot.png')) });
+  await page.flush();
+  await submit('W-7', true, 6);
+  posts(page)[7]!.respond(400, { ok: false, error: { code: 'attachment_type', message: 'no' } });
+  await page.flush();
+  fill(page, 'W-8');
+  page.$('ticket-form').dispatch('submit');
+  await page.flush();
+  answerPage(pageReads(page, 'web/W-7')[0]!, ticket('web/W-7'));
+  await page.flush();
+  assert.deepEqual([page.$('drawer').hidden, page.$('ticket-status').textContent], [false, 'Sending…']);
+  assert.equal(page.$('toast-text').textContent, 'Ticket created: .software-factory/W-7.md in web. Not attached: 1.png (attachment_type: no). Add it on the ticket\'s page: paste or drop on its Images card.');
+});
+
+test('setup client: Create & plan uploads the images before it reads the link; an upload that fails keeps the form open with Create\'s words, still points the tab, and opens no page', async () => {
+  const page = await openPage([], [workspace('web')], []);
+  page.$('open-new-ticket').click();
+  const plan = async (key: string): Promise<{ create: FetchRequest; upload: FetchRequest }> => {
+    page.$('ticket-form').dispatch('paste', { clipboardData: files(new File([PNG], 'shot.png')) });
+    await page.flush();
+    fill(page, key);
+    page.$('ticket-plan').click();
+    await page.flush();
+    const create = posts(page).at(-1)!;
+    create.respond(200, created('web', key));
+    await page.flush();
+    return { create, upload: posts(page).at(-1)! };
+  };
+  const failText = (key: string): string => `Ticket created: .software-factory/${key}.md in web. Not attached: 1.png (attachment_type: no). Add it on the ticket's page: paste or drop on its Images card.`;
+
+  // Every image attached: the upload, then the read; Create's words with the count, then the page.
+  const first = await plan('W-1');
+  assert.equal(first.upload.path, 'api/tickets/web/W-1/attachments?name=1.png');
+  assert.equal(pageReads(page, 'web/W-1').length, 0);
+  first.upload.respond(200, { ok: true, result: { name: '1.png', bytes: PNG.length, type: 'image/png' } });
+  await page.flush();
+  const read = pageReads(page, 'web/W-1')[0]!;
+  assert.ok(page.requests.indexOf(first.upload) < page.requests.indexOf(read));
+  answerPage(read, ticket('web/W-1'));
+  await page.flush();
+  assert.deepEqual([page.opened[0]!.tab!.location.href, page.$('toast-text').textContent], [ticket('web/W-1').conversation.url, `${createdText('web', 'W-1')} 1 image attached.`]);
+  page.streams.at(-1)!.emit('tickets', { tickets: [ticket('web/W-1')], archived: [] });
+  await page.flush();
+  assert.equal(page.location.hash, '#web/W-1/ticket');
+  page.$('ticket').querySelector('[data-back]')!.click();
+  page.$('open-new-ticket').click();
+
+  // An upload that fails: the tab still gets the conversation; the form stays with Create's words; no page opens.
+  const second = await plan('W-2');
+  second.upload.respond(400, { ok: false, error: { code: 'attachment_type', message: 'no' } });
+  await page.flush();
+  answerPage(pageReads(page, 'web/W-2')[0]!, ticket('web/W-2'));
+  await page.flush();
+  assert.deepEqual([page.opened[1]!.tab!.location.href, page.$('drawer').hidden, page.$('ticket-status').textContent], [ticket('web/W-2').conversation.url, false, failText('W-2')]);
+  page.streams.at(-1)!.emit('tickets', { tickets: [ticket('web/W-1'), ticket('web/W-2')], archived: [] });
+  await page.flush();
+  assert.deepEqual([page.location.hash, page.$('drawer').hidden], ['#', false]);
+
+  // Without a link, the status line ends with where the conversation is.
+  const third = await plan('W-3');
+  third.upload.respond(400, { ok: false, error: { code: 'attachment_type', message: 'no' } });
+  await page.flush();
+  answerPage(pageReads(page, 'web/W-3')[0]!, ticket('web/W-3', { conversation: { message: 'x', url: null } }));
+  await page.flush();
+  assert.deepEqual([page.opened[2]!.tab!.closed, page.$('ticket-status').textContent], [true, `${failText('W-3')} ${LINKLESS}`]);
+
+  // A blocked tab: nothing read; the status line ends with the blocked tab.
+  page.window.blockPopups = true;
+  const fourth = await plan('W-4');
+  fourth.upload.respond(400, { ok: false, error: { code: 'attachment_type', message: 'no' } });
+  await page.flush();
+  assert.deepEqual([pageReads(page, 'web/W-4').length, page.$('ticket-status').textContent], [0, `${failText('W-4')} ${BLOCKED}`]);
 });

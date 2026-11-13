@@ -67,11 +67,15 @@ Then, for every ticket:
 
 1. Start the factory with `npm start` (`sf up`): it runs the tunnel too. Its lines start with
    `tunnel | `.
-2. On the dashboard press **New ticket**: the workspace (`my-app`), the ticket key (`APP-12`), a
-   one-line title, and what you want in your own words; paste screenshots into the form if they
-   help (Ctrl+V, or drop the files). The Context owner is "ChatGPT, in the browser" (for Claude
-   Code, see section 2). Press
-   *Create the ticket*.
+2. On the dashboard press **New ticket**: the workspace (`my-app`; the form starts on the one you
+   last created a ticket in), the ticket key (`APP-12`), a one-line title, and what you want in
+   your own words; paste screenshots into the form if they help (Ctrl+V, or drop the files). The
+   Context owner is "ChatGPT, in the browser" (for Claude Code, see section 2). The short way:
+   press **Create & plan**. It creates the ticket (step 3) and does step 4 for you: a new tab opens
+   the ChatGPT conversation with the first message filled in, and the dashboard shows the ticket's
+   page. (When the message is too long for a link, or the browser blocks the tab, the dashboard
+   says so: open the conversation on the ticket's page, as in step 4.) The long way: press
+   *Create the ticket*, then steps 3 and 4.
 3. The factory writes a **skeleton**: `.software-factory/APP-12.md` with the front matter
    (`ticket`, `title`, `base`: the branch `origin/HEAD` points at, else `main`), a heading and
    `## Status: waiting for the Context owner`. Your words are kept apart (in the state directory)

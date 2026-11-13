@@ -63,6 +63,7 @@ function openStream(): void {
     state.jobLandsAfter = Array.isArray(data.job_lands_after) ? data.job_lands_after : [];
     state.queue = data.queue !== null && typeof data.queue === 'object' ? data.queue : null;
     renderSetup();
+    openAwaitedTicket();
     if (ui.job !== null) {
       renderHead();
     }
@@ -125,6 +126,96 @@ function select(key: string): void {
   byId('action-doubt').textContent = state.doubts.get(key) ?? '';
   renderComposer();
   void loadStream(key);
+}
+
+// ---------- What opens after Start (the job's Stream) and Create & plan (the conversation, the ticket's page) ----------
+
+// The page of a ticket started from it moves to the job's Stream once the new job is on the board
+// (the stream's jobs event may come before or after Start's answer); an earlier failed or aborted
+// job of the ticket is not it.
+function goToStarted(): void {
+  const key = state.goAfterStart;
+  const job = key === null ? null : jobByKey(key);
+  if (key === null || job === null || TERMINAL_STATES.includes(job.state)) {
+    return;
+  }
+  state.goAfterStart = null;
+  if (ui.screen === 'ticket' && ui.ticket === key) {
+    go(key, 'stream');
+  }
+}
+
+// The tab of the ChatGPT conversation, with no way back to this page; submitTicket opens it in the
+// click's own call, before any wait, since a browser blocks a tab opened later. Null: the browser
+// blocked it; undefined: no tab, Claude Code plans in the terminal.
+function openPlanningTab(): Window | null | undefined {
+  if (!byIdAs('owner-chatgpt', 'input').checked) {
+    return undefined;
+  }
+  const tab = window.open('', '_blank');
+  if (tab !== null) {
+    tab.opener = null;
+  }
+  return tab;
+}
+
+// Points the tab at the created ticket's conversation, read from its planned page once the images
+// its first message names are uploaded; only the server's ChatGPT URL, else the tab closes. Returns
+// the words the outcome ends with when no tab shows the conversation (with their leading space),
+// else ''.
+async function pointPlanningTab(tab: Window | null, key: string): Promise<string> {
+  if (tab === null) {
+    return ' The browser blocked the new tab: open the conversation on the ticket\'s page.';
+  }
+  let url: unknown = null;
+  try {
+    url = fieldOf(fieldOf(fieldOf(await getJson(`api/tickets/${jobPath(key)}/page`), 'ticket'), 'conversation'), 'url');
+  } catch { // a failed read or a body that is not JSON: no link, the tab closes
+  }
+  if (typeof url === 'string' && url.startsWith(CHATGPT_PREFILL_URL)) {
+    tab.location.href = url;
+    return '';
+  }
+  tab.close();
+  return ' Open the conversation on the ticket\'s page.';
+}
+
+// A New ticket submission past its checks: a ticket waiting for its page is dropped, and the
+// submission's number makes it the latest; an earlier one still under way opens no page any more.
+function newTicketSubmission(): number {
+  state.openWhenListed = null;
+  state.ticketSubmits += 1;
+  return state.ticketSubmits;
+}
+
+// A ticket created with every image attached: the form's status clears and the drawer closes; for
+// Create & plan (planned: its key) its page opens at once when the board lists it, else once the
+// stream's tickets event does (openAwaitedTicket). Unless a newer submission has the form by now
+// (Create & plan's read is a wait): then the form stays as that one left it, and nothing opens.
+function finishTicketForm(submission: number, planned: string | null): void {
+  if (submission !== state.ticketSubmits) {
+    return;
+  }
+  setSetupStatus('ticket-status', null);
+  closeDrawer();
+  if (planned !== null && ticketByKey(planned) !== null) {
+    openTicket(planned);
+  } else {
+    state.openWhenListed = planned;
+  }
+}
+
+// The ticket waiting for its row, once listed: its page opens only when the user is still where
+// the create left them (the board, no drawer); else it is dropped.
+function openAwaitedTicket(): void {
+  const key = state.openWhenListed;
+  if (key === null || ticketByKey(key) === null) {
+    return;
+  }
+  state.openWhenListed = null;
+  if (ui.screen === 'board' && state.drawer === null) {
+    openTicket(key);
+  }
 }
 
 function init(): void {
@@ -216,6 +307,8 @@ function init(): void {
     event.preventDefault();
     void submitTicket();
   });
+  // Create & plan: the same create, then the planning conversation; Enter stays Create.
+  byId('ticket-plan').addEventListener('click', () => void submitTicket(true));
   // The Morning digest section: typed values stay until saved.
   byId('digest-form').addEventListener('submit', (event) => {
     event.preventDefault();

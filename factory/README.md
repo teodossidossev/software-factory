@@ -3971,9 +3971,11 @@ problem such as a missing checkout) with Remove (off while the workspace has a l
 registration only, nothing on disk changes) and an Add form: a name and the path of the local
 checkout, typed or pasted (the page cannot browse the machine's disk), validated as `sf workspace
 add` does (an absolute path that exists and is the root of a non-bare Git work tree, a name not
-registered yet) with the refusal shown as it comes. **New ticket** takes the workspace (the
-filter's by default), the ticket key, a one-line title, what the user wants in their own words
-and the Context owner (*ChatGPT, in the browser*, the default, or *Claude Code, in your terminal*), and writes a
+registered yet) with the refusal shown as it comes. **New ticket** takes the workspace (by
+default the one the last ticket was created in, in this browser, kept in localStorage as
+`sf-ticket-workspace`; when that one is not registered any more, or the browser keeps nothing, the
+board filter's, else the first), the ticket key, a one-line title, what the user wants in their
+own words and the Context owner (*ChatGPT, in the browser*, the default, or *Claude Code, in your terminal*), and writes a
 **ticket skeleton** (SF-028), `.software-factory/<ticket>.md` in the checkout, through the Task
 file writer: the front matter (`ticket`, `title`, `base` = the branch `origin/HEAD` points at, else
 `main`), `# <ticket>: <title>` and `## Status: waiting for the Context owner` with one line of
@@ -3986,7 +3988,17 @@ deleting the ticket removes it with the words. Images pasted or dropped into the
 (SF-064, section Ticket images). An existing Task file is never replaced from the page (`409 ticket_exists`). Once
 the ticket is created the dialog closes and the board scrolls to the new Queue card and highlights
 it (a click on it opens its page); a refusal keeps the dialog open with the error and the input.
-Nothing opens the ChatGPT tab by itself. **Archived** (with the count) lists the archived tickets
+Only **Create & plan**, beside *Create the ticket*, opens the ChatGPT tab: it creates the ticket
+the same way, opening the tab in the click itself (a browser blocks one opened later) without a
+way back to the dashboard; once the ticket and its images are there, it reads the ticket's page
+and points the tab at its conversation's URL (the server's `https://chatgpt.com/?q=` link only).
+Without a link (a message too long, a failed read) the tab closes and the message says to open the
+conversation on the ticket's page; a blocked tab says the same. Then the ticket's planned page
+opens, once the board lists the ticket, unless the user has moved on meanwhile (another page, or
+the drawer open again) or a newer create was sent before it finished (its outcome then goes to
+the toast, and the form stays the newer one's); an image that was not attached keeps the form
+open instead, as with Create. For a Claude Code owner there is no tab: the ticket's page opens, with the first message to copy.
+Enter in the form is Create. **Archived** (with the count) lists the archived tickets
 with Task (the archived text), Restore and Delete…; Archive, Restore and Delete… are described
 under SF-027 (a finished job of the ticket leaves the board with them). The archived Task drawer
 shows the file (`GET api/tickets/<ws>/<ticket>/task?archived=1`) as text: one line per line,

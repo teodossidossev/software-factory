@@ -681,7 +681,7 @@ function yourTurn(job: JobRow): HTMLElement[] {
     act.append(cardConfirmButton(job, 'mr-create'));
   }
   if (job.state === 'handed_over') {
-    act.append(cardConfirmButton(job, 'handed-done-merged'));
+    act.append(cardArmButton(job, 'merged-archive'));
   }
   return [act, ...cardOutcome(key, true)];
 }
@@ -700,10 +700,10 @@ function cardOutcome(key: string, doubts: boolean): HTMLElement[] {
   return parts;
 }
 
-// A card's Create merge request…, Merge…, Merged another way… or Archive: opens the job's page with
-// that confirmation; off with the reason as its title while the action is unavailable.
-function cardConfirmButton(job: JobRow, action: string, label = `${ACTION_LABELS[action]}…`): HTMLButtonElement {
-  const node = button('btn small', label, { open: keyOf(job), confirm: action });
+// A card's Create merge request…, Merge… or Archive: opens the job's page with that confirmation
+// (data); off with the reason as its title while the action is unavailable.
+function cardConfirmButton(job: JobRow, action: string, label = `${ACTION_LABELS[action]}…`, data: Record<string, string> = { open: keyOf(job), confirm: action }): HTMLButtonElement {
+  const node = button('btn small', label, data);
   const reason = availability(action, job);
   node.disabled = reason !== '';
   if (reason !== '') {
@@ -712,9 +712,14 @@ function cardConfirmButton(job: JobRow, action: string, label = `${ACTION_LABELS
   return node;
 }
 
+// A card's Merged — archive: confirmed in place on the card, where cardRun arms it, then runs it.
+const cardArmButton = (job: JobRow, action: string): HTMLButtonElement =>
+  armable(cardConfirmButton(job, action, ACTION_LABELS[action], { run: action, key: keyOf(job) }), action, keyOf(job));
+
 // A job on Done (pushed, aborted, failed): its merge request with the link, Create merge request… or
-// Merge… where they apply, Archive (its confirmation on the job's page: the job leaves the board, and
-// its Task file goes to the archive while it is active), and the job's last outcome. Never a primary button.
+// Merge… where they apply, Merged — archive for a pushed job (confirmed in place), Archive (its
+// confirmation on the job's page: the job leaves the board, and its Task file goes to the archive while
+// it is active), and the job's last outcome. Never a primary button (an armed one is, until disarmed).
 function doneFoot(job: JobRow): HTMLElement[] {
   const key = keyOf(job);
   const parts: HTMLElement[] = [];
@@ -725,7 +730,8 @@ function doneFoot(job: JobRow): HTMLElement[] {
   }
   const actions = [canCreateMr(job) ? 'mr-create' : null, canMerge(job) ? 'mr-merge' : null].filter((action) => action !== null);
   const act = el('div', 'act');
-  act.append(...actions.map((action) => cardConfirmButton(job, action)), cardConfirmButton(job, 'archive', ACTION_LABELS.archive));
+  act.append(...actions.map((action) => cardConfirmButton(job, action)), ...(job.state === 'pushed' ? [cardArmButton(job, 'merged-archive')] : []),
+    cardConfirmButton(job, 'archive', ACTION_LABELS.archive));
   return [...parts, act, ...cardOutcome(key, false)];
 }
 

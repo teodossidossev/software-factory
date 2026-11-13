@@ -76,10 +76,12 @@ test('jobActions per state: the shown list in order, the first non-dangerous one
   // pushed: Create merge request without an open or merged one, Merge on an open one, Refresh always
   // (without a record it looks the branch up, SF-200).
   const mr = (state: 'open' | 'merged' | 'closed') => ({ host: 'github' as const, number: 3, url: 'https://github.com/acme/app/pull/3', state });
-  assert.deepEqual(shown(job('pushed')), ['mr-create:Create merge request', 'mr-status:Refresh MR status', 'archive:Archive']);
-  assert.deepEqual(shown(job('pushed', { mr: mr('open') })), ['mr-merge:Merge…', 'mr-status:Refresh MR status', 'archive:Archive']);
-  assert.deepEqual(shown(job('pushed', { mr: mr('merged') })), ['mr-status:Refresh MR status', 'archive:Archive']);
-  assert.deepEqual(shown(job('pushed', { mr: mr('closed') })), ['mr-create:Create merge request', 'mr-status:Refresh MR status', 'archive:Archive']);
+  // Merged — archive right before Archive.
+  const tail = ['merged-archive:Merged — archive', 'archive:Archive'];
+  assert.deepEqual(shown(job('pushed')), ['mr-create:Create merge request', 'mr-status:Refresh MR status', ...tail]);
+  assert.deepEqual(shown(job('pushed', { mr: mr('open') })), ['mr-merge:Merge…', 'mr-status:Refresh MR status', ...tail]);
+  assert.deepEqual(shown(job('pushed', { mr: mr('merged') })), ['mr-status:Refresh MR status', ...tail]);
+  assert.deepEqual(shown(job('pushed', { mr: mr('closed') })), ['mr-create:Create merge request', 'mr-status:Refresh MR status', ...tail]);
 });
 
 test('jobActions per row: each stop shows its row\'s actions in order, each precondition both ways', () => {
@@ -164,6 +166,13 @@ test('availability: every action has an entry, \'\' or its one-line reason, as t
   assert.notEqual(reason(stopped('simplify_offered'), 'accept', { review: FIX }), '');
   assert.equal(reason(job('working'), 'handover'), 'only when the job is ready_for_human_review; it is working.');
   assert.equal(reason(job('working'), 'takeback'), 'only when the job is handed_over; it is working.');
+  // Merged — archive: a handed-over or a pushed job only.
+  for (const state of ['handed_over', 'pushed'] as const) {
+    assert.equal(reason(job(state), 'merged-archive'), '', state);
+  }
+  for (const state of ['starting', 'working', 'awaiting_review', 'preparing_mr', 'needs_human', 'ready_for_human_review', 'paused', 'waiting_limit', 'aborted', 'failed'] as const) {
+    assert.equal(reason(job(state), 'merged-archive'), `only for a handed-over or pushed job; it is ${state}.`, state);
+  }
   assert.equal(reason(job('paused', { paused: { from: 'working', step: 'turn', at: T0 } }), 'say'), 'the job is paused: Resume sends the message.');
   assert.equal(reason(job('waiting_limit', { paused: { from: 'awaiting_review', step: 'review', at: T0 } }), 'say'), 'the job waits for limits: Resume now, then send the message.');
   assert.equal(reason(job('pushed'), 'say'), 'messages need working, awaiting_review, needs_human, ready_for_human_review or handed_over; the job is pushed.');

@@ -46,16 +46,16 @@ const workspace = (name: string, color?: WorkspaceColor) => ({ name, path: `/srv
 
 type Job = ReturnType<typeof job>;
 
-// answer.jobs off leaves later api/jobs reads to the test.
+// answer.jobs off leaves later api/jobs reads to the test; answer.confirm: the details' confirm_actions.
 // globals: names added to the page's context (a localStorage, a matchMedia: SF-119).
-async function openBoard(jobs: Job[], tickets: ReturnType<typeof ticket>[], workspaces = [workspace('app')], hash = '', answer = { jobs: true }, globals: Record<string, unknown> = {}): Promise<Page> {
+async function openBoard(jobs: Job[], tickets: ReturnType<typeof ticket>[], workspaces = [workspace('app')], hash = '', answer: { jobs: boolean; confirm?: string[] } = { jobs: true }, globals: Record<string, unknown> = {}): Promise<Page> {
   const page = await loadPage(STATIC_DIR, (path) => {
     if (path === 'api/jobs') {
       return answer.jobs ? { jobs } : undefined;
     }
     const match = /^api\/jobs\/([^/]+)\/([^/]+)$/.exec(path);
     const found = match ? jobs.find((row) => row.ticket === match[2]) : undefined;
-    return found ? detail(found) : undefined;
+    return found ? { ...detail(found), ...(answer.confirm !== undefined ? { confirm_actions: answer.confirm } : {}) } : undefined;
   }, undefined, globals);
   page.location.hash = hash;
   page.document.dispatch('DOMContentLoaded');
@@ -146,7 +146,7 @@ test('board client: one column per ticket: a pushed one only in Done, a failed o
   // Archive ticket. It opens the job's page with its confirmation; the job's route archives the job
   // and its active Task file.
   assert.deepEqual(labels(card(page, 'app/X-1')), ['Archive']);
-  assert.deepEqual(labels(card(page, 'app/P-1')), ['Create merge request…', 'Archive']);
+  assert.deepEqual(labels(card(page, 'app/P-1')), ['Create merge request…', 'Merged — archive', 'Archive']);
   button(card(page, 'app/P-1'), 'Archive')!.click();
   await page.flush();
   page.streams.at(-1)!.emit('job', detail(jobs[0]!));
@@ -768,22 +768,70 @@ test('board client: the ready card offers Review the MR and push (the job\'s Mer
   assert.equal(onJobPage(page), false);
 });
 
-test('board client: a handed-over card offers Merged another way…, which opens the job page with its confirmation and posts handed-done-merged only from its button', async () => {
+const MERGED_TITLE = 'Marks the job merged and archives it: the worktree is removed and the Task file archived; no branch is checked or deleted. Click twice.';
+
+test('board client: the handed-over card and the pushed Done card offer Merged — archive, confirmed in place: a first click arms it and posts nothing, the 4000 ms timer disarms it, two clicks post merged-archive once; the job page does not open', async () => {
   const handed = job('T-5', 'handed_over', { prepared_commit: 'a'.repeat(40) });
-  const page = await openBoard([handed], []);
-  assert.deepEqual(labels(card(page, 'app/T-5')), ['Review the MR and push', 'Create merge request…', 'Merged another way…']);
-  const merged = button(card(page, 'app/T-5'), 'Merged another way…')!;
-  assert.deepEqual([merged.className, merged.disabled, merged.dataset.open, merged.dataset.confirm], ['btn small', false, 'app/T-5', 'handed-done-merged']);
-  merged.click();
+  const pushed = job('T-6', 'pushed', { prepared_commit: 'b'.repeat(40) });
+  const page = await openBoard([handed, pushed], []);
+  assert.deepEqual(labels(card(page, 'app/T-5')), ['Review the MR and push', 'Create merge request…', 'Merged — archive']);
+  assert.deepEqual(labels(card(page, 'app/T-6')), ['Create merge request…', 'Merged — archive', 'Archive']);
+  const merged = (key: string) => button(card(page, key), 'Merged — archive') ?? button(card(page, key), 'Click again to archive')!;
+  for (const key of ['app/T-5', 'app/T-6']) {
+    const node = merged(key);
+    assert.deepEqual([node.className, node.disabled, node.dataset.run, node.dataset.key, node.getAttribute('title'), node.dataset.open], ['btn small', false, 'merged-archive', key, MERGED_TITLE, undefined], key);
+  }
+  // A first click arms the button: nothing is posted.
+  merged('app/T-5').click();
   await page.flush();
-  page.streams.at(-1)!.emit('job', detail(handed));
+  assert.deepEqual([merged('app/T-5').textContent, merged('app/T-5').classList.contains('primary')], ['Click again to archive', true]);
+  assert.equal(merged('app/T-6').textContent, 'Merged — archive');
+  assert.deepEqual([posts(page).length, onJobPage(page)], [0, false]);
+  // The timer disarms it; a click after it arms again.
+  assert.equal(page.tick(4000), 1);
   await page.flush();
-  assert.deepEqual([page.location.hash, page.$('confirm').hidden, page.$('confirm-title').textContent, page.$('confirm-ok').textContent], ['#app/T-5', false, 'Merged another way app/T-5?', 'Merged another way']);
-  assert.equal(page.$('confirm-text').textContent, 'Mark the job done: you merged its changes yourself under another branch or straight into the main branch. The factory does not check origin.');
+  assert.deepEqual([merged('app/T-5').textContent, merged('app/T-5').classList.contains('primary')], ['Merged — archive', false]);
+  merged('app/T-5').click();
+  await page.flush();
   assert.equal(posts(page).length, 0);
-  page.$('confirm-ok').click();
+  // Arming another replaces it: one armed button at a time.
+  merged('app/T-6').click();
   await page.flush();
-  assert.deepEqual(posts(page).map((request) => [request.path, request.body]), [['api/jobs/app/T-5/handed-done-merged', '{}']]);
+  assert.deepEqual([merged('app/T-5').textContent, merged('app/T-6').textContent], ['Merged — archive', 'Click again to archive']);
+  assert.equal(posts(page).length, 0);
+  // Two clicks on the same button post once.
+  merged('app/T-5').click();
+  await page.flush();
+  merged('app/T-5').click();
+  await page.flush();
+  merged('app/T-5').click();
+  await page.flush();
+  assert.deepEqual(posts(page).map((request) => [request.path, request.body]), [['api/jobs/app/T-5/merged-archive', '{}']]);
+  assert.equal(onJobPage(page), false);
+});
+
+test('board client: on the remote port the second click of Merged — archive opens the ticket dialog first, and posts only with the ticket typed', async () => {
+  const handed = job('T-5', 'handed_over', { prepared_commit: 'a'.repeat(40) });
+  const page = await openBoard([handed], [], [workspace('app')], '', { jobs: true, confirm: ['merged-archive'] });
+  page.streams.at(-1)!.emit('jobs', { jobs: [handed], remote: true });
+  await page.flush();
+  const merged = () => button(card(page, 'app/T-5'), 'Merged — archive') ?? button(card(page, 'app/T-5'), 'Click again to archive')!;
+  merged().click();
+  await page.flush();
+  // The ticket dialog is made on first use: none yet.
+  assert.equal(page.document.getElementById('remote-confirm'), null);
+  merged().click();
+  await page.flush();
+  assert.deepEqual([page.$('remote-confirm').hidden, page.$('remote-confirm-title').textContent, page.$('remote-confirm-text').textContent], [
+    false, 'Type T-5 to continue', 'Merged — archive from another device: it marks the job merged and archives it without asking origin.',
+  ]);
+  assert.equal(posts(page).length, 0);
+  const input = page.$('remote-confirm-input');
+  input.value = 'T-5';
+  input.dispatch('input');
+  page.$('remote-confirm-ok').click();
+  await page.flush();
+  assert.deepEqual(posts(page).map((request) => [request.path, request.body]), [['api/jobs/app/T-5/merged-archive', '{"confirm":"T-5"}']]);
 });
 
 test('board client: a job card opens the job as a full page, following it on the stream; ← Board and Escape go back, the focus on the card', async () => {

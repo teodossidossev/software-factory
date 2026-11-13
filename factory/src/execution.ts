@@ -18,8 +18,8 @@
 //   sandbox's config lock.
 // - execution/control.ts: pause and Resume, the usage-limit park, abort, reset,
 //   Archive, the pass of merged jobs, exclusive, and the requests sf serve queues to a job's runner.
-// - execution/archive.ts: the Archive with the ticket's active Task file, and the pass of merged
-//   jobs (the fetch of the target, the merged check, merged_on_target).
+// - execution/archive.ts: the Archive with the ticket's active Task file, Merged — archive, and the
+//   pass of merged jobs (the host's and the base's signals of a merge, merged_on_target).
 // - execution/status.ts: check and status.
 // - execution/dto.ts: the data shapes Execution's calls return or take.
 // - execution/errors.ts: the codes sf accept and sf retry take on, and the shared refusals.
@@ -297,8 +297,9 @@ export class Execution implements RunnerWork {
     return this.#parts.handover.handedDone(workspaceName, ticket);
   }
 
-  markHandedDone(workspaceName: string, ticket: string): Promise<{ state: JobState; branch: string }> {
-    return this.#parts.handover.markHandedDone(workspaceName, ticket);
+  // Merged — archive (sf handed-done --merged): a handed_over or pushed job marked merged and archived, without asking origin.
+  markMerged(workspaceName: string, ticket: string): Promise<Retired & { state: JobState }> {
+    return this.#parts.control.markMerged(workspaceName, ticket);
   }
 
   checkHandedOver(workspaceName: string, ticket: string, minIntervalMs = 0): Promise<{ state: JobState; branch: string; commit?: string; same_tree?: boolean | null }> {

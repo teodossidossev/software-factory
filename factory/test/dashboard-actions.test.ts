@@ -64,7 +64,7 @@ const ROUTES: Record<RouteName, { body: unknown; call: unknown[]; refresh?: Post
   handover: { body: {}, call: ['handover', 'app', 'T-1'], command: 'handover' },
   takeback: { body: {}, call: ['takeback', 'app', 'T-1'], command: 'takeback' },
   'handed-done': { body: {}, call: ['handedDone', 'app', 'T-1'], command: 'handed-done' },
-  'handed-done-merged': { body: {}, call: ['markHandedDone', 'app', 'T-1'], command: 'handed-done', confirm: true },
+  'merged-archive': { body: {}, call: ['markMerged', 'app', 'T-1'], refresh: 'jobs', command: 'handed-done', confirm: true },
   'mr-save': { body: { title: 't', body: 'b', branch: 'T-1-x' }, call: ['saveMr', 'app', 'T-1', { title: 't', body: 'b', branch: 'T-1-x' }], refresh: 'job' },
   'mr-reset': { body: {}, call: ['resetMr', 'app', 'T-1'], refresh: 'job' },
   'queue-add': { body: { workspace: 'app', ticket: 'T-5', at: 2 }, call: ['add', 'app', 'T-5', 2], refresh: 'setup', command: 'queue-add' },
@@ -85,7 +85,7 @@ test('POST_ROUTES (SF-139): every route as before: its kind, what the pages get 
   assert.deepEqual(ROUTE_NAMES, Object.keys(ROUTES));
   assert.deepEqual(JOB_ROUTES, [
     'approve', 'abort', 'say', 'review', 'retry', 'accept', 'settle', 'simplify', 'archive', 'mr-create', 'mr-merge', 'mr-status', 'pause', 'resume', 'restart', 'handover', 'takeback', 'handed-done',
-    'handed-done-merged', 'mr-save', 'mr-reset',
+    'merged-archive', 'mr-save', 'mr-reset',
   ]);
   for (const name of ROUTE_NAMES) {
     const route = POST_ROUTES[name];
@@ -98,7 +98,7 @@ test('POST_ROUTES (SF-139): every route as before: its kind, what the pages get 
     }
   }
   assert.deepEqual(ROUTE_NAMES.filter((name) => openWhileUpdating(POST_ROUTES[name])), ['mr-status', 'pause']);
-  assert.deepEqual(ROUTE_NAMES.filter((name) => POST_ROUTES[name].confirm === true), ['approve', 'retry', 'archive', 'mr-create', 'mr-merge', 'handed-done-merged']);
+  assert.deepEqual(ROUTE_NAMES.filter((name) => POST_ROUTES[name].confirm === true), ['approve', 'retry', 'archive', 'mr-create', 'mr-merge', 'merged-archive']);
 });
 
 test('dashboard actions (SF-139): every route of POST_ROUTES answers as before: POST only, its body strictly, its one call with the arguments, the result passed through', async () => {
@@ -731,7 +731,7 @@ test('dashboard retry (SF-087): POST only, the action checks, Execution.retryMr 
   });
 });
 
-test('dashboard confirm (SF-126): on the remote port the confirm routes of POST_ROUTES (approve, retry, archive, mr-create, mr-merge and handed-done-merged) need "confirm" equal to the ticket, else 409 confirm_required and nothing runs; locally they run without it; the other job routes need none', async () => {
+test('dashboard confirm (SF-126): on the remote port the confirm routes of POST_ROUTES (approve, retry, archive, mr-create, mr-merge and merged-archive) need "confirm" equal to the ticket, else 409 confirm_required and nothing runs; locally they run without it; the other job routes need none', async () => {
   const remoteOrigin = 'https://pc.tail1234.ts.net';
   const store = await fixture('dash-act-confirm');
   const fake = fakeActions();
@@ -741,7 +741,7 @@ test('dashboard confirm (SF-126): on the remote port the confirm routes of POST_
     const remote = new URL(`http://127.0.0.1:${dashboard.remotePort}/d/${token}/`);
     const headers = { origin: remoteOrigin, 'tailscale-user-login': 'alice@github' };
     const remoteAct = (action: string, body: unknown): Promise<Reply> => act(remote, `api/jobs/app/T-1/${action}`, body, { host: 'pc.tail1234.ts.net', headers });
-    const methods: Record<string, string> = { approve: 'approve', retry: 'retryMr', archive: 'archiveFinished', 'mr-create': 'createMergeRequest', 'mr-merge': 'mergeMergeRequest', 'handed-done-merged': 'markHandedDone' };
+    const methods: Record<string, string> = { approve: 'approve', retry: 'retryMr', archive: 'archiveFinished', 'mr-create': 'createMergeRequest', 'mr-merge': 'mergeMergeRequest', 'merged-archive': 'markMerged' };
     const confirmRoutes = JOB_ROUTES.filter((name) => POST_ROUTES[name].confirm === true);
     assert.deepEqual(confirmRoutes, Object.keys(methods));
     for (const action of confirmRoutes) {

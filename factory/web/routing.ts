@@ -719,11 +719,11 @@ function queueAction(action: string, key: string): void {
   }
 }
 
-// Retry review, Retry and Resume of a Your turn card: posted at once, once.
+// Retry review, Retry and Resume of a Your turn card: posted at once, once; Merged — archive armed first (armOrRun).
 function cardRun(action: string, key: string): void {
   const job = jobByKey(key);
   if (job === null || availability(action, job) !== '' || (action === 'review' && !reviewFailed(job)) || (action === 'retry' && !retryOn(job))) {
     return;
   }
-  void run(action, key, {});
+  armOrRun(action, key);
 }

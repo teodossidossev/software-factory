@@ -85,7 +85,7 @@ test('mr client: Create merge request… on a pushed job, confirmed with the tit
   const page = await open([job('T-1', 'pushed')], '#app/T-1');
   // Refresh MR status without a record looks the branch up.
   assert.deepEqual([state(page, 'mr-create-button'), missing(page, 'mr-merge-button'), state(page, 'mr-status-button'), missing(page, 'mr-line')], [[false, false], true, [false, false], true]);
-  assert.deepEqual(page.$('acts').children.map((button) => button.textContent), ['Create merge request', 'Refresh MR status', 'Archive']);
+  assert.deepEqual(page.$('acts').children.map((button) => button.textContent), ['Create merge request', 'Refresh MR status', 'Merged — archive', 'Archive']);
   page.$('mr-create-button').click();
   assert.equal(page.$('confirm-title').textContent, 'Create merge request app/T-1?');
   assert.equal(page.$('confirm-text').textContent, 'Opens a merge request on GitHub from T-1-demo into main, titled “feat(T-1): Demo”, with the rest of the MR text as its description. One already open for the branch is reused.');
@@ -200,12 +200,12 @@ test('mr client: the board offers Create merge request… on Your turn and Done 
     job('T-4', 'pushed', { mr: { host: 'github', number: 9, url: URL_1, state: 'merged' } }),
   ];
   const page = await open(jobs, '');
-  assert.deepEqual(cardButtons(card(page, 'app/T-1')), ['Merge…', 'Archive']);
+  assert.deepEqual(cardButtons(card(page, 'app/T-1')), ['Merge…', 'Merged — archive', 'Archive']);
   assert.deepEqual(links(card(page, 'app/T-1')).map((element) => element.href), [URL_1]);
   assert.deepEqual(cardButtons(card(page, 'app/T-2')), ['Review the MR and push', 'Create merge request…']);
   const off = card(page, 'app/T-3').all().find((element) => element.tagName === 'BUTTON' && element.textContent === 'Create merge request…')!;
   assert.deepEqual([off.disabled, off.getAttribute('title')], [true, 'the origin URL of the checkout names no GitHub or GitLab repository.']);
-  assert.deepEqual(cardButtons(card(page, 'app/T-4')), ['Archive']);
+  assert.deepEqual(cardButtons(card(page, 'app/T-4')), ['Merged — archive', 'Archive']);
   assert.match(card(page, 'app/T-4').textContent, /#9 merged/);
 
   card(page, 'app/T-1').all().find((element) => element.tagName === 'BUTTON' && element.textContent === 'Merge…')!.click();
@@ -612,7 +612,7 @@ test('mr client (SF-126): from another device (api/jobs remote: true) Merge… a
 
 test('mr client (SF-139): from another device the page asks for the ticket exactly for the detail\'s confirm_actions, the server\'s list; locally never', async () => {
   const opened = job('T-1', 'pushed', { mr: { host: 'github', number: 4, url: URL_1, state: 'open' } });
-  assert.deepEqual(CONFIRM_ACTIONS, ['approve', 'retry', 'archive', 'mr-create', 'mr-merge', 'handed-done-merged']);
+  assert.deepEqual(CONFIRM_ACTIONS, ['approve', 'retry', 'archive', 'mr-create', 'mr-merge', 'merged-archive']);
   const merge = async (page: Page): Promise<void> => {
     page.$('mr-merge-button').click();
     page.$('confirm-ok').click();

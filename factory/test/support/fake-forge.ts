@@ -26,6 +26,8 @@ export interface FakeMr {
   mergeableState: string;
   detailed: string;
   merge_commit: string | null;
+  // When it was merged: set by the merge routes, or by a test to place a merge before or after a job.
+  merged_at?: string;
 }
 
 export interface FakeForge {
@@ -80,16 +82,19 @@ export async function startFakeForge(kind: 'github' | 'gitlab', repoPath: string
         return;
       }
       const input = (body ?? {}) as Record<string, string>;
+      const mergedAt = (mr: FakeMr): string | null => (mr.state === 'merged' ? mr.merged_at ?? new Date().toISOString() : null);
       if (kind === 'github') {
         const pr = (mr: FakeMr) => ({
           number: mr.number, html_url: `https://github.com/${repoPath}/pull/${mr.number}`, state: mr.state === 'open' ? 'open' : 'closed',
-          merged: mr.state === 'merged', merged_at: mr.state === 'merged' ? '2026-11-04T10:00:00Z' : null, draft: mr.draft,
+          merged: mr.state === 'merged', merged_at: mergedAt(mr), draft: mr.draft,
           mergeable: mr.mergeable, mergeable_state: mr.mergeableState, merge_commit_sha: mr.merge_commit ?? 'e'.repeat(40),
           head: { ref: mr.branch, sha: HEAD_SHA }, base: { ref: mr.base }, title: mr.title, body: mr.body,
         });
         if (req.method === 'GET' && path === `${github}/pulls`) {
           const head = url.searchParams.get('head');
-          const found = fake.mrs.filter((mr) => mr.state === 'open' && `${repoPath.split('/')[0]}:${mr.branch}` === head && mr.base === url.searchParams.get('base')).map(pr);
+          // state=closed: the closed and the merged ones; without it or open: the open ones.
+          const states = url.searchParams.get('state') === 'closed' ? ['closed', 'merged'] : ['open'];
+          const found = fake.mrs.filter((mr) => states.includes(mr.state) && `${repoPath.split('/')[0]}:${mr.branch}` === head && mr.base === url.searchParams.get('base')).map(pr);
           send(200, url.searchParams.get('direction') === 'desc' ? found.reverse() : found);
           return;
         }
@@ -119,6 +124,7 @@ export async function startFakeForge(kind: 'github' | 'gitlab', repoPath: string
           }
           mr.state = 'merged';
           mr.merge_commit = MERGE_SHA;
+          mr.merged_at = new Date().toISOString();
           send(200, { sha: MERGE_SHA, merged: true, message: 'Pull Request successfully merged' });
           return;
         }
@@ -132,10 +138,12 @@ export async function startFakeForge(kind: 'github' | 'gitlab', repoPath: string
       const mrJson = (mr: FakeMr) => ({
         iid: mr.number, web_url: `${fake.url}/${repoPath}/-/merge_requests/${mr.number}`, state: mr.state === 'open' ? 'opened' : mr.state,
         draft: mr.draft, detailed_merge_status: mr.detailed, merge_commit_sha: mr.merge_commit, head_pipeline: { status: 'success' },
-        source_branch: mr.branch, target_branch: mr.base, title: mr.title, description: mr.body,
+        source_branch: mr.branch, target_branch: mr.base, title: mr.title, description: mr.body, merged_at: mergedAt(mr),
       });
       if (req.method === 'GET' && path === `${gitlab}/merge_requests`) {
-        const found = fake.mrs.filter((mr) => mr.state === 'open' && mr.branch === url.searchParams.get('source_branch') && mr.base === url.searchParams.get('target_branch')).map(mrJson);
+        // state=merged: the merged ones; without it or opened: the open ones.
+        const wanted = url.searchParams.get('state') === 'merged' ? 'merged' : 'open';
+        const found = fake.mrs.filter((mr) => mr.state === wanted && mr.branch === url.searchParams.get('source_branch') && mr.base === url.searchParams.get('target_branch')).map(mrJson);
         send(200, url.searchParams.get('sort') === 'desc' ? found.reverse() : found);
         return;
       }
@@ -161,6 +169,7 @@ export async function startFakeForge(kind: 'github' | 'gitlab', repoPath: string
         }
         mr.state = 'merged';
         mr.merge_commit = MERGE_SHA;
+        mr.merged_at = new Date().toISOString();
         send(200, mrJson(mr));
         return;
       }

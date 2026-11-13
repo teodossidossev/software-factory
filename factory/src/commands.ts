@@ -203,8 +203,8 @@ export const COMMANDS = {
   },
   handedDone: {
     name: 'handed-done', args: ['<workspace>', '<ticket>'], flags: ['--merged'],
-    description: 'I opened the MR myself: the job is pushed once origin has the branch with your changes (handed_over); --merged (Merged another way): you merged the changes yourself under another branch or straight into the main branch, and the job is pushed without asking origin',
-    run: (s, [w = '', t = ''], flags) => (flags.merged === true ? s.execution.markHandedDone(w, t) : s.execution.handedDone(w, t)),
+    description: 'I opened the MR myself: the job is pushed once origin has the branch with your changes (handed_over); --merged (Merged — archive): you merged the changes (any way, the branch may be gone): the job (handed_over or pushed) is marked merged and archived without asking origin',
+    run: (s, [w = '', t = ''], flags) => (flags.merged === true ? s.execution.markMerged(w, t) : s.execution.handedDone(w, t)),
   },
   abort: {
     name: 'abort', args: ['<workspace>', '<ticket>'], flags: ['--discard'],

@@ -175,7 +175,7 @@ export function openStream(url: URL): Promise<Stream> {
 export type Call = ['start', string, string] | ['approve', string, string] | ['abort', string, string, boolean] | ['say', string, string, string] | ['retryReview', string, string] | ['retryMr', string, string] | ['acceptGate', string, string] | ['settle', string, string, string, string, string] | ['archiveFinished', string, string]
   | ['createMergeRequest', string, string] | ['mergeMergeRequest', string, string] | ['mergeRequestStatus', string, string] | ['simplify', string, string]
   | ['pause', string, string] | ['resumePaused', string, string, string] | ['restart', string, string, boolean]
-  | ['handover', string, string] | ['takeback', string, string] | ['handedDone', string, string] | ['markHandedDone', string, string] | ['checkHandedOver', string, string, number]
+  | ['handover', string, string] | ['takeback', string, string] | ['handedDone', string, string] | ['markMerged', string, string] | ['checkHandedOver', string, string, number]
   | ['mergeRequestView', string, string] | ['saveMr', string, string, MrInput] | ['resetMr', string, string]
   | ['openMergeRequests', string] | ['mergeRequestThreads', string, number];
 
@@ -214,7 +214,7 @@ export function fakeActions(answer: unknown = { state: 'pushed', branch: 'T-1-de
     handover: (workspace, ticket) => reply(['handover', workspace, ticket]),
     takeback: (workspace, ticket) => reply(['takeback', workspace, ticket]),
     handedDone: (workspace, ticket) => reply(['handedDone', workspace, ticket]),
-    markHandedDone: (workspace, ticket) => reply(['markHandedDone', workspace, ticket]),
+    markMerged: (workspace, ticket) => reply(['markMerged', workspace, ticket]),
     // The job detail's push check (SF-073): recorded, and answered with the job unchanged.
     checkHandedOver: async (workspace, ticket, minIntervalMs) => {
       fake.calls.push(['checkHandedOver', workspace, ticket, minIntervalMs ?? 0]);

@@ -3,7 +3,7 @@
 // words of each stop) has exactly the keys of src/stops.ts's table, usage_limit and other included.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { STOP_CODES } from '../src/stops.js';
+import { SETTLE_LABELS, STOP_CODES } from '../src/stops.js';
 import { readScripts } from './support/fake-dom.js';
 
 // Every script of the page, in load order, as one text: the files written by hand (SF-146: web/*.ts
@@ -33,4 +33,10 @@ test('stops client: the keys of the page\'s STOPS are the table\'s, usage_limit 
   assert.ok(keys.includes('usage_limit') && keys.includes('other'));
   // Only the words: a stop's kind is the payload's stop_kind.
   assert.doesNotMatch(block, /\bkind:/);
+});
+
+test('stops client (SF-203): the page\'s SETTLE_LABELS are the words of src/stops.ts\'s, which the explanation\'s answers name', async () => {
+  const labels = /^const SETTLE_LABELS = \{ accept: '([^']+)', fix: '([^']+)' \} as const;$/m.exec(await pageSource());
+  assert.ok(labels !== null, 'a script has const SETTLE_LABELS');
+  assert.deepEqual({ accept: labels[1], fix: labels[2] }, SETTLE_LABELS);
 });

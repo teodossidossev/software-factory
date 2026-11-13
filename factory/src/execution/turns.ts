@@ -422,14 +422,8 @@ export class TurnsPart {
     if (fix.items.length > 0) {
       // The lead line names the user's decisions only; open entries carried along keep their ids.
       const decided = fix.items.filter((item) => item.userNote !== undefined).map((item) => item.id).join(', ');
-      try {
-        await this.fix(job, fixContent(`The user settled the stop (${job.error?.code}): ${decided} to fix.`, fix.items, 'the user'), { ledger: fix.ledger, fromStop: true });
-      } catch (error) {
-        if (error instanceof FactoryError && error.code === 'iteration_limit') {
-          return 'needs_human';
-        }
-        throw error;
-      }
+      // The user decided this Fix: SF_MAX_ITERATIONS does not stop it, only the next review's.
+      await this.fix(job, fixContent(`The user settled the stop (${job.error?.code}): ${decided} to fix.`, fix.items, 'the user'), { ledger: fix.ledger, fromStop: true, byUser: true });
       return 'working';
     }
     if (job.worktree === null || !(await exists(job.worktree))) {
@@ -483,9 +477,10 @@ export class TurnsPart {
   // title: the section's title after its number (## Fix N: Simplify).
   // overLimit: written even at SF_MAX_ITERATIONS (Simplify, once per job).
   // fromTests: the Tests Fix of a failed test run, from preparing_mr.
+  // byUser: the Fix of the user's Must fix on a resuming settle, written even at SF_MAX_ITERATIONS.
   async fix(current: Job, content: string, options: FixOptions = {}): Promise<{ iteration: number; check_after_minutes: number }> {
-    const { counts = {}, ledger, fromStop = false, title, fromTests = false } = options;
-    const overLimit = options.overLimit === true || fromTests;
+    const { counts = {}, ledger, fromStop = false, title, fromTests = false, byUser = false } = options;
+    const overLimit = options.overLimit === true || fromTests || byUser;
     let job = current;
     const { workspace: workspaceName, ticket } = job;
     if (fromTests) {
@@ -517,7 +512,7 @@ export class TurnsPart {
     const fix = job.iteration;
     // A change made while the job was paused, before the factory's own Fix section.
     const change = job.task_sha256 === undefined || job.worktree === null ? undefined : await this.#peers.control.taskChange(workspace, job);
-    await appendFix(workspace, ticket, fix, content, title, { record: (sha256) => this.#history.append(workspaceName, ticket, { kind: 'fix_added', by: 'factory', sha256, fix }) });
+    await appendFix(workspace, ticket, fix, content, title, { record: (sha256) => this.#history.append(workspaceName, ticket, { kind: 'fix_added', by: byUser ? 'you' : 'factory', sha256, fix }) });
     if (ledger !== undefined) {
       await this.#store.jobs.writeLedger(workspaceName, ticket, ledger);
     }

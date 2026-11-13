@@ -118,6 +118,39 @@ test('escalation: sf settle fix writes the next Fix section with the user\'s dec
   }
 });
 
+test('escalation at the Fix round limit: sf settle fix runs the Fix the user decided (recorded as theirs), no iteration_limit stop; the next review\'s fix verdict meets the limit again', async () => {
+  const env = await newEnv('ledger-userfix-limit', { SF_REVIEW: 'on', SF_MAX_ITERATIONS: '1' });
+  const repo = await newRepo(env, 'ledger-userfix-limit-repo', false);
+  await putTask(env, repo, 'L-12', 'Greet the reader');
+  await script(env, [
+    { write: { 'README.md': 'hello world\n' }, text: 'Report of iteration 1' },
+    { write: { 'README.md': 'hello world!\n' }, text: '| R1 | escalated | Which language? |' },
+    { write: { 'README.md': 'hallo Leser\n' }, text: '| R1 | fixed | German now. |' },
+  ]);
+  const later = { ...ITEM, path: 'a.txt', problem: 'Missing.', expected: 'A file.' };
+  await reviewScript(env, [{ output: FIX }, { output: { ...FIX, items: [later] } }]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'L-12' });
+    assert.equal((await waitFor(served, 'L-12', 'needs_human', 2)).error.code, 'escalated');
+    const jobs = new JobStore(env.state);
+    assert.equal((await jobs.read('app', 'L-12'))!.fixes, 1);
+    const settled = await runCli(env, ['settle', 'app', 'L-12', 'R1', 'fix', 'German.']);
+    assert.equal(settled.code, 0, settled.stderr);
+    assert.match(settled.stdout, /state: working/);
+    // The Fix ran and its review's fix verdict stops the job at the limit, as before.
+    const limited = await waitFor(served, 'L-12', 'needs_human', 3);
+    assert.equal(limited.error.code, 'iteration_limit');
+    assert.match(await taskFile(repo, 'L-12'), /## Fix 2\n\nReview by the user: The user settled the stop \(escalated\): R1 to fix\./);
+    assert.ok(!(await taskFile(repo, 'L-12')).includes('## Fix 3'));
+    assert.equal((await jobs.read('app', 'L-12'))!.fixes, 2);
+    const history = (await readFile(join(env.state, 'tickets', 'app', 'L-12', 'history.jsonl'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as { kind: string; by: string; fix?: number });
+    assert.deepEqual(history.filter((event) => event.kind === 'fix_added').map((event) => [event.fix, event.by]), [[1, 'factory'], [2, 'you']]);
+  } finally {
+    await stop(served);
+  }
+});
+
 test('escalation with a second open major: accepting R1 runs the stopped review again, no Fix by the user; its clean verdict (the gate off: it decides) settles R2', async () => {
   const env = await newEnv('ledger-escalate-open', { SF_REVIEW: 'on' });
   const repo = await newRepo(env, 'ledger-escalate-open-repo', false);

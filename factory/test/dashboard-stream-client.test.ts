@@ -491,6 +491,82 @@ test('stream client: the stop block of every needs_human code: its label (a deci
   }
 });
 
+// SF-203: a written explanation of the job's stop (src/explain.ts's record).
+const explanationOf = (row: Row) => ({
+  stop: { at: row.updated_at, code: (row.error as { code: string }).code }, model: 'sonnet', language: 'English', started_at: row.updated_at, ended_at: at(6), cost_usd: 0.01, error: null,
+  output: { headline: 'Decide R1.', explanation: 'It asks which language.', choices: [{ choice: 'The Must fix button next to R1', effect: 'It is fixed.', recommended: true }], recommendation: 'Must fix.' },
+});
+const children = (node: FakeElement): FakeElement[] => node.children as FakeElement[];
+
+test('stream client (SF-203): under a written explanation each offered entry stays in sight in one line with its note, Accept risk and Must fix; Details holds the sentence, the full texts and the raw message, without buttons', async () => {
+  const message = 'The Implementer escalated R1: only you know the answer.';
+  const row = stopped('escalated', { stop: { items: [{}], saves_lines: null }, message });
+  const ledger = [ledgerEntry('R1', 'escalated', { problem: 'Problem of R1.\nIts second line.', response: 'Which language?' }), ledgerEntry('R2', 'fixed')];
+  const page = await withEntries(row, detail(row, { ledger, explanation: explanationOf(row) }), [state('2', 'working', 'needs_human', 'escalated', 'x', 9)]);
+  const block = page.$('stopblock');
+  // Details closed: the box, the entry to settle, the toggle.
+  assert.deepEqual(children(block).map((child) => child.className), ['bh', 'explain', 'findings', 'linkish']);
+  assert.equal(byClass(block, 'stop-details').length, 0);
+  const finding = children(children(block)[2]!)[0]!;
+  assert.deepEqual([finding.dataset.id, finding.className, finding.textContent], ['R1', 'finding compact', 'R1majorREADME.mdProblem of R1.Accept riskMust fix']);
+  // The file button stays in sight too.
+  assert.equal(byClass(finding, 'pathlink')[0]!.tagName, 'BUTTON');
+  assert.equal(finding.querySelector('input')!.getAttribute('aria-label'), 'Note on R1');
+  buttonIn(block, 'Must fix').click();
+  await page.flush();
+  assert.deepEqual(sent(page), [['settle', { id: 'R1', decision: 'fix', note: '' }]]);
+  // Opened: the technical text, no settle button in it.
+  buttonIn(page.$('stopblock'), 'Details').click();
+  await page.flush();
+  const more = byClass(page.$('stopblock'), 'stop-details')[0]!;
+  assert.equal(children(more)[0]!.textContent, 'The Implementer asks you about 1 finding. Answer each: Accept risk or Must fix.');
+  assert.match(more.textContent, /Its second line\.The Implementer asks: Which language\?/);
+  assert.deepEqual([children(more).at(-1)!.tagName, children(more).at(-1)!.textContent], ['PRE', message]);
+  assert.equal(more.all().filter((node) => node.tagName === 'BUTTON' && /Accept risk|Must fix/.test(node.textContent)).length, 0);
+  // Without the explanation the block is as before: the sentence and the full entry with its buttons.
+  await update(page, row, detail(row, { ledger }));
+  assert.match(page.$('stopblock').textContent, /Problem of R1\.\nIts second line\.The Implementer asks: Which language\?Accept riskMust fix$/);
+});
+
+test('stream client (SF-203, Fix 1): under a written explanation the findings of gate_rounds, iteration_limit and review_churn stay in sight in one line each with their file button; Details holds their full texts', async () => {
+  const cases: Array<[string, Record<string, unknown>, Record<string, unknown>, string, RegExp]> = [
+    ['gate_rounds', { gate_fixes: 3, stop: { items: [{}], saves_lines: null } }, { iterations: [iteration(1, { review: CLEAN, gate: GATE_FIX })] },
+      '#1majorREADME.mdIt greets the world.', /It greets the world\.Expected: It greets the reader\./],
+    ['iteration_limit', { fixes: 3, stop: { items: [ledgerEntry('R4', 'open')], saves_lines: null } }, { iterations: [iteration(1, { review: CLAUDE_FIX })], ledger: [ledgerEntry('R4', 'open')] },
+      'R4majorREADME.mdProblem of R4.', /Problem of R4\.Expected: Better\./],
+    // An open churn entry is not offered to settle: its row has no settle button, but its file stays in sight.
+    ['review_churn', { stop: { items: [{}], saves_lines: null } }, { iterations: [iteration(1, { review: CLEAN })], ledger: [ledgerEntry('R1', 'open'), ledgerEntry('R2', 'fixed')] },
+      'R1majorREADME.mdProblem of R1.', /Problem of R1\.Expected: Better\./],
+  ];
+  for (const [code, jobExtra, detailExtra, line, full] of cases) {
+    const row = stopped(code, jobExtra);
+    const page = await withEntries(row, detail(row, { ...detailExtra, explanation: explanationOf(row) }), [state('2', 'working', 'needs_human', code, 'x', 9)]);
+    const block = page.$('stopblock');
+    assert.deepEqual(children(block).map((child) => child.className), ['bh', 'explain', 'findings', 'linkish'], code);
+    assert.equal(byClass(block, 'stop-details').length, 0, code);
+    const finding = children(children(block)[2]!)[0]!;
+    assert.deepEqual([finding.className, finding.textContent], ['finding compact', line], code);
+    assert.deepEqual(byClass(finding, 'pathlink').map((node) => [node.tagName, node.textContent]), [['BUTTON', 'README.md']], code);
+    buttonIn(block, 'Details').click();
+    await page.flush();
+    assert.match(byClass(page.$('stopblock'), 'stop-details')[0]!.textContent, full, code);
+  }
+});
+
+test('stream client (SF-203): a simplify_offered stop under a written explanation keeps its suggestions (with their file buttons) in sight and Simplify and Skip in the composer; Details holds the sentence and the raw message', async () => {
+  const row = stopped('simplify_offered', { iteration: 1, stop: { items: [SUGGESTION], saves_lines: 3 } });
+  const page = await withEntries(row, detail(row, { iterations: [iteration(1, { review: CLEAN, simplify: SIMPLIFY })], explanation: explanationOf(row) }), [state('2', 'working', 'needs_human', 'simplify_offered', 'x', 9)]);
+  const block = page.$('stopblock');
+  assert.deepEqual(children(block).map((child) => child.className), ['bh', 'explain', 'findings', 'linkish']);
+  assert.match(children(block)[2]!.textContent, /^#1src\/guard\.tsThe second guard\.Why: The first one covers it\.saves about 3 lines$/);
+  assert.ok(byClass(block, 'pathlink').length === 1);
+  assert.deepEqual(labels(page), ['Simplify', 'Skip', 'Send', 'Abort…']);
+  buttonIn(block, 'Details').click();
+  await page.flush();
+  const more = byClass(page.$('stopblock'), 'stop-details')[0]!;
+  assert.deepEqual(children(more).map((child) => child.textContent), ['The simplification pass suggests 1 change (saves about 3 lines). Simplify or skip.', 'The first line.\nThe second line.']);
+});
+
 test('stream client (SF-128): a test run is one entry, running and then its result joined by run, its output behind the toggle; an Accept shows on its own; the Accept confirmation names the command', async () => {
   const run = at(20);
   const started: Entry = { k: '0', ts: at(20), it: 1, who: 'factory', t: 'tests', run, command: 'npm test' };

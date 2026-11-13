@@ -1635,14 +1635,14 @@ interface FindingLike {
   expected?: unknown;
 }
 // A finding of a verdict or a Fix section: its ledger id (or #n), severity, path, problem and what
-// is expected.
-function findingHtml(item: FindingLike, index: number, it: unknown): HTMLElement {
-  const node = el('li', 'finding');
+// is expected; compact (under a stop's explanation): the problem's first line only.
+function findingHtml(item: FindingLike, index: number, it: unknown, compact = false): HTMLElement {
+  const node = el('li', compact ? 'finding compact' : 'finding');
   node.append(el('span', 'fid', typeof item.id === 'string' && item.id !== '' ? item.id : `#${index + 1}`), severityTag(item.severity), pathLink(item.path, it));
   const problem = el('div', 'problem');
-  problem.append(...prose(item.problem));
+  problem.append(...prose(compact ? firstLine(item.problem) : item.problem));
   node.append(problem);
-  if (typeof item.expected === 'string' && item.expected !== '') {
+  if (!compact && typeof item.expected === 'string' && item.expected !== '') {
     const expected = el('div', 'expected');
     expected.append('Expected: ', ...prose(item.expected));
     node.append(expected);
@@ -1899,15 +1899,17 @@ const noteKey = (id: string | undefined): string => `${state.key}/${id}`;
 
 // One ledger entry of a stop: the id, severity, path and problem, what the Implementer said, a
 // dispute's reason, and, when the server offers it to settle (offered: one of settle_ids),
-// Accept risk / Must fix with a note; a settled one shows its decision.
-function ledgerFinding(entry: LedgerEntry, busy: string, offered: boolean): HTMLElement {
-  const node = el('li', 'finding');
+// Accept risk / Must fix with a note; a settled one its decision. compact: the problem's first line.
+function ledgerFinding(entry: LedgerEntry, busy: string, offered: boolean, compact = false): HTMLElement {
+  const node = el('li', compact ? 'finding compact' : 'finding');
   node.dataset.id = entry.id;
   node.append(el('span', 'fid', entry.id), severityTag(entry.severity), pathLink(entry.path, entry.iteration > 0 ? entry.iteration : null));
   const problem = el('div', 'problem');
-  problem.append(...prose(entry.problem));
+  problem.append(...prose(compact ? firstLine(entry.problem) : entry.problem));
   node.append(problem);
-  if (entry.status === 'escalated') {
+  if (compact) {
+    // The full texts are under the stop's Details.
+  } else if (entry.status === 'escalated') {
     node.append(el('div', 'expected', `The Implementer asks: ${entry.response}`));
   } else if (entry.status === 'contested' || (entry.dispute !== null && entry.dispute !== undefined)) {
     node.append(el('div', 'expected', `The Implementer contests it: ${entry.response}`), el('div', 'expected', `Evidence: ${entry.evidence || 'none given'}`));
@@ -1919,20 +1921,15 @@ function ledgerFinding(entry: LedgerEntry, busy: string, offered: boolean): HTML
   }
   const decide = el('div', 'decide');
   if (entry.settled !== null && entry.settled !== undefined) {
-    decide.append(el('span', 'decided', entry.settled.decision === 'accept' ? 'Accepted risk' : 'Must fix'));
-    if (entry.settled.note) {
-      decide.append(el('span', 'muted', entry.settled.note));
-    }
+    decide.append(el('span', 'decided', entry.settled.decision === 'accept' ? 'Accepted risk' : SETTLE_LABELS.fix), ...(entry.settled.note ? [el('span', 'muted', entry.settled.note)] : []));
   } else if (offered) {
     const note = el('input', 'note');
-    note.type = 'text';
-    note.placeholder = 'Note (optional)';
-    note.value = state.notes.get(noteKey(entry.id)) ?? '';
+    Object.assign(note, { type: 'text', placeholder: 'Note (optional)', value: state.notes.get(noteKey(entry.id)) ?? '' });
     note.dataset.note = entry.id;
     note.setAttribute('aria-label', `Note on ${entry.id}`);
     decide.append(note);
-    for (const [text, decision] of [['Accept risk', 'accept'], ['Must fix', 'fix']] as const) {
-      const choice = button('btn small', text, { settle: `${entry.id}:${decision}` });
+    for (const decision of ['accept', 'fix'] as const) {
+      const choice = button('btn small', SETTLE_LABELS[decision], { settle: `${entry.id}:${decision}` });
       choice.disabled = busy !== '';
       if (busy !== '') {
         choice.setAttribute('title', busy);
@@ -1955,15 +1952,21 @@ function stopLedger(detail: JobDetail, code: string, since: string | null): Ledg
 }
 
 // What the stop block shows for its code (the Task's table): the suggestions, the entries to
-// settle, the findings, the gate's tokens, an error or the message.
-function stopInline(job: JobRow, detail: JobDetail | null, entry: StateEntry): HTMLElement[] {
+// settle, the findings, the gate's tokens, an error or the message. Under an explanation, 'controls'
+// is what holds buttons, kept in sight (the suggestions; the ledger entries and the findings,
+// compact), and 'text' the rest, under Details.
+function stopInline(job: JobRow, detail: JobDetail | null, entry: StateEntry, shown: 'all' | 'controls' | 'text' = 'all'): HTMLElement[] {
   const code = job.stop_code ?? 'other';
+  const buttons = ['simplify_offered', 'escalated', 'review_disputed', 'review_churn', 'gate_rounds', 'iteration_limit'].includes(code);
+  if ((shown === 'controls' && !buttons) || (shown === 'text' && code === 'simplify_offered')) {
+    return [];
+  }
   const message = typeof job.error?.message === 'string' ? job.error.message : '';
   const whole = (): HTMLElement[] => (message === '' ? [] : [el('pre', 'raw', message)]);
   const last = detail === null ? null : iterationOf(detail, job.iteration);
   const findings = (items: readonly FindingLike[]): HTMLElement[] => {
     const list = el('ul', 'findings');
-    list.append(...items.map((item, index) => findingHtml(item, index, job.iteration)));
+    list.append(...items.map((item, index) => findingHtml(item, index, job.iteration, shown === 'controls')));
     return items.length === 0 ? [] : [list];
   };
   switch (code) {
@@ -1977,14 +1980,14 @@ function stopInline(job: JobRow, detail: JobDetail | null, entry: StateEntry): H
       if (detail === null) {
         return [];
       }
+      const offered = new Set(Array.isArray(detail.settle_ids) ? detail.settle_ids : []);
       const entries = stopLedger(detail, code, entry.ts);
       if (entries.length === 0) {
-        return [el('div', 'muted', 'No ledger entry is left to settle.')];
+        return shown === 'controls' ? [] : [el('div', 'muted', 'No ledger entry is left to settle.')];
       }
       const busy = availability('settle', detail.job);
       const list = el('ul', 'findings');
-      const offered = new Set(Array.isArray(detail.settle_ids) ? detail.settle_ids : []);
-      list.append(...entries.map((item) => ledgerFinding(item, busy, offered.has(item.id))));
+      list.append(...entries.map((item) => ledgerFinding(item, busy, shown !== 'text' && offered.has(item.id), shown === 'controls')));
       return [list];
     }
     case 'gate_rounds':
@@ -2045,24 +2048,22 @@ function stopBlock(entry: StateEntry, live: boolean): HTMLElement {
   }
   block.id = 'stopblock';
   const detail = shownDetail();
-  const technical = [el('div', '', stop.sentence(job)), ...stopInline(job, detail, entry)];
   const explained = stopExplanation(job, detail);
-  if (explained === null) {
-    block.append(...technical);
+  block.append(...(explained === null ? [] : [explanationBox(explained)]));
+  if (explained === null || explained.output === null) {
+    // None, or still being written: the content stays as it is.
+    block.append(el('div', '', stop.sentence(job)), ...stopInline(job, detail, entry));
     return block;
   }
-  block.append(explanationBox(explained));
-  if (explained.output === null) {
-    // Still being written: the technical content stays as it is.
-    block.append(...technical);
-    return block;
-  }
-  // The technical content under Details, collapsed until opened.
+  // What the user acts on stays in sight; the technical content (the sentence, the full texts, the
+  // raw message) is under Details, collapsed until opened.
   const key = `${entry.k}/details`;
-  block.append(toggleButton(key, ui.open.has(key) ? 'Hide details' : 'Details'));
+  block.append(...stopInline(job, detail, entry, 'controls'), toggleButton(key, ui.open.has(key) ? 'Hide details' : 'Details'));
   if (ui.open.has(key)) {
     const more = el('div', 'stop-details');
-    more.append(...technical);
+    const text = stopInline(job, detail, entry, 'text');
+    const message = String(job.error?.message ?? '');
+    more.append(el('div', '', stop.sentence(job)), ...text, ...(message === '' || text.some((node) => node.textContent === message) ? [] : [el('pre', 'raw', message)]));
     block.append(more);
   }
   return block;

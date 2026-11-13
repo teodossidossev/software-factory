@@ -251,8 +251,12 @@ ask you a question between Start and your own review, so leave no decision open.
 - **`lands_after:`**: the tickets this one needs merged first (`APP-11`, or `my-api/API-7` in
   another workspace). The queue waits for them; when the ticket needs their code, set `base` to
   their branch or wait for the merge.
-- **Size**: about one merge request; roughly 20 to 30 files is a soft limit. Split bigger work into
-  several Task files with `lands_after` between them.
+- **Size**: cut a solution into slices by kind of change: mechanical, preparation, change (the
+  thinnest working path, then one axis of widening per slice), the switch, cleanup. A change or
+  switch slice stays within about 400 changed lines, tests included, and 10 files; the other kinds
+  have no limit but hold only their kind. Prefer slices that start from the base branch and can
+  merge in any order; use `base:` and `lands_after` only when a slice needs another's code or must
+  not merge first. The method is the Handbook's `## Slicing a solution`.
 - **Lean**: about 800 words for a change under 300 lines, 1,200 words up to 1,000 lines; split
   anything larger. A lean Task holds the goal and agreed basis, the decisions, the behaviour as
   outcomes, what is out of scope, the tests as cases, the acceptance, `scope:` and a Review brief.

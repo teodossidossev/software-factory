@@ -131,7 +131,7 @@ export const JOB_TRANSITIONS: readonly JobTransition[] = Object.freeze([
   ...rows('push', ['needs_human', 'ready_for_human_review', 'handed_over'], ['pushed']),
   ...rows('push', ['needs_human', 'ready_for_human_review'], ['needs_human']),
   ...rows('pushed_by_user', ['handed_over'], ['pushed']),
-  // Merged another way: the user says they merged the changes themselves; origin is not asked.
+  // Merged — archive (or the pass of merged jobs) on a handed-over job: the user merged the changes; origin is not asked.
   ...rows('marked_done', ['handed_over'], ['pushed']),
   ...rows('abort', JOB_STATES.filter((state) => !TERMINAL_STATES.includes(state)), ['aborted']),
   ...rows('pause', ['working', 'awaiting_review'], ['paused']),
@@ -505,8 +505,8 @@ export type EventRecord = { ts: string; iteration: number } & (
   | import('./skills.js').SkillsEvent | { type: 'skill_missing'; skill: string }
   // The merge check before sf mr merge (src/merge-check.ts): its last base commit (null: none), how it ended.
   | { type: 'merge_checked'; base_commit: string | null; outcome: 'passed' | 'failed' | 'conflict' | 'timed_out' | 'aborted'; duration_ms: number }
-  // sf serve's pass of merged jobs found the pushed commit on the target's history, then archived the job.
-  | { type: 'merged_on_target'; commit: string; target: string }
+  // Landed on the target, then archived; how (absent: base): the pass found commit on the target, the host said merge request mr merged, or the user's Merged — archive.
+  | { type: 'merged_on_target'; commit: string | null; target: string; how?: 'base' | 'host' | 'user'; mr?: number }
 );
 
 // The bound of one reviewer event or message in events.jsonl, in bytes of its JSON.

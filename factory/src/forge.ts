@@ -1,7 +1,7 @@
 // The Git host's merge requests: GitHub (github.com, REST API v3) and GitLab (gitlab.com or the
 // host of SF_GITLAB_URL, REST API v4), chosen from the workspace checkout's origin URL. Opens a
 // pull request / merge request from the job's branch into its base (or reuses the open one), reads
-// its state and merges it through the host's API; finds the open ones of a branch (GET only); lists
+// its state and merges it through the host's API; finds the open and the merged ones of a branch (GET only); lists
 // the open ones and reads one's review threads (src/forge-comments.ts); nothing is pushed or forced here. The tokens
 // come from the environment file (SF_GITHUB_TOKEN, SF_GITLAB_TOKEN); each goes only in the
 // Authorization header of a request to its own host's API, redirects are refused, and no message
@@ -110,6 +110,8 @@ export interface MergeRequestStatus extends MergeRequest {
   merge_commit?: string;
 }
 
+export type MergedRequest = MergeRequest & { merged_at: string; merge_commit?: string };
+
 export interface Forge {
   readonly kind: ForgeKind;
   // "GitHub" or "GitLab <host>", for messages.
@@ -119,6 +121,10 @@ export interface Forge {
   // Read only (GET): every open merge request from branch into base, newest created first, read page
   // by page to the last; an entry the host answers for another branch or base is dropped.
   findOpen(branch: string, base: string): Promise<MergeRequest[]>;
+  // Read only (GET), for the pass of merged jobs: every merged merge request from branch into base,
+  // read page by page to the last, latest merged_at first; an entry of another branch, base or (GitLab)
+  // project, or without merged_at, is dropped. merge_commit: the host's merge (GitLab: or squash) commit.
+  findMerged(branch: string, base: string): Promise<MergedRequest[]>;
   status(number: number): Promise<MergeRequestStatus>;
   // Merges an open, mergeable merge request; mr_not_open or mr_not_mergeable (the host's reason)
   // otherwise. GitHub: merge method merge with the host's commit title; GitLab: PUT .../merge.
@@ -345,6 +351,19 @@ function numbered(client: HostClient, data: Json, key: 'number' | 'iid', urlKey:
   return { number, url, state };
 }
 
+// A merged entry of a list: its merged_at (a time) and merge commit; undefined without merged_at.
+function mergedEntry(client: HostClient, data: Json, key: 'number' | 'iid', urlKey: 'html_url' | 'web_url', commit: string | undefined): MergedRequest | undefined {
+  const mergedAt = str(data.merged_at);
+  if (mergedAt === undefined || !Number.isFinite(Date.parse(mergedAt))) {
+    return undefined;
+  }
+  return { ...numbered(client, data, key, urlKey, 'merged'), merged_at: mergedAt, ...(commit !== undefined ? { merge_commit: commit } : {}) };
+}
+
+// The latest merged first.
+const latestMerged = (list: Array<MergedRequest | undefined>): MergedRequest[] =>
+  list.filter((entry): entry is MergedRequest => entry !== undefined).sort((a, b) => Date.parse(b.merged_at) - Date.parse(a.merged_at));
+
 // "2 passed, 1 failed, 1 running" from GitHub's check runs.
 function checkSummary(runs: Json[]): string | undefined {
   if (runs.length === 0) {
@@ -370,11 +389,18 @@ function githubForge(client: HostClient, path: string): Forge {
     const list = await allPages(client, `${base}/pulls?${query}`, 'list the pull requests');
     return list.filter((pr) => asRecord(pr.head).ref === branch && asRecord(pr.base).ref === target).map((pr) => numbered(client, pr, 'number', 'html_url', 'open'));
   };
+  const findMerged = async (branch: string, target: string): Promise<MergedRequest[]> => {
+    const query = new URLSearchParams({ state: 'closed', head: `${owner}:${branch}`, base: target, sort: 'updated', direction: 'desc' });
+    const list = await allPages(client, `${base}/pulls?${query}`, 'list the pull requests');
+    return latestMerged(list.filter((pr) => asRecord(pr.head).ref === branch && asRecord(pr.base).ref === target)
+      .map((pr) => mergedEntry(client, pr, 'number', 'html_url', commitOf(pr.merge_commit_sha))));
+  };
   const forge: Forge = {
     kind: 'github',
     name: 'GitHub',
     ...githubReads(client, base),
     findOpen,
+    findMerged,
     async open({ branch, base: target, title, body }) {
       const [existing] = await findOpen(branch, target);
       if (existing !== undefined) {
@@ -474,21 +500,29 @@ const GITLAB_REASONS: Record<string, string> = {
 };
 const GITLAB_PENDING = new Set(['checking', 'unchecked', 'preparing', 'approvals_syncing']);
 
+// A fork's merge request of a branch of the same name comes from another project: dropped.
+const sameProject = (mr: Json): boolean => typeof mr.source_project_id !== 'number' || mr.source_project_id === mr.target_project_id;
+
 function gitlabForge(client: HostClient, path: string): Forge {
   const project = `/projects/${encodeURIComponent(path)}`;
   const stateOf = (value: unknown): MergeRequestState => (value === 'opened' ? 'open' : value === 'merged' ? 'merged' : 'closed');
   const findOpen = async (branch: string, target: string): Promise<MergeRequest[]> => {
     const query = new URLSearchParams({ state: 'opened', source_branch: branch, target_branch: target, order_by: 'created_at', sort: 'desc' });
     const list = await allPages(client, `${project}/merge_requests?${query}`, 'list the merge requests');
-    // A fork's merge request of a branch of the same name comes from another project: dropped.
-    const sameProject = (mr: Json): boolean => typeof mr.source_project_id !== 'number' || mr.source_project_id === mr.target_project_id;
     return list.filter((mr) => mr.source_branch === branch && mr.target_branch === target && sameProject(mr)).map((mr) => numbered(client, mr, 'iid', 'web_url', 'open'));
+  };
+  const findMerged = async (branch: string, target: string): Promise<MergedRequest[]> => {
+    const query = new URLSearchParams({ state: 'merged', source_branch: branch, target_branch: target, order_by: 'updated_at', sort: 'desc' });
+    const list = await allPages(client, `${project}/merge_requests?${query}`, 'list the merge requests');
+    return latestMerged(list.filter((mr) => mr.source_branch === branch && mr.target_branch === target && sameProject(mr))
+      .map((mr) => mergedEntry(client, mr, 'iid', 'web_url', commitOf(mr.merge_commit_sha) ?? commitOf(mr.squash_commit_sha))));
   };
   const forge: Forge = {
     kind: 'gitlab',
     name: client.name,
     ...gitlabReads(client, project),
     findOpen,
+    findMerged,
     async open({ branch, base: target, title, body }) {
       const [existing] = await findOpen(branch, target);
       if (existing !== undefined) {

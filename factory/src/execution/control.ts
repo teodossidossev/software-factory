@@ -1,5 +1,5 @@
 // The user's control of a job and the runner's requests: pause and Resume, the park on a usage
-// limit and its reset, abort, reset, Archive (retire) and the pass of merged jobs, exclusive (the start
+// limit and its reset, abort, reset, Archive (retire), Merged — archive and the pass of merged jobs, exclusive (the start
 // screen's section under the lock), and the requests sf serve queues to a job's runner (request, apply, resume, stop).
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -31,6 +31,7 @@ import { exists, type FixOptions, gateSkipped } from './shared.js';
 // What ControlPart calls of the other parts, by just those methods.
 export interface ControlHandover {
   leaveCheckout(job: Job, workspace: Workspace, pushed: boolean): Promise<Job>;
+  markHandedDone(workspaceName: string, ticket: string): Promise<{ state: JobState; branch: string }>;
   worktreePath(workspace: string, ticket: string): string;
 }
 
@@ -94,8 +95,9 @@ export class ControlPart {
   readonly #stop: StopPort;
   // The parts it calls (src/execution.ts wires them).
   readonly #peers: ControlPeers;
-  // The pass of merged jobs: its logged fetch failures and its run under way.
-  readonly #mergedPass = new MergedPass();
+  // The pass of merged jobs (its logged failures, its run under way) and Merged — archive, with this part's ports.
+  readonly #mergedPass = new MergedPass(() => ({ store: this.#store, locks: this.#locks, settings: this.#settings,
+    archive: (w, t) => this.archiveFinished(w, t), markHandedDone: (w, t) => this.#peers.handover.markHandedDone(w, t) }));
 
   constructor(store: JobStorePort, locks: LockPort, sessions: LivePort, runner: RunnerPort, settings: SettingsPort, stop: StopPort, peers: ControlPeers) {
     this.#store = store;
@@ -162,8 +164,7 @@ export class ControlPart {
     }
   }
 
-  // Cancels the job's running review, gate, simplification pass or test run (its abort kills the
-  // sandbox's process group); its outcome is then never applied.
+  // Cancels the job's running review, gate, simplification pass or test run (its abort kills the sandbox's process group); its outcome is then never applied.
   #cancelReview(key: string): void {
     this.#sessions.reviews.get(key)?.controller.abort();
     this.#sessions.reviews.delete(key);
@@ -457,8 +458,7 @@ export class ControlPart {
     return rules === '' ? text : `${rules.trimEnd()}\n\n${text}`;
   }
 
-  // Whether the ticket's Task file changed since the Implementer was last given it (the job's copy,
-  // else the worktree's), and its diff; undefined when it did not, or when nothing tells.
+  // Whether the ticket's Task file changed since the Implementer was last given it (the job's copy, else the worktree's), and its diff; undefined when it did not, or when nothing tells.
   async taskChange(workspace: Workspace, job: Job): Promise<{ diff: string | undefined; sha256: string } | undefined> {
     const current = await readTask(workspace, job.ticket);
     const sha256 = taskSha256(current);
@@ -470,8 +470,7 @@ export class ControlPart {
     return before === current ? undefined : { diff: await taskDiff(job.ticket, before, current), sha256 };
   }
 
-  // Stops the job's runner, which ends its session and cancels its review, whose outcome is then
-  // never applied.
+  // Stops the job's runner, which ends its session and cancels its review, whose outcome is then never applied.
   async endSession(workspace: string, ticket: string): Promise<void> {
     const key = `${workspace}/${ticket}`;
     this.#cancelReview(key);
@@ -514,7 +513,7 @@ export class ControlPart {
     });
   }
 
-  // The Archive of a Done card or job page, and of the pass of merged jobs: reset, for a finished job
+  // The Archive of a Done card or job page, of Merged — archive and of the pass of merged jobs: reset, for a finished job
   // only. With an active Task file, Setup's ticket archive checks it again and moves the file too in its
   // own lock acquisition; else the state is checked and the job retired in one, so a newer job is refused.
   async archiveFinished(workspaceName: string, ticket: string): Promise<Retired> {
@@ -522,9 +521,12 @@ export class ControlPart {
     return (await archiveWithTask(this.#settings, job)) ?? this.#locks.locked(async () => this.#retire(await this.#finishedJob(workspaceName, ticket, 'invalid_state')));
   }
 
-  // sf serve's pass of merged jobs (MergedPass): the pushed jobs found merged on their target, archived.
+  // sf serve's pass of merged jobs and Merged — archive (MergedPass, archive.ts): the jobs found merged, or the user's, marked and archived.
   archiveMergedJobs(): Promise<Job[]> {
-    return this.#mergedPass.run({ store: this.#store, locks: this.#locks, settings: this.#settings }, (job) => this.archiveFinished(job.workspace, job.ticket));
+    return this.#mergedPass.run();
+  }
+  markMerged(workspaceName: string, ticket: string): Promise<Retired & { state: JobState }> {
+    return this.#mergedPass.markMerged(workspaceName, ticket);
   }
 
   // The ticket's current job, refused unless it is terminal, with the code (and the message) of
@@ -648,8 +650,7 @@ export class ControlPart {
   // Runner mode: what the job was doing when its last runner ended. A job awaiting review whose
   // last iteration has no review gets one; one whose review is clean and has no gate.json gets its
   // gate (or, with the gate off, Clean); one with a clean gate.json too gets its simplification
-  // pass, or its outcome. Without the Claude review: no gate.json gets the gate, a clean one its
-  // outcome.
+  // pass, or its outcome. Without the Claude review: no gate.json gets the gate, a clean one its outcome.
   resume(): Promise<void> {
     const { workspace, ticket } = this.#runner.runnerJob();
     return this.#locks.locked(async () => {

@@ -160,7 +160,7 @@ test('the hand-over of a continuing job counts the user\'s push to <continues>, 
     await call(served, 'mark_clean', { workspace: 'app', ticket: 'T-1' });
     await waitFor(served, 'T-1', 'handed_over');
     const s = { env, repo, origin, served, jobs };
-    assert.deepEqual(await refusedSocket(s, 'handed-done', ['app', 'T-1']), { code: 'not_pushed', message: `The branch ${CONTINUES} is not on origin with your changes; push it first. If you merged it another way, use Merged another way (sf handed-done --merged).` });
+    assert.deepEqual(await refusedSocket(s, 'handed-done', ['app', 'T-1']), { code: 'not_pushed', message: `The branch ${CONTINUES} is not on origin with your changes; push it first. If you merged it another way, use Merged — archive (sf handed-done --merged).` });
     // A push of the job's own branch does not count.
     git(repo, 'commit', '-q', '-a', '-F', config(repo, 'commit.template')!, '--cleanup=scissors');
     git(repo, 'push', '-q', 'origin', BRANCH);

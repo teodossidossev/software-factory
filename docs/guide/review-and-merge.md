@@ -52,7 +52,7 @@ It is read when the job is ready, so a change applies to running jobs too.
 | You want to … | Button | Command | What happens |
 | --- | --- | --- | --- |
 | push it yourself | *I opened the MR myself* (after your push) | `sf handed-done my-app APP-12` | Commit (edit the message as you like), push from your IDE, open the merge request on the host. The factory marks the job `pushed` once `origin` has the branch with a commit that descends from the base; the job's page also notices your push by itself (it asks `origin` at most once a minute). Refused with `not_pushed` until then. |
-| say you merged it yourself another way | **Merged another way…** (on the card and in the job's panel) | `sf handed-done my-app APP-12 --merged` | If you merged it yourself another way (under another branch name, or committed straight to the main branch), press Merged another way. After its confirmation the job is `pushed` without the factory asking `origin`; the commit template and the prefilled message go from your checkout as after a push, and your branch, commits and edits stay. From another device you type the ticket to confirm. |
+| say you merged it | **Merged — archive** (on the card and in the job's panel; also on a pushed job's Done card and page) | `sf handed-done my-app APP-12 --merged` | You merged the changes, any way: a merge request on the host, another branch name, straight into the main branch; the branch may already be deleted. Press it twice: the first click arms it ("Click again to archive"), a second click within 4 seconds runs it. The job is marked merged and archived in one step, without the factory asking `origin` or the host: the commit template and the prefilled message go from your checkout as after a push, the worktree goes and the Task file moves to the archive. Your branch, commits and edits stay, and no branch is deleted anywhere. From another device you type the ticket to confirm. |
 | let the factory push | **Approve…** | `sf approve my-app APP-12` | Without a commit of yours, the factory pushes its own commit and moves your branch to it ("Pushed the factory's commit …"); your uncommitted edits stay local and are not pushed. With your own commits on top of the base, it pushes the branch as it is ("Pushed your commit …"). |
 | have the factory push and open the MR | **Create merge request** | `sf mr create my-app APP-12` | The push, then the merge request on GitHub or GitLab (below). |
 | ask the Implementer for changes | **Ask for changes** (the composer's Send) | `sf say my-app APP-12 "<message>"` | Your edits go back into the job (below), and a new turn starts. |
@@ -169,14 +169,24 @@ text"); edit the commit message in your IDE instead. After the push it is read-o
   the job record. While the ticket's Task file is active it also moves the Task file (and its
   images) to `.software-factory/archive/`; Restore brings it back from the *Archived* drawer. The
   branch and its commits are never touched. From another device it asks you to type the ticket.
-- **A job merged another way leaves by itself.** A minute after `sf serve` starts and then every 10
-  minutes, the factory looks at each pushed job with no merge request (or a closed one): it fetches
-  the job's base (`git fetch --no-tags origin <base>` in your checkout, which only updates
-  `origin/<base>`, never a branch or a file), and when the job's commit is in `origin/<base>` it
-  records `merged_on_target` in the job's history and archives the job as Archive does. A squash or
-  rebase merge is not seen (the commit is not in the base's history): press Archive. A fetch that
-  fails leaves the jobs alone and is logged once. A job whose merge request the factory tracks stays
-  on Done until you archive it.
+- **A merged job leaves by itself.** A minute after `sf serve` starts and then every 10 minutes,
+  the factory looks at every pushed job and every handed-over job, and archives as Archive does the
+  ones it finds merged, after recording `merged_on_target` in the job's history:
+  - the merge request it recorded is merged (no request to the host);
+  - with a host token for the workspace (`SF_GITHUB_TOKEN` or `SF_GITLAB_TOKEN`): the host reports
+    the recorded merge request merged, or, with none recorded, a merge request of the job's branch
+    into its base that was merged after the job started (the one you opened by hand from the
+    handed-over branch counts). Only `GET` requests go to the host; a host error is logged once and
+    the next check runs;
+  - for a pushed job only: its commit is in `origin/<base>` after a fetch of the base
+    (`git fetch --no-tags origin <base>` in your checkout, which only updates `origin/<base>`, never
+    a branch or a file). A fetch that fails leaves the jobs alone and is logged once.
+
+  A squash or rebase merge leaves no commit of the job in the base, so only the host finds it; in a
+  workspace without a host token, press **Merged — archive**. A handed-over job is archived only on
+  the host's word (no ref of your checkout is read for it, nothing fetched), after the same first
+  step as Merged — archive. A job that continues an existing branch (`continues`) is never looked up
+  on the host. Nothing deletes a branch or a commit.
 - Tickets that wait for this one (`lands_after`) can start once it counts as **merged**: the factory
   found it on its base (`merged_on_target`), its merge request is recorded `merged`, or (with no
   merge request recorded) its branch is in `origin/<base>`. After a merge on the host, *Refresh MR

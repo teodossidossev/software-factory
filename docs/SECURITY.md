@@ -110,11 +110,14 @@ refused), and the factory's test command passed in a sandbox without network on 
 - **The GitLab token goes only to gitlab.com or the host of `SF_GITLAB_URL`.** A workspace on any
   other host that is not GitHub has its merge request actions off, and the hourly logins check
   leaves it out.
+- **The pass of merged jobs only reads the Git host.** Every 10 minutes it sends the host `GET`
+  requests only, and it never deletes a branch.
 - **The dashboard:**
   - It listens on loopback only.
   - From another device it opens only through Tailscale, for the logins in
     `SF_DASHBOARD_REMOTE_LOGINS`.
-  - Approve, Retry, Create merge request and Merge from there need the ticket typed again.
+  - Approve, Retry, Create merge request, Merge, Archive and Merged — archive from there need the
+    ticket typed again.
   - A foreign web page cannot act on it.
   - No token is written to a log.
   - The coordinator's state (its status, its open questions and its chat link) is a local file

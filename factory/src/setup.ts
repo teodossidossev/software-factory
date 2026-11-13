@@ -567,7 +567,8 @@ export class Setup {
     return undefined;
   }
 
-  // Merged: a job the pass of merged jobs found on its base (merged_on_target) is; else the merge request
+  // Merged: a job with merged_on_target is (written by the pass of merged jobs, from its base or its Git
+  // host, and by Merged — archive); else the merge request
   // state the factory recorded decides when there is one (merged or not: open and closed are not
   // merged); only without one does Git decide, its answer kept MERGE_CHECK_TTL_MS per ticket (fresh: asked again).
   async #merged(ref: TicketRef, job: JobFacts, entry: WorkspaceEntry | undefined, fresh: boolean): Promise<boolean> {

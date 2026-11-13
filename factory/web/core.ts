@@ -41,7 +41,7 @@ const ACTION_LABELS: Readonly<Record<string, string>> = {
   approve: 'Approve', abort: 'Abort', say: 'Send', review: 'Retry review', retry: 'Retry', accept: 'Accept and prepare MR', settle: 'Settle', simplify: 'Simplify', archive: 'Archive',
   'mr-create': 'Create merge request', 'mr-merge': 'Merge', 'mr-status': 'Refresh MR status', pause: 'Pause', resume: 'Resume', restart: 'Restart',
   handover: 'Hand over to my checkout', takeback: 'Take it back', 'handed-done': 'I opened the MR myself',
-  'handed-done-merged': 'Merged another way',
+  'merged-archive': 'Merged — archive',
   'review-mr': 'Review the MR and push',
 };
 const PENDING_REASONS: Readonly<Record<string, string>> = {
@@ -63,7 +63,7 @@ const PENDING_REASONS: Readonly<Record<string, string>> = {
   handover: 'the hand-over was requested; waiting for its outcome.',
   takeback: 'Take it back was requested; waiting for its outcome.',
   'handed-done': 'origin is being asked for your push.',
-  'handed-done-merged': 'marking it done; waiting for its outcome.',
+  'merged-archive': 'marking it merged and archiving; waiting for its outcome.',
 };
 const PENDING_TEXT: Readonly<Record<string, string>> = {
   accept: 'Accepting over the gate…',
@@ -84,8 +84,15 @@ const PENDING_TEXT: Readonly<Record<string, string>> = {
   handover: 'Handing the branch over to your checkout…',
   takeback: 'Taking the branch back from your checkout…',
   'handed-done': 'Asking origin for your push…',
-  'handed-done-merged': 'Marking the job done…',
+  'merged-archive': 'Marking it merged and archiving…',
 };
+// The actions whose button confirms in place, with its title: the first click arms it (state.armed),
+// a second click runs it; ARM_MS after the first click it is disarmed. No browser confirm().
+const ARM_MS = 4000;
+const ARMED_TITLES: Readonly<Record<string, string>> = {
+  'merged-archive': 'Marks the job merged and archives it: the worktree is removed and the Task file archived; no branch is checked or deleted. Click twice.',
+};
+let armTimer: ReturnType<typeof setTimeout> | null = null;
 // The element with the id, or null when the page has none.
 const $ = (id: string): HTMLElement | null => document.getElementById(id);
 // The element with the id, where the page requires it: dashboard.html has it, so a missing one is a
@@ -157,6 +164,7 @@ interface PageState {
   unresolved: Map<string, { reason: string; refreshing: boolean; failed: boolean }>;
   doubts: Map<string, string>;
   confirm: { action: string; key: string } | null;
+  armed: { action: string; key: string } | null;
   remote: boolean;
   ticketAsk: { ticket: string; resolve: (confirmed: boolean) => void } | null;
   handoverMenu: boolean;
@@ -227,6 +235,8 @@ const state: PageState = {
   unresolved: new Map(),
   doubts: new Map(),
   confirm: null,
+  // The one button armed for its confirmation in place (ARMED_TITLES), with its job; null when none.
+  armed: null,
   // The page came through the remote port (api/jobs's remote), and the open ticket
   // dialog of an action that pushes or merges ({ ticket, resolve }).
   remote: false,
@@ -316,6 +326,39 @@ function button(className: string, text?: string, data: Readonly<Record<string, 
     node.dataset[name] = value;
   }
   return node;
+}
+
+// An action's button of the job key as its confirmation in place shows it (ARMED_TITLES): its title when on; armed, the label to click again, primary.
+function armable(node: HTMLButtonElement, action: string, key: string): HTMLButtonElement {
+  const title = ARMED_TITLES[action];
+  if (title !== undefined && !node.disabled) {
+    node.setAttribute('title', title);
+  }
+  if (title !== undefined && state.armed?.action === action && state.armed.key === key) {
+    node.textContent = 'Click again to archive';
+    node.classList.add('primary');
+  }
+  return node;
+}
+
+// A click on an action's button of the job key: one confirmed in place (ARMED_TITLES) is armed by the first click (replacing
+// any other armed one) and runs on a second click while armed; any other runs at once. Every page is drawn again on a change.
+function armOrRun(action: string, key: string): void {
+  const confirmed = ARMED_TITLES[action] === undefined || (state.armed?.action === action && state.armed.key === key);
+  setArmed(confirmed ? null : { action, key }, !confirmed || state.armed !== null);
+  if (confirmed) {
+    void run(action, key, {});
+  }
+}
+
+function setArmed(armed: PageState['armed'], redraw = true): void {
+  clearTimeout(armTimer ?? undefined);
+  state.armed = armed;
+  armTimer = armed === null ? null : setTimeout(() => setArmed(null), ARM_MS);
+  if (redraw) {
+    renderComposer();
+    renderBoard();
+  }
 }
 
 // An SVG element: its attributes (class too) only through setAttribute.

@@ -229,9 +229,11 @@ measure); the page and `sf digest --now` show each digest's cost.
   live; if one is gone anyway, `git worktree prune` in the checkout clears the registration.
 - **Jobs**: `sf reset my-app APP-12`, or *Archive* on a Done card or a finished job's page,
   archives the job directory as `jobs/my-app/APP-12.<timestamp>/` (they stay for `sf metrics` and
-  the ticket's history); *Archive* also moves the ticket's active Task file to the archive. A pushed
-  job already merged on its base (its commit in `origin/<base>`, with no merge request or a closed
-  one) is archived by `sf serve` itself, checked every 10 minutes. There is no prune command:
+  the ticket's history); *Archive* also moves the ticket's active Task file to the archive, and so
+  does *Merged — archive* (`sf handed-done --merged`) for a handed-over or pushed job you merged. A
+  pushed or handed-over job found merged is archived by `sf serve` itself, checked every 10
+  minutes: its merge request merged on the Git host (with a host token; `GET` requests only), or,
+  for a pushed job, its commit in `origin/<base>` after a fetch of the base. There is no prune command:
   delete old archived job directories by hand when you no longer want them.
 - **Tickets**: *Archive* in a Queue card's ⋯ menu (or on a Done card) moves the Task file and its
   images to `.software-factory/archive/`; *Delete…* (in the card's ⋯ menu or the Archived drawer)
@@ -345,7 +347,7 @@ Use `tailscale serve`, never `tailscale funnel`: Funnel puts the address on the 
 | a 403 on the phone, the log naming your login | the login is not in `SF_DASHBOARD_REMOTE_LOGINS` | add it as the log shows it, restart `sf serve` |
 | a 403 on the phone, no log line | the address is not in `SF_DASHBOARD_REMOTE_ORIGINS`, or `sf serve` was not restarted after adding it | add exactly the `https://<machine>.<tailnet>.ts.net` that `tailscale serve status` shows, restart `sf serve` ([The dashboard on your phone](#the-dashboard-on-your-phone-tailscale)) |
 | the phone's address gives a 403 or nothing, and `tailscale serve status` shows `8788` | `tailscale serve` points at the local port, which refuses the Tailscale address | `tailscale serve reset`, then `tailscale serve --bg 8789` |
-| `confirm_required` on the phone | Approve, Retry, Create merge request, Merge or Merged another way was sent from the remote port without the ticket typed | use the dialog: type the ticket exactly as shown |
+| `confirm_required` on the phone | Approve, Retry, Create merge request, Merge, Merged — archive or Archive was sent from the remote port without the ticket typed | use the dialog: type the ticket exactly as shown |
 | `invalid_config` naming `SF_DASHBOARD_REMOTE_ORIGINS` at `sf serve`'s start | an entry is not `https://<machine>.<tailnet>.ts.net` (http, another domain, a port, a path or a trailing part) | write each origin as `tailscale serve status` shows it, comma-separated, then start `sf serve` again |
 | `invalid_config` naming `SF_DASHBOARD_REMOTE_LOGINS` or `SF_DASHBOARD_REMOTE_PORT` at `sf serve`'s start | remote origins without logins, or the remote port equal to `SF_DASHBOARD_PORT` | set `SF_DASHBOARD_REMOTE_LOGINS`; give the remote port another number |
 | the hand-over or your own `git config` fails with "could not lock config file … File exists" | a stale `.git/config.lock` in the checkout: Claude Code's sandbox leaves an empty read-only one, which the factory removes when no job of the workspace runs; a lock that is not the sandbox's is never touched (`handover_failed`) | wait for the workspace's running jobs to end (`config_locked` hands over by itself); if no job and no Git command runs, delete `.git/config.lock` by hand |

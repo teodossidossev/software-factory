@@ -275,6 +275,56 @@ test('findOpen (SF-200): the open merge requests of the branch into the base, ne
   }
 });
 
+test('findMerged (SF-207): the merged merge requests of the branch into the base, latest merged first, with merged_at and the merge commit, GET only; open and closed ones, another branch\'s or base\'s and a GitLab fork\'s entry are dropped', async () => {
+  for (const kind of ['github', 'gitlab'] as const) {
+    const fake = await startFakeForge(kind, 'acme/app');
+    try {
+      const forge = kind === 'github'
+        ? forgeFor('git@github.com:acme/app.git', forgeSettings({ SF_GITHUB_TOKEN: GH_TOKEN, SF_GITHUB_API: fake.url }))
+        : forgeFor(`${fake.url}/acme/app.git`, forgeSettings({ SF_GITLAB_TOKEN: GL_TOKEN, SF_GITLAB_URL: `${fake.url}/api/v4` }));
+      assert.deepEqual(await forge.findMerged('T-1-demo', 'main'), [], kind);
+      const merged = (number: number, branch: string, base: string, at: string, commit: string): FakeMr => ({ ...opened(number, branch, base, 'merged'), merged_at: at, merge_commit: commit });
+      fake.mrs.push(
+        merged(1, 'T-1-demo', 'main', '2026-11-01T10:00:00Z', 'a'.repeat(40)),
+        opened(2, 'T-1-demo', 'main'),
+        opened(3, 'T-1-demo', 'main', 'closed'),
+        merged(4, 'T-1-other', 'main', '2026-11-05T10:00:00Z', 'b'.repeat(40)),
+        merged(5, 'T-1-demo', 'develop', '2026-11-05T10:00:00Z', 'b'.repeat(40)),
+        // Created after 1, merged after it too; 7 created last, merged between them.
+        merged(6, 'T-1-demo', 'main', '2026-11-03T10:00:00Z', 'c'.repeat(40)),
+        merged(7, 'T-1-demo', 'main', '2026-11-02T10:00:00Z', 'd'.repeat(40)),
+      );
+      const found = await forge.findMerged('T-1-demo', 'main');
+      assert.deepEqual(found.map((mr) => [mr.number, mr.state, mr.merged_at, mr.merge_commit]), [
+        [6, 'merged', '2026-11-03T10:00:00Z', 'c'.repeat(40)], [7, 'merged', '2026-11-02T10:00:00Z', 'd'.repeat(40)], [1, 'merged', '2026-11-01T10:00:00Z', 'a'.repeat(40)],
+      ], kind);
+      const query = new URL(fake.requests.at(-1)!.path, 'http://fake').searchParams;
+      assert.equal(query.get('state'), kind === 'github' ? 'closed' : 'merged', kind);
+      // A host that ignored the filters: only merged entries of the branch and base asked for are kept.
+      const list = kind === 'github' ? '/repos/acme/app/pulls' : '/api/v4/projects/acme%2Fapp/merge_requests';
+      fake.lists[list] = kind === 'github'
+        ? [
+          { number: 2, html_url: 'https://github.com/acme/app/pull/2', head: { ref: 'T-1-demo' }, base: { ref: 'main' }, merged_at: null },
+          { number: 4, html_url: 'https://github.com/acme/app/pull/4', head: { ref: 'T-1-other' }, base: { ref: 'main' }, merged_at: '2026-11-05T10:00:00Z' },
+          { number: 8, html_url: 'https://github.com/acme/app/pull/8', head: { ref: 'T-1-demo' }, base: { ref: 'main' }, merged_at: '2026-11-06T10:00:00Z', merge_commit_sha: 'f'.repeat(40) },
+        ]
+        : [
+          { iid: 2, web_url: `${fake.url}/acme/app/-/merge_requests/2`, source_branch: 'T-1-demo', target_branch: 'main', merged_at: null },
+          { iid: 5, web_url: `${fake.url}/acme/app/-/merge_requests/5`, source_branch: 'T-1-demo', target_branch: 'develop', merged_at: '2026-11-05T10:00:00Z' },
+          // A fork's branch of the same name.
+          { iid: 6, web_url: `${fake.url}/acme/app/-/merge_requests/6`, source_branch: 'T-1-demo', target_branch: 'main', source_project_id: 9, target_project_id: 1, merged_at: '2026-11-05T10:00:00Z' },
+          // A squash merge: the squash commit is the merge commit.
+          { iid: 8, web_url: `${fake.url}/acme/app/-/merge_requests/8`, source_branch: 'T-1-demo', target_branch: 'main', merged_at: '2026-11-06T10:00:00Z', merge_commit_sha: null, squash_commit_sha: 'f'.repeat(40) },
+        ];
+      assert.deepEqual((await forge.findMerged('T-1-demo', 'main')).map((mr) => [mr.number, mr.merge_commit]), [[8, 'f'.repeat(40)]], kind);
+      assert.deepEqual([...new Set(fake.requests.map((r) => r.method))], ['GET'], kind);
+      assert.ok(fake.requests.every((r) => r.path.startsWith(list)), kind);
+    } finally {
+      await fake.close();
+    }
+  }
+});
+
 test('findOpen reads every page: 150 open merge requests of the branch (two pages of 100) all count, newest first, with GET only', async () => {
   for (const kind of ['github', 'gitlab'] as const) {
     const fake = await startFakeForge(kind, 'acme/app');

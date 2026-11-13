@@ -220,7 +220,7 @@ The queue never stops a job, but a queued ticket may wait. Its card says why:
 | `handed_over` | The job is in your checkout: Take it back first. |
 | `checkout_moved` | Ask for changes: your checkout is not on the job's branch any more; switch back, or Take it back. |
 | `takeback_changed` | Take it back: your checkout changed since the hand-over; use Ask for changes, or undo your edits. |
-| `not_pushed` | I opened the MR myself: `origin` does not have the branch with your changes; push first. If you merged it another way, use Merged another way (`sf handed-done --merged`). |
+| `not_pushed` | I opened the MR myself: `origin` does not have the branch with your changes; push first. If you merged it another way, use Merged — archive (`sf handed-done --merged`). |
 | `push_check_failed` | I opened the MR myself: `origin` did not answer. |
 | `restart_refused` | Restart: the old branch has commits or was pushed; push or delete it by hand first. |
 | `runner_timeout`, `runner_failed` | `sf serve` did not get an answer from the job's runner; see [Troubleshooting](operations.md#troubleshooting). |

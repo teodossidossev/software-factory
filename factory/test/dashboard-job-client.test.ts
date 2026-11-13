@@ -446,20 +446,34 @@ test('job client (SF-200): More\'s Refresh MR status on a handed-over job withou
   assert.equal(page.$('mr-status-line').textContent, 'On the host: #7 open, mergeable, checks: pipeline success.');
 });
 
-test('job client: the panel\'s Merged another way opens its confirmation with the sentence; Confirm posts handed-done-merged and the outcome says the job is marked done', async () => {
+test('job client: the panel\'s Merged — archive is confirmed in place: a first click arms it (no dialog, nothing posted), a second posts merged-archive once and the outcome says the job left the board; a pushed job\'s row has it before Archive', async () => {
   const page = await openJob(detail(handedOver(), { mr: true, mr_title: 'feat(T-1): Demo' } as Partial<Omit<Detail, 'job'>>));
   const path = panelOf(page).querySelectorAll('.ho-path')[0]!;
-  assert.deepEqual(path.querySelectorAll('button').map((node) => node.textContent), ['I opened the MR', 'Merged another way']);
-  inPanel(page, 'Merged another way').click();
-  assert.deepEqual([page.$('confirm').hidden, page.$('confirm-title').textContent, page.$('confirm-ok').textContent], [false, 'Merged another way app/T-1?', 'Merged another way']);
-  assert.equal(page.$('confirm-text').textContent, 'Mark the job done: you merged its changes yourself under another branch or straight into the main branch. The factory does not check origin.');
-  assert.equal(posts(page, 'handed-done-merged').length, 0);
-  page.$('confirm-ok').click();
+  assert.deepEqual(path.querySelectorAll('button').map((node) => node.textContent), ['I opened the MR', 'Merged — archive']);
+  const merged = page.$('merged-archive-button');
+  assert.deepEqual([merged.className, merged.getAttribute('title')], ['btn', 'Marks the job merged and archives it: the worktree is removed and the Task file archived; no branch is checked or deleted. Click twice.']);
+  merged.click();
   await page.flush();
-  assert.deepEqual(posts(page, 'handed-done-merged').map((request) => request.body), ['{}']);
-  posts(page, 'handed-done-merged')[0]!.respond(200, { ok: true, result: { state: 'pushed', branch: 'T-1-demo' } });
+  assert.deepEqual([page.$('merged-archive-button').textContent, page.$('merged-archive-button').className, page.$('confirm').hidden], ['Click again to archive', 'btn primary', true]);
+  assert.equal(posts(page, 'merged-archive').length, 0);
+  page.$('merged-archive-button').click();
   await page.flush();
-  assert.match(page.document.body.textContent, /Marked done: you merged T-1-demo's changes another way; the job is pushed\./);
+  assert.deepEqual(posts(page, 'merged-archive').map((request) => request.body), ['{}']);
+  assert.equal(page.$('merged-archive-button').textContent, 'Merged — archive');
+  posts(page, 'merged-archive')[0]!.respond(200, { ok: true, result: { state: 'pushed', branch: 'T-1-demo', archived: 'jobs/app/T-1.20261113T100000Z' } });
+  await page.flush();
+  assert.match(page.document.body.textContent, /Merged and archived: the job left the board \(its history is in jobs\/app\/T-1\.20261113T100000Z\); the branch T-1-demo is untouched\./);
+
+  const pushed = await openJob(detail(job('pushed', { prepared_commit: 'a'.repeat(40), worktree: null })));
+  const row = pushed.$('acts').querySelectorAll('button').map((node) => node.textContent);
+  assert.deepEqual(row.slice(row.indexOf('Merged — archive')), ['Merged — archive', 'Archive']);
+  pushed.$('merged-archive-button').click();
+  await pushed.flush();
+  assert.equal(pushed.$('merged-archive-button').textContent, 'Click again to archive');
+  assert.equal(pushed.tick(4000), 1);
+  await pushed.flush();
+  assert.equal(pushed.$('merged-archive-button').textContent, 'Merged — archive');
+  assert.equal(posts(pushed, 'merged-archive').length, 0);
 });
 
 test('job client (SF-107): an outcome from before the hand-over is the "Earlier, at …" note and Dismiss hides it for good; an action on the panel shows as current, with a ×', async () => {

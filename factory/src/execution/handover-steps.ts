@@ -1,5 +1,5 @@
 // The hand-over of a job's branch to the user's checkout: handover, takeback, the check of the
-// user's own push, Merged another way, Ask for changes, the repair of a cut-off step, the saved
+// user's own push, the first step of Merged — archive, Ask for changes, the repair of a cut-off step, the saved
 // refs, and the sandbox's leftover config lock around hand-overs and sessions (handOverLocked,
 // afterTaskCheck, afterJobChange).
 import { rm } from 'node:fs/promises';
@@ -428,8 +428,9 @@ export class HandoverPart {
     return this.#pushCheck(workspaceName, ticket, true);
   }
 
-  // sf handed-done --merged: the user merged the changes another way (another branch, or straight
-  // into the base). Origin is not asked; the checkout is left as on a push; prepared_commit stays.
+  // The first step of Merged — archive (sf handed-done --merged) and of the pass of merged jobs on a
+  // handed-over job: its changes are merged (any way). Origin is not asked; the checkout is left as on
+  // a push; prepared_commit stays. ControlPart then marks the job merged and archives it.
   markHandedDone(workspaceName: string, ticket: string): Promise<{ state: JobState; branch: string }> {
     return this.#tracked(workspaceName, ticket, 'handed_done', () => this.#locks.locked(async () => {
       this.checkHandedOverJob(await this.#store.job(workspaceName, ticket), 'sf handed-done --merged');
@@ -525,7 +526,7 @@ export class HandoverPart {
     const why = remote.kind === 'unrelated'
       ? `The branch ${pushedBranch(job)} on origin (${remote.commit.slice(0, 12)}) does not descend from the job's base ${job.handover!.base.slice(0, 12)}; push your changes to it first.`
       : `The branch ${pushedBranch(job)} is not on origin with your changes; push it first.`;
-    throw new FactoryError('not_pushed', `${why} If you merged it another way, use Merged another way (sf handed-done --merged).`);
+    throw new FactoryError('not_pushed', `${why} If you merged it another way, use Merged — archive (sf handed-done --merged).`);
   }
 
   // A handed-over job leaves the checkout (the push, abort): the factory's commit.template and

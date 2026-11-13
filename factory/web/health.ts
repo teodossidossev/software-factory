@@ -56,11 +56,8 @@ function sinceEl(ts: unknown): HTMLElement {
   return node;
 }
 
-// The time since the checks came, in seconds or minutes.
-function checkedAge(): string {
-  const seconds = Math.max(0, Math.round((Date.now() - (health.at ?? Date.now())) / 1000));
-  return seconds < 60 ? `${seconds} s ago` : `${Math.round(seconds / 60)} min ago`;
-}
+// The time since the checks came (core.js ago).
+const checkedAge = (): string => ago(health.at ?? Date.now());
 
 function renderHealthPanel(): void {
   const checks = health.checks ?? [];

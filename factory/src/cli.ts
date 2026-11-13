@@ -256,7 +256,7 @@ async function serve(options: { tunnel?: 'off' } = {}): Promise<{ dashboard: URL
   // The socket first: it refuses a second sf serve on the same state before recovery touches it.
   const socket = await listenSocket(config.stateDir, socketHandler({
     execution, queue: runQueue, checks, digests, mcpPort: () => boundMcpPort,
-    stateDir: config.stateDir, testHooks: tests, onQueueChange: () => dashboard?.refreshSetup(),
+    stateDir: config.stateDir, testHooks: tests, onQueueChange: () => dashboard?.refreshSetup(), onCoordinatorChange: () => dashboard?.coordinatorChanged(),
   }));
   let server;
   // The updating marker at the start: the jobs of a finished (restart_pending) or dead

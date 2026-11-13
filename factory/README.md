@@ -39,6 +39,11 @@ bin/sf attach <workspace> <ticket> --remove <name>  # remove one; refused while 
 bin/sf start <workspace> <ticket> # start the job in a worktree of its own (same as the dashboard's Start); a start by hand is never held by the run limit; needs sf serve
 bin/sf skills                     # the installed skills and which agent role uses each (section The agents' skills); needs sf serve
 bin/sf skills set <role> <skill> on|off  # switch an installed skill on or off for an agent role; jobs started afterwards use it; needs sf serve
+bin/sf coordinator                # the coordinator's state on the board's Coordinator card (section Coordinator card): status, open questions with their ids, the chat's link; needs sf serve
+bin/sf coordinator status [text...] [--clear]  # what the coordinator does now (at most 300 characters, too_long beyond), with the time; --clear removes it; needs sf serve
+bin/sf coordinator ask <text...>  # a question that waits for the user's answer (at most 1,000 characters, 10 open: too_many_questions); prints its id, q1, q2, ...; needs sf serve
+bin/sf coordinator answered <id>  # take the answered question off the card (unknown_question for an id not open); needs sf serve
+bin/sf coordinator link <url> | --clear  # the chat's link for Open the chat: an https://claude.ai/ URL only (bad_link otherwise); --clear removes it; needs sf serve
 bin/sf queue list                 # the run queue (section Run queue): the limit, the running count, held or not, the queued tickets in order with what each waits for, the next one, the starts that failed; needs sf serve
 bin/sf queue add <workspace> <ticket> [--at N]  # queue a planned ticket at position N (1-based; default the end); needs sf serve
 bin/sf queue remove <workspace> <ticket>        # take it out of the queue; needs sf serve
@@ -4174,6 +4179,7 @@ naming the type, when a type of `web/types.d.ts` has neither.
 - `header.js`: the board's top bar: what waits for you, the pages, the workspace filter, the
   pill's running count, the run limit and the reset rule.
 - `board.js`: board, cards, workspaces and dependencies, queue, toast.
+- `coordinator.js`: the board's Coordinator card (section Coordinator card), read-only.
 - `routing.js`: the view shown, routing, the delegated click, input, change and key handlers.
 - `ticket-page.js`: Markdown preview, the planned ticket page, a ticket's images.
 - `reports.js`: the morning digest and the Stats page.
@@ -4197,6 +4203,7 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 | `api/workspaces/<ws>/merge-requests/<number>/threads` | the review threads of one merge request, as `sf mr comments` reads them: `[{id, resolved, path, line, comments: [{author, body, created_at}]}]`, oldest first; `path` and `line` `null` for a general comment, `resolved` `null` where the host has no such state (GitHub); the refusals as above; a number that is not a whole number from 1 is an empty 404 |
 | `api/digests` | `{running, digests: [{id, trigger, period, ended_at, counts: {landed, live_branches, impact}, cost_usd, error}]}`, newest first (SF-103); the counts from the Git data, never from the model; 404 without the digest (in-process dashboards) |
 | `api/digests/<id>` | the stored record `digest/<id>.json` (SF-103); an unknown id or any query is an empty 404 |
+| `api/coordinator` | the coordinator's state, `coordinator.json` read as `sf coordinator` reads it (section Coordinator card): `{version, status: {text, at} \| null, questions: [{id, text, at}], link, next_question}`; any query is an empty 404; written only by `sf coordinator` |
 | `api/tickets` | `{tickets: [{workspace, ticket, title, base, draft, request, job, lands_after, attachments, conversation: {message, url}, queue_position, queue_error, queue_reason, queue_force}], archived: [{workspace, ticket, title}], job_lands_after: [{workspace, ticket, lands_after}], queue: {max_running, running, held, hold_reason, next, on_limit, limit_hold}}`: the Task files without a live job; `queue_position` its 1-based place in the run queue or `null`, `queue_error` the queue's failed start `{code, message}` or `null`, `queue_reason` why its plan holds it in the queue ("plan not ready: N blocker, M major", "plan check failed", "plan being checked", "plan not checked") or `null`, `queue_force` whether Start anyway was given (SF-086), `queue` the run queue (`next`: `{workspace, ticket}` of the first entry that waits for nothing and whose plan does not hold it, or `null`; `on_limit` the rule at a usage limit's reset and `limit_hold` `{parked, resets_at}` while a job is parked, else `null`, SF-072; the whole `queue` is `null` without a run queue) (SF-071, section Run queue); `lands_after` the tickets its Task file waits for, `[{workspace, ticket, state}]` with `state` `merged`, `pushed`, `running`, `planned` or `missing` (SF-084, section Dashboard), and `job_lands_after` the same for the Task files with a live job; `attachments` its images `[{name, bytes, type}]` (SF-064, section Ticket images); `draft` is true for a skeleton; `request` the user's words of New ticket or `null`; `job` is the last job's state or `null`; `url` is `https://chatgpt.com/?q=<message URL-encoded>`, or `null` when too long |
 | `api/jobs/<ws>/<ticket>/iterations/<n>/report` | the Report, `text/markdown` |
 | `api/jobs/<ws>/<ticket>/iterations/<n>/patch` | the Patch, `text/x-diff` |
@@ -4208,7 +4215,7 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 | `api/jobs/<ws>/<ticket>/stream?from=<line>` | the job's Stream (SF-082) for the v3 job page: `{entries, next, end}`, the entries of at most 2000 lines of `events.jsonl` from the 0-based `from` (default 0, at most 9 digits, else 404), in line order; `next` is the first line not read, `end` whether the file has no more lines (a `from` past the last line: `{entries: [], next: from, end: true}`; a job without `events.jsonl`: `{entries: [], next: 0, end: true}`). Each entry has `t`, `k` (`"<line>"`, or `"<line>.<n>"` when the line gives several), `ts`, `it` (the record's iteration, at least 1) and `who` (`implementer`, `claude`, `codex`, `you`, `factory` or `mr`). Types: `prompt` (`kind` `implement`, `fix` with `fix_n` and the `## Fix N` section of `task.md` as `fix`, `mr`, `conflict` or `continue`; `text` without the factory's rules block, `first`, `task_changed` when the Task-change note was cut from `text`; SF-112: the first `/implement` prompt with the job's `<rules>` block, and kept files, is an `implement` prompt whose `text` has no rules block, and the turn-limit continuation is a `continue` prompt), `user` (the user's message, `text`, `task_changed`; a Resume's leading `<rules>` block is cut from its `text`), `text`, `tool` (`id`, `line`, `detail`: the input as JSON, at most 16384 characters), `tool_result` (`id`, `out`, `result` at most 16384 characters, `err`; never merged into its `tool`: the client joins them by `id`), `result` (`turns`, `ms`, `cost`), `state` (`from`, `to`, `code`, `msg`; with a code also `stop_code` and `stop_kind`, its canonical row of `src/stops.ts`, SF-129, so an earlier stop of the job resolves without aliases on the page), `verdict` (`verdict`, `effective`, and `summary` and `items` with their ledger `id` only when the iteration's `review.json` or `gate.json` matches the record's verdict and item count), `changes` (after a published iteration: `files`, `paths` from `meta.json`), `simplify` (`suggestions`, `saves_lines`) and `note` (every other record, as one `sf watch` line without its time and prefix). An entry depends only on its line and the job's files when it is built (`src/job-stream.ts`); a live `verdict` can lack the ledger ids a later page load has |
 | `api/tickets/<ws>/<ticket>/task` | the ticket's Task file, `text/markdown`, read through the Task file reader (a regular file of valid Task content); `?archived=1` reads `.software-factory/archive/<ticket>.md` instead (any other `archived` value is 404); an unknown workspace or a missing file is an empty 404, a file the reader refuses its refusal (`400 invalid_content`) |
 | `api/tickets/<ws>/<ticket>/attachments/<name>` | one image of the ticket (SF-064), with the content type its bytes tell and `x-content-type-options: nosniff`; a missing workspace, Task file or image (or any query) is an empty 404, a bad name `400 invalid_name`, a file that is not the image its name says `400 attachment_type` |
-| `api/stream?job=<ws>/<ticket>&from=<line>` | server-sent events: `jobs` (on connect and on every state change), `workspaces` and `tickets` (as the two endpoints, at the same times and after every setup action from a page), `job` (the job's detail, on connect and when it changes state), `event` (`{line, ts, iteration, type, text}` for every visible line of `events.jsonl` from the 0-based `from`, as `sf watch` formats it; the page reads `entries` since SF-078), `entries` (`{line, entries}`, the line's entries as `api/jobs/<ws>/<ticket>/stream` gives them, for every line from `from` that has entries, strictly in line order; a line whose build fails is logged and skipped); a comment every 15 s; at most 8 streams, then 503 |
+| `api/stream?job=<ws>/<ticket>&from=<line>` | server-sent events: `jobs` (on connect and on every state change), `coordinator` (`{}`, on connect and after each `sf coordinator` write: the Coordinator card reads `api/coordinator` again), `workspaces` and `tickets` (as the two endpoints, at the same times and after every setup action from a page), `job` (the job's detail, on connect and when it changes state), `event` (`{line, ts, iteration, type, text}` for every visible line of `events.jsonl` from the 0-based `from`, as `sf watch` formats it; the page reads `entries` since SF-078), `entries` (`{line, entries}`, the line's entries as `api/jobs/<ws>/<ticket>/stream` gives them, for every line from `from` that has entries, strictly in line order; a line whose build fails is logged and skipped); a comment every 15 s; at most 8 streams, then 503 |
 
 The reads above are one route table in `src/dashboard-reads.ts` (SF-140), matched in order; a path
 no route matches is an empty 404 (`api/stream` is the change feed's, sent there first by
@@ -4644,6 +4651,45 @@ choice is one for all workspaces, and every skill may be switched off.
   a side panel as plain text (set as text, never parsed as HTML, `white-space: pre-wrap`), with a
   note when the file was cut at 256 KiB; Close or Esc closes it, the focus back on the name. The
   next Esc goes back to the board.
+
+### Coordinator card
+
+The coordinator (the user's Claude Code session in the factory's checkout, `docs/runbooks/coordinator.md`)
+works out of the dashboard's sight; its chat stays on claude.ai. A compact card **Coordinator** on the
+board, above the columns (`#coord`, `web/coordinator.ts`), shows what it does now, the questions that
+wait for the user's answer, and one click to the chat. The card is read-only: nothing on the
+dashboard writes the state, answers go to the chat.
+
+- **The state**: `${SF_STATE_DIR}/coordinator.json`, mode 0600, written atomically: `{ version: 1,
+  status: { text, at } | null, questions: [{ id, text, at }], link: string | null, next_question }`.
+  A missing file reads as empty, one that is not JSON too (with one warning line). Question ids are
+  `q1`, `q2`, ...: `next_question` is the next one's number (a missing or invalid one reads as 1 +
+  the highest open id), so an id is never given twice while the file lives. An id has at most 15
+  digits: after `q999999999999999` an ask is refused with `ids_exhausted` (removing the file starts
+  again at `q1`).
+- **Writing it**: only the `sf coordinator` commands (section Commands), run by `sf serve` over its
+  socket like the other writing commands, one write at a time; without a running `sf serve` they
+  fail as the others do, and while `sf update` drains or builds the writes are refused
+  (`update_in_progress`; the read `sf coordinator` answers). The bounds: a status of at most 300
+  characters and a question of at most 1,000 (`too_long`; an empty one is `bad_request`), 10 open
+  questions (`too_many_questions`); `answered` of an id not open is `unknown_question`. The link is
+  taken only when it parses with `URL` as `https:`, host exactly `claude.ai`, the default port and
+  no user or password (`bad_link` otherwise: `http:`, `claude.ai.evil.com`, `user@claude.ai`,
+  `javascript:`, ...).
+- **Reading it**: `GET api/coordinator` answers the state as JSON (any query or longer path is an
+  empty 404; no other method or route touches it). After each write `sf serve` marks the change
+  feed's `coordinator` kind: every open page gets a `coordinator` event (no data), and the card
+  reads `GET api/coordinator` again; the stream sends one on connect too, so the card reads once
+  when the board opens. There is no timer of its own: each board render renders the card again,
+  so its ages follow the board's refresh.
+- **The card**: hidden until its first read. With no state at all one muted line, "The
+  coordinator has not reported (sf coordinator)". Otherwise the status and how long ago ("3 min
+  ago": `ago` of `web/core.ts`, as the health panel's "checked ..."); older than 2 hours the status
+  is muted with "quiet since <time>" (HH:MM today, else the date and time, as the health panel's
+  since). Then *Open the chat* when a link is set (`target="_blank" rel="noopener noreferrer"`,
+  the URL checked again on the page by the same rules, so a link that is not claude.ai's is never
+  shown). The open questions follow in the order asked (newest last), each with its age; with any
+  open question the card has the accent border. Every text is set as text, never HTML.
 
 ### Phone and tablet
 

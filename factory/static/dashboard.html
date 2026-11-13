@@ -12,6 +12,7 @@
   <script src="job-page.js" defer></script>
   <script src="header.js" defer></script>
   <script src="board.js" defer></script>
+  <script src="coordinator.js" defer></script>
   <script src="routing.js" defer></script>
   <script src="ticket-page.js" defer></script>
   <script src="reports.js" defer></script>
@@ -69,6 +70,8 @@
       <button id="open-new-ticket" type="button" class="btn primary">New ticket</button>
     </header>
     <p id="board-hint" class="bhint" hidden></p>
+    <!-- The Coordinator card (coordinator.js): read-only, filled from api/coordinator -->
+    <section id="coord" class="coord" aria-label="Coordinator" hidden></section>
     <div class="cols" id="cols">
       <section class="col queue" aria-labelledby="col-queue-title"><h2 id="col-queue-title"><button type="button" class="colfold" data-colfold="queue" aria-expanded="true" aria-controls="qlist">Queue <span class="n" id="count-queue"></span></button></h2><ul id="qlist"></ul></section>
       <section class="col impl" aria-labelledby="col-implementing-title"><h2 id="col-implementing-title"><button type="button" class="colfold" data-colfold="implementing" aria-expanded="true" aria-controls="list-implementing">Implementing <span class="n" id="count-implementing"></span></button></h2><ul id="list-implementing"></ul></section>

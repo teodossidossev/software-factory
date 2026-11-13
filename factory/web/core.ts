@@ -384,6 +384,16 @@ function timeEl(ts: unknown): HTMLTimeElement {
   }
   return node;
 }
+// How long ago a moment was (a stored timestamp, or milliseconds since the epoch): "N s ago" under a
+// minute, "N min ago" under an hour, "N h ago" after; never below 0; empty for a time that does not parse.
+function ago(ts: string | number): string {
+  const at = typeof ts === 'number' ? ts : Date.parse(ts);
+  if (Number.isNaN(at)) {
+    return '';
+  }
+  const seconds = Math.max(0, Math.round((Date.now() - at) / 1000));
+  return seconds < 60 ? `${seconds} s ago` : seconds < 3600 ? `${Math.floor(seconds / 60)} min ago` : `${Math.floor(seconds / 3600)} h ago`;
+}
 // A duration as the prototype writes it: "14 min", "1 h 4 min".
 const dur = (ms: number): string => {
   const m = Math.max(0, Math.round(ms / 60000));

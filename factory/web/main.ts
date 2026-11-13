@@ -31,6 +31,8 @@ function openStream(): void {
   source.addEventListener('open', healthStreamUp);
   // The health checks: the first event on connect, then one on every status change.
   source.addEventListener('health', (message: MessageEvent<string>) => onHealthEvent(message.data));
+  // The coordinator's state changed (one event on connect too): the board's card reads it (coordinator.js).
+  source.addEventListener('coordinator', () => void readCoordinatorCard());
   source.addEventListener('jobs', (message: MessageEvent<string>) => {
     state.jobs = jobsOf(message.data);
     state.jobsSeen += 1;

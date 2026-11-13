@@ -63,6 +63,15 @@ rule changes, change it here, through a pull request like any other change.
   for a person.
 - Wait for jobs with a background watcher; do not poll. Read job results with short summaries
   (states, verdicts, counts), never whole logs or diffs.
+- **Show the user on the dashboard what you do** (the Coordinator card on the board; the user
+  follows the chat on another device):
+  - Once per session, set the chat's link: `sf coordinator link https://claude.ai/chat/<id>`.
+  - When you start a step that takes minutes, set your status: `sf coordinator status "<what you
+    do now>"` (at most 300 characters); `sf coordinator status --clear` when you are idle.
+  - Each question you put to the user: `sf coordinator ask "<the question>"` (it prints the id,
+    `q1`, `q2`, ...). When the answer comes, `sf coordinator answered <id>`.
+  - `sf coordinator` shows what the card shows. The dashboard never writes it: the answers come in
+    the chat.
 - At most three jobs run at once (the user's plan allows it since 2026-11-05).
 - The run queue starts tickets by itself (`sf queue add <ws> <ticket>`, `sf queue list`,
   `sf queue limit N`); it starts a ticket only when its plan check says ready or is not needed

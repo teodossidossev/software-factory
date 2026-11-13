@@ -827,13 +827,17 @@ export async function loadPage(
   const navigator = clipboard === undefined ? {} : { clipboard };
   const objectUrls = new Map<string, Blob>();
   const revokedUrls: string[] = [];
-  const objectUrl = {
-    createObjectURL: (blob: Blob): string => {
+  // The page's URL: the real one (the Coordinator card parses its link), with object URLs of its own.
+  const objectUrl = class extends URL {
+    static override createObjectURL(blob: Blob): string {
       const url = `blob:fake/${objectUrls.size + 1}`;
       objectUrls.set(url, blob);
       return url;
-    },
-    revokeObjectURL: (url: string): void => void revokedUrls.push(url),
+    }
+
+    static override revokeObjectURL(url: string): void {
+      revokedUrls.push(url);
+    }
   };
   // A bitmap of the image: its size, and the Blob it was made of.
   const createImageBitmap = async (blob: Blob): Promise<{ width: number; height: number; blob: Blob }> => ({ width: 4, height: 3, blob });

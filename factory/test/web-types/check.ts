@@ -12,6 +12,7 @@
 // of Checks or is named in PAGE_ONLY or KNOWN_DRIFT.
 /// <reference path="../../web/types.d.ts" />
 import type * as Changes from '../../src/changes.js';
+import type * as Coordinator from '../../src/coordinator.js';
 import type * as CoordinatorSkills from '../../src/coordinator-skills.js';
 import type * as Dashboard from '../../src/dashboard.js';
 import type * as JobStream from '../../src/job-stream.js';
@@ -250,6 +251,8 @@ export interface Checks {
   CoordinatorOverride: Same<CoordinatorOverride, CoordinatorSkills.SkillOverride>;
   CoordinatorColumn: Copy<CoordinatorColumn, CoordinatorSkills.CoordinatorColumn>;
   SkillText: Copy<SkillText, Awaited<ReturnType<typeof Skills.skillText>>>;
+  CoordinatorQuestion: Copy<CoordinatorQuestion, Coordinator.CoordinatorQuestion>;
+  CoordinatorState: Copy<CoordinatorState, Awaited<ReturnType<typeof Coordinator.readCoordinator>>>;
 }
 
 // true when every check passes, else each failure as "<page type>: <what differs>".

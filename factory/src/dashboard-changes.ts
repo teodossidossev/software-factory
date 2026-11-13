@@ -15,7 +15,15 @@ import { describeEvent, followLines } from './watch.js';
 export const MAX_STREAMS = 8;
 const KEEP_ALIVE_MS = 15_000;
 
-export function changeFeed(ctx: DashboardContext): ChangeFeed {
+// A change with one more kind than Change's: coordinator, the coordinator's state changed (an sf
+// coordinator write, src/coordinator.ts); every page gets a coordinator event, on which its
+// Coordinator card reads GET api/coordinator again. The event carries no state of its own.
+export type FeedChange = Change & { coordinator?: true };
+export interface DashboardFeed extends ChangeFeed {
+  changed(change: FeedChange): void;
+}
+
+export function changeFeed(ctx: DashboardContext): DashboardFeed {
   const { jobs, actions, setup, checks, queue, health, gateOn, toolCalls, streams, send, empty, jobsOf } = ctx;
 
   async function openStream(req: IncomingMessage, res: ServerResponse, query: URLSearchParams, remote: boolean): Promise<void> {
@@ -57,6 +65,8 @@ export function changeFeed(ctx: DashboardContext): ChangeFeed {
       send(stream, 'health', health.list());
     }
     send(stream, 'jobs', await jobsOf(remote));
+    // The Coordinator card reads its state once on connect, then after each change.
+    send(stream, 'coordinator', {});
     // The start screen's data: on connect whole, later after each change (changed).
     send(stream, 'workspaces', await workspacesPayload(setup));
     send(stream, 'tickets', await ticketsPayload(setup, checks, queue));
@@ -102,6 +112,7 @@ export function changeFeed(ctx: DashboardContext): ChangeFeed {
   // one tick, merged (keys unioned, 'all' wins over keys), and sent by one flush. A change that
   // arrives while a flush builds or sends is marked again and sent by one more flush right after.
   let marked: Marked | undefined;
+  let coordinatorMarked = false;
   let flushQueued = false;
   let flushing = false;
   const queueFlush = (): void => {
@@ -110,20 +121,23 @@ export function changeFeed(ctx: DashboardContext): ChangeFeed {
       setImmediate(() => void flush());
     }
   };
-  function changed(change: Change): void {
+  function changed(change: FeedChange): void {
     marked = mergeChange(marked, change);
+    coordinatorMarked ||= change.coordinator === true;
     queueFlush();
   }
   async function flush(): Promise<void> {
     flushQueued = false;
     const change = marked;
+    const coordinator = coordinatorMarked;
     marked = undefined;
+    coordinatorMarked = false;
     if (change === undefined || streams.size === 0) {
       return;
     }
     flushing = true;
     try {
-      await sendChange(change);
+      await sendChange(change, coordinator);
     } catch (error) {
       console.error(error);
     } finally {
@@ -134,8 +148,8 @@ export function changeFeed(ctx: DashboardContext): ChangeFeed {
 
   // Each marked payload built once and sent: jobs to every page, a changed job's detail to the
   // pages that follow it (one job event per job), workspaces and tickets to every page; tickets
-  // with changed, the tickets it names, unless every ticket was marked.
-  async function sendChange(change: Marked): Promise<void> {
+  // with changed, the tickets it names, unless every ticket was marked; coordinator to every page.
+  async function sendChange(change: Marked, coordinator: boolean): Promise<void> {
     const list = change.jobs ? await jobsPayload(jobs, setup, actions, toolCalls) : undefined;
     const details = [];
     for (const [workspace, ticket] of change.job.values()) {
@@ -164,6 +178,9 @@ export function changeFeed(ctx: DashboardContext): ChangeFeed {
       }
       if (tickets !== undefined) {
         send(stream, 'tickets', tickets);
+      }
+      if (coordinator) {
+        send(stream, 'coordinator', {});
       }
     }
   }

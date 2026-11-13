@@ -117,6 +117,10 @@ refused), and the factory's test command passed in a sandbox without network on 
   - Approve, Retry, Create merge request and Merge from there need the ticket typed again.
   - A foreign web page cannot act on it.
   - No token is written to a log.
+  - The coordinator's state (its status, its open questions and its chat link) is a local file
+    in the state directory. Only `sf coordinator`, through `sf serve`, writes it; the dashboard
+    only reads it, and shows every text as text. The chat link is limited to `https://claude.ai/`,
+    checked when it is written and again on the page.
 - **What is published is checked.**
   - The guard refuses a push or an MR text that holds a secret, in every workspace.
   - In a workspace with `"guard": true`, it also refuses the names on your private list and the

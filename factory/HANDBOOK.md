@@ -314,6 +314,10 @@ with every iteration. The Context owner does not review.
   a message asked is one. A message that decides nothing (such as "Go on.") changes nothing.
 - A `fix` lists concrete items: path, what is wrong, what is expected, severity. No restating of
   the whole task.
+- A verdict is complete: it lists every blocker and major item the Patch has, not the first one
+  found. After an item, keep reading the rest of the Patch and the files it changes. An item
+  raised in a later round on lines an earlier round already showed is a miss of that round. An
+  item still needs its evidence: do not pad the list, and a nit stays a nit.
 - Every item has a severity:
   - `blocker`: the change is wrong, unsafe or breaks the Task's acceptance.
   - `major`: a real defect or a Task requirement not met, but contained.

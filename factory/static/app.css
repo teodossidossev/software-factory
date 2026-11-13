@@ -715,8 +715,8 @@ pre.raw.doc .heading { font-weight: 700; }
 /* Stats: a full page like the digest's, up to 1440 px wide; tiles in a grid, the charts two
    per row from 900 px and one below, tables that scroll in their own box. The charts are inline SVG
    whose colours are classes over the theme tokens (no style attribute: the CSP has no unsafe-inline). */
-#stats { position: fixed; inset: 0; display: flex; flex-direction: column; background: var(--bg); z-index: 6; padding-top: env(safe-area-inset-top, 0px); padding-bottom: calc(56px + env(safe-area-inset-bottom, 0px)); }
-#stats .jhead .t1 .title { font-size: 16px; font-weight: 600; }
+#stats, #skills { position: fixed; inset: 0; display: flex; flex-direction: column; background: var(--bg); z-index: 6; padding-top: env(safe-area-inset-top, 0px); padding-bottom: calc(56px + env(safe-area-inset-bottom, 0px)); }
+#stats .jhead .t1 .title, #skills .jhead .t1 .title { font-size: 16px; font-weight: 600; }
 #stats .jhead .tools { flex-wrap: wrap; }
 .st-body { max-width: 1440px; margin: 0 auto; display: grid; gap: 18px; min-width: 0; }
 .st-sec { display: grid; gap: 10px; min-width: 0; }
@@ -791,6 +791,35 @@ pre.raw.doc .heading { font-weight: 700; }
 .mq-label { font-size: 13px; font-weight: 600; }
 .mq-text { width: 100%; box-sizing: border-box; font: 13px var(--sans); resize: vertical; }
 
+/* Skills: a full page like the Stats', up to 1280 px wide; the table scrolls sideways in its own
+   box (the page does not), a skill's SKILL.md opens in a side panel as plain text. #skills itself
+   shares the rules of #stats. */
+.sk-body { max-width: 1280px; margin: 0 auto; display: grid; gap: 10px; min-width: 0; }
+.sk-body > p { margin: 0; }
+.sk-filter { min-height: var(--control); max-width: 360px; width: 100%; box-sizing: border-box; padding: 6px 10px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--panel); color: inherit; font: inherit; }
+.sk-scroll { overflow-x: auto; min-width: 0; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); }
+.sk-table { border-collapse: collapse; width: 100%; font-size: 13px; }
+.sk-table th, .sk-table td { text-align: left; vertical-align: top; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+.sk-table tbody tr:last-child td { border-bottom: 0; }
+.sk-table th { font-size: 12px; color: var(--muted); font-weight: 600; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.sk-table .sk-role { text-align: center; }
+.sk-skill { min-width: 220px; max-width: 420px; }
+.sk-name { font-size: 13px; font-weight: 600; }
+.sk-desc { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sk-meta, .sk-note { font-size: 12px; }
+.sk-note { display: block; font-weight: 400; white-space: normal; max-width: 150px; margin: 2px auto 0; }
+.sk-box { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); cursor: pointer; }
+.sk-box:disabled { cursor: progress; }
+.sk-missing { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; font-size: 13px; }
+.sk-missing li { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center; background: var(--warn-bg); border-left: 3px solid var(--warn); border-radius: var(--radius-sm); padding: 6px 10px; }
+.sk-missing-text { overflow-wrap: anywhere; min-width: 0; }
+.sk-off { display: inline-flex; gap: 4px; align-items: center; }
+.sk-panel { position: fixed; top: 0; right: 0; bottom: 0; width: min(720px, 100vw); box-sizing: border-box; z-index: 7; display: flex; flex-direction: column; gap: 10px; padding: calc(12px + env(safe-area-inset-top, 0px)) 16px 16px; background: var(--bg); border-left: 1px solid var(--border); box-shadow: -4px 0 24px rgba(16, 24, 40, 0.15); }
+.sk-panel-head { display: flex; gap: 10px; align-items: center; justify-content: space-between; }
+.sk-panel-head .title { font-weight: 600; overflow-wrap: anywhere; min-width: 0; }
+.sk-panel p { margin: 0; }
+.sk-text { flex: 1; min-height: 0; overflow: auto; margin: 0; padding: 10px 12px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius-sm); font: 12.5px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+
 /* Phone (below 768 px), touch (phone or no hover), tablet board. */
 /* Every width: the column headings fold their column (the list and Done's "show all"); the reasons
    of the disabled buttons, shown only by the touch block; the tree's fold, shown only on a phone. */
@@ -810,7 +839,7 @@ pre.raw.doc .heading { font-weight: 700; }
 /* A phone: one list, the top bar scrolls away, the header's whole title and full-width switch, the
    Stream's time and actor above the text, the composer's full-width box, Changes stacked. */
 @media (max-width: 767px) {
-  #job, #ticket, #digest, #merge-requests { padding-bottom: env(safe-area-inset-bottom, 0px); }
+  #job, #ticket, #digest, #merge-requests, #skills { padding-bottom: env(safe-area-inset-bottom, 0px); }
   .kbd { display: none; }
   .cols { grid-template-columns: minmax(0, 1fr); }
   .qhint { display: none; }

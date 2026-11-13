@@ -268,9 +268,7 @@ function openTicket(key: string): void {
   ui.pending = false;
   byId('job').hidden = true;
   byId('board').hidden = true;
-  byId('digest').hidden = true;
-  leaveDigest();
-  byId('stats').hidden = true;
+  leavePages();
   const page = byId('ticket');
   page.hidden = false;
   renderTicket();

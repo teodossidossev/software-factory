@@ -44,7 +44,7 @@ function openDigest(id: string | null): void {
   byId('board').hidden = true;
   byId('job').hidden = true;
   byId('ticket').hidden = true;
-  byId('stats').hidden = true;
+  leavePages();
   const page = byId('digest');
   page.hidden = false;
   renderDigest();
@@ -565,8 +565,7 @@ function openStats(): void {
   byId('board').hidden = true;
   byId('job').hidden = true;
   byId('ticket').hidden = true;
-  byId('digest').hidden = true;
-  leaveDigest();
+  leavePages();
   const page = byId('stats');
   page.hidden = false;
   renderStats();

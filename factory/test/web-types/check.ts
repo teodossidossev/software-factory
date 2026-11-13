@@ -15,6 +15,8 @@ import type * as Changes from '../../src/changes.js';
 import type * as Dashboard from '../../src/dashboard.js';
 import type * as JobStream from '../../src/job-stream.js';
 import type * as ReviewJob from '../../src/review-job.js';
+import type * as SkillRoles from '../../src/skill-roles.js';
+import type * as Skills from '../../src/skills.js';
 import type * as Stats from '../../src/stats.js';
 import type * as TicketHistory from '../../src/ticket-history.js';
 
@@ -241,6 +243,10 @@ export interface Checks {
   OpenMergeRequest: Copy<OpenMergeRequest, Awaited<ReturnType<ServerActions['openMergeRequests']>>[number]>;
   ReviewThread: Copy<ReviewThread, Awaited<ReturnType<ServerActions['mergeRequestThreads']>>[number]>;
   ReviewJobResult: Copy<ReviewJobResult, Awaited<ReturnType<typeof ReviewJob.createReviewJob>>>;
+  SkillRole: Same<SkillRole, SkillRoles.Role>;
+  SkillRow: Copy<SkillRow, Skills.InstalledSkill>;
+  SkillsPayload: Copy<SkillsPayload, Skills.SkillsView>;
+  SkillText: Copy<SkillText, Awaited<ReturnType<typeof Skills.skillText>>>;
 }
 
 // true when every check passes, else each failure as "<page type>: <what differs>".

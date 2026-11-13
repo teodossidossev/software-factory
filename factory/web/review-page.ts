@@ -40,6 +40,7 @@ function leavePages(): void {
   leaveDigest();
   byId('stats').hidden = true;
   byId('merge-requests').hidden = true;
+  byId('skills').hidden = true;
 }
 
 function openMergeRequests(): void {

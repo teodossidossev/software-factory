@@ -21,6 +21,7 @@ const PAGE_OPEN: Readonly<Record<string, () => void>> = {
   'merge-requests': () => openMergeRequests(),
   archived: () => openArchived(),
   workspaces: () => openWorkspaces(),
+  skills: () => openSkills(),
 };
 
 // The jobs that wait for the user, in every workspace whatever the filter: Your turn's.
@@ -143,6 +144,7 @@ function setLimit(delta: number): void {
 function initHeader(): void {
   byId('waits').addEventListener('click', showYourTurn);
   byId('open-merge-requests').addEventListener('click', openMergeRequests);
+  byId('open-skills').addEventListener('click', openSkills);
   // The page select opens what the tabs open, then shows the board again (the bar is the board's).
   const pages = byIdAs('page-select', 'select');
   pages.value = 'board';

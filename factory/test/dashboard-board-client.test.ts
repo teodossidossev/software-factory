@@ -438,10 +438,10 @@ test('board client (SF-160): "N waits for you" counts every workspace, hides at 
 test('board client (SF-160): the top bar\'s pages: the tabs with Board current and Archived\'s count, and the page select below 1100 px opening the same pages and drawers', async () => {
   const page = await openBoard([], [], [workspace('app')]);
   assert.deepEqual(page.document.querySelectorAll('.topbar .tabs button').map((tab) => [tab.id, tab.textContent, tab.getAttribute('aria-current')]), [
-    ['open-board', 'Board', 'page'], ['open-digest', 'Digest', null], ['open-stats', 'Stats', null], ['open-merge-requests', 'Merge requests', null], ['open-archived', 'Archived (0)', null], ['open-workspaces', 'Workspaces', null],
+    ['open-board', 'Board', 'page'], ['open-digest', 'Digest', null], ['open-stats', 'Stats', null], ['open-merge-requests', 'Merge requests', null], ['open-archived', 'Archived (0)', null], ['open-workspaces', 'Workspaces', null], ['open-skills', 'Skills', null],
   ]);
   const pages = page.$('page-select');
-  assert.deepEqual([pages.value, (pages.children as FakeElement[]).map((option) => option.textContent)], ['board', ['Board', 'Digest', 'Stats', 'Merge requests', 'Archived (0)', 'Workspaces']]);
+  assert.deepEqual([pages.value, (pages.children as FakeElement[]).map((option) => option.textContent)], ['board', ['Board', 'Digest', 'Stats', 'Merge requests', 'Archived (0)', 'Workspaces', 'Skills']]);
   pages.value = 'workspaces';
   pages.dispatch('change');
   assert.deepEqual([page.$('drawer').hidden, pages.value], [false, 'board']);

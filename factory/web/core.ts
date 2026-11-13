@@ -426,10 +426,11 @@ function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
 
 // The action's answer. A 4xx, and a 5xx that names a factory refusal, is definite: ActionError.
 // Anything else (no answer, a body cut or unreadable after the headers, a 2xx without a result,
-// an internal failure) throws a plain Error: the action may have run.
-async function post(path: string, body: unknown): Promise<unknown> {
+// an internal failure) throws a plain Error: the action may have run. method: PUT for the one PUT
+// route (api/skills/roles/<role>).
+async function post(path: string, body: unknown, method: 'POST' | 'PUT' = 'POST'): Promise<unknown> {
   return answerOf(await fetch(path, {
-    method: 'POST', cache: 'no-store', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    method, cache: 'no-store', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
   }));
 }
 

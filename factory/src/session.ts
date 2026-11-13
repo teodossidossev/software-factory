@@ -18,7 +18,7 @@ import { stateDir } from './config.js';
 import { IMPLEMENTER_TOOLS } from './rules.js';
 import { claudeConfigDir, claudeUserSettings, type PathDenials, withSandboxDenials } from './sandbox-denials.js';
 import { factoryRoots, reapOrphanedSandboxes } from './sandbox-reaper.js';
-import { skillsSnapshot } from './skills.js';
+import { implementerSkills } from './skills.js';
 import { BWRAP_MISSING, prepareClaudeState, SANDBOX_UNAVAILABLE, WrappedSpawn } from './session-wrapper.js';
 
 // Markers a running Claude Code session sets for its children; a session inheriting them acts as
@@ -115,9 +115,9 @@ export interface SessionOptions {
   smokeMode?: boolean | undefined;
   // How long a turn's stream may stay open after its result (default STREAM_GRACE_MS); tests shorten it.
   streamGraceMs?: number | undefined;
-  // The skills folder the wrapper binds (src/skills.ts), asked again for each turn's wrapper; default:
-  // the state directory's snapshot link.
-  skills?: (() => Promise<string>) | undefined;
+  // The skill folders the wrapper binds (src/skills.ts), asked again for each turn's wrapper; default:
+  // the Implementer's chosen skills in the state directory's snapshot link (implementerSkills).
+  skills?: (() => Promise<string[]>) | undefined;
 }
 
 // After a turn's result, Claude Code ends its stream unless something keeps it alive (a background
@@ -451,7 +451,7 @@ export class ImplementerSession {
     const claudeDir = claudeConfigDir(process.env, home);
     const globalConfig = claudeUserSettings(process.env, home)[1]!;
     await prepareClaudeState(claudeDir, globalConfig);
-    const skills = this.#options.skills === undefined ? skillsSnapshot(stateDir()) : await this.#options.skills();
+    const skills = this.#options.skills === undefined ? await implementerSkills(stateDir()) : await this.#options.skills();
     return new WrappedSpawn(bwrap, denials?.sandbox ?? { denyRead: [], denyWrite: [] }, {
       worktree: this.#options.cwd, sessionTmp: tmp, home, claudeDir, globalConfig, skills,
     });

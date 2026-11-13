@@ -122,6 +122,8 @@ export type Target =
   | { kind: 'queue'; name: string; route: QueueRoute }
   // A job from a merge request's review comments: api/workspaces/<ws>/merge-requests/<number>/job, POST only.
   | { kind: 'mr-job'; workspace: string | undefined; number: string | undefined }
+  // An agent role's skills: PUT api/skills/roles/<role>, PUT only.
+  | { kind: 'skill-roles'; role: string }
   | { kind: 'read' };
 
 export function targetOf(path: string[]): Target {
@@ -171,6 +173,9 @@ export function targetOf(path: string[]): Target {
   }
   if (kind === 'tickets' && path.length === 7 && c === 'attachments' && path[6] === 'remove') {
     return { kind: 'ticket-attachment-remove', workspace: a, ticket: b, name: path[5] };
+  }
+  if (kind === 'skills' && path.length === 4 && a === 'roles' && b !== undefined) {
+    return { kind: 'skill-roles', role: b };
   }
   const change = kind === 'queue' && path.length === 3 ? postRoute(`queue-${a}`, 'queue') : undefined;
   if (change !== undefined) {

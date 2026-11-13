@@ -15,9 +15,10 @@ import { claudeReviews, type FileChange, type GateOverride, type GateRecord, typ
 import { applyVerdict, entryItem, isSimplification, SIMPLIFIER, type Applied, type Decision, DECISIONS, LEDGER_ID, type LedgerEntry, FACTORY_PROBLEMS, settle, unappliedEntries, unsettled } from '../ledger.js';
 import { Redactor } from '../redact.js';
 import { readJobRules } from '../rules-docs.js';
-import { actedVerdict, decide, type Verdict, fixContent, oneLine, REVIEWER, type ReviewInput, type ReviewItem, type ReviewMethod, readReviewMethod, type ReviewOutcome, type ReviewOutput, reviewPrompt, runReview, type StructuredOutcome, unacceptedItems } from '../review.js';
+import { actedVerdict, decide, type Verdict, fixContent, oneLine, REVIEWER, type ReviewInput, type ReviewItem, type RecordedSkills, reviewerSkills, type ReviewOutcome, type ReviewOutput, reviewPrompt, runReview, type StructuredOutcome, unacceptedItems } from '../review.js';
 import { type DenialScope, gateWrapperFor, type PathDenials, pathDenials, USER_SETTINGS_WEAKEN_SANDBOX } from '../sandbox-denials.js';
 import { factoryTokens } from '../secrets.js';
+import { jobSkills } from '../skills.js';
 import { changedBetween, type FixFiles, fixNumbers, guardSuggestions, offerMessage, runSimplify, SIMPLIFY_CODE, SIMPLIFY_TITLE, simplifyFix, type SimplifyInput, type SimplifyOutput, simplifyPrompt, type Suggestion } from '../simplify.js';
 import { codesWithAction, settleCodes, withoutDropped } from '../stops.js';
 import { mayTouch, parseFrontMatter, readTask, TASK_DIR } from '../task-file.js';
@@ -344,8 +345,8 @@ export class ReviewsPart {
     return new Redactor({ cwd: job.worktree ?? '', secrets: await factoryTokens(this.#settings.config) });
   }
 
-  // The material of a review of the job's last iteration, the Task file read in the worktree.
-  async #reviewInput(job: Job, worktree: string): Promise<ReviewInput & { review_method: ReviewMethod }> {
+  // The material of a review of the job's last iteration, the Task file read in the worktree, and the skills of role by its list the job's start recorded.
+  async #reviewInput(job: Job, worktree: string, role: 'claude_review' | 'codex_gate'): Promise<ReviewInput & { recorded: RecordedSkills }> {
     const { workspace: name, ticket, iteration } = job;
     const [{ report, patch }, meta] = await Promise.all([this.#store.jobs.readIteration(name, ticket, iteration), this.#store.jobs.readMeta(name, ticket, iteration)]);
     return {
@@ -354,14 +355,14 @@ export class ReviewsPart {
       rules: await readJobRules(this.#store.jobs.dir(name, ticket)),
       // Every message sent up to and including the reviewed iteration.
       userMessages: (await jobUserMessages(this.#store.jobs, name, ticket)).filter((m) => m.iteration <= iteration),
-      ...(await readReviewMethod(this.#settings.config.reviewSkill)),
+      ...(await reviewerSkills(await jobSkills(this.#settings.config.stateDir, this.#store.jobs.eventsPath(name, ticket)), role, this.#settings.config.reviewSkill, this.#settings.config.reviewSkillSet)),
     };
   }
 
   // Runs the review session, then applies its outcome under the lock.
   async #review(job: Job, running: RunningReview): Promise<void> {
     let outcome: ReviewOutcome;
-    let method: ReviewMethod = 'none';
+    let method: RecordedSkills = { review_method: 'none' };
     // The code a session refused before it started stops the job with (user_settings_weaken_sandbox).
     let stop: string | undefined;
     const redactor = await this.#redactor(job);
@@ -370,8 +371,8 @@ export class ReviewsPart {
         throw new Error('the job has no worktree');
       }
       const worktree = job.worktree;
-      const input = await this.#reviewInput(job, worktree);
-      method = input.review_method;
+      const input = await this.#reviewInput(job, worktree, 'claude_review');
+      method = input.recorded;
       outcome = await runReview(reviewPrompt(input), {
         cwd: worktree, claudePath: this.#settings.config.claudePath, sandbox: this.#settings.config.sandbox, model: this.#settings.config.reviewModel,
         pathDenials: (sessionTmp) => this.#pathDenials(job, worktree, sessionTmp),
@@ -406,7 +407,7 @@ export class ReviewsPart {
   // the round. Otherwise review.json (with method, the review method's record) and the event are
   // written; the verdict applies only while the job still awaits review of the same iteration.
   // stop: the code of a session refused before it started, for the job's error instead of review_failed.
-  async #reviewed(reviewed: Job, running: RunningReview, outcome: ReviewOutcome, method: ReviewMethod, limit?: UsageLimit, stop?: string): Promise<void> {
+  async #reviewed(reviewed: Job, running: RunningReview, outcome: ReviewOutcome, method: RecordedSkills, limit?: UsageLimit, stop?: string): Promise<void> {
     const { workspace: name, ticket, iteration } = reviewed;
     const key = `${name}/${ticket}`;
     if (this.#sessions.reviews.get(key) !== running || running.controller.signal.aborted) {
@@ -425,8 +426,8 @@ export class ReviewsPart {
     }
     const ignored = current ? {} : { ignored: true as const };
     const record: ReviewRecord = outcome.ok
-      ? { reviewer: REVIEWER, ...outcome.output, cost_usd: outcome.costUsd, started_at: outcome.startedAt, ended_at: outcome.endedAt, review_method: method }
-      : { reviewer: REVIEWER, error: outcome.message, review_method: method };
+      ? { reviewer: REVIEWER, ...outcome.output, cost_usd: outcome.costUsd, started_at: outcome.startedAt, ended_at: outcome.endedAt, ...method }
+      : { reviewer: REVIEWER, error: outcome.message, ...method };
     await this.#store.jobs.writeReview(name, ticket, iteration, record);
     await this.#store.jobs.appendEvent(name, ticket, outcome.ok
       ? { ts: now(), iteration, type: 'review', reviewer: REVIEWER, ...(await this.#verdictOf(job, outcome.output)), items: outcome.output.items.length, ...ignored }
@@ -603,7 +604,7 @@ export class ReviewsPart {
     const { workspace: name, ticket, iteration } = job;
     const gate = this.#settings.config.gate;
     let outcome: GateOutcome;
-    let method: ReviewMethod = 'none';
+    let method: RecordedSkills = { review_method: 'none' };
     const redactor = await this.#redactor(job);
     try {
       if (!gate.on) {
@@ -612,8 +613,8 @@ export class ReviewsPart {
       if (job.worktree === null || job.base_commit === null) {
         throw new Error('the job has no worktree or base commit');
       }
-      const input = await this.#reviewInput(job, job.worktree);
-      method = input.review_method;
+      const input = await this.#reviewInput(job, job.worktree, 'codex_gate');
+      method = input.recorded;
       const dir = this.#store.jobs.iterationDir(name, ticket, iteration);
       const images = this.imageRefs(job, input.task).map((image) => image.path);
       // Codex inside bubblewrap under the sessions' read denials; unwrapped with SF_SANDBOX=off.
@@ -647,7 +648,7 @@ export class ReviewsPart {
   }
 
   // The end of a gate run. A cancelled one leaves no trace. Otherwise its tokens count for the job,
-  // gate.json (with method, the review method's record) and the event are written, and the verdict
+  // gate.json (with method: the review method's record, the skills' names) and the event (naming a skill left out) are written, and the verdict
   // applies only while the job still awaits review of the same iteration, as the factory acts on it
   // (decide): clean (a fix with nits only too) runs Clean with the paths both reviewers accepted, fix
   // (a blocker or major item, or an undeclared sensitive path or a path outside the Task's scope the
@@ -655,7 +656,7 @@ export class ReviewsPart {
   // Claude review (claude undefined) the paths are the gate's alone and SF_GATE_MAX_ROUNDS does not
   // apply: SF_MAX_ITERATIONS limits the rounds. A run that hit a usage limit (limit) while the job still awaits review of the
   // same iteration parks the job: no gate.json, no event, no tokens charged.
-  async #gated(gated: Job, running: RunningReview, claude: ReviewOutput | undefined, outcome: GateOutcome, method: ReviewMethod, limit?: UsageLimit): Promise<void> {
+  async #gated(gated: Job, running: RunningReview, claude: ReviewOutput | undefined, outcome: GateOutcome, method: RecordedSkills, limit?: UsageLimit): Promise<void> {
     const { workspace: name, ticket, iteration } = gated;
     const key = `${name}/${ticket}`;
     if (this.#sessions.reviews.get(key) !== running || running.controller.signal.aborted) {
@@ -683,11 +684,12 @@ export class ReviewsPart {
     const model = this.#settings.config.codexModel !== undefined ? { model: this.#settings.config.codexModel } : {};
     const times = { started_at: outcome.startedAt, ended_at: outcome.endedAt };
     const record: GateRecord = outcome.ok
-      ? { reviewer: GATE_REVIEWER, ...outcome.output, ...model, tokens: outcome.tokens, ...times, review_method: method }
-      : { reviewer: GATE_REVIEWER, error: outcome.message, ...model, tokens: outcome.tokens, ...times, review_method: method };
+      ? { reviewer: GATE_REVIEWER, ...outcome.output, ...model, tokens: outcome.tokens, ...times, ...method }
+      : { reviewer: GATE_REVIEWER, error: outcome.message, ...model, tokens: outcome.tokens, ...times, ...method };
     await this.#store.jobs.writeGate(name, ticket, iteration, record);
+    const omitted = method.skills_omitted !== undefined && method.skills_omitted.length > 0 ? { skills_omitted: method.skills_omitted } : {};
     await this.#store.jobs.appendEvent(name, ticket, outcome.ok
-      ? { ts: now(), iteration, type: 'review', reviewer: GATE_REVIEWER, ...(await this.#verdictOf(job, outcome.output)), items: outcome.output.items.length, ...ignored }
+      ? { ts: now(), iteration, type: 'review', reviewer: GATE_REVIEWER, ...(await this.#verdictOf(job, outcome.output)), items: outcome.output.items.length, ...ignored, ...omitted }
       : { ts: now(), iteration, type: 'review_failed', reviewer: GATE_REVIEWER, error: outcome.message, ...ignored });
     if (!current) {
       return;

@@ -15,6 +15,7 @@ values and an example, as the code of this version reads them.
 | The guard's private list | `~/.config/software-factory/guard-terms.txt` | at every check of the guard ([The guard](#the-guard)) |
 | The queue (order, limit, hold, limit rule) | `~/.local/state/software-factory/queue.json` | by `sf serve`; changed with `sf queue` or the board |
 | A ticket's plan | `.software-factory/<ticket>.md` in the workspace's checkout | at Start, by the Task check and the queue |
+| The agents' skills by role | `~/.local/state/software-factory/skill-roles.json` | at each job's Start, each Task check's start, and by `sf serve` for planning; changed with `sf skills set` ([The agents' skills](#the-agents-skills)) |
 
 `~/.config/software-factory` is the **config directory**: `SF_CONFIG_DIR`, else
 `$XDG_CONFIG_HOME/software-factory`, else `~/.config/software-factory`.
@@ -413,6 +414,39 @@ change. It exits 0 without hits and 1 with hits. Only `sf guard` and the hook sh
 - **At the push** (`sf approve`, Push, `sf mr create`): nothing is pushed and the job is not
   changed. The message names `sf guard <workspace> <commit> --mr <ticket>`; fix the commit, the
   branch name or the MR text (on the Merge request screen), or add a `!` line, and push again.
+
+## The agents' skills
+
+The factory's agents use your installed skills, the ones the `skills` tool keeps in
+`~/.agents/skills` (`SF_SKILLS_DIR`) with its `.skill-lock.json`. You choose which of them each
+agent role uses; the choice is one, shared by all workspaces (no workspace has its own). The factory installs nothing: run `npx skills add
+<source>` in a terminal, then switch the skill on for a role.
+
+| Role | What it is | Its skills by default | How it gets them |
+| --- | --- | --- | --- |
+| `implementer` | The Implementer's session | `implement`, `tdd`, `code-review`, `grilling` | Mounted read-only where Claude Code looks for your skills; it sees no other. Without `implement`, its prompts name the Task file without `/implement`. |
+| `claude_review` | The Claude review | `code-review` | `code-review` is its review method; each other skill is a `<skill>` block in its prompt. |
+| `codex_gate` | The Codex gate | `code-review` | As the Claude review. |
+| `task_check` | The Task check | none | Each skill is a `<skill>` block in its prompt. |
+| `planner` | ChatGPT's planning method | `grilling` | Each skill's `SKILL.md` body, in order, after the Quick start. |
+
+A role can have no skill at all, `implement` and `code-review` included: it then works without a
+method (the planner with the Quick start alone). The `<skill>` blocks of one prompt take at most
+64 KiB; a skill past that is named in the record (`skills_omitted`), not sent.
+
+```sh
+sf skills                                  # the installed skills: source, updated, description, on/- per role; then the chosen ones not installed
+sf skills set codex_gate grilling on       # add a skill to a role
+sf skills set implementer implement off    # take one out
+```
+
+`sf skills set` refuses an unknown role or a skill that is not installed, with the list. The
+choice is `skill-roles.json` in the state directory (`{ "version": 1, "roles": { <role>: [...] }
+}`; a role missing from it has its default). A job keeps the choice it started with; a change
+applies to the jobs started after it, to the next Task check and, in `sf serve`, to the next
+planning request. `SF_REVIEW_SKILL` and `SF_PLAN_SKILL`, when set, win over the choice. The
+dashboard reads and changes the same choice through `GET api/skills`, `GET api/skills/<name>`
+and `PUT api/skills/roles/<role>` (factory/README.md, section The agents' skills).
 
 ## Coding rules
 

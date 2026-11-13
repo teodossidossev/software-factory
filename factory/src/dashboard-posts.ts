@@ -1,8 +1,8 @@
 // The dashboard's posts: the User's actions as POST endpoints, each validated and dispatched as
 // the one call it stands for: the job and queue actions of POST_ROUTES (src/dashboard-routes.ts,
 // routePost), the setup actions (setupPost), the Task check's start (checkPost), the planned
-// ticket page's Save (taskPost) and a ticket's images (attachmentAddPost, attachmentRemovePost);
-// handlePost runs the transport checks, the call, and tells the open pages through the change
+// ticket page's Save (taskPost), a ticket's images (attachmentAddPost, attachmentRemovePost) and an
+// agent role's skills (skillRolesPost, the one PUT); handlePost runs the transport checks, the call, and tells the open pages through the change
 // feed. Nothing here changes a job by itself.
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import * as z from 'zod/v4';
@@ -16,11 +16,15 @@ import { FactoryError } from './errors.js';
 import { internalError, sendJson, statusOf } from './http.js';
 import { HANDOFF_MODES, WORKSPACE_COLORS, WORKSPACE_NAME_PATTERN } from './registry.js';
 import { REVIEW_JOB_SHAPE, reviewJobCall } from './review-job.js';
+import { setRoleSkills } from './skills.js';
 import { MAX_TASK_BYTES } from './task-file.js';
 import { refuseWhileUpdating } from './update.js';
 
 // The raw body of an action request, in bytes: a transport bound, not a lifecycle rule.
 export const MAX_ACTION_BODY_BYTES = 128 * 1024;
+// The bounds of PUT api/skills/roles/<role>'s list: its names, and a name's length.
+const MAX_ROLE_SKILLS = 200;
+const MAX_SKILL_NAME = 200;
 // The raw body of the planned ticket page's Save: a whole Task file as a JSON string, whose
 // escapes can take up to twice its bytes; the content's own size is checked by the Task file writer.
 // A file of mostly non-ASCII or control characters can need more and is written with write_task.
@@ -174,7 +178,20 @@ export function postHandlers(ctx: DashboardContext, feed: Pick<ChangeFeed, 'chan
     };
   }
 
-  function setupPost(target: Exclude<Target, { kind: 'read' | 'action' | 'ticket-check' | 'ticket-task' | 'queue' | 'ticket-attachment-add' | 'ticket-attachment-remove' }>): Post | undefined {
+  // PUT api/skills/roles/<role>: the role's whole list of skills, checked as sf skills set checks a
+  // skill (an unknown role, a skill not installed: refused with the list), written, and the snapshot synced.
+  function skillRolesPost(role: string): Post {
+    const body = z.strictObject({ skills: z.array(z.string().max(MAX_SKILL_NAME)).max(MAX_ROLE_SKILLS) });
+    return {
+      route: 'skill-roles', shape: '{"skills": [<skill name>, ...]}',
+      call: (data) => {
+        const parsed = body.safeParse(data);
+        return parsed.success ? () => setRoleSkills(stateDir, role, parsed.data.skills) : undefined;
+      },
+    };
+  }
+
+  function setupPost(target: Exclude<Target, { kind: 'read' | 'action' | 'ticket-check' | 'ticket-task' | 'queue' | 'ticket-attachment-add' | 'ticket-attachment-remove' | 'skill-roles' }>): Post | undefined {
     if (target.kind === 'workspace-edit') {
       const name = target.name;
       if (name === undefined || !WORKSPACE_NAME_PATTERN.test(name)) {
@@ -369,5 +386,5 @@ export function postHandlers(ctx: DashboardContext, feed: Pick<ChangeFeed, 'chan
     sendJson(res, 200, { ok: true, result });
   }
 
-  return { checkPost, routePost, taskPost, attachmentAddPost, attachmentRemovePost, setupPost, handlePost };
+  return { checkPost, routePost, taskPost, attachmentAddPost, attachmentRemovePost, setupPost, skillRolesPost, handlePost };
 }

@@ -26,15 +26,15 @@ import { appendFix, mayTouch, parseFrontMatter, readTask, TASK_DIR, taskScope } 
 import { TicketHistory } from '../ticket-history.js';
 import { usageLimit, type UsageLimit } from '../usage-limit.js';
 import type { RunnerRequest } from '../runner.js';
-import { jobSkills } from '../skills.js';
+import { implementerSkills, jobSkills } from '../skills.js';
 import type { JobStorePort, LivePort, LockPort, RunnerPort, SettingsPort, StopPort } from './ports.js';
 import { checkNotInCheckout, cutOffError } from './errors.js';
-import { changeNote } from './prompts.js';
+import { changeNote, implementCommand } from './prompts.js';
 import { exists, type FixOptions, type Live } from './shared.js';
 
 type Success = Extract<IdleOutcome, { ok: true }>;
 
-// The skill the Implementer's first prompt runs (/implement, firstPrompt), and the event of its absence.
+// The skill the Implementer's first prompt runs (/implement, firstPrompt) when chosen, and the event of its absence.
 const IMPLEMENT_SKILL = 'implement';
 const SKILL_MISSING = 'skill_missing';
 
@@ -148,9 +148,9 @@ export class TurnsPart {
         // real job's state directory.
         allowCommands: probe !== undefined ? [probe] : undefined,
         smokeMode: probe !== undefined,
-        // The skills folder the job's start recorded (else the snapshot link), bound read-only under
-        // the wrapper of each turn: a later sync does not change the skills of this job.
-        skills: () => jobSkills(this.#settings.config.stateDir, this.#store.jobs.eventsPath(name, ticket)),
+        // The Implementer's skills the job's start recorded, in the folder it recorded (else the snapshot
+        // link), bound read-only under the wrapper of each turn: a later sync or choice does not change them.
+        skills: () => implementerSkills(this.#settings.config.stateDir, this.#store.jobs.eventsPath(name, ticket)),
         // Built by the session's first turn, again for every session the factory creates, with
         // the session's own temporary folder kept; under the wrapper (the sandbox on) its skills readable.
         pathDenials: (sessionTmp) => pathDenials({
@@ -185,7 +185,7 @@ export class TurnsPart {
             // it closes the session).
             void this.#recordSession(name, ticket, message.session_id);
           }
-          if (message.type === 'system' && message.subtype === 'init' && !message.slash_commands.includes(IMPLEMENT_SKILL)) {
+          if (message.type === 'system' && message.subtype === 'init' && !message.slash_commands.includes(IMPLEMENT_SKILL) && (await jobSkills(this.#settings.config.stateDir, this.#store.jobs.eventsPath(name, ticket))).roles.implementer.includes(IMPLEMENT_SKILL)) {
             await this.#recordSkillMissing(name, ticket, iteration);
           }
         },
@@ -523,7 +523,7 @@ export class TurnsPart {
       ? await this.#store.transition({ ...job, ...counts, prepared_commit: null }, 'working', 'tests')
       // from: awaiting_review, ready_for_human_review (checkFix), needs_human (fromStop)
       : await this.#store.transition({ ...job, ...counts, fixes: job.fixes + 1, prepared_commit: null }, 'working', 'fix');
-    this.session(job, workspace).send(factoryPrompt(this.withChange(`/implement ${TASK_DIR}/${ticket}.md Fix ${fix}`, ticket, change), ticket, job.iteration + 1, this.imagesLine(job), job.base_commit), DENIED_TOOLS);
+    this.session(job, workspace).send(factoryPrompt(this.withChange(implementCommand(ticket, (await jobSkills(this.#settings.config.stateDir, this.#store.jobs.eventsPath(workspaceName, ticket))).roles.implementer, fix), ticket, change), ticket, job.iteration + 1, this.imagesLine(job), job.base_commit), DENIED_TOOLS);
     return { iteration: job.iteration + 1, check_after_minutes: this.#settings.config.checkAfterFixMin };
   }
 

@@ -47,15 +47,22 @@ refused), and the factory's test command passed in a sandbox without network on 
     folder of the wrapper's own: writable, but nothing of the host's `/tmp` is seen there and
     nothing written there reaches the host. So a link swapped in between the file guard's check and
     the write cannot send the write out of the worktree.
-    Its skills are the user's installed ones (`implement`, `tdd`, `code-review`, `grilling` from
-    `~/.agents/skills`), copied verbatim into the factory's skills snapshot in its state directory
-    when their lock file's hashes change, and never edited. The snapshot is mounted read-only where
-    Claude Code looks for the user's skills: the job can read them but not change them, every turn
-    of a job binds the folder its start recorded (an update builds a new folder and swaps a link to
-    it, and no folder a job not yet archived recorded is removed), the user's other skills
-    (`~/.claude/skills`, `~/.agents`) stay hidden, and each job's event log records the versions
-    and the folder it used. The reviewers' and the planning method are read from the same
-    snapshot. The file
+    Its skills are the user's choice: of the skills installed in `~/.agents/skills`, each agent
+    role (the Implementer, the Claude review, the Codex gate, the Task check, the planner) uses the
+    ones you switch on with `sf skills set` (by default `implement`, `tdd`, `code-review`,
+    `grilling` for the Implementer). The factory only reads `~/.agents/skills` and its lock file:
+    it installs nothing (`npx skills add` in your terminal does) and never writes into `~/.agents`,
+    `~/.claude` or a workspace's checkout. The chosen skills are copied verbatim into the factory's
+    skills snapshot in its state directory when their lock file's hashes change, and never edited.
+    Only the Implementer's chosen skills are mounted, each read-only, where Claude Code looks for
+    the user's skills, over an empty read-only folder: the job can read them but not change them or
+    add one, every turn of a job binds the folder and the choice its start recorded (an update
+    builds a new folder and swaps a link to it, and no folder a job not yet archived recorded is
+    removed), every other skill (`~/.claude/skills`, `~/.agents`, the snapshot's others) stays
+    hidden, and each job's event log records the versions, the folder and each role's list it
+    used. The reviewers, the Task check and the planning method get their chosen skills' text in
+    their prompts, read from the same snapshot; the dashboard's `api/skills` reads only an
+    installed skill's `SKILL.md` and refuses any other name or path. The file
     guard lets only this session read that folder, by the path given; every other session, and a
     write by any session, is refused there.
     Without `bwrap` a job's turn stops; it never runs unwrapped. `SF_SANDBOX=off` turns the

@@ -47,7 +47,9 @@ test('every command of the CLI is in sf help once, with its usage line; the line
   const lines = help.stdout.split('\n');
   for (const command of CLI_COMMANDS) {
     assert.ok(lines.includes(usageLine(command)), `sf help lacks: ${usageLine(command)}`);
-    assert.equal(lines.filter((line) => line.startsWith(`  sf ${command.name} `)).length, 1, command.name);
+    // Not counting the lines of a group's command under the same first word (sf skills set under sf skills).
+    const longer = CLI_COMMANDS.filter((other) => other.name.startsWith(`${command.name} `));
+    assert.equal(lines.filter((line) => line.startsWith(`  sf ${command.name} `) && !longer.some((other) => line.startsWith(`  sf ${other.name} `))).length, 1, command.name);
   }
   // As they were written by hand before SF-138.
   assert.ok(lines.includes('  sf accept <workspace> <ticket>                        Accept a clean Claude review over a stopped gate (needs_human with gate_rounds, gate_budget or gate_failed) or a ledger stop (review_churn, review_disputed) or the Fix round limit (iteration_limit) or the workspace\'s tests (tests_failed, tests_unavailable: without passing tests) and prepare the MR; on simplify_offered: skip the suggestions (listed in the MR text)'));
@@ -93,6 +95,12 @@ test('the CLI\'s lookup: one word or a group\'s two; a group without one of its 
   assert.equal(cliCommand(['accept', 'app', 'T-1'])?.command, COMMANDS.accept);
   assert.deepEqual(cliCommand(['queue', 'add', 'app', 'T-1'])?.args, ['app', 'T-1']);
   assert.equal(cliCommand(['mr', 'status', 'app', 'T-1'])?.command, COMMANDS.mrStatus);
+  // sf skills, and sf skills set: the group's own word wins over the command of the one word.
+  assert.deepEqual(cliCommand(['skills']), { command: COMMANDS.skills, args: [] });
+  assert.deepEqual(cliCommand(['skills', 'set', 'planner', 'tdd', 'on']), { command: COMMANDS.skillsSet, args: ['planner', 'tdd', 'on'] });
+  assert.deepEqual(checkArgs(COMMANDS.skillsSet, ['planner', 'tdd', 'off']).args, ['planner', 'tdd', 'off']);
+  assert.throws(() => checkArgs(COMMANDS.skillsSet, ['planner', 'tdd', 'maybe']), UsageError);
+  assert.throws(() => checkArgs(COMMANDS.skills, ['extra']), UsageError);
   assert.throws(() => cliCommand(['mr']), (error: unknown) => error instanceof UsageError && error.message === 'mr needs create, merge, status, list or comments.');
   assert.throws(() => cliCommand(['mr', 'open']), (error: unknown) => error instanceof UsageError && error.message === 'unknown mr command "open".');
   assert.throws(() => cliCommand(['queue', 'bogus']), (error: unknown) => error instanceof UsageError && error.message === 'unknown queue command "bogus".');
@@ -147,7 +155,7 @@ test('while sf update drains or builds, a command not open while updating is ref
       }
     }
     assert.deepEqual(COMMAND_LIST.filter((command) => command.openWhileUpdating === true).map(socketName).sort(),
-      ['check', 'digest-latest', 'mcp-port', 'mr-comments', 'mr-list', 'mr-status', 'pause', 'ping', 'queue-list', 'serve-busy']);
+      ['check', 'digest-latest', 'mcp-port', 'mr-comments', 'mr-list', 'mr-status', 'pause', 'ping', 'queue-list', 'serve-busy', 'skills']);
     // From the CLI: refused with exit 1; the open pause reaches the job (there is none).
     const accept = await runCli(env, ['accept', 'app', 'T-1']);
     assert.equal(accept.code, 1);

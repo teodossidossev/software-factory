@@ -249,6 +249,40 @@ test('dashboard (SF-103): the digest list and one digest, a manual run and diges
   });
 });
 
+test('dashboard: GET api/skills, the installed skills and the roles\' lists; GET api/skills/<name>, a skill\'s SKILL.md, refused for a path or a name not installed; PUT api/skills/roles/<role> as sf skills set', async () => {
+  await withDashboard('dash-skills', fakeActions(), async (dashboard, store) => {
+    const base = dashboard.url;
+    const view = JSON.parse((await fetchRaw(new URL('api/skills', base))).body) as { skills: Array<{ name: string; description: string | null }>; roles: Record<string, string[]>; missing: string[] };
+    assert.deepEqual(view.skills.map((skill) => [skill.name, skill.description]), [['code-review', 'The fake code-review skill'], ['grilling', 'The fake grilling skill'], ['implement', 'The fake implement skill'], ['tdd', 'The fake tdd skill']]);
+    assert.deepEqual([view.roles.codex_gate, view.roles.task_check, view.missing], [['code-review'], [], []]);
+    const text = JSON.parse((await fetchRaw(new URL('api/skills/tdd', base))).body) as { text: string; truncated: boolean };
+    assert.deepEqual(text, { name: 'tdd', text: '---\nname: tdd\ndescription: The fake tdd skill\n---\n\nTest-driven development: red, then green.\n', truncated: false });
+    // A path (an encoded slash, ..), a name of another form or one not installed: refused, nothing read.
+    for (const path of ['api/skills/a%2Fb', 'api/skills/..%2Fskills%2Ftdd', 'api/skills/%2E%2E%2Fagents', 'api/skills/Tdd', 'api/skills/none']) {
+      const refused = await fetchRaw(new URL(path, base));
+      assert.deepEqual([refused.status, JSON.parse(refused.body).error.code], [400, 'skill_not_installed'], path);
+    }
+    // A path the URL folds (..) reaches no skill route; a deeper one is none either.
+    for (const path of ['api/skills/tdd/SKILL.md', 'api/skills/tdd?x=1']) {
+      assert.equal((await fetchRaw(new URL(path, base))).status, 404, path);
+    }
+    // PUT a role's list: written, checked as sf skills set; GET or POST there is 405.
+    const put = await act(base, 'api/skills/roles/task_check', { skills: ['tdd', 'grilling'] }, { method: 'PUT' });
+    assert.equal(put.status, 200, put.body);
+    assert.deepEqual(JSON.parse(put.body).result.roles.task_check, ['tdd', 'grilling']);
+    assert.deepEqual(JSON.parse(await readFile(join(store.state, 'skill-roles.json'), 'utf8')).roles.task_check, ['tdd', 'grilling']);
+    for (const [path, body, code] of [
+      ['api/skills/roles/reviewer', { skills: [] }, 'unknown_role'], ['api/skills/roles/planner', { skills: ['../tdd'] }, 'skill_not_installed'],
+      ['api/skills/roles/planner', { skills: 'tdd' }, 'invalid_body'], ['api/skills/roles/planner', { skills: [], more: 1 }, 'invalid_body'],
+    ] as const) {
+      const refused = await act(base, path, body, { method: 'PUT' });
+      assert.deepEqual([refused.status, JSON.parse(refused.body).error.code], [400, code], path);
+    }
+    assert.equal((await act(base, 'api/skills/roles/planner', { skills: [] })).status, 405);
+    assert.equal((await act(base, 'api/skills/roles/planner', { skills: [] }, { headers: { origin: 'http://evil.example' }, method: 'PUT' })).status, 403);
+  });
+});
+
 test('dashboard (SF-117): GET api/stats with days 7, 30 or 90 and a workspace; any other query or a longer path is an empty 404; POST is 405', async () => {
   await withDashboard('dash-stats', fakeActions(), async (dashboard, { jobs, job }) => {
     const base = dashboard.url;

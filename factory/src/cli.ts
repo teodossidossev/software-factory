@@ -43,14 +43,14 @@ import { followJobs, lockPath, runJob } from './runner.js';
 import { jobNotification, notifyConfig, notifyTaskCheck, sendNotification, stateNotifier } from './notify.js';
 import { configDir, HANDOFF_MODES, ignoredWorkCheckouts, isHandoffMode, isWorkspaceColor, loadRegistry, resolveWorkspace, saveRegistry, verifyCheckout, WORKSPACE_COLORS, workspaceColor, type WorkspaceEntry } from './registry.js';
 import {
-  ensureMcpToken, keepProfilePrivate, loadHandbook, mcpBaseUrl, mcpUrl, packageVersion, planSkillPath, probeMcp, profileHasUrl, readMcpToken, redactMcpToken, requireMcpToken,
+  ensureMcpToken, keepProfilePrivate, loadHandbook, mcpBaseUrl, mcpUrl, packageVersion, probeMcp, profileHasUrl, readMcpToken, redactMcpToken, requireMcpToken,
   replaceMcpToken, rewriteProfileUrl, SERVER_NAME, startServer, TOKEN_LABEL,
 } from './server.js';
 import { Setup } from './setup.js';
 import { handoverLines, limitLine, type StatusRow, statusRows } from './status.js';
 import { fileSummaryLines } from './patch.js';
 import { prepareTaskChecksDir } from './sandbox-denials.js';
-import { serveSkills } from './skills.js';
+import { planWarning, serveSkills } from './skills.js';
 import { factoryRoots, OrphanWatch, reapOrphanedSandboxes } from './sandbox-reaper.js';
 import { reapThenScan, upkeep } from './recovery.js';
 import { KEEP_AWAKE_COMMAND, KEEP_AWAKE_EVERY_MS, KeepAwake } from './keep-awake.js';
@@ -153,8 +153,8 @@ async function serve(options: { tunnel?: 'off' } = {}): Promise<{ dashboard: URL
   const keepAwakeOn = keepAwakeSetting();
   const tunnelOn = tunnelSetting() === 'auto' && options.tunnel !== 'off';
   const handbook = await serveSkills(config.stateDir).then(() => loadHandbook());
-  if (handbook.planSkill === undefined && process.env.SF_PLAN_SKILL !== '') {
-    console.error(`warning: no planning skill at ${planSkillPath()}; the instructions are the Quick start alone`);
+  if (planWarning(handbook) !== undefined) {
+    console.error(planWarning(handbook));
   }
   // Fail at startup on an invalid registry rather than on the first tool call.
   const registry = await loadRegistry();

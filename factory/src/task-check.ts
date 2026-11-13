@@ -29,6 +29,7 @@ import { runStructuredSession, SEVERITIES, SEVERITY_DEFINITIONS, type Severity }
 import { collectRules } from './rules-docs.js';
 import { matchesGlob, scopeOf } from './rules.js';
 import { absoluteRule, pathDenials, prepareTaskChecksDir, TASK_CHECK_DIR_UNSAFE } from './sandbox-denials.js';
+import { roleSkillBlocks, SKILL_BLOCKS_LINE, type SkillNames } from './skills.js';
 import { ARCHIVE_DIR, checkNeed, isDraft, mayTouch, parseFrontMatter, readTask, TASK_DIR, taskScope, TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
 import { addDetachedWorktree, removeWorktree } from './worktree.js';
 
@@ -117,9 +118,9 @@ export function settleCheck(task: string, output: CheckOutput): CheckOutput {
   return { paraphrase: output.paraphrase, findings, files: output.files, verdict: checkVerdict(findings) };
 }
 
-// The prompt of the check: what it is and how to answer, the <rules> block when there is one,
-// then the Task file. Nothing else: no conversation, job, review or ledger.
-export function checkPrompt(ticket: string, task: string, rules = ''): string {
+// The prompt of the check: what it is and how to answer, the task_check role's <skill> blocks and the
+// <rules> block when there are any, then the Task file. Nothing else: no conversation, job, review or ledger.
+export function checkPrompt(ticket: string, task: string, rules = '', skills = ''): string {
   return [
     `Readiness check of the Task file of ticket ${ticket}, before an Implementer builds it. You check; you change nothing.`,
     'The current directory is a checkout of the repository the Task is about, at the Task\'s base: the code the Implementer starts from. Your tools are Read, Grep and Glob, inside this directory only; nothing else is available. The Task file below is all you get of the plan.',
@@ -133,6 +134,7 @@ export function checkPrompt(ticket: string, task: string, rules = ''): string {
     '- files: every file you expect the change to create, modify or delete, tests and docs included. When the front matter has `scope:`, a file you expect outside it is `missing`, and a scope entry no expected file needs is `overreach`.',
     '- verdict: `ready` when no finding is a blocker or major; `not_ready` otherwise. The factory applies this rule to your findings, whatever you write.',
     '',
+    ...(skills !== '' ? [SKILL_BLOCKS_LINE, skills, ''] : []),
     ...(rules !== '' ? [rules.trimEnd(), ''] : []),
     `<task_file path="${TASK_DIR}/${ticket}.md">`,
     task.trimEnd(),
@@ -169,8 +171,8 @@ export const checkId = (sha256: string): string => sha256.slice(0, 16);
 
 // A stored check: the output (null when the check failed) or its redacted error, the base commit
 // it read (null when it failed before), the model, the estimated cost and the times. ok checks
-// have a verdict; a failed one never counts as ready.
-export interface CheckRecord {
+// have a verdict (its session's skills: SkillNames, the task_check role's); a failed one never counts as ready.
+export interface CheckRecord extends SkillNames {
   workspace: string;
   ticket: string;
   sha256: string;
@@ -652,21 +654,19 @@ export async function runTaskCheck(workspace: Workspace, ticket: string, task: s
     });
     let rules: string;
     try {
-      rules = (await collectRules(workspace.workCheckout, checkout.commit, {
-        workspace: workspace.name, skip: workspace.rulesSkip ?? [], configDir: options.configDir, maxBytes: options.rulesMaxBytes,
-      })).block;
+      rules = (await collectRules(workspace.workCheckout, checkout.commit, { workspace: workspace.name, skip: workspace.rulesSkip ?? [], configDir: options.configDir, maxBytes: options.rulesMaxBytes })).block;
     } catch (error) {
       return failed(redactor.failure(`The check could not collect the coding rules: ${error instanceof Error ? error.message : String(error)}`.slice(0, 1000)));
     }
     if (options.signal?.aborted === true) {
       return failed('The check was cancelled.');
     }
-    // The paths off limits to every session, but the Task checks' parent directory the check
-    // runs in: on top of checkDeniedRules for the tools, and for the sandbox, with the session's
-    // temporary folder and the check's own folder (not its siblings) kept. The check's own guard (guardHooks) holds the tools, not the job's.
+    // The paths off limits to every session, but the Task checks' parent directory the check runs in: on top of checkDeniedRules for the tools, and for the sandbox, with the session's
+    // temporary folder and the check's own folder (not its siblings) kept. The check's own guard (guardHooks) holds the tools, not the job's. Its skills: the choice and the link now.
     let outcome: Awaited<ReturnType<typeof runStructuredSession<CheckOutput>>>;
+    const skills = await roleSkillBlocks(options.stateDir, 'task_check');
     try {
-      outcome = await runStructuredSession(checkPrompt(ticket, task, rules), {
+      outcome = await runStructuredSession(checkPrompt(ticket, task, rules, skills.text), {
         cwd, claudePath: options.claudePath, sandbox: options.sandbox, model: options.model, maxTurns: options.maxTurns,
         pathDenials: async (sessionTmp) => ({ ...(await pathDenials({ session: 'task_check', workspace: workspace.name, checkout: workspace.workCheckout, sessionTmp,
           checkFolder: dirname(cwd), stateDir: options.stateDir, worktreeRoot: options.worktreeRoot, configDir: options.configDir })), hooks: undefined }),
@@ -684,7 +684,7 @@ export async function runTaskCheck(workspace: Workspace, ticket: string, task: s
       // Only the path denials throw (runStructuredSession).
       return failed(redactor.failure(`The check could not build its path denials: ${error instanceof Error ? error.message : String(error)}`.slice(0, 1000)));
     }
-    const base = { ...record, commit: checkout.commit, model: outcome.model ?? options.model ?? null, started_at: startedAt, ended_at: outcome.endedAt };
+    const base = { ...record, ...skills.names, commit: checkout.commit, model: outcome.model ?? options.model ?? null, started_at: startedAt, ended_at: outcome.endedAt };
     if (!outcome.ok) {
       return { ...base, status: 'failed', output: null, error: redactor.failure(outcome.message), cost_usd: null };
     }

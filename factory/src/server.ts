@@ -8,7 +8,7 @@
 // token file on every request. Jobs are started, reviewed and approved by the user (the
 // dashboard, the CLI) and the reviewers, never through this endpoint.
 import { constants } from 'node:fs';
-import { lstat, mkdir, open, readFile } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, stat } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -30,7 +30,8 @@ import { resolveWorkspace, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN } 
 import { DEFAULT_PAGE_BYTES, MAX_FILE_BYTES, MAX_PAGE_BYTES, MAX_PATH_LENGTH, MIN_PAGE_BYTES, RepoFiles, RepoReadError } from './repo-files.js';
 import { DEFAULT_RESULTS, MAX_QUERY_CHARS, MAX_RESULTS, search } from './search.js';
 import { PACKAGE_ROOT } from './package-root.js';
-import { snapshotSkillFile } from './skills.js';
+import { rolesFile } from './skill-roles.js';
+import { planSkills, planWarning } from './skills.js';
 import { MCP_TOKEN_FILE, readTokenFile } from './secrets.js';
 import { checkFile, checkFinding, recordVerdict, type TaskChecks } from './task-check.js';
 import { AUTO_CHECK_DELAY_MS, type AutoChecks } from './task-check-auto.js';
@@ -41,10 +42,11 @@ export const SERVER_NAME = 'software-factory';
 const MCP_PATH = '/mcp';
 
 export interface Handbook {
-  // The whole file, its "## Quick start" section, and the planning skill's body (servedHandbook): undefined without its file or with SF_PLAN_SKILL empty.
+  // The whole file, its "## Quick start" section, and the planning skills' bodies (servedHandbook): undefined without any or with SF_PLAN_SKILL empty; planMissing: the skill files not there.
   text: string;
   quickStart: string;
   planSkill: string | undefined;
+  planMissing?: string[];
 }
 
 // The MCP token's file: src/secrets.ts's.
@@ -369,13 +371,10 @@ export async function packageVersion(): Promise<string> {
   return data.version;
 }
 
-// The planning skill's file: SF_PLAN_SKILL (empty: none), else the skills snapshot's grilling
-// skill (src/skills.ts, synced at sf serve's start). A missing file leaves planSkill undefined; serve says so.
-export const planSkillPath = (): string => process.env.SF_PLAN_SKILL ?? snapshotSkillFile(stateDir(), 'grilling');
-export async function loadHandbook(path = process.env.SF_HANDBOOK || fileURLToPath(new URL('HANDBOOK.md', PACKAGE_ROOT)), skillPath = planSkillPath()): Promise<Handbook> {
+// The Handbook and the planning method (planSkills: SF_PLAN_SKILL, else the planner role's skills).
+export async function loadHandbook(path = process.env.SF_HANDBOOK || fileURLToPath(new URL('HANDBOOK.md', PACKAGE_ROOT)), skillPath?: string | readonly string[]): Promise<Handbook> {
   const text = await readFile(path, 'utf8');
-  const skill = skillPath === '' ? undefined : await readFile(skillPath, 'utf8').catch((error: unknown) => ((error as NodeJS.ErrnoException).code === 'ENOENT' ? undefined : Promise.reject(error)));
-  return { text, quickStart: handbookSection(text, '## Quick start'), planSkill: skill?.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, '').trim() };
+  return { text, quickStart: handbookSection(text, '## Quick start'), ...(await planSkills(stateDir(), skillPath)) };
 }
 
 const PLANNING_LINES = [
@@ -759,12 +758,14 @@ function unauthorized(res: ServerResponse): void {
   sendJson(res, 401, UNAUTHORIZED_BODY, { ...PLAIN_JSON, 'www-authenticate': 'Bearer', 'cache-control': 'no-store' });
 }
 
-// stateDir: where the MCP token is read, on every request (no cache: a rotated token counts at
-// once); a file that cannot be used refuses every request (fail closed).
+// stateDir: where the MCP token is read, on every request (no cache: a rotated token counts at once); a file that cannot be
+// used refuses every request (fail closed). The planning method is read again before a request when skill-roles.json's mtime changed.
 export async function startServer(
   port: number, stateDir: string, handbook: Handbook, version: string, execution: Pick<Execution, 'jobs'>, checks?: ServerChecks, history?: TicketHistory, queue?: ServerQueue, auto?: ServerAutoChecks,
 ): Promise<RunningServer> {
-  const mcpHandler = createMcpHandler(() => createMcpServer(handbook, version, execution, checks, history, queue, auto));
+  const rolesTime = async (): Promise<number | undefined> => (await stat(rolesFile(stateDir)).catch(() => undefined))?.mtimeMs;
+  let [served, readAt] = [handbook, await rolesTime()];
+  const mcpHandler = createMcpHandler(() => createMcpServer(served, version, execution, checks, history, queue, auto));
   const nodeHandler = toNodeHandler(mcpHandler);
   const validateHost = localhostHostValidation();
   const validateOrigin = localhostOriginValidation();
@@ -811,6 +812,12 @@ export async function startServer(
       unauthorized(res);
       return;
     }
+    const changed = await rolesTime();
+    if (changed !== readAt) {
+      readAt = changed;
+      served = { ...served, ...(await planSkills(stateDir)) };
+      console.error(planWarning(served) ?? 'mcp: the planning method was read again (skill-roles.json changed)');
+    }
     // The SDK sees the endpoint's path only: the token goes no further than here.
     req.url = `${MCP_PATH}${target.search}`;
     await nodeHandler(req, res);
@@ -833,13 +840,7 @@ export async function startServer(
     async close() {
       await mcpHandler.close();
       await new Promise<void>((resolve, reject) => {
-        httpServer.close((error) => {
-          if (error) {
-            reject(error);
-            return;
-          }
-          resolve();
-        });
+        httpServer.close((error) => (error ? reject(error) : resolve()));
         httpServer.closeAllConnections();
       });
     },

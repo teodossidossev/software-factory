@@ -3,16 +3,19 @@
 // review_method of review.json and gate.json.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { cp, mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { loadConfig } from '../src/config.js';
 import { gatePrompt } from '../src/gate.js';
 import { handbookSection } from '../src/prompts.js';
-import { MAX_REVIEW_METHOD_BYTES, readReviewMethod, reviewPrompt, REVIEW_METHOD_LINES } from '../src/review.js';
-import { loadHandbook } from '../src/server.js';
-import { syncSkills } from '../src/skills.js';
+import { firstPrompt } from '../src/execution.js';
+import { implementCommand } from '../src/execution/prompts.js';
+import { MAX_REVIEW_METHOD_BYTES, readReviewMethod, reviewerSkills, reviewPrompt, REVIEW_METHOD_LINES } from '../src/review.js';
+import { loadHandbook, servedHandbook } from '../src/server.js';
+import { rolesOf, writeRoles } from '../src/skill-roles.js';
+import { MAX_SKILL_BLOCKS_BYTES, planSkills, planWarning, SKILL_BLOCKS_LINE, syncSkills } from '../src/skills.js';
 import { FAKE_SKILLS, newEnv, ownReviewMethod } from './support/harness.js';
 
 const input = async () => ({ ticket: 'R-1', iteration: 1, task: 't', report: 'r', patch: Buffer.from('p'), patchTruncated: false, files: [], handbook: (await loadHandbook()).text });
@@ -97,6 +100,102 @@ test('readReviewMethod: none without a path, or with a missing or unreadable fil
   assert.deepEqual(await readReviewMethod(undefined), none);
   assert.deepEqual(await readReviewMethod(join(tmpdir(), `sf-no-such-skill-${process.pid}.md`)), none);
   assert.deepEqual(await readReviewMethod(tmpdir()), none);
+});
+
+test('a reviewer\'s skills: the method only with code-review chosen; each other skill a <skill> block in the gate\'s prompt; over 64 KiB named, not included; SF_REVIEW_SKILL set wins', async () => {
+  const env = await newEnv('review-method-roles');
+  await syncSkills(env.state);
+  const reviewSkill = loadConfig({ SF_STATE_DIR: env.state }).reviewSkill;
+  // A job pinned to the snapshot's current folder with codex_gate's list.
+  const job = (list: string[], folder = join(env.state, 'skills')) => ({ folder, roles: { claude_review: [], codex_gate: list } });
+  const reviewerSkillsOf = (list: string[], skill = reviewSkill, folder?: string, set = false) => reviewerSkills(job(list, folder), 'codex_gate', skill, set);
+  // codex_gate with []: no method, no block, nothing recorded but the method.
+  const none = await reviewerSkillsOf([]);
+  assert.deepEqual([none.method, none.skillBlocks, none.recorded], ['', '', { review_method: 'none' }]);
+  const plain = gatePrompt({ ...(await input()), ...none, baseCommit: 'abc123' });
+  assert.ok(!plain.includes('<review_method>') && !plain.includes('<skill '), plain);
+  // The default, [code-review]: the method, and the record as before (no names).
+  assert.deepEqual((await reviewerSkillsOf(['code-review'])).recorded, { review_method: await ownReviewMethod(env) });
+  // [code-review, grilling]: the method and one <skill name="grilling"> block after it.
+  const both = await reviewerSkillsOf(['code-review', 'grilling']);
+  assert.deepEqual(both.recorded, { review_method: await ownReviewMethod(env), skills: ['grilling'], skills_omitted: [] });
+  const prompt = gatePrompt({ ...(await input()), ...both, baseCommit: 'abc123' });
+  assert.equal(prompt.split('<skill name=').length - 1, 1, prompt);
+  const block = `${SKILL_BLOCKS_LINE}\n<skill name="grilling">\n---\nname: grilling\ndescription: The fake grilling skill\n---\n\n${FAKE_SKILLS.grilling}\n</skill>\n`;
+  assert.ok(prompt.includes(`</review_method>\n\n${block}`), prompt);
+  // A job pinned to a folder the link no longer names: after its start the link keeps code-review but
+  // changes it, and loses grilling; the job's reviewer still reads both as they were at its start.
+  const pinned = join(env.state, 'skills.d', 'pinned');
+  await cp(await realpath(join(env.state, 'skills')), pinned, { recursive: true });
+  await writeFile(join(env.state, 'skills', 'code-review', 'SKILL.md'), '---\nname: code-review\n---\n\nA changed method.\n');
+  await rm(join(env.state, 'skills', 'grilling'), { recursive: true });
+  const kept = await reviewerSkillsOf(['code-review', 'grilling'], reviewSkill, pinned);
+  assert.equal(kept.method, FAKE_SKILLS['code-review']);
+  assert.ok(kept.skillBlocks.includes(FAKE_SKILLS.grilling!));
+  assert.deepEqual(kept.recorded, { review_method: { ...(await ownReviewMethod(env)), path: join(pinned, 'code-review', 'SKILL.md') }, skills: ['grilling'], skills_omitted: [] });
+  // A job pinned to the link itself (none recorded) reads the link's copy as it is now.
+  assert.equal((await reviewerSkillsOf(['code-review'])).method, 'A changed method.');
+  // A skill over the limit: named, not included; the later ones still tried.
+  await writeFile(join(env.state, 'skills', 'implement', 'SKILL.md'), 'x'.repeat(MAX_SKILL_BLOCKS_BYTES));
+  const over = await reviewerSkillsOf(['implement', 'tdd']);
+  assert.deepEqual(over.recorded, { review_method: 'none', skills: ['tdd'], skills_omitted: ['implement'] });
+  assert.ok(!over.skillBlocks.includes('<skill name="implement">') && over.skillBlocks.includes('<skill name="tdd">'));
+  // SF_REVIEW_SKILL set: its file is the method whatever the role chose.
+  const own = await tempFile('own-method.md', 'My own method.\n');
+  assert.equal((await reviewerSkillsOf([], own, undefined, true)).method, 'My own method.');
+});
+
+test('the planner\'s method: each chosen skill\'s body in the file\'s order; none chosen: the Quick start alone, with its warning', async () => {
+  const env = await newEnv('plan-roles');
+  await syncSkills(env.state);
+  const saved = process.env.SF_PLAN_SKILL;
+  delete process.env.SF_PLAN_SKILL;
+  try {
+    await writeRoles(env.state, { ...rolesOf(undefined), planner: ['tdd', 'grilling'] });
+    assert.deepEqual(await planSkills(env.state), { planSkill: `${FAKE_SKILLS.tdd}\n\n${FAKE_SKILLS.grilling}`, planMissing: [] });
+    await writeRoles(env.state, { ...rolesOf(undefined), planner: [] });
+    const handbook = { ...(await loadHandbook()), ...(await planSkills(env.state)) };
+    assert.equal(handbook.planSkill, undefined);
+    assert.deepEqual(servedHandbook(handbook), { instructions: handbook.quickStart, guide: handbook.text });
+    assert.equal(planWarning(handbook), 'warning: the planner role has no skill (sf skills set planner <skill> on); the instructions are the Quick start alone');
+    await writeRoles(env.state, { ...rolesOf(undefined), planner: ['grilling', 'gone'] });
+    const partly = await planSkills(env.state);
+    assert.deepEqual(partly, { planSkill: FAKE_SKILLS.grilling, planMissing: [join(env.state, 'skills', 'gone', 'SKILL.md')] });
+    assert.match(planWarning(partly)!, /^warning: no planning skill at .*gone\/SKILL\.md; the method is the other skills$/);
+  } finally {
+    if (saved !== undefined) {
+      process.env.SF_PLAN_SKILL = saved;
+    }
+  }
+});
+
+test('the Implementer\'s command: /implement of the Task file when it has implement; else the Task file\'s path alone', () => {
+  assert.equal(implementCommand('T-1', ['implement', 'tdd']), '/implement .software-factory/T-1.md');
+  assert.equal(implementCommand('T-1', ['implement'], 2), '/implement .software-factory/T-1.md Fix 2');
+  assert.equal(implementCommand('T-1', ['tdd'], 2), '.software-factory/T-1.md Fix 2');
+  assert.equal(firstPrompt('T-1', [], '<rules>\nR\n</rules>', []), '.software-factory/T-1.md\n\n<rules>\nR\n</rules>');
+  assert.equal(firstPrompt('T-1', []), '/implement .software-factory/T-1.md');
+});
+
+test('SF_REVIEW_SKILL set to the snapshot\'s own code-review path still wins for a reviewer whose role has no code-review; unset, that reviewer has no method', async () => {
+  const env = await newEnv('review-method-override');
+  await syncSkills(env.state);
+  const job = { folder: join(env.state, 'skills'), roles: { claude_review: [], codex_gate: ['grilling'] } };
+  const set = loadConfig({ SF_STATE_DIR: env.state, SF_REVIEW_SKILL: join(env.state, 'skills', 'code-review', 'SKILL.md') });
+  assert.equal(set.reviewSkillSet, true);
+  for (const role of ['claude_review', 'codex_gate'] as const) {
+    const skills = await reviewerSkills(job, role, set.reviewSkill, set.reviewSkillSet);
+    assert.equal(skills.method, FAKE_SKILLS['code-review'], role);
+    assert.deepEqual(skills.recorded.review_method, await ownReviewMethod(env), role);
+  }
+  // The same path, not set: the default, which the role's choice decides.
+  const unset = loadConfig({ SF_STATE_DIR: env.state });
+  assert.equal(unset.reviewSkill, set.reviewSkill);
+  assert.equal(unset.reviewSkillSet, false);
+  assert.deepEqual((await reviewerSkills(job, 'codex_gate', unset.reviewSkill, unset.reviewSkillSet)).recorded, { review_method: 'none', skills: ['grilling'], skills_omitted: [] });
+  // Set empty: no method for either reviewer, whatever their roles.
+  const empty = loadConfig({ SF_STATE_DIR: env.state, SF_REVIEW_SKILL: '' });
+  assert.equal((await reviewerSkills({ ...job, roles: { claude_review: ['code-review'], codex_gate: [] } }, 'claude_review', empty.reviewSkill, empty.reviewSkillSet)).method, '');
 });
 
 test('SF_REVIEW_SKILL: unset, the skills snapshot\'s code-review; empty, none; a path, that path', () => {

@@ -117,7 +117,7 @@ test('a wrong argument count gives the command\'s one message, from the CLI (exi
     return args === undefined ? [] : [runCli(env, [...words(command), ...args]).then((result) => ({ command, result }))];
   }));
   // Every count is right only for those whose arguments may all be left out (their --clear instead).
-  assert.deepEqual(CLI_COMMANDS.filter((command) => wrongCount(command) === undefined).map((command) => command.name), ['queue hold', 'coordinator status', 'coordinator link']);
+  assert.deepEqual(CLI_COMMANDS.filter((command) => wrongCount(command) === undefined).map((command) => command.name), ['queue hold', 'coordinator status', 'coordinator link', 'norms']);
   for (const { command, result } of fromCli) {
     assert.equal(result.code, 2, `${command.name}: ${result.stderr}`);
     assert.ok(result.stderr.startsWith(`sf: ${usageMessage(command)}\n\nUsage:\n`), `${command.name}: ${result.stderr.slice(0, 200)}`);
@@ -157,7 +157,7 @@ test('while sf update drains or builds, a command not open while updating is ref
       }
     }
     assert.deepEqual(COMMAND_LIST.filter((command) => command.openWhileUpdating === true).map(socketName).sort(),
-      ['check', 'coordinator', 'digest-latest', 'mcp-port', 'mr-comments', 'mr-list', 'mr-status', 'pause', 'ping', 'queue-list', 'serve-busy', 'skills']);
+      ['check', 'coordinator', 'digest-latest', 'mcp-port', 'mr-comments', 'mr-list', 'mr-status', 'norms', 'pause', 'ping', 'queue-list', 'serve-busy', 'skills']);
     // From the CLI: refused with exit 1; the open pause reaches the job (there is none).
     const accept = await runCli(env, ['accept', 'app', 'T-1']);
     assert.equal(accept.code, 1);

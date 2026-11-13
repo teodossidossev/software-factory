@@ -44,6 +44,7 @@ bin/sf coordinator status [text...] [--clear]  # what the coordinator does now (
 bin/sf coordinator ask <text...>  # a question that waits for the user's answer (at most 1,000 characters, 10 open: too_many_questions); prints its id, q1, q2, ...; needs sf serve
 bin/sf coordinator answered <id>  # take the answered question off the card (unknown_question for an id not open); needs sf serve
 bin/sf coordinator link <url> | --clear  # the chat's link for Open the chat: an https://claude.ai/ URL only (bad_link otherwise); --clear removes it; needs sf serve
+bin/sf norms [workspace]          # the norms in force (section Norms): each value of norms.json with its source (default, file or workspace), then the file's problems; exit 0 with problems too; needs sf serve
 bin/sf queue list                 # the run queue (section Run queue): the limit, the running count, held or not, the queued tickets in order with what each waits for, the next one, the starts that failed; needs sf serve
 bin/sf queue add <workspace> <ticket> [--at N]  # queue a planned ticket at position N (1-based; default the end); needs sf serve
 bin/sf queue remove <workspace> <ticket>        # take it out of the queue; needs sf serve
@@ -5216,6 +5217,74 @@ changes an existing workspace's path, description, app, hand-over, colour and di
 name stays; `work_checkout`, `rules_skip`, `guard` and `test_command` are kept): its body has every field, `""` removes the
 description and the app, `"default"` the handoff, `"auto"` the color; the path is checked as Add
 checks it, and a path change while the workspace has a live job is `workspace_busy`.
+
+## Norms
+
+`<config dir>/norms.json` (beside `workspaces.json`) holds the numbers and lists you tune by hand,
+at once for every workspace and per workspace (src/norms.ts). Every key is optional; with the
+defaults, and a workspace entry:
+
+```json
+{
+  "version": 1,
+  "slice": { "change_max_lines": 400, "change_max_files": 10, "min_lines": 50 },
+  "lead_time_hours": { "small": 2, "medium": 4, "complex": 8 },
+  "decision_docs": ["GLOSSARY.md", "docs/adr/**/*.md", "docs/decisions/**/*.md",
+                    "docs/terminology.md", "docs/architecture.md"],
+  "workspaces": { "web": { "slice": { "change_max_lines": 300 } } }
+}
+```
+
+| Key | Meaning | Valid |
+| --- | --- | --- |
+| `slice.change_max_lines` | the most added plus removed lines, tests included, of a slice that changes behaviour | an integer from 1 to 100000 |
+| `slice.change_max_files` | the most changed files of such a slice | an integer from 1 to 100000 |
+| `slice.min_lines` | the size under which such a slice should join its neighbour | an integer from 1 to 100000 |
+| `lead_time_hours.small`, `.medium`, `.complex` | the target from a job's start to its merge request, by the Task's size | a number above 0 and at most 1000 |
+| `decision_docs` | the globs of the documents that hold the product's decisions; `[]` means none | at most 50 globs, each 1 to 200 characters, relative to the checkout: `/` separators, no backslash, no NUL, no leading `/` or `./`, no `..` segment (a leading `~` is a plain character, not the home directory), no braces, parentheses or square brackets (a brace's or an extglob's alternative expands on its own: `{/tmp,docs}/x.md` to `/tmp/x.md`, `{..,docs}/x.md` to `../x.md`; a character class of one character is that character: Node's glob reads `docs/[.][.]/x.md` as `docs/../x.md`; write one entry per alternative instead). The wildcards `*`, `**` and `?` stay: they never match `..` |
+| `workspaces.<name>` | the same three keys for one workspace | an object; looked up by its own key only |
+
+A value comes from the workspace's entry, else the file's top level, else the default. `slice` and
+`lead_time_hours` merge key by key (an empty object changes nothing); `decision_docs` replaces the
+list as a whole. The file is read at each use: no cache, no restart; no command writes it.
+
+A bad file never stops anything. A missing file is the defaults; a file that cannot be read or is not
+JSON is the defaults with one problem (`norms.json is not JSON: <message>; the defaults are used`).
+A value of the wrong type or out of range falls back to the next source for that key, with one
+problem naming it: `<key>: <what is wrong> (got <the value as JSON, at most 40 characters>); <the
+default | the file's value> is used` (a workspace's key is written `workspaces.<name>.<key>`). One
+bad entry of `decision_docs` makes the whole list fall back, its problem naming the entry
+(`decision_docs[<index>]`). A root, `slice`, `lead_time_hours`, `workspaces` or workspace entry that
+is not an object counts as absent, with one problem. A `version` other than 1 is one problem and the
+file is still read; a missing one is fine. An unknown key is ignored and listed
+(`<key>: unknown key, ignored`; a key that is not plain is written as its JSON, so a problem stays
+one line). The problems are the whole file's: every workspace's entry is checked, in the file's
+order, whichever workspace is asked (or none); only the asked one's values are used.
+
+`norms(workspace, configDir)` gives the values in force and never throws; `effectiveNorms(file,
+workspace)` is the same over the parsed file. Nothing reads the values yet.
+
+`sf norms [workspace]` (a command of `sf serve`, open while `sf update` drains or builds) prints the
+file's path, each effective value with its source (`default`, `file` or `workspace`), the decision
+documents one per line under their row, and the problems; it exits 0 with problems too. The name
+is checked as a workspace name only; the registry is not read: a name without an entry prints the
+top-level and default values and `workspace <name>: no entry`. With no file:
+
+```
+norms: /home/me/.config/software-factory/norms.json (no file: the defaults)
+slice.change_max_lines   400  default
+slice.change_max_files   10   default
+slice.min_lines          50   default
+lead_time_hours.small    2    default
+lead_time_hours.medium   4    default
+lead_time_hours.complex  8    default
+decision_docs                 default
+  GLOSSARY.md
+  docs/adr/**/*.md
+  docs/decisions/**/*.md
+  docs/terminology.md
+  docs/architecture.md
+```
 
 ## History
 

@@ -1,5 +1,5 @@
-// The commands that go to sf serve over its socket, in one table (sf coordinator's entries are
-// written in src/coordinator.ts and spread into it): for each, its name, its
+// The commands that go to sf serve over its socket, in one table (sf coordinator's and sf norms's
+// entries are written in src/coordinator.ts and src/norms.ts and spread into it): for each, its name, its
 // arguments and flags as the help shows them, its help description, whether it answers while sf
 // update drains or builds, and the call it makes in sf serve. The CLI (src/cli.ts) builds its help
 // lines, its argument check and its socket call from it; sf serve's socket handler
@@ -13,6 +13,7 @@ import type { Execution } from './execution.js';
 import type { OpenRequest, ReviewThread } from './forge-comments.js';
 import { type Decision, DECISIONS } from './ledger.js';
 import { localTime } from './local-time.js';
+import { NORMS_ANSWERS, NORMS_COMMANDS } from './norms.js';
 import { MAX_RUNNING, MIN_RUNNING, ON_LIMIT_RULES, type QueueView, type RunQueue } from './queue.js';
 import { WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN } from './registry.js';
 import { ROLES } from './skill-roles.js';
@@ -44,8 +45,8 @@ export type Flags = Readonly<Record<string, string | boolean | undefined>>;
 export interface Command {
   // The words after sf ('accept', 'queue add'); on the socket joined by '-' ('queue-add').
   name: string;
-  // The positional arguments as the help writes them: <workspace> and <ticket> are checked as
-  // names, <N> as a whole number, <x> is any word, a|b one of the words, [x] may be left out,
+  // The positional arguments as the help writes them: <workspace>, [workspace] and <ticket> are
+  // checked as names, <N> as a whole number, <x> is any word, a|b one of the words, [x] may be left out,
   // <x...> and [x...] take the rest.
   args: readonly string[];
   // '--as-is' (boolean) or '--at N' (a whole number), each optional.
@@ -229,6 +230,7 @@ export const COMMANDS = {
   },
   // sf coordinator: the dashboard's Coordinator card (src/coordinator.ts); each write tells the pages.
   ...COORDINATOR_COMMANDS,
+  ...NORMS_COMMANDS, // sf norms: the norms in force, norms.json read at each call (src/norms.ts).
 
   // The requests of sf's own steps, no command of their own.
   // sf info: whether sf serve answers; sf service install: which process does.
@@ -389,7 +391,7 @@ export function checkArgs(command: Command, argv: readonly string[]): { args: st
     if (arg === undefined) {
       return;
     }
-    if (token === '<workspace>') {
+    if (token === '<workspace>' || token === '[workspace]') {
       checkName(arg);
     } else if (token === '<ticket>') {
       checkTicket(arg);
@@ -569,6 +571,7 @@ const ANSWERS = new Map<Command, (result: Result, flags: Flags) => Answer>([
   [COMMANDS.skills, (result) => ({ lines: skillsLines(result as unknown as SkillsView), failed: false })],
   [COMMANDS.skillsSet, (result) => ({ lines: skillsLines(result as unknown as SkillsView), failed: false })],
   ...COORDINATOR_ANSWERS,
+  ...NORMS_ANSWERS,
   [COMMANDS.abort, (result, flags) => ({
     lines: [
       ...resultLines(result),

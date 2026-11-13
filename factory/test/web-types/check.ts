@@ -12,6 +12,7 @@
 // of Checks or is named in PAGE_ONLY or KNOWN_DRIFT.
 /// <reference path="../../web/types.d.ts" />
 import type * as Changes from '../../src/changes.js';
+import type * as CoordinatorSkills from '../../src/coordinator-skills.js';
 import type * as Dashboard from '../../src/dashboard.js';
 import type * as JobStream from '../../src/job-stream.js';
 import type * as ReviewJob from '../../src/review-job.js';
@@ -245,7 +246,9 @@ export interface Checks {
   ReviewJobResult: Copy<ReviewJobResult, Awaited<ReturnType<typeof ReviewJob.createReviewJob>>>;
   SkillRole: Same<SkillRole, SkillRoles.Role>;
   SkillRow: Copy<SkillRow, Skills.InstalledSkill>;
-  SkillsPayload: Copy<SkillsPayload, Skills.SkillsView>;
+  SkillsPayload: Copy<SkillsPayload, ReturnType<typeof Skills.skillsForClients>>;
+  CoordinatorOverride: Same<CoordinatorOverride, CoordinatorSkills.SkillOverride>;
+  CoordinatorColumn: Copy<CoordinatorColumn, CoordinatorSkills.CoordinatorColumn>;
   SkillText: Copy<SkillText, Awaited<ReturnType<typeof Skills.skillText>>>;
 }
 

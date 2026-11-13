@@ -16,7 +16,7 @@ import { FactoryError } from './errors.js';
 import { internalError, sendJson, statusOf } from './http.js';
 import { HANDOFF_MODES, WORKSPACE_COLORS, WORKSPACE_NAME_PATTERN } from './registry.js';
 import { REVIEW_JOB_SHAPE, reviewJobCall } from './review-job.js';
-import { setRoleSkills } from './skills.js';
+import { setRoleSkills, skillsForClients } from './skills.js';
 import { MAX_TASK_BYTES } from './task-file.js';
 import { refuseWhileUpdating } from './update.js';
 
@@ -180,13 +180,15 @@ export function postHandlers(ctx: DashboardContext, feed: Pick<ChangeFeed, 'chan
 
   // PUT api/skills/roles/<role>: the role's whole list of skills, checked as sf skills set checks a
   // skill (an unknown role, a skill not installed: refused with the list), written, and the snapshot synced.
+  // coordinator: the skills on, written to its Claude Code settings file. The answer is the new view,
+  // without the coordinator checkout's path.
   function skillRolesPost(role: string): Post {
     const body = z.strictObject({ skills: z.array(z.string().max(MAX_SKILL_NAME)).max(MAX_ROLE_SKILLS) });
     return {
       route: 'skill-roles', shape: '{"skills": [<skill name>, ...]}',
       call: (data) => {
         const parsed = body.safeParse(data);
-        return parsed.success ? () => setRoleSkills(stateDir, role, parsed.data.skills) : undefined;
+        return parsed.success ? async () => skillsForClients(await setRoleSkills(stateDir, role, parsed.data.skills)) : undefined;
       },
     };
   }

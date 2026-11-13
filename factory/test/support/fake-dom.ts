@@ -78,6 +78,7 @@ export class FakeElement {
   open = false;
   disabled = false;
   checked = false;
+  indeterminate = false;
   value = '';
   type = '';
   href = '';

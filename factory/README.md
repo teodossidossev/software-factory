@@ -344,6 +344,7 @@ started by the run queue as before.
 | `SF_REVIEW_MODEL` | unset | Model of the Claude review, passed as is as the `model` option of `query()`; unset uses the user's Claude Code default. |
 | `SF_REVIEW_MAX_TURNS` | `60` | `maxTurns` of the Claude review. |
 | `SF_REVIEW_SKILL` | `code-review/SKILL.md` of the skills snapshot's folder the job pinned at its start (`<state dir>/skills.d/<id>/`), for a reviewer whose role chose `code-review` | The code-review skill whose method both reviewers follow (the `<review_method>` block of the Claude review's and the Codex gate's prompt, section Jobs); set, it wins over the roles' choice; empty sends none. Read at each review; a missing or unreadable file sends none, and the record says `review_method: "none"`. |
+| `SF_COORDINATOR_WORKSPACE` | `software-factory` | The workspace whose checkout is the coordinator's, the Claude Code session whose skills the Skills page's Coordinator column and `sf skills set coordinator` switch through its `.claude/settings.local.json` (section The agents' skills). Not registered: no column, `no_coordinator_workspace`. Read by `sf serve` on each read and change. |
 | `SF_SKILLS_DIR` | `~/.agents/skills` | The folder of the user's installed skills the factory lists (`sf skills`) and copies into its skills snapshot, the skills some agent role chose (section The agents' skills); its lock file is `.skill-lock.json` next to it. |
 | `SF_HANDOFF` | `checkout` | The hand-over at ready for review (SF-073, section Hand-over to your checkout): `checkout` checks the job's branch out in the workspace's checkout with its changes as Local Changes; `off` leaves the job in `ready_for_human_review` with its worktree. A workspace's own `handoff` in `workspaces.json` wins over it (SF-083). Anything else refuses to start (`invalid_config`). |
 | `SF_SIMPLIFY` | on | The simplification pass (SF-055) after the deciding clean verdict of a job with at least one Fix section; `off` goes straight to MR preparation. It uses `SF_REVIEW_MODEL` and `SF_REVIEW_MAX_TURNS`. |
@@ -2208,24 +2209,53 @@ user), the factory's prompt rule wins and the sandbox refuses mutating Git.
   `skill-roles.json`'s mtime changed since the last read.
 - **`sf skills`** lists the installed skills (those the lock file lists whose folder has a
   `SKILL.md`): name, source (the lock file's `source`), updated (`updatedAt`, its date), one column
-  per role (`on` or `-`) and the description of the `SKILL.md` front matter, then `missing: <name>
-  (chosen for <roles>, not installed)` for each chosen skill that is not installed. `sf skills set
-  <role> <skill> on|off` adds the skill at the end of the role's list or takes it out; an unknown
-  role (`unknown_role`) or a skill not installed (`skill_not_installed`; one the role already has
-  may still go) is refused with the list. Both go through `sf serve`.
+  per role (`on` or `-`), a `coordinator` column (below) and the description of the `SKILL.md`
+  front matter, then `missing: <name> (chosen for <roles>, not installed)` for each chosen skill
+  that is not installed, and a `coordinator:` line naming its settings file (or why there is no
+  column). `sf skills set <role> <skill> on|off` adds the skill at the end of the role's list or
+  takes it out; an unknown role (`unknown_role`) or a skill not installed (`skill_not_installed`;
+  one the role already has may still go) is refused with the list. Both go through `sf serve`.
+- **The coordinator** (`src/coordinator-skills.ts`) is the Claude Code session the user runs in the
+  checkout of the workspace `SF_COORDINATOR_WORKSPACE` (`software-factory` by default; not
+  registered: no column, `no_coordinator_workspace`). It is not a role: `skill-roles.json`, the
+  snapshot and the prompts know nothing of it. Its choice is Claude Code's own per-project switch,
+  `skillOverrides` in `<checkout>/.claude/settings.local.json` (`{ <skill>: "on" | "off" |
+  "name-only" | "user-invocable-only" }`, absent is on), read on every view, so a change made with
+  `/skills` in Claude Code shows on the next read. The `coordinator` column prints `on`, `-` or the
+  other value. `sf skills set coordinator <skill> on|off` removes the skill's entry or sets it to
+  `"off"`; `PUT api/skills/roles/coordinator` takes the skills that are on and changes only those
+  whose state differs (in the list and not on: entry removed; not in it and on: `"off"`; not in it
+  and `name-only` / `user-invocable-only`: left). A change reads the file (missing: `{}`), changes
+  only those entries (removing an empty `skillOverrides`), keeps every other key in value and
+  order, and writes it atomically, 2-space indented, with its mode (new: 0600, a new `.claude`
+  0700); nothing to change writes nothing. Refused, the file untouched: a file that is not a JSON
+  object or whose `skillOverrides` is not one (`coordinator_settings_unreadable`), a `.claude` or
+  settings file that is a symlink or a `.claude` that is not the checkout's own
+  (`coordinator_settings_unsafe`; the file is read and replaced only through one handle on
+  `.claude`, opened without following a link, as `/proc/self/fd/<fd>`, so a `.claude` swapped
+  meanwhile cannot redirect the write), a name not installed (`skill_not_installed`); a file the system will not let it read or write is
+  `coordinator_settings_unreadable` / `coordinator_settings_unwritable` with the error's code (the
+  column's error in a read, never a failed view). Messages name the file relative to the checkout,
+  never by its path. Entries of other names (plugin skills) are kept and
+  not shown. It applies to the next Claude Code session there, or after `/skills`.
 - **The API** (for the dashboard, behind its token and Origin check as every route): `GET
   api/skills` answers what `sf skills` shows, `{ skills: [{ name, source, updated, description }],
-  roles: { <role>: [...] }, missing: [...] }`; `GET api/skills/<name>` answers `{ name, text,
+  roles: { <role>: [...] }, missing: [...], coordinator: { workspace, skills: { <name>: "on" |
+  "off" | "name-only" | "user-invocable-only" } } }` (or `coordinator: { error: { code, message }
+  }`; never the checkout's path); `GET api/skills/<name>` answers `{ name, text,
   truncated }`, the skill's `SKILL.md` from the source folder, at most 256 KiB (cut at a character's
   start, `truncated` then true), and refuses (400 `skill_not_installed`) a name that is not an
   installed skill's folder name, a path (`/`, `..`) included, before anything is read; `PUT
   api/skills/roles/<role>` with `{ "skills": [...] }` (strict) replaces the role's list, checked as
-  `sf skills set` checks a skill, and answers `{ ok: true, result: <the GET api/skills data> }`.
+  `sf skills set` checks a skill (for `coordinator`, the skills that are on, above), and answers
+  `{ ok: true, result: <the GET api/skills data> }`.
   The dashboard's Skills page (section Dashboard, Skills) uses these three routes and no other.
 - **The source**: `~/.agents/skills/<name>` (where the `skills` tool installs them; links
   followed) and its lock file `~/.agents/.skill-lock.json` (`skills.<name>.skillFolderHash`).
   `SF_SKILLS_DIR` names another folder; the lock file is then `.skill-lock.json` next to it. The
-  factory only reads it, and never writes into `~/.agents`, `~/.claude` or a workspace's checkout.
+  factory only reads it, and never writes into `~/.agents`, `~/.claude` or a workspace's checkout,
+  with one exception: the `skillOverrides` key of the coordinator checkout's
+  `.claude/settings.local.json` (above).
 - **The snapshot**: `<state dir>/skills` is a link to one folder of `<state dir>/skills.d/`, each a
   full set: the folder of every skill some role chose (a skill no role chose is left out of a new
   folder), copied verbatim, and `versions.json` (`{ <name>:
@@ -4589,14 +4619,22 @@ choice is one for all workspaces, and every skill may be switched off.
   first line of its description (the whole on hover), its source and updated date in muted text;
   then one checkbox column per role, headed Implementer, Claude review, Codex gate, Task check and
   Planner (ChatGPT), each with the count of the role's skills ("Implementer · 3"); under Planner,
-  "Applies to the next planning request". Each box is labelled "<skill> for <role>" for screen
-  readers. Above the table a filter (by name or description) and the line "Changes apply to jobs
+  "Applies to the next planning request"; last, Coordinator (Claude Code), the coordinator's
+  skills (section The agents' skills), its count the skills that are on. There a `name-only` or
+  `user-invocable-only` skill is an indeterminate box with the value in its title; a column the
+  factory could not read (no coordinator workspace, an unreadable or unsafe file) has no boxes and
+  the reason in its head's title and below the table. Below the table, the line "The coordinator's
+  choice is Claude Code's skillOverrides in the <workspace> checkout's .claude/settings.local.json;
+  it applies to the next Claude Code session there (or after /skills)." Each box is labelled
+  "<skill> for <role>" for screen readers. Above the table a filter (by name or description) and the line "Changes apply to jobs
   started after; running jobs keep their skills." The table scrolls sideways in its own box.
 - **Switching**: a click sends `PUT api/skills/roles/<role>` with the role's new list (the skill
   added at its end, or taken out) at once; there is no Save button. While it is sent every box is
   disabled (one switch at a time, so no two answers race) and the role's boxes show the list sent.
   The answer, the list the server stored, is shown, and a read of `api/skills` under way when it
-  arrives is dropped. Each head's count is the role's whole list, a skill chosen but not installed
+  arrives is dropped. The Coordinator column sends `PUT api/skills/roles/coordinator` with its
+  skills that are on: a click on an on box takes the skill out, on an off or indeterminate box adds
+  it; the other indeterminate skills are not in the list and stay as they are. Each head's count is the role's whole list, a skill chosen but not installed
   included. A refusal or a network error puts the box back,
   shows "<skill> for <role> was not switched on|off: <message>" next to the table and reads `GET
   api/skills` again, so a box never shows a state the server did not store.

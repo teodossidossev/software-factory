@@ -791,11 +791,17 @@ interface SkillRow {
   updated: string | null;
   description: string | null;
 }
-// GET api/skills and the answer of PUT api/skills/roles/<role>: src/skills.ts SkillsView.
+// A skill's state for the coordinator: Claude Code's skillOverrides value (src/coordinator-skills.ts SkillOverride).
+type CoordinatorOverride = 'on' | 'off' | 'name-only' | 'user-invocable-only';
+// The coordinator's column: its workspace and each installed skill's state, or why there is none
+// (src/coordinator-skills.ts CoordinatorColumn).
+type CoordinatorColumn = { workspace: string; skills: Readonly<Record<string, CoordinatorOverride>> } | { error: { code: string; message: string } };
+// GET api/skills and the answer of PUT api/skills/roles/<role>: src/skills.ts SkillsView, as skillsForClients sends it.
 interface SkillsPayload {
   skills: SkillRow[];
   roles: Readonly<Record<SkillRole, string[]>>;
   missing: string[];
+  coordinator: CoordinatorColumn;
 }
 // GET api/skills/<name>: an installed skill's SKILL.md (src/skills.ts skillText).
 interface SkillText {

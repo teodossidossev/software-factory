@@ -13,6 +13,9 @@ import { type Decision, DECISIONS } from './ledger.js';
 import { localTime } from './local-time.js';
 import { MAX_RUNNING, MIN_RUNNING, ON_LIMIT_RULES, type QueueView, type RunQueue } from './queue.js';
 import { WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN } from './registry.js';
+import { ROLES } from './skill-roles.js';
+import { type SkillsView, skillsLines, skillsView, switchSkill } from './skills.js';
+import { stateDir } from './config.js';
 import type { TaskChecks } from './task-check.js';
 import { TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
 
@@ -211,6 +214,17 @@ export const COMMANDS = {
     description: 'End the session, remove the worktree and archive the job; the branch is untouched',
     run: (s, [w = '', t = '']) => s.execution.reset(w, t),
   },
+  // sf skills: the installed skills and each agent role's choice (src/skills.ts, src/skill-roles.ts).
+  skills: {
+    name: 'skills', args: [], openWhileUpdating: true,
+    description: `The installed skills (~/.agents/skills): source, updated, description and, per agent role (${ROLES.join(', ')}), on or -; then the chosen ones that are not installed`,
+    run: async () => skillsView(stateDir()),
+  },
+  skillsSet: {
+    name: 'skills set', args: ['<role>', '<skill>', 'on|off'],
+    description: 'Switch an installed skill on or off for an agent role, one choice shared by all workspaces; jobs started afterwards use it, a running job keeps its own',
+    run: (_s, [role = '', skill = '', on = '']) => switchSkill(stateDir(), role, skill, on === 'on'),
+  },
 
   // The requests of sf's own steps, no command of their own.
   // sf info: whether sf serve answers; sf service install: which process does.
@@ -390,7 +404,8 @@ export function cliCommand(argv: readonly string[]): { command: Command; args: s
   if (group.length === 0) {
     return undefined;
   }
-  const single = group.find((command) => command.name === first);
+  // A word of its own wins over the group's command (sf skills set over sf skills).
+  const single = group.find((command) => command.name === first && !group.some((sub) => sub.name === `${first} ${second}`));
   if (single !== undefined) {
     return { command: single, args: argv.slice(1) };
   }
@@ -547,6 +562,8 @@ const ANSWERS = new Map<Command, (result: Result, flags: Flags) => Answer>([
   [COMMANDS.mrStatus, (result) => mergeRequestShown(COMMANDS.mrStatus, result)],
   [COMMANDS.mrList, (result) => ({ lines: openRequestLines(result), failed: false })],
   [COMMANDS.mrComments, (result) => ({ lines: threadLines(result), failed: false })],
+  [COMMANDS.skills, (result) => ({ lines: skillsLines(result as unknown as SkillsView), failed: false })],
+  [COMMANDS.skillsSet, (result) => ({ lines: skillsLines(result as unknown as SkillsView), failed: false })],
   [COMMANDS.abort, (result, flags) => ({
     lines: [
       ...resultLines(result),

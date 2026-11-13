@@ -9,10 +9,14 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { JobStore } from '../src/jobs.js';
 import { prepareClaudeState } from '../src/session-wrapper.js';
+import { rolesOf } from '../src/skill-roles.js';
 import { initToolsProblem } from '../src/live-smoke.js';
 import { DENIED_TOOLS, IMPLEMENTER_TOOLS } from '../src/rules.js';
 import { IMPLEMENTER_SESSION_TOOLS, SESSION_SHELL_ENV, SMOKE_PROBE_RULE, SMOKE_TOOLS, sessionAllowedTools } from '../src/session.js';
 import { bwrapLog, call, FAKE_SKILLS, fakeLog, implementerRun, newEnv, newRepo, putTask, runCli, script, serve, skillsSourceDir, stop, temp, waitFor, jobPrompt } from './support/harness.js';
+
+// Each role's list a job's skills event records without a choice.
+const DEFAULT_ROLES = rolesOf(undefined);
 
 test('permission_mode_mismatch ends in needs_human; a restart turns working jobs into needs_human and sf say resumes them', async () => {
   const env = await newEnv('restart');
@@ -209,7 +213,7 @@ test('a job started with no skills source: its one skills event names every skil
   const runnerLog = await readFile(join(new JobStore(env.state).dir('app', 'M-1'), 'runner.log'), 'utf8');
   assert.equal(runnerLog.split('\n').filter((entry) => entry === line).length, 1, runnerLog);
   const events = (await readFile(new JobStore(env.state).eventsPath('app', 'M-1'), 'utf8')).trim().split('\n').map((entry) => JSON.parse(entry) as Record<string, unknown>);
-  assert.deepEqual(events.filter((record) => record.type === 'skills').map(({ ts: _ts, ...rest }) => rest), [{ iteration: 0, type: 'skills', versions: {}, missing: ['implement', 'tdd', 'code-review', 'grilling'] }]);
+  assert.deepEqual(events.filter((record) => record.type === 'skills').map(({ ts: _ts, ...rest }) => rest), [{ iteration: 0, type: 'skills', versions: {}, missing: ['implement', 'tdd', 'code-review', 'grilling'], roles: DEFAULT_ROLES }]);
 });
 
 test('the skills event: one per job, at its start before its first prompt, with the snapshot\'s versions and folder; a later turn adds none; a later job takes a changed skill, and the first job\'s next turn still binds its own folder', async () => {
@@ -243,8 +247,8 @@ test('the skills event: one per job, at its start before its first prompt, with 
   const skillsOf = async (ticket: string): Promise<Array<Record<string, unknown>>> => (await records(ticket)).filter((record) => record.type === 'skills').map(({ ts: _ts, ...rest }) => rest);
   const [first] = await skillsOf('V-1');
   const [second] = await skillsOf('V-2');
-  assert.deepEqual(await skillsOf('V-1'), [{ iteration: 0, type: 'skills', versions, folder: first!.folder }]);
-  assert.deepEqual(await skillsOf('V-2'), [{ iteration: 0, type: 'skills', versions: { ...versions, tdd: 'tdd-v2' }, folder: second!.folder }]);
+  assert.deepEqual(await skillsOf('V-1'), [{ iteration: 0, type: 'skills', versions, folder: first!.folder, roles: DEFAULT_ROLES }]);
+  assert.deepEqual(await skillsOf('V-2'), [{ iteration: 0, type: 'skills', versions: { ...versions, tdd: 'tdd-v2' }, folder: second!.folder, roles: DEFAULT_ROLES }]);
   assert.match(String(first!.folder), /^skills\.d\/[\w-]+$/);
   assert.notEqual(first!.folder, second!.folder);
   assert.equal(await readlink(join(env.state, 'skills')), second!.folder);
@@ -254,9 +258,9 @@ test('the skills event: one per job, at its start before its first prompt, with 
   const binds = async (ticket: string): Promise<string[]> => {
     const worktree = (await jobs.read('app', ticket))!.worktree!;
     const runs = (await bwrapLog(env, { implementer: true })).filter((run) => implementerRun(run) && run.argv[run.argv.indexOf('--chdir') + 1] === worktree);
-    return runs.map((run) => run.argv[run.argv.indexOf(join(env.home, '.claude', 'skills')) - 1]!);
+    return runs.map((run) => run.argv[run.argv.indexOf(join(env.home, '.claude', 'skills', 'implement')) - 1]!);
   };
-  assert.deepEqual(await binds('V-1'), [join(env.state, String(first!.folder)), join(env.state, String(first!.folder))]);
-  assert.deepEqual(await binds('V-2'), [join(env.state, String(second!.folder))]);
+  assert.deepEqual(await binds('V-1'), [join(env.state, String(first!.folder), 'implement'), join(env.state, String(first!.folder), 'implement')]);
+  assert.deepEqual(await binds('V-2'), [join(env.state, String(second!.folder), 'implement')]);
   assert.equal(await readFile(join(env.state, 'skills', 'tdd', 'SKILL.md'), 'utf8'), 'tdd v2\n');
 });

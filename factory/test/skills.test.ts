@@ -5,7 +5,15 @@ import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, readlink, rm, stat, ut
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mock, test } from 'node:test';
-import { AGENT_SKILLS, jobSkills, recordSkills, type SkillsEvent, skillsSnapshot, skillsSource, skillsText, syncSkills } from '../src/skills.js';
+import { chosenSkills, rolesOf, writeRoles } from '../src/skill-roles.js';
+import {
+  implementerSkills, jobSkills, MAX_SKILL_BLOCKS_BYTES, MAX_SKILL_TEXT_BYTES, recordSkills, setRoleSkills, skillBlocks, type SkillsEvent, skillsLines, skillsSnapshot, skillsSource,
+  skillsText, skillsView, skillText, switchSkill, syncSkills,
+} from '../src/skills.js';
+
+// Every role's default list, and the skills they choose together: what the snapshot holds without a choice.
+const DEFAULT_ROLES = rolesOf(undefined);
+const AGENT_SKILLS = chosenSkills(DEFAULT_ROLES);
 
 // A fake installation: <root>/agents/skills/<name>/ and <root>/agents/.skill-lock.json, every
 // listed skill at hash <name>-1 with a SKILL.md and a nested file; the state directory <root>/state.
@@ -25,9 +33,15 @@ async function fixture(name: string): Promise<{ root: string; source: string; st
 const snapshotFile = (state: string, ...path: string[]): Promise<string> => readFile(join(skillsSnapshot(state), ...path), 'utf8');
 const versionsOf = async (state: string): Promise<unknown> => JSON.parse(await snapshotFile(state, 'versions.json'));
 const allAt = (n: number): Record<string, string> => Object.fromEntries(AGENT_SKILLS.map((skill) => [skill, `${skill}-${n}`]));
+// A sync's versions and missing skills, without the pair of choice and folder it also returns.
+async function synced(state: string, env: NodeJS.ProcessEnv): Promise<{ versions: Record<string, string>; missing: string[] }> {
+  const { versions, missing } = await syncSkills(state, env);
+  return { versions, missing };
+}
 
 test('the source: ~/.agents/skills and ~/.agents/.skill-lock.json; SF_SKILLS_DIR overrides the folder, the lock file next to it', () => {
   assert.deepEqual(AGENT_SKILLS, ['implement', 'tdd', 'code-review', 'grilling']);
+  assert.deepEqual(DEFAULT_ROLES, { implementer: ['implement', 'tdd', 'code-review', 'grilling'], claude_review: ['code-review'], codex_gate: ['code-review'], task_check: [], planner: ['grilling'] });
   assert.deepEqual(skillsSource({ HOME: '/h' }), { dir: '/h/.agents/skills', lock: '/h/.agents/.skill-lock.json' });
   assert.deepEqual(skillsSource({ HOME: '/h', SF_SKILLS_DIR: '/srv/mine/skills' }), { dir: '/srv/mine/skills', lock: '/srv/mine/.skill-lock.json' });
   assert.equal(skillsSnapshot('/state'), '/state/skills');
@@ -36,7 +50,7 @@ test('the source: ~/.agents/skills and ~/.agents/.skill-lock.json; SF_SKILLS_DIR
 test('the first sync copies every listed skill byte for byte, with versions.json, behind the skills link', async () => {
   const { source, state, env } = await fixture('first');
   await mkdir(join(source, 'other'));
-  assert.deepEqual(await syncSkills(state, env), { versions: allAt(1), missing: [] });
+  assert.deepEqual(await synced(state, env), { versions: allAt(1), missing: [] });
   assert.ok((await lstat(skillsSnapshot(state))).isSymbolicLink());
   assert.match(await readlink(skillsSnapshot(state)), /^skills\.d\/[^/]+$/);
   assert.deepEqual((await readdir(skillsSnapshot(state))).sort(), [...AGENT_SKILLS, 'versions.json'].sort());
@@ -52,7 +66,7 @@ test('the same hashes copy nothing: the link and its folder stay, even with the 
   await syncSkills(state, env);
   const link = await readlink(skillsSnapshot(state));
   await writeFile(join(source, 'tdd', 'SKILL.md'), 'edited without a new hash\n');
-  assert.deepEqual(await syncSkills(state, env), { versions: allAt(1), missing: [] });
+  assert.deepEqual(await synced(state, env), { versions: allAt(1), missing: [] });
   assert.equal(await readlink(skillsSnapshot(state)), link);
   assert.deepEqual(await readdir(join(state, 'skills.d')), [link.slice('skills.d/'.length)]);
   assert.match(await snapshotFile(state, 'tdd', 'SKILL.md'), /The tdd method/);
@@ -70,7 +84,7 @@ test('one changed hash copies that skill only, whole: a file removed in the sour
   // A source change without a new hash is not taken.
   await writeFile(join(source, 'grilling', 'SKILL.md'), 'grilling edited\n');
   await lock({ ...allAt(1), tdd: 'tdd-2' });
-  assert.deepEqual(await syncSkills(state, env), { versions: { ...allAt(1), tdd: 'tdd-2' }, missing: [] });
+  assert.deepEqual(await synced(state, env), { versions: { ...allAt(1), tdd: 'tdd-2' }, missing: [] });
   assert.notEqual(await readlink(skillsSnapshot(state)), before);
   assert.equal(await snapshotFile(state, 'tdd', 'SKILL.md'), 'tdd v2\n');
   assert.deepEqual(await readdir(join(skillsSnapshot(state), 'tdd')), ['SKILL.md']);
@@ -83,16 +97,16 @@ test('one changed hash copies that skill only, whole: a file removed in the sour
 test('a missing source or lock file keeps the snapshot as it is and names every skill missing; none before: nothing is made', async () => {
   const { root, source, state, env } = await fixture('missing');
   const fresh = join(root, 'fresh');
-  assert.deepEqual(await syncSkills(fresh, { HOME: join(root, 'nobody') }), { versions: {}, missing: [...AGENT_SKILLS] });
+  assert.deepEqual(await synced(fresh, { HOME: join(root, 'nobody') }), { versions: {}, missing: [...AGENT_SKILLS] });
   await assert.rejects(lstat(skillsSnapshot(fresh)), { code: 'ENOENT' });
   await syncSkills(state, env);
   const link = await readlink(skillsSnapshot(state));
   await rm(join(root, 'agents', '.skill-lock.json'));
-  assert.deepEqual(await syncSkills(state, env), { versions: allAt(1), missing: [...AGENT_SKILLS] });
+  assert.deepEqual(await synced(state, env), { versions: allAt(1), missing: [...AGENT_SKILLS] });
   await writeFile(join(root, 'agents', '.skill-lock.json'), 'not json');
-  assert.deepEqual(await syncSkills(state, env), { versions: allAt(1), missing: [...AGENT_SKILLS] });
+  assert.deepEqual(await synced(state, env), { versions: allAt(1), missing: [...AGENT_SKILLS] });
   await rm(source, { recursive: true });
-  assert.deepEqual(await syncSkills(state, env), { versions: allAt(1), missing: [...AGENT_SKILLS] });
+  assert.deepEqual(await synced(state, env), { versions: allAt(1), missing: [...AGENT_SKILLS] });
   assert.equal(await readlink(skillsSnapshot(state)), link);
   assert.match(await snapshotFile(state, 'implement', 'SKILL.md'), /The implement method/);
 });
@@ -101,7 +115,7 @@ test('a skill missing from the lock or the source blocks only itself: the others
   const { root, source, env, lock } = await fixture('partial');
   const state = join(root, 'state');
   await lock({ implement: 'implement-1', tdd: 'tdd-1', 'code-review': 'code-review-1' });
-  assert.deepEqual(await syncSkills(state, env), { versions: { implement: 'implement-1', tdd: 'tdd-1', 'code-review': 'code-review-1' }, missing: ['grilling'] });
+  assert.deepEqual(await synced(state, env), { versions: { implement: 'implement-1', tdd: 'tdd-1', 'code-review': 'code-review-1' }, missing: ['grilling'] });
   await assert.rejects(stat(join(skillsSnapshot(state), 'grilling')), { code: 'ENOENT' });
   await lock(allAt(1));
   await syncSkills(state, env);
@@ -109,10 +123,10 @@ test('a skill missing from the lock or the source blocks only itself: the others
   await rm(join(source, 'implement'), { recursive: true });
   await writeFile(join(source, 'code-review', 'SKILL.md'), 'review v2\n');
   await lock({ implement: 'implement-2', 'code-review': 'code-review-2', grilling: 'grilling-1' });
-  assert.deepEqual(await syncSkills(state, env), { versions: { ...allAt(1), 'code-review': 'code-review-2' }, missing: ['implement', 'tdd'] });
+  assert.deepEqual(await synced(state, env), { versions: { ...allAt(1), 'code-review': 'code-review-2' }, missing: ['implement', 'tdd'] });
   // The next sync: implement's new hash with no folder in the source is still missing, and no new folder is built.
   const link = await readlink(skillsSnapshot(state));
-  assert.deepEqual(await syncSkills(state, env), { versions: { ...allAt(1), 'code-review': 'code-review-2' }, missing: ['implement', 'tdd'] });
+  assert.deepEqual(await synced(state, env), { versions: { ...allAt(1), 'code-review': 'code-review-2' }, missing: ['implement', 'tdd'] });
   assert.equal(await readlink(skillsSnapshot(state)), link);
   assert.match(await snapshotFile(state, 'implement', 'SKILL.md'), /The implement method/);
   assert.match(await snapshotFile(state, 'tdd', 'SKILL.md'), /The tdd method/);
@@ -124,20 +138,20 @@ test('a skill whose source folder is gone while its lock hash is unchanged is mi
   await syncSkills(state, env);
   const link = await readlink(skillsSnapshot(state));
   await rm(join(source, 'grilling'), { recursive: true });
-  assert.deepEqual(await syncSkills(state, env), { versions: allAt(1), missing: ['grilling'] });
+  assert.deepEqual(await synced(state, env), { versions: allAt(1), missing: ['grilling'] });
   assert.equal(await readlink(skillsSnapshot(state)), link);
   assert.deepEqual(await readdir(join(state, 'skills.d')), [link.slice('skills.d/'.length)]);
   assert.match(await snapshotFile(state, 'grilling', 'SKILL.md'), /The grilling method/);
   const records: unknown[] = [];
   await recordSkills(state, async (record) => void records.push(record), { env });
-  assert.deepEqual(records, [{ type: 'skills', versions: allAt(1), missing: ['grilling'], folder: link }]);
-  assert.match(skillsText(records[0] as { versions: Record<string, string>; missing: string[] }), /; missing in the source: grilling \(kept the copy\)\.$/);
+  assert.deepEqual(records, [{ type: 'skills', versions: allAt(1), missing: ['grilling'], folder: link, roles: DEFAULT_ROLES }]);
+  assert.match(skillsText(records[0] as SkillsEvent), /; missing in the source: grilling \(kept the copy\); by role: implementer implement, tdd, code-review, grilling; claude_review code-review; codex_gate code-review; task_check none; planner grilling\.$/);
 });
 
 test('two syncs at once each build a complete folder; the link names one of them; a later one removes the folders a week old but the current one and the one it replaced', async () => {
   const { state, env, lock } = await fixture('race');
   const results = await Promise.all([syncSkills(state, env), syncSkills(state, env)]);
-  assert.deepEqual(results, [{ versions: allAt(1), missing: [] }, { versions: allAt(1), missing: [] }]);
+  assert.deepEqual(results.map(({ versions, missing }) => ({ versions, missing })), [{ versions: allAt(1), missing: [] }, { versions: allAt(1), missing: [] }]);
   const folders = await readdir(join(state, 'skills.d'));
   assert.ok(folders.length >= 1 && folders.length <= 2, folders.join());
   for (const folder of folders) {
@@ -168,8 +182,8 @@ test('recordSkills syncs and appends one skills event: the versions, the missing
   await lock({ ...allAt(1), grilling: '' });
   await recordSkills(join(state, 'other'), async (record) => void records.push(record), { env });
   assert.deepEqual(records, [
-    { type: 'skills', versions: allAt(1), folder: await readlink(skillsSnapshot(state)) },
-    { type: 'skills', versions: { implement: 'implement-1', tdd: 'tdd-1', 'code-review': 'code-review-1' }, missing: ['grilling'], folder: await readlink(skillsSnapshot(join(state, 'other'))) },
+    { type: 'skills', versions: allAt(1), folder: await readlink(skillsSnapshot(state)), roles: DEFAULT_ROLES },
+    { type: 'skills', versions: { implement: 'implement-1', tdd: 'tdd-1', 'code-review': 'code-review-1' }, missing: ['grilling'], folder: await readlink(skillsSnapshot(join(state, 'other'))), roles: DEFAULT_ROLES },
   ]);
   assert.match(String((records[0] as SkillsEvent).folder), /^skills\.d\/[\w-]+$/);
 });
@@ -199,10 +213,10 @@ test('a job start with skills missing in the source writes one warning line nami
   assert.equal(await readFile(join(root, 'runner.log'), 'utf8'), `${lines[0]}\n`);
   const folder = await readlink(skillsSnapshot(state));
   assert.deepEqual(records, [
-    { type: 'skills', versions: allAt(1), folder },
-    { type: 'skills', versions: allAt(1), missing: [...AGENT_SKILLS], folder },
+    { type: 'skills', versions: allAt(1), folder, roles: DEFAULT_ROLES },
+    { type: 'skills', versions: allAt(1), missing: [...AGENT_SKILLS], folder, roles: DEFAULT_ROLES },
     // No snapshot at all: no folder; the job binds the link, which is none.
-    { type: 'skills', versions: {}, missing: [...AGENT_SKILLS] },
+    { type: 'skills', versions: {}, missing: [...AGENT_SKILLS], roles: DEFAULT_ROLES },
   ]);
 });
 
@@ -213,7 +227,7 @@ test('a sync that fails records the snapshot as it was and the failure, never a 
   await writeFile(join(state, 'skills.d'), 'not a folder');
   const records: Array<Record<string, unknown>> = [];
   await recordSkills(state, async (record) => void records.push(record), { env });
-  assert.deepEqual(records.map((record) => Object.keys(record).sort()), [['error', 'type', 'versions']]);
+  assert.deepEqual(records.map((record) => Object.keys(record).sort()), [['error', 'roles', 'type', 'versions']]);
   assert.deepEqual([records[0]!.type, records[0]!.versions], ['skills', {}]);
   assert.match(String(records[0]!.error), /^(ENOTDIR|EEXIST)/);
 });
@@ -230,7 +244,7 @@ test('a failed update records the versions the snapshot still holds, and the fai
   } finally {
     await chmod(join(state, 'skills.d'), mode);
   }
-  assert.deepEqual(records.map((record) => ({ ...record, error: typeof record.error })), [{ type: 'skills', versions: allAt(1), folder: await readlink(skillsSnapshot(state)), error: 'string' }]);
+  assert.deepEqual(records.map((record) => ({ ...record, error: typeof record.error })), [{ type: 'skills', versions: allAt(1), folder: await readlink(skillsSnapshot(state)), error: 'string', roles: DEFAULT_ROLES }]);
   assert.match(String(records[0]!.error), /^EACCES/);
 });
 
@@ -256,16 +270,16 @@ test('a job\'s wrapper binds the folder its skills event recorded: a later swap 
   assert.notEqual(records[1]!.folder, a);
   assert.equal(await readlink(skillsSnapshot(state)), records[1]!.folder);
   // A's next wrapper still binds A.
-  assert.equal(await jobSkills(state, events), join(state, a));
+  assert.equal((await jobSkills(state, events)).folder, join(state, a));
   // A job started before the folder was recorded, a job without events, a recorded folder gone
   // or a path that is not a skills.d folder: the link.
   const unpinned = await jobEvents(state, 'app', 'O-1', { type: 'skills', versions: allAt(1) });
-  assert.equal(await jobSkills(state, unpinned), skillsSnapshot(state));
-  assert.equal(await jobSkills(state, join(state, 'jobs', 'app', 'none', 'events.jsonl')), skillsSnapshot(state));
+  assert.equal((await jobSkills(state, unpinned)).folder, skillsSnapshot(state));
+  assert.equal((await jobSkills(state, join(state, 'jobs', 'app', 'none', 'events.jsonl'))).folder, skillsSnapshot(state));
   const gone = await jobEvents(state, 'app', 'G-1', { type: 'skills', versions: allAt(1), folder: 'skills.d/0-0-gone' });
-  assert.equal(await jobSkills(state, gone), skillsSnapshot(state));
+  assert.equal((await jobSkills(state, gone)).folder, skillsSnapshot(state));
   const outside = await jobEvents(state, 'app', 'X-1', { type: 'skills', versions: allAt(1), folder: '../agents' });
-  assert.equal(await jobSkills(state, outside), skillsSnapshot(state));
+  assert.equal((await jobSkills(state, outside)).folder, skillsSnapshot(state));
 });
 
 test('the 7-day cleanup never removes a folder a job not yet archived recorded; an archived job\'s goes', async () => {
@@ -300,4 +314,158 @@ test('skillsText: each skill with its short hash, then the missing ones, kept or
   assert.equal(skillsText({ versions: {}, missing: ['implement'] }), 'Skills: none; missing in the source: implement (not available).');
   // A failed sync: the snapshot's versions as they were, and why it failed.
   assert.equal(skillsText({ versions, error: 'EACCES: permission denied' }), 'Skills: implement 4804b46, tdd 667dbdd; the sync failed (EACCES: permission denied), the snapshot as it was.');
+});
+
+// Two more installed skills, extra and unused, each with a SKILL.md and its lock entry (source, updatedAt).
+async function withMore(fixtureOf: Awaited<ReturnType<typeof fixture>>): Promise<void> {
+  const { root, source } = fixtureOf;
+  for (const skill of ['extra', 'unused']) {
+    await mkdir(join(source, skill), { recursive: true });
+    await writeFile(join(source, skill, 'SKILL.md'), `---\nname: ${skill}\ndescription: "The ${skill} skill"\n---\nThe ${skill} method.\n`);
+  }
+  const lock = JSON.parse(await readFile(join(root, 'agents', '.skill-lock.json'), 'utf8')) as { skills: Record<string, unknown> };
+  for (const skill of ['extra', 'unused']) {
+    lock.skills[skill] = { skillFolderHash: `${skill}-1`, source: `owner/${skill}`, updatedAt: '2026-11-10T08:00:00.000Z' };
+  }
+  await writeFile(join(root, 'agents', '.skill-lock.json'), JSON.stringify(lock));
+}
+
+test('the union snapshot: a skill chosen by the Task check only is copied, one no role chose is not', async () => {
+  const fixed = await fixture('union');
+  await withMore(fixed);
+  const { state, env } = fixed;
+  await mkdir(state, { recursive: true });
+  await writeRoles(state, { implementer: [], claude_review: [], codex_gate: [], task_check: ['extra'], planner: [] });
+  assert.deepEqual(await synced(state, env), { versions: { extra: 'extra-1' }, missing: [] });
+  assert.deepEqual((await readdir(skillsSnapshot(state))).sort(), ['extra', 'versions.json']);
+  // Back to every default: the four are copied, extra (chosen by no role now) is left out of the new folder.
+  await rm(join(state, 'skill-roles.json'));
+  assert.deepEqual(await synced(state, env), { versions: allAt(1), missing: [] });
+  assert.deepEqual((await readdir(skillsSnapshot(state))).sort(), [...AGENT_SKILLS, 'versions.json'].sort());
+});
+
+test('a choice that only takes skills out shrinks the snapshot: a new folder holds the chosen subset, its copies unchanged, and the link swaps to it', async () => {
+  const { state, env } = await fixture('shrink');
+  assert.deepEqual(await synced(state, env), { versions: allAt(1), missing: [] });
+  const before = await readlink(skillsSnapshot(state));
+  // Every remaining skill's hash is the snapshot's own: only the removal calls for a new folder.
+  await writeRoles(state, { implementer: ['tdd'], claude_review: [], codex_gate: [], task_check: [], planner: [] });
+  assert.deepEqual(await synced(state, env), { versions: { tdd: 'tdd-1' }, missing: [] });
+  assert.notEqual(await readlink(skillsSnapshot(state)), before);
+  assert.deepEqual((await readdir(skillsSnapshot(state))).sort(), ['tdd', 'versions.json']);
+  assert.deepEqual(await versionsOf(state), { tdd: 'tdd-1' });
+  assert.match(await snapshotFile(state, 'tdd', 'SKILL.md'), /The tdd method/);
+  // The old folder stays for a job that recorded it; a sync with the same choice builds nothing more.
+  assert.ok((await readdir(join(state, 'skills.d'))).includes(before.slice('skills.d/'.length)));
+  const after = await readlink(skillsSnapshot(state));
+  await syncSkills(state, env);
+  assert.equal(await readlink(skillsSnapshot(state)), after);
+});
+
+test('the roles change between two jobs\' syncs: each job records the pair its own sync returned, and the first job\'s folder still holds every skill of its recorded lists', async () => {
+  const fixed = await fixture('pair');
+  await withMore(fixed);
+  const { state, env } = fixed;
+  const records: SkillsEvent[] = [];
+  await recordSkills(state, async (record) => void records.push(record), { env });
+  // The choice changes before the second job's sync: extra added, every default but tdd taken out.
+  await setRoleSkills(state, 'implementer', ['tdd', 'extra'], env);
+  for (const role of ['claude_review', 'codex_gate', 'planner'] as const) {
+    await setRoleSkills(state, role, [], env);
+  }
+  await recordSkills(state, async (record) => void records.push(record), { env });
+  const [first, second] = records;
+  assert.deepEqual(first!.roles, DEFAULT_ROLES);
+  assert.deepEqual(second!.roles, { implementer: ['tdd', 'extra'], claude_review: [], codex_gate: [], task_check: [], planner: [] });
+  assert.notEqual(first!.folder, second!.folder);
+  // Each recorded folder holds every skill its recorded lists name, with the versions recorded beside it.
+  for (const record of [first!, second!]) {
+    const held = await readdir(join(state, record.folder!));
+    for (const name of chosenSkills(record.roles!)) {
+      assert.ok(held.includes(name), `${record.folder} lacks ${name}`);
+    }
+    assert.deepEqual(JSON.parse(await readFile(join(state, record.folder!, 'versions.json'), 'utf8')), record.versions);
+  }
+  // The first job binds its own folder, with its own lists, after the swaps.
+  const events = await jobEvents(state, 'app', 'P-1', first);
+  assert.deepEqual(await implementerSkills(state, events), AGENT_SKILLS.map((name) => join(state, first!.folder!, name)));
+});
+
+test('a running job keeps the lists its start recorded after a change; a job started afterwards has the new ones, its Implementer only its own skills', async () => {
+  const { state, env } = await fixture('pinned-roles');
+  const records: SkillsEvent[] = [];
+  await recordSkills(state, async (record) => void records.push(record), { env });
+  const running = await jobEvents(state, 'app', 'R-1', records[0]);
+  await setRoleSkills(state, 'implementer', ['tdd'], env);
+  await setRoleSkills(state, 'codex_gate', [], env);
+  assert.deepEqual((await jobSkills(state, running)).roles, DEFAULT_ROLES);
+  assert.deepEqual((await implementerSkills(state, running)).map((path) => path.split('/').at(-1)), ['implement', 'tdd', 'code-review', 'grilling']);
+  await recordSkills(state, async (record) => void records.push(record), { env });
+  const later = await jobEvents(state, 'app', 'L-1', records[1]);
+  assert.deepEqual((await jobSkills(state, later)).roles, { ...DEFAULT_ROLES, implementer: ['tdd'], codex_gate: [] });
+  assert.deepEqual(await implementerSkills(state, later), [join(state, records[1]!.folder!, 'tdd')]);
+  // Without a job: the choice now, in the link.
+  assert.deepEqual(await implementerSkills(state), [join(skillsSnapshot(state), 'tdd')]);
+  // A job started before the lists were recorded: every role's default.
+  const older = await jobEvents(state, 'app', 'O-1', { type: 'skills', versions: allAt(1) });
+  assert.deepEqual((await jobSkills(state, older)).roles, DEFAULT_ROLES);
+});
+
+test('sf skills: the installed skills with source, updated and description, each role\'s list, the missing ones; set refuses an unknown role and a skill not installed', async () => {
+  const fixed = await fixture('view');
+  await withMore(fixed);
+  const { state, env } = fixed;
+  await mkdir(state, { recursive: true });
+  await writeRoles(state, { ...DEFAULT_ROLES, planner: ['grilling', 'gone'] });
+  const view = await skillsView(state, env);
+  assert.deepEqual(view.skills.map((skill) => skill.name), ['code-review', 'extra', 'grilling', 'implement', 'tdd', 'unused']);
+  assert.deepEqual(view.skills.find((skill) => skill.name === 'extra'), { name: 'extra', source: 'owner/extra', updated: '2026-11-10T08:00:00.000Z', description: 'The extra skill' });
+  assert.deepEqual(view.missing, ['gone']);
+  const lines = skillsLines(view);
+  assert.match(lines[0]!, /^skill +source +updated +implementer +claude_review +codex_gate +task_check +planner +description$/);
+  assert.match(lines.find((line) => line.startsWith('extra'))!, /^extra +owner\/extra +2026-11-10 +- +- +- +- +- +The extra skill$/);
+  // No updatedAt and no description: a dash, and nothing.
+  assert.match(lines.find((line) => line.startsWith('code-review'))!, /^code-review +x +- +on +on +on +- +-$/);
+  assert.equal(lines.at(-1), 'missing: gone (chosen for planner, not installed)');
+  // sf skills set: on adds at the end, off takes out; the file is written with mode 0600 and the snapshot synced at once.
+  const after = await switchSkill(state, 'task_check', 'extra', true, env);
+  assert.deepEqual(after.roles.task_check, ['extra']);
+  assert.equal((await stat(join(state, 'skill-roles.json'))).mode & 0o777, 0o600);
+  assert.ok((await readdir(skillsSnapshot(state))).includes('extra'));
+  assert.deepEqual((await switchSkill(state, 'implementer', 'implement', false, env)).roles.implementer, ['tdd', 'code-review', 'grilling']);
+  // A name the role has though it is not installed may go.
+  assert.deepEqual((await switchSkill(state, 'planner', 'gone', false, env)).roles.planner, ['grilling']);
+  await assert.rejects(switchSkill(state, 'reviewer', 'tdd', true, env), { code: 'unknown_role', message: /the roles are implementer, claude_review, codex_gate, task_check, planner/ });
+  await assert.rejects(switchSkill(state, 'planner', 'nope', true, env), { code: 'skill_not_installed', message: /Not an installed skill: nope; installed: code-review, extra, grilling, implement, tdd, unused/ });
+  await assert.rejects(switchSkill(state, 'planner', 'nope', false, env), { code: 'skill_not_installed' });
+  await assert.rejects(setRoleSkills(state, 'codex_gate', ['../agents'], env), { code: 'skill_not_installed' });
+});
+
+test('a skill\'s SKILL.md for the API: an installed skill\'s text; a path, .. or a name not installed is refused before anything is read', async () => {
+  const fixed = await fixture('text');
+  await withMore(fixed);
+  const { source, env } = fixed;
+  assert.deepEqual(await skillText('extra', env), { name: 'extra', text: '---\nname: extra\ndescription: "The extra skill"\n---\nThe extra method.\n', truncated: false });
+  for (const name of ['../agents', 'a/b', '..', '.', '', 'Extra', 'docs/../extra', 'missing']) {
+    await assert.rejects(skillText(name, env), { code: 'skill_not_installed' }, name);
+  }
+  // A long file is cut at MAX_SKILL_TEXT_BYTES.
+  await writeFile(join(source, 'unused', 'SKILL.md'), 'é'.repeat(MAX_SKILL_TEXT_BYTES));
+  const long = await skillText('unused', env);
+  assert.equal(long.truncated, true);
+  assert.equal(Buffer.byteLength(long.text), MAX_SKILL_TEXT_BYTES);
+});
+
+test('skillBlocks: each skill\'s SKILL.md in a <skill> block, in order, at most the limit in all; one over it is named, not included, and the later ones are still tried', async () => {
+  const { state, env } = await fixture('blocks');
+  await syncSkills(state, env);
+  const folder = skillsSnapshot(state);
+  const all = await skillBlocks(folder, ['tdd', 'grilling']);
+  assert.equal(all.text, '<skill name="tdd">\n---\nname: tdd\n---\nThe tdd method.\n</skill>\n<skill name="grilling">\n---\nname: grilling\n---\nThe grilling method.\n</skill>');
+  assert.equal(MAX_SKILL_BLOCKS_BYTES, 64 * 1024);
+  const tdd = Buffer.byteLength('<skill name="tdd">\n---\nname: tdd\n---\nThe tdd method.\n</skill>') + 1;
+  await writeFile(join(folder, 'implement', 'SKILL.md'), 'x'.repeat(200));
+  const cut = await skillBlocks(folder, ['implement', 'tdd', 'none'], tdd + 50);
+  assert.deepEqual([cut.included, cut.omitted], [['tdd'], ['implement', 'none']]);
+  assert.ok(cut.text.startsWith('<skill name="tdd">'));
 });

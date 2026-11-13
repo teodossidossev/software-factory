@@ -46,6 +46,9 @@ export interface Config {
   // The code-review skill file whose method both reviewers follow (SF_REVIEW_SKILL, reviewSkillPath);
   // undefined: none (SF_REVIEW_SKILL empty, or a Config made by hand).
   reviewSkill?: string | undefined;
+  // SF_REVIEW_SKILL was set (empty too): reviewSkill is then the user's override, which wins over the
+  // reviewers' roles whatever its value, the snapshot's own path included (src/review.ts, reviewerSkills).
+  reviewSkillSet?: boolean;
   // The simplification pass after the deciding clean verdict of a job with review fixes;
   // false with SF_SIMPLIFY=off. Its model and maxTurns are the review's.
   simplify: boolean;
@@ -344,7 +347,8 @@ export function claudeReviewDecision(config: Pick<Config, 'claudeReview' | 'gate
 }
 
 // SF_REVIEW_SKILL: the code-review skill file of the reviewers, read at each review; unset, the
-// skills snapshot's (src/skills.ts); empty, none.
+// skills snapshot's (src/skills.ts), which a reviewer reads in the folder its job pinned and only when
+// its role chose code-review (src/review.ts, reviewerSkills); set, it wins for both reviewers; empty, none.
 export function reviewSkillPath(env: NodeJS.ProcessEnv = process.env): string | undefined {
   const path = env.SF_REVIEW_SKILL ?? snapshotSkillFile(stateDir(env), 'code-review');
   return path === '' ? undefined : path;
@@ -446,6 +450,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     reviewModel: env.SF_REVIEW_MODEL || undefined,
     reviewMaxTurns: positiveInteger(env, 'SF_REVIEW_MAX_TURNS', 60),
     reviewSkill: reviewSkillPath(env),
+    reviewSkillSet: env.SF_REVIEW_SKILL !== undefined,
     simplify: env.SF_SIMPLIFY !== 'off',
     taskCheckMaxTurns: positiveInteger(env, 'SF_TASK_CHECK_MAX_TURNS', 30),
     taskCheckAuto: taskCheckAutoSetting(env),

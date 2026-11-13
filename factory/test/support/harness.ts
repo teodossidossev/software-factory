@@ -24,6 +24,7 @@ import { factoryPrompt } from '../../src/prompts.js';
 import { saveRegistry } from '../../src/registry.js';
 import { MCP_TOKEN_FILE } from '../../src/server.js';
 import { cliRuleList, FACTORY_MCP_SERVER } from '../../src/sandbox-denials.js';
+import { jobSkills } from '../../src/skills.js';
 import { rulesBlock } from '../../src/rules-docs.js';
 import { CheckStore, taskSha256 } from '../../src/task-check.js';
 import { writeTask } from '../../src/task-file.js';
@@ -188,10 +189,12 @@ async function writeFakeSkills(): Promise<void> {
   process.env.SF_SKILLS_DIR = skillsSourceDir();
 }
 
-// The review_method review.json and gate.json have with the snapshot's code-review skill (the fake's).
-export async function ownReviewMethod(env: Env): Promise<{ path: string; sha256: string }> {
+// The review_method review.json and gate.json have with the snapshot's code-review skill (the fake's):
+// in the folder the job app/<ticket> pinned at its start (its skills event), else through the link.
+export async function ownReviewMethod(env: Env, ticket?: string): Promise<{ path: string; sha256: string }> {
   const source = join(skillsSourceDir(), 'code-review', 'SKILL.md');
-  return { path: join(env.state, 'skills', 'code-review', 'SKILL.md'), sha256: createHash('sha256').update(await readFile(source)).digest('hex') };
+  const folder = ticket === undefined ? join(env.state, 'skills') : (await jobSkills(env.state, new JobStore(env.state).eventsPath('app', ticket))).folder;
+  return { path: join(folder, 'code-review', 'SKILL.md'), sha256: createHash('sha256').update(await readFile(source)).digest('hex') };
 }
 
 export async function newEnv(name: string, extra: Record<string, string> = {}, options: { realBwrap?: boolean } = {}): Promise<Env & { proc: string }> {

@@ -33,10 +33,16 @@ export function changeNote(ticket: string, diff: string | undefined): string {
   return [`The Task file ${path} changed since you were last given it (while the job was paused); the copy in your worktree is the new version. Act on the change:`, '', '````diff', diff, '````'].join('\n');
 }
 
-// The first prompt of a job: /implement of its Task file, then the job's <rules> block when it has
+// The Implementer's command (fix: of a Fix section): /implement of the Task file when its skills (the
+// job's Implementer's, src/skill-roles.ts) hold implement; else the Task file's path alone.
+export function implementCommand(ticket: string, skills: readonly string[], fix?: number): string {
+  return `${skills.includes('implement') ? '/implement ' : ''}${TASK_DIR}/${ticket}.md${fix === undefined ? '' : ` Fix ${fix}`}`;
+}
+
+// The first prompt of a job: its command (implementCommand), then the job's <rules> block when it has
 // one; after sf restart --keep-files, with the files kept from the previous job.
-export function firstPrompt(ticket: string, kept: string[], rules = ''): string {
-  const command = [`/implement ${TASK_DIR}/${ticket}.md`, ...(rules !== '' ? ['', rules.trimEnd()] : [])].join('\n');
+export function firstPrompt(ticket: string, kept: string[], rules = '', skills: readonly string[] = ['implement']): string {
+  const command = [implementCommand(ticket, skills), ...(rules !== '' ? ['', rules.trimEnd()] : [])].join('\n');
   if (kept.length === 0) {
     return command;
   }

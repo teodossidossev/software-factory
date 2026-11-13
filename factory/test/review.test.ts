@@ -247,7 +247,7 @@ test('fix, then clean: the Fix section from the items, the next iteration, Clean
     const recorded = await jobs.readReview('app', 'R-1', 1);
     assert.ok(recorded !== undefined && 'verdict' in recorded);
     const { started_at: startedAt, ended_at: endedAt, ...rest } = recorded;
-    assert.deepEqual(rest, { reviewer: 'claude', ...FIX, items: ledgerFields(FIX.items), cost_usd: 0.0456, review_method: await ownReviewMethod(env) });
+    assert.deepEqual(rest, { reviewer: 'claude', ...FIX, items: ledgerFields(FIX.items), cost_usd: 0.0456, review_method: await ownReviewMethod(env, 'R-1') });
     assert.ok(Date.parse(startedAt) <= Date.parse(endedAt));
     assert.deepEqual((await eventsOf(env, 'R-1')).filter((record) => record.type === 'review').map(({ ts: _ts, ...record }) => record), [
       { iteration: 1, type: 'review', reviewer: 'claude', verdict: 'fix', items: 1 },
@@ -661,7 +661,7 @@ test('a failed review (a turn that is not a success, no output, an invalid verdi
       assert.equal(failed.error.code, 'review_failed');
       assert.match(failed.error.message, entry.message);
       assert.deepEqual(failed.review, { status: 'failed', summary: failed.error.message });
-      assert.deepEqual(await new JobStore(env.state).readReview('app', ticket, 1), { reviewer: 'claude', error: failed.error.message, review_method: await ownReviewMethod(env) });
+      assert.deepEqual(await new JobStore(env.state).readReview('app', ticket, 1), { reviewer: 'claude', error: failed.error.message, review_method: await ownReviewMethod(env, ticket) });
       assert.doesNotMatch(await taskFile(repo, ticket), /## Fix/);
     }
     assert.match((await runCli(env, ['watch', 'app', 'F-2', '--once'])).stdout, /\[1\] review by claude failed: The review returned no structured output\.$/m);
@@ -810,7 +810,7 @@ test('retry a failed review: sf review and the dashboard put the job back to awa
     assert.match(retried.stdout, /^state: awaiting_review\niteration: 1$/m);
     const again = await waitFor(served, 'R-2', 'needs_human', 1);
     assert.equal(again.error.message, 'The review returned no structured output.');
-    assert.deepEqual(await jobs.readReview('app', 'R-2', 1), { reviewer: 'claude', error: again.error.message, review_method: await ownReviewMethod(env) });
+    assert.deepEqual(await jobs.readReview('app', 'R-2', 1), { reviewer: 'claude', error: again.error.message, review_method: await ownReviewMethod(env, 'R-2') });
 
     // The dashboard's route: the third review's fix starts iteration 2, whose review is clean.
     const reply = await act(served.dashboard!, 'api/jobs/app/R-2/review', {});

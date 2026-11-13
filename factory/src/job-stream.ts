@@ -7,6 +7,7 @@ import { createReadStream } from 'node:fs';
 import { createInterface } from 'node:readline';
 import type { GateRecord, IterationMeta, JobStore, ReviewRecord, SimplifyRecord } from './jobs.js';
 import type { LedgerEntry } from './ledger.js';
+import { rolesOf } from './skill-roles.js';
 import { skillsText } from './skills.js';
 import { canonicalStop, type StopCode, type StopKind, STOPS } from './stops.js';
 import { CONTINUE_PROMPT } from './turn-limit.js';
@@ -351,7 +352,10 @@ async function drafts(raw: string, record: Record<string, unknown>, it: number, 
     return [entry, ...(await changesEntry({ from: state.from, to: state.to, code }, it, ctx))];
   }
   if (record.type === 'review' || record.type === 'review_failed') {
-    return record.type === 'review' && record.ignored !== true ? [await verdictEntry(record, it, ctx)] : noteEntry(raw, reviewerWho(record.reviewer));
+    // The gate's skills left out of its prompt (over the size limit, or not in the snapshot), named after its verdict.
+    const omitted = Array.isArray(record.skills_omitted) && record.skills_omitted.length > 0
+      ? [{ t: 'note' as const, who: 'factory' as const, text: `Skills left out of the review's prompt (over 64 KiB, or not in the snapshot): ${record.skills_omitted.map(String).join(', ')}.` }] : [];
+    return record.type === 'review' && record.ignored !== true ? [await verdictEntry(record, it, ctx), ...omitted] : noteEntry(raw, reviewerWho(record.reviewer));
   }
   if (record.type === 'simplify') {
     if (record.ignored === true) {
@@ -377,7 +381,7 @@ async function drafts(raw: string, record: Record<string, unknown>, it: number, 
     }];
   }
   if (record.type === 'skills') {
-    return [{ t: 'note', who: 'factory', text: skillsText({ versions: Object.fromEntries(Object.entries(asRecord(record.versions)).map(([name, hash]) => [name, String(hash)])), missing: Array.isArray(record.missing) ? record.missing.map(String) : [], ...(typeof record.error === 'string' ? { error: record.error } : {}) }) }];
+    return [{ t: 'note', who: 'factory', text: skillsText({ versions: Object.fromEntries(Object.entries(asRecord(record.versions)).map(([name, hash]) => [name, String(hash)])), missing: Array.isArray(record.missing) ? record.missing.map(String) : [], ...(typeof record.error === 'string' ? { error: record.error } : {}), ...(typeof record.roles === 'object' && record.roles !== null ? { roles: rolesOf({ roles: record.roles }) } : {}) }) }];
   }
   if (record.type === 'skill_missing') {
     const skill = String(record.skill);

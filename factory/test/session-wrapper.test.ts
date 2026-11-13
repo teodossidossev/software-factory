@@ -14,14 +14,15 @@ import { findBwrap } from '../src/gate.js';
 import { within } from '../src/test-command.js';
 import type { SandboxDenials } from '../src/sandbox-denials.js';
 import { type IdleOutcome, ImplementerSession } from '../src/session.js';
-import { skillsSnapshot, syncSkills } from '../src/skills.js';
+import { implementerSkills, skillsSnapshot, syncSkills } from '../src/skills.js';
 import { BWRAP_MISSING, CLAUDE_WRITTEN, claudeExecutable, implementerWrapper, prepareClaudeState, type WrapperPaths } from '../src/session-wrapper.js';
 import { bwrapLog, FAKE, fakeLog, newEnv, script, temp, useFakeBwrap } from './support/harness.js';
 
 // A fake home with Claude Code's state, a native install under ~/.local/share/claude, ~/.ssh, the
 // user's own skills (~/.claude/skills/mine, ~/.agents/skills/theirs), a worktree with a .git file, a
-// .env and a .claude folder, and a skills snapshot's folder (skills/implement/SKILL.md); every path real.
-async function fixture(name: string): Promise<{ root: string; paths: WrapperPaths; denials: SandboxDenials }> {
+// .env and a .claude folder, and a skills snapshot's folder (snapshot: implement/SKILL.md and
+// tdd/SKILL.md), of which the paths bind implement alone; every path real.
+async function fixture(name: string): Promise<{ root: string; paths: WrapperPaths; denials: SandboxDenials; snapshot: string }> {
   const root = join(await realpath(temp), name);
   const home = join(root, 'home');
   const claudeDir = join(home, '.claude');
@@ -31,7 +32,7 @@ async function fixture(name: string): Promise<{ root: string; paths: WrapperPath
   const skills = join(root, 'state', 'skills.d', 'one');
   for (const dir of [
     join(home, '.ssh'), claudeDir, join(claudeDir, 'backups'), join(claudeDir, 'skills', 'mine'), join(home, '.agents', 'skills', 'theirs'), join(worktree, '.claude'), sessionTmp,
-    dirname(executable), join(skills, 'implement'),
+    dirname(executable), join(skills, 'implement'), join(skills, 'tdd'),
   ]) {
     await mkdir(dir, { recursive: true });
   }
@@ -39,7 +40,7 @@ async function fixture(name: string): Promise<{ root: string; paths: WrapperPath
   for (const [path, text] of [
     [join(home, '.ssh', 'id_ed25519'), 'key'], [join(home, '.claude.json'), '{}'], [join(claudeDir, '.credentials.json'), '{}'], [join(claudeDir, 'settings.json'), '{}'],
     [join(worktree, '.git'), 'gitdir: /nowhere\n'], [join(worktree, '.env'), 'SECRET=1\n'], [executable, '#!/bin/sh\n'],
-    [join(skills, 'implement', 'SKILL.md'), 'the factory\'s implement\n'], [join(claudeDir, 'skills', 'mine', 'SKILL.md'), 'mine\n'],
+    [join(skills, 'implement', 'SKILL.md'), 'the factory\'s implement\n'], [join(skills, 'tdd', 'SKILL.md'), 'tdd\n'], [join(claudeDir, 'skills', 'mine', 'SKILL.md'), 'mine\n'],
     [join(home, '.agents', 'skills', 'theirs', 'SKILL.md'), 'theirs\n'],
   ] as const) {
     await writeFile(path, text);
@@ -54,12 +55,17 @@ async function fixture(name: string): Promise<{ root: string; paths: WrapperPath
     ],
     denyWrite: [join(home, '.ssh'), join(claudeDir, '.credentials.json'), join(home, '.claude.json'), join(claudeDir, 'settings.json'), join(worktree, '.git'), join(worktree, '.claude')],
   };
-  return { root, paths: { worktree, sessionTmp, home, claudeDir, globalConfig: join(home, '.claude.json'), skills, executable }, denials };
+  return { root, paths: { worktree, sessionTmp, home, claudeDir, globalConfig: join(home, '.claude.json'), skills: [join(skills, 'implement')], executable }, denials, snapshot: skills };
 }
 
-test('the wrapper\'s arguments: the read-only root, the hidden entries but the CLI\'s own, the installation, the read-write binds, the fix-up pass, then .git, the agent configuration and the user settings read-only again, and last the skills snapshot read-only on <config dir>/skills', async () => {
-  const { paths, denials } = await fixture('wrapper-args');
-  const { home, claudeDir, worktree, sessionTmp, executable, skills } = paths;
+// The wrapper's skills mounts: an empty tmpfs on mount, each folder read-only at mount/<its name>, the tmpfs read-only.
+const skillsMounts = (mount: string, folders: string[]): string[] => [
+  '--tmpfs', mount, ...folders.flatMap((folder) => ['--ro-bind', folder, join(mount, folder.split('/').at(-1)!)]), '--remount-ro', mount,
+];
+
+test('the wrapper\'s arguments: the read-only root, the hidden entries but the CLI\'s own, the installation, the read-write binds, the fix-up pass, then .git, the agent configuration and the user settings read-only again, and last the Implementer\'s skills read-only in <config dir>/skills', async () => {
+  const { paths, denials, snapshot } = await fixture('wrapper-args');
+  const { home, claudeDir, worktree, sessionTmp, executable } = paths;
   const nodePrefix = dirname(dirname(realpathSync(process.execPath)));
   const native = join(home, '.local', 'share', 'claude');
   const written = CLAUDE_WRITTEN.map((name) => join(claudeDir, name));
@@ -81,39 +87,46 @@ test('the wrapper\'s arguments: the read-only root, the hidden entries but the C
     // Read-only again: the worktree's .git and .claude, then the user settings.
     '--ro-bind', join(worktree, '.git'), join(worktree, '.git'), '--ro-bind', join(worktree, '.claude'), join(worktree, '.claude'),
     '--ro-bind', join(claudeDir, 'settings.json'), join(claudeDir, 'settings.json'),
-    // Last, over the tmpfs that hid the user's skills: the snapshot's, read-only.
-    '--ro-bind', skills, join(claudeDir, 'skills'),
+    // Last, over the tmpfs that hid the user's skills: an empty one with the chosen skill of the snapshot, read-only.
+    '--tmpfs', join(claudeDir, 'skills'), '--ro-bind', join(snapshot, 'implement'), join(claudeDir, 'skills', 'implement'), '--remount-ro', join(claudeDir, 'skills'),
   ]);
 });
 
-test('the skills bind: on <config dir>/skills when it is a folder, made by prepareClaudeState when missing, on the real path of a link; the snapshot\'s link resolved; none without a snapshot or through a dangling link', async () => {
-  const { root, paths, denials } = await fixture('wrapper-skills');
-  const last = (args: string[]): string[] => args.slice(-3);
+test('the skills binds: in <config dir>/skills when it is a folder, made by prepareClaudeState when missing, in the real path of a link; the snapshot\'s link resolved; only the chosen skills; none through a dangling link', async () => {
+  const { root, paths, denials, snapshot } = await fixture('wrapper-skills');
+  const implement = [join(snapshot, 'implement')];
+  const last = (args: string[], count = implement.length): string[] => args.slice(-(4 + 3 * count));
   // A folder (the user's links live in it).
-  assert.deepEqual(last(implementerWrapper(denials, paths)), ['--ro-bind', paths.skills, join(paths.claudeDir, 'skills')]);
+  assert.deepEqual(last(implementerWrapper(denials, paths)), skillsMounts(join(paths.claudeDir, 'skills'), implement));
   // Missing: made empty first, so bwrap has its mount point.
   const fresh = join(root, 'fresh', '.claude');
   await prepareClaudeState(fresh, join(root, 'fresh', '.claude.json'));
   assert.ok((await stat(join(fresh, 'skills'))).isDirectory());
-  assert.deepEqual(last(implementerWrapper(denials, { ...paths, claudeDir: fresh })), ['--ro-bind', paths.skills, join(fresh, 'skills')]);
-  // A link (to ~/.agents/skills, which the home's tmpfs hides): on its real path, the path the CLI reaches.
+  assert.deepEqual(last(implementerWrapper(denials, { ...paths, claudeDir: fresh })), skillsMounts(join(fresh, 'skills'), implement));
+  // A link (to ~/.agents/skills, which the home's tmpfs hides): in its real path, the path the CLI reaches.
   const linked = join(root, 'linked', '.claude');
   await mkdir(linked, { recursive: true });
   await symlink(join(paths.home, '.agents', 'skills'), join(linked, 'skills'));
   await prepareClaudeState(linked, join(root, 'linked', '.claude.json'));
-  assert.deepEqual(last(implementerWrapper(denials, { ...paths, claudeDir: linked })), ['--ro-bind', paths.skills, join(paths.home, '.agents', 'skills')]);
+  assert.deepEqual(last(implementerWrapper(denials, { ...paths, claudeDir: linked })), skillsMounts(join(paths.home, '.agents', 'skills'), implement));
   // The snapshot is a link to its current folder: the folder is bound, so a later swap leaves this session's as it is.
   const link = join(root, 'state', 'skills');
   await mkdir(dirname(link), { recursive: true });
-  await symlink(paths.skills, link);
-  assert.deepEqual(last(implementerWrapper(denials, { ...paths, skills: link })), ['--ro-bind', paths.skills, join(paths.claudeDir, 'skills')]);
-  // No snapshot, or a dangling link (prepareClaudeState leaves it): no bind, the job shows skill_missing.
-  assert.ok(!implementerWrapper(denials, { ...paths, skills: join(root, 'none') }).includes(join(root, 'none')));
+  await symlink(snapshot, link);
+  assert.deepEqual(last(implementerWrapper(denials, { ...paths, skills: [join(link, 'implement')] })), skillsMounts(join(paths.claudeDir, 'skills'), implement));
+  // The Implementer with [tdd] only: tdd alone is bound, implement is not.
+  const tdd = implementerWrapper(denials, { ...paths, skills: [join(link, 'tdd')] });
+  assert.deepEqual(last(tdd), skillsMounts(join(paths.claudeDir, 'skills'), [join(snapshot, 'tdd')]));
+  assert.ok(!tdd.includes(join(snapshot, 'implement')));
+  // No skills, or none of them in the snapshot: the empty, read-only tmpfs alone, so no skill of the user's is seen.
+  assert.deepEqual(last(implementerWrapper(denials, { ...paths, skills: [] }), 0), skillsMounts(join(paths.claudeDir, 'skills'), []));
+  assert.deepEqual(last(implementerWrapper(denials, { ...paths, skills: [join(root, 'none', 'implement')] }), 0), skillsMounts(join(paths.claudeDir, 'skills'), []));
+  // A dangling link (prepareClaudeState leaves it): no mount there, the job shows skill_missing.
   const dangling = join(root, 'dangling', '.claude');
   await mkdir(dangling, { recursive: true });
   await symlink(join(root, 'nowhere'), join(dangling, 'skills'));
   await prepareClaudeState(dangling, join(root, 'dangling', '.claude.json'));
-  assert.ok(!implementerWrapper(denials, { ...paths, claudeDir: dangling }).includes(paths.skills));
+  assert.ok(!implementerWrapper(denials, { ...paths, claudeDir: dangling }).includes(join(snapshot, 'implement')));
 });
 
 test('the private /tmp (SF-185): --tmpfs /tmp after the read-only root and before every bind of a path under /tmp; a denial under /tmp is not mounted, but one inside the session\'s tmp is hidden again on top of its bind; one outside /tmp is hidden', async () => {
@@ -173,7 +186,7 @@ test('prepareClaudeState: the state folders, and the credentials and global conf
   await prepareClaudeState(claudeDir, globalConfig);
   assert.equal(await readFile(globalConfig, 'utf8'), '{"numStartups":3}');
   const args = implementerWrapper({ denyRead: [], denyWrite: [] }, {
-    worktree: root, sessionTmp: root, home: join(root, 'home'), claudeDir, globalConfig, skills: join(root, 'skills'), executable: '/bin/sh',
+    worktree: root, sessionTmp: root, home: join(root, 'home'), claudeDir, globalConfig, skills: [join(root, 'skills', 'implement')], executable: '/bin/sh',
   }).join(' ');
   for (const file of [join(claudeDir, '.credentials.json'), globalConfig]) {
     assert.ok(args.includes(`--bind ${file} ${file}`), args);
@@ -196,7 +209,7 @@ async function oneTurn(env: Awaited<ReturnType<typeof newEnv>>, path: string, se
   try {
     await syncSkills(env.state);
     return await new Promise<IdleOutcome>((resolve) => {
-      new ImplementerSession({ cwd: join(env.home, 'work'), maxTurns: 3, claudePath: FAKE, sandbox: sandboxSettings({}), skills: async () => skillsSnapshot(env.state) }, {
+      new ImplementerSession({ cwd: join(env.home, 'work'), maxTurns: 3, claudePath: FAKE, sandbox: sandboxSettings({}), skills: () => implementerSkills(env.state) }, {
         message: async (message) => void seen.push('subtype' in message ? `${message.type}/${message.subtype}` : message.type),
         prompt: async () => undefined, idle: async (outcome) => resolve(outcome),
       }).send('go', []);
@@ -233,10 +246,12 @@ test('spawnClaudeCodeProcess: the command, its argv, cwd and environment reach C
   for (const path of [...CLAUDE_WRITTEN.map((name) => join(env.home, '.claude', name)), join(env.home, '.claude', '.credentials.json'), join(env.home, '.claude.json')]) {
     assert.ok(existsSync(path), path);
   }
-  // The skills snapshot's current folder (the link resolved), read-only on ~/.claude/skills, the last mount before the chdir.
+  // The Implementer's skills (every default) in the snapshot's current folder (the link resolved), read-only in
+  // ~/.claude/skills, the last mounts before the chdir.
   const snapshot = realpathSync(skillsSnapshot(env.state));
   assert.ok(within(snapshot, join(env.state, 'skills.d')) && existsSync(join(snapshot, 'implement', 'SKILL.md')), snapshot);
-  assert.deepEqual(run!.argv.slice(cut - 5, cut - 2), ['--ro-bind', snapshot, join(env.home, '.claude', 'skills')]);
+  const chosen = ['implement', 'tdd', 'code-review', 'grilling'].map((name) => join(snapshot, name));
+  assert.deepEqual(run!.argv.slice(cut - 18, cut - 2), skillsMounts(join(env.home, '.claude', 'skills'), chosen));
 });
 
 test('with CLAUDE_CONFIG_DIR set, the skills snapshot is bound read-only on <CLAUDE_CONFIG_DIR>/skills', async () => {
@@ -249,7 +264,8 @@ test('with CLAUDE_CONFIG_DIR set, the skills snapshot is bound read-only on <CLA
   assert.equal(outcome.ok, true, JSON.stringify(outcome));
   const [run] = await bwrapLog(env, { implementer: true });
   const cut = run!.argv.indexOf('--');
-  assert.deepEqual(run!.argv.slice(cut - 5, cut - 2), ['--ro-bind', realpathSync(skillsSnapshot(env.state)), join(configDir, 'skills')]);
+  const chosen = ['implement', 'tdd', 'code-review', 'grilling'].map((name) => join(realpathSync(skillsSnapshot(env.state)), name));
+  assert.deepEqual(run!.argv.slice(cut - 18, cut - 2), skillsMounts(join(configDir, 'skills'), chosen));
   assert.ok(existsSync(join(configDir, 'skills')));
 });
 
@@ -327,7 +343,7 @@ function realBwrapStarts(): boolean {
 }
 
 test('under the real bwrap with the wrapper: a write in the home outside the allowed set, through a link out of the worktree, to ~/.claude/settings.json and to the worktree\'s .git fails; the worktree, the tmp and ~/.claude/projects take one; a file and a Unix socket in the private /tmp are made there and never reach the host\'s /tmp, whose entries are not seen; <config dir>/skills/implement/SKILL.md is the snapshot\'s, read-only, and neither the user\'s skills nor ~/.agents are seen', { skip: process.platform === 'linux' && realBwrapStarts() ? false : 'the real bubblewrap cannot start here' }, async () => {
-  const { root, paths, denials } = await fixture('wrapper-real');
+  const { root, paths, denials, snapshot } = await fixture('wrapper-real');
   await mkdir(join(root, 'home', 'elsewhere'));
   await symlink(join(root, 'home', 'elsewhere'), join(paths.worktree, 'out'));
   // The fixture is under /tmp when the test's temporary folder is (the usual case): then its home is
@@ -353,6 +369,9 @@ test('under the real bwrap with the wrapper: a write in the home outside the all
     skillRead: `grep -qx "the factory's implement" '${join(paths.claudeDir, 'skills', 'implement', 'SKILL.md')}'`,
     skillWrite: `echo x > '${join(paths.claudeDir, 'skills', 'implement', 'SKILL.md')}'`,
     userSkill: `cat '${join(paths.claudeDir, 'skills', 'mine', 'SKILL.md')}'`,
+    // A skill of the snapshot the Implementer did not choose, and one it would add.
+    otherSkill: `cat '${join(paths.claudeDir, 'skills', 'tdd', 'SKILL.md')}'`,
+    skillAdd: `mkdir '${join(paths.claudeDir, 'skills', 'added')}'`,
     agents: `ls '${join(paths.home, '.agents', 'skills')}'`,
     ...(underTmp ? { hostTmp: `cat '${hostOnly}'` } : {}),
   };
@@ -361,9 +380,10 @@ test('under the real bwrap with the wrapper: a write in the home outside the all
   assert.equal(ran.status, 0, ran.stderr);
   assert.deepEqual(ran.stdout.trim().split('\n'), [
     `home:${underTmp ? 'ok' : 'refused'}`, 'link:refused', 'settings:refused', 'git:refused', 'ssh:refused', 'worktree:ok', 'tmp:ok', 'projects:ok',
-    'tmpFile:ok', 'tmpSocket:ok', 'skillRead:ok', 'skillWrite:refused', 'userSkill:refused', 'agents:refused', ...(underTmp ? ['hostTmp:refused'] : []),
+    'tmpFile:ok', 'tmpSocket:ok', 'skillRead:ok', 'skillWrite:refused', 'userSkill:refused', 'otherSkill:refused', 'skillAdd:refused', 'agents:refused',
+    ...(underTmp ? ['hostTmp:refused'] : []),
   ]);
-  assert.equal(await readFile(join(paths.skills, 'implement', 'SKILL.md'), 'utf8'), "the factory's implement\n");
+  assert.equal(await readFile(join(snapshot, 'implement', 'SKILL.md'), 'utf8'), "the factory's implement\n");
   assert.equal(existsSync(join(paths.home, 'outside.txt')), false);
   assert.equal(existsSync(join(root, 'home', 'elsewhere', 'escaped.txt')), false);
   assert.equal(await readFile(join(paths.claudeDir, 'settings.json'), 'utf8'), '{}');

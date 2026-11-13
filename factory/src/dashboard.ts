@@ -514,6 +514,14 @@ export async function startDashboard(
       posts.handlePost(req, res, post, remote).catch(failed);
       return;
     }
+    if (what.kind === 'skill-roles') {
+      if (req.method !== 'PUT') {
+        empty(res, 405, { allow: 'PUT' });
+        return;
+      }
+      posts.handlePost(req, res, posts.skillRolesPost(what.role), remote).catch(failed);
+      return;
+    }
     if (what.kind === 'both' && req.method === 'POST') {
       posts.handlePost(req, res, posts.setupPost(what)!, remote).catch(failed);
       return;

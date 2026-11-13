@@ -4,7 +4,7 @@
 // nothing about job states; the Execution applies the verdict.
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { type Options, query, type SandboxSettings, type SDKMessage, type SDKResultMessage, type SettingSource } from '@anthropic-ai/claude-agent-sdk';
 import * as z from 'zod/v4';
 import { type ImageRef, promptInput } from './attachments.js';
@@ -16,6 +16,7 @@ import { handbookSection } from './prompts.js';
 import { ENV_FILE_RULES } from './rules.js';
 import { type PathDenials, type SandboxDenials, withSandboxDenials } from './sandbox-denials.js';
 import { JOB_SESSION_SETTINGS, sessionEnvironment, withSandboxEnvDenials } from './session.js';
+import { SKILL_BLOCKS_LINE, skillBlocksOf, type SkillNames } from './skills.js';
 import { TASK_DIR } from './task-file.js';
 
 export const REVIEWER = 'claude';
@@ -102,6 +103,22 @@ export async function readReviewMethod(path: string | undefined): Promise<{ meth
   return { method: `${cutBuffer(body, MAX_REVIEW_METHOD_BYTES)}\n${note}`, review_method };
 }
 
+// What review.json and gate.json record of a reviewer's skills: its method, and the names of its
+// <skill> blocks (SkillNames: none when the role chose no skill besides code-review).
+export type RecordedSkills = SkillNames & { review_method: ReviewMethod };
+
+// The skills of a reviewer (job: the folder and lists its start recorded, jobSkills; role: claude_review
+// or codex_gate), all read from the job's folder, so a later sync changes none of them: the method is its
+// code-review/SKILL.md when the role chose code-review; with set true (Config.reviewSkillSet:
+// SF_REVIEW_SKILL set) it is reviewSkill's file instead, whatever the role chose; reviewSkill undefined
+// (SF_REVIEW_SKILL empty, or a Config made by hand) is none. Each other chosen skill is a <skill> block (skillBlocksOf).
+export async function reviewerSkills(job: { folder: string; roles: Record<'claude_review' | 'codex_gate', string[]> }, role: 'claude_review' | 'codex_gate', reviewSkill: string | undefined, set = false): Promise<{ method: string; review_method: ReviewMethod; skillBlocks: string; recorded: RecordedSkills }> {
+  const chosen = job.roles[role];
+  const blocks = await skillBlocksOf(job.folder, chosen.filter((name) => name !== 'code-review'));
+  const method = await readReviewMethod(set || reviewSkill === undefined ? reviewSkill : chosen.includes('code-review') ? join(job.folder, 'code-review', 'SKILL.md') : undefined);
+  return { ...method, skillBlocks: blocks.text, recorded: { review_method: method.review_method, ...blocks.names } };
+}
+
 export interface ReviewInput {
   ticket: string;
   iteration: number;
@@ -126,6 +143,8 @@ export interface ReviewInput {
   method?: string;
   // The review method's record for review.json and gate.json; absent counts as 'none'.
   review_method?: ReviewMethod;
+  // The <skill> blocks of the reviewer's other skills (reviewerSkills); absent or '': none.
+  skillBlocks?: string;
 }
 
 // The buffer's first maxBytes bytes as text, never splitting a UTF-8 character.
@@ -231,6 +250,7 @@ export function reviewBody(input: ReviewInput): string[] {
     '- Set `caused_by` to the id of the fix whose change caused the item. `reopens` and `caused_by` are each a ledger id or "".',
     '',
     ...(method !== '' ? [...REVIEW_METHOD_LINES, '<review_method>', method, '</review_method>', ''] : []),
+    ...(input.skillBlocks !== undefined && input.skillBlocks !== '' ? [SKILL_BLOCKS_LINE, input.skillBlocks, ''] : []),
     handbookSection(input.handbook, '## Review rules'),
     '',
     ...(rules !== '' ? [rules.trimEnd(), ''] : []),

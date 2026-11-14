@@ -183,7 +183,7 @@ test('notifications: desktop and ntfy for the user\'s states, silent iterations,
   assert.equal(tested.code, 0, tested.stdout + tested.stderr);
   assert.equal(tested.stdout, 'desktop: sent (notify-send succeeded)\nntfy: sent (HTTP 200)\n');
   assert.equal(received.length, 1);
-  assert.equal(received[0]!.headers.title, 'SF-TEST: pushed');
+  assert.deepEqual([received[0]!.headers.title, received[0]!.headers.priority], ['SF-TEST: needs_human', 'high']);
   assert.equal((await desktop()).length, 1);
   received.length = 0;
   await rm(desktopLog);

@@ -557,7 +557,7 @@ test('a missing review skill (SF_REVIEW_SKILL): both prompts as without a method
     const prompts = [...(await reviewLog(env)), ...(await codexLog(env))].map((entry) => entry.prompt);
     assert.equal(prompts.length, 2);
     for (const prompt of prompts) {
-      assert.ok(!prompt.includes('<review_method>') && !prompt.includes('`Spec:` or `Standards:`'), prompt);
+      assert.ok(!prompt.includes('<review_method>') && !prompt.includes('`Spec:`, `Standards:` or `Decision:`'), prompt);
     }
     const jobs = new JobStore(env.state);
     assert.equal((await jobs.readReview('app', 'G-20', 1) as { review_method?: unknown }).review_method, 'none');

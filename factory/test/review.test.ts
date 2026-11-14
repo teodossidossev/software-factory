@@ -11,17 +11,19 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
+import { gatePrompt } from '../src/gate.js';
 import { JobStore } from '../src/jobs.js';
-import { handbookSection } from '../src/prompts.js';
+import { handbookSection, MAX_USER_DECISIONS_CHARS, MAX_USER_MESSAGE_CHARS, userDecisionLines } from '../src/prompts.js';
 import type { FileChange } from '../src/jobs.js';
-import { actedVerdict, decide, fixContent, MAX_USER_DECISIONS_CHARS, MAX_USER_MESSAGE_CHARS, readOnlySessionOptions, REVIEW_DENIED_TOOLS, REVIEW_SCHEMA, REVIEW_TOOLS, type ReviewItem, reviewPrompt, reviewSessionOptions, runReview, scopeItem, sensitiveItem, unacceptedItems, uniqueNits, userDecisionLines } from '../src/review.js';
+import { actedVerdict, decide, fixContent, readOnlySessionOptions, REVIEW_DENIED_TOOLS, REVIEW_SCHEMA, REVIEW_TOOLS, type ReviewItem, reviewPrompt, reviewSessionOptions, runReview, scopeItem, sensitiveItem, unacceptedItems, uniqueNits } from '../src/review.js';
 import type { HookCallback } from '@anthropic-ai/claude-agent-sdk';
 import { FILE_GUARD } from '../src/sandbox-denials.js';
 import { loadHandbook } from '../src/server.js';
 import { runSimplify } from '../src/simplify.js';
 import { writeTask } from '../src/task-file.js';
 import { act, fetchRaw } from './support/dashboard-client.js';
-import { assertPathDenials, call, type Env, FAKE, fakeLog, git, newEnv, newRepo, ownReviewMethod, probeLog, putRules, putTask, reviewLog, reviewScript, runCli, script, serve, stop, task, waitFor } from './support/harness.js';
+import { assertPathDenials, call, codexLog, codexScript, type Env, FAKE, fakeLog, git, newEnv, newRepo, ownReviewMethod, probeLog, putRules, putTask, reviewLog, reviewScript, runCli, script, serve, stop, task, waitFor } from './support/harness.js';
+import { CLAUDE_CLEAN, GATE_CLEAN, gateEnv } from './support/gate.js';
 
 const FIX = {
   verdict: 'fix',
@@ -349,6 +351,70 @@ test('the review prompt without rules is as before: no <rules> block, no rule-vi
   assert.ok(!before.includes('<rules>') && !before.includes('rule violation'));
   const withRules = reviewPrompt({ ...input, rules: '<rules>\nR\n</rules>' });
   assert.equal(withRules.replace('- A review item that is a rule violation names the rule\'s file (and heading) in `problem`.\n', '').replace('<rules>\nR\n</rules>\n\n', ''), before);
+});
+
+// The Handbook's review rule of the decision documents, as both reviewers get it.
+const DECISION_DOCS_RULE = [
+  '- The decision documents (`<decision_documents>` in the prompt: the glossary, the decision',
+  '  records, the architecture pages) say what was decided about the product. Read those that bear',
+  '  on the Patch. An item that is a conflict with one begins `Decision:`, cites the path and the',
+  '  heading and quotes the sentence; its severity follows the definitions above. A question of the',
+  '  product that no document answers is not an item: put it in `summary`, on a line that begins',
+  '  `For the user:`.',
+].join('\n');
+
+test('the decision documents: both reviewers\' prompts hold the Handbook\'s rule and end with the <decision_documents> block; none listed: no block, the prompt as before', async () => {
+  const handbook = (await loadHandbook()).text;
+  assert.ok(handbookSection(handbook, '## Review rules').includes(DECISION_DOCS_RULE));
+  const input = { ticket: 'R-1', iteration: 1, task: 't', report: 'r', patch: Buffer.from('p'), patchTruncated: false, files: [], handbook };
+  const list = { docs: [{ path: 'GLOSSARY.md', bytes: 4100 }, { path: 'docs/adr/0001-example.md', bytes: 2100 }], left_out: 12 };
+  const block = '<decision_documents>\nGLOSSARY.md (4100 bytes)\ndocs/adr/0001-example.md (2100 bytes)\n(12 more are not listed)\n</decision_documents>';
+  const prompts: Array<(extra: { decision_docs?: typeof list }) => string> = [
+    (extra) => reviewPrompt({ ...input, ...extra }),
+    (extra) => gatePrompt({ ...input, ...extra, baseCommit: 'abc123' }),
+  ];
+  for (const prompt of prompts) {
+    const before = prompt({});
+    assert.ok(before.includes(DECISION_DOCS_RULE) && !before.includes('\n<decision_documents>'));
+    assert.equal(prompt({ decision_docs: { docs: [], left_out: 0 } }), before);
+    assert.equal(prompt({ decision_docs: list }), `${before}\n\n${block}`);
+    assert.ok(before.endsWith('\n</patch>'));
+  }
+});
+
+test('through sf serve: the Claude review and the gate get the workspace\'s decision documents as they are in the job\'s worktree', async () => {
+  const env = await newEnv('review-decision-docs', gateEnv());
+  const repo = await newRepo(env, 'review-decision-docs-repo', false);
+  await mkdir(join(repo, 'docs', 'adr'), { recursive: true });
+  await writeFile(join(repo, 'GLOSSARY.md'), '# Glossary\n');
+  const adr = '# Greeting\n\nGreet the reader.\n';
+  await writeFile(join(repo, 'docs', 'adr', '0001-greeting.md'), adr);
+  await writeFile(join(repo, 'docs', 'notes.md'), 'Not a decision document.\n');
+  git(repo, 'add', 'GLOSSARY.md', 'docs');
+  git(repo, 'commit', '-q', '-m', 'decisions');
+  await putTask(env, repo, 'R-30', 'Greet the reader');
+  const glossary = '# Glossary\n\n## Reader\n\nA reader is a signed-in user.\n';
+  await script(env, [
+    { write: { 'README.md': 'hello reader\n', 'GLOSSARY.md': glossary }, text: 'Report of iteration 1' },
+    { write: { '.software-factory/R-30.mr.md': mrText('feat(R-30): Greet the reader') }, text: 'prepared' },
+  ]);
+  await reviewScript(env, [{ output: CLAUDE_CLEAN }]);
+  await codexScript(env, [{ output: GATE_CLEAN }]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'R-30' });
+    await waitFor(served, 'R-30', 'ready_for_human_review', 1);
+    const prompts = [...(await reviewLog(env)), ...(await codexLog(env))].map((entry) => entry.prompt);
+    assert.equal(prompts.length, 2);
+    // The glossary at the size the change left it in the worktree.
+    const block = `<decision_documents>\nGLOSSARY.md (${Buffer.byteLength(glossary)} bytes)\ndocs/adr/0001-greeting.md (${Buffer.byteLength(adr)} bytes)\n</decision_documents>`;
+    for (const prompt of prompts) {
+      assert.ok(prompt.endsWith(`\n</patch>\n\n${block}`), prompt.slice(-500));
+      assert.ok(prompt.includes(DECISION_DOCS_RULE));
+    }
+  } finally {
+    await stop(served);
+  }
 });
 
 // SF-112: the user's messages to the job reach the reviewers as decisions.

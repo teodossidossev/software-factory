@@ -12,7 +12,7 @@ import { gatePrompt } from '../src/gate.js';
 import { handbookSection } from '../src/prompts.js';
 import { firstPrompt } from '../src/execution.js';
 import { implementCommand } from '../src/execution/prompts.js';
-import { MAX_REVIEW_METHOD_BYTES, readReviewMethod, reviewerSkills, reviewPrompt, REVIEW_METHOD_LINES } from '../src/review.js';
+import { decide, MAX_REVIEW_METHOD_BYTES, readReviewMethod, reviewerSkills, reviewOutput, reviewPrompt, REVIEW_METHOD_LINES } from '../src/review.js';
 import { loadHandbook, servedHandbook } from '../src/server.js';
 import { rolesOf, writeRoles } from '../src/skill-roles.js';
 import { MAX_SKILL_BLOCKS_BYTES, planSkills, planWarning, SKILL_BLOCKS_LINE, syncSkills } from '../src/skills.js';
@@ -33,7 +33,7 @@ test('the review method: the three lines and the adaptation lines, then the <rev
   const prompt = reviewPrompt({ ...base, method: 'Two axes.\nSpec and Standards.' });
   for (const line of [
     'Follow the review method below (the user\'s code-review skill), adapted to this review: do not spawn sub-agents and do not ask for a fixed point or a spec. The fixed point is the base commit; the spec is the Task file and the user\'s messages; the standards are the documents the method names plus the rules below. Cover the Spec axis first, then the Standards axis.',
-    'Begin each item\'s `problem` with `Spec:` or `Standards:`.',
+    'Begin each item\'s `problem` with `Spec:`, `Standards:` or `Decision:`.',
     'A baseline smell is always a `nit`, never `major` or `blocker`. A breach of a documented standard or of the Task keeps the severities below.',
     'The change is the uncommitted worktree against the base commit (`git diff <base>`, or the Patch below), not `<fixed-point>...HEAD`; do not stop on an empty `...HEAD` diff.',
     'Answer only with the output schema: no `## Standards`/`## Spec` report, no word limits.',
@@ -46,6 +46,14 @@ test('the review method: the three lines and the adaptation lines, then the <rev
   assert.ok(prompt.includes(`\n\n${block}${rules}\n`), prompt);
   // Everything else is as without it.
   assert.equal(prompt.replace(block, ''), reviewPrompt(base));
+});
+
+test('an item whose problem begins `Decision:` is accepted and acted on as one that begins `Spec:` or `Standards:`', () => {
+  for (const lead of ['Spec:', 'Standards:', 'Decision:']) {
+    const item = { path: 'src/a.ts', problem: `${lead} the reader is called a visitor; GLOSSARY.md#Reader says "A reader is a signed-in user."`, expected: 'Call them readers.', severity: 'major' };
+    const output = reviewOutput.parse({ verdict: 'fix', summary: 'One item.\nFor the user: may a guest read?', items: [item], accepted_sensitive: [] });
+    assert.deepEqual(decide(output, []), { verdict: 'fix', items: [{ ...item, reopens: '', caused_by: '' }] });
+  }
 });
 
 test('without a method, or with an empty one, the prompt is as before: no block, no method lines', async () => {

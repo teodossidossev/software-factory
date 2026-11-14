@@ -13,9 +13,11 @@ import { addAttachment } from '../src/attachments.js';
 import { basename, dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { type Job, JobStore } from '../src/jobs.js';
+import { DECISION_CHECK_LINES } from '../src/decisions.js';
+import { checkPrompt } from '../src/prompts.js';
 import { readOnlySessionOptions, REVIEW_DENIED_TOOLS } from '../src/review.js';
 import {
-  CHECK_SCHEMA, type CheckFinding, type CheckOutput, type CheckRecord, CheckStore, TaskChecks, checkDeniedRules, checkLines, checkOutput, checkPrompt, checkSummary,
+  CHECK_SCHEMA, type CheckFinding, type CheckOutput, type CheckRecord, CheckStore, TaskChecks, checkDeniedRules, checkLines, checkOutput, checkSummary,
   checkVerdict, cutOutsideLinks, guardReason, OUTSIDE_LINK_NOTE, scopeFindings, settleCheck, startNote, taskCheckSha256, taskSha256,
 } from '../src/task-check.js';
 import { writeTask } from '../src/task-file.js';
@@ -111,6 +113,24 @@ test('the prompt holds the instructions and the Task file, nothing else', () => 
   assert.equal(checkPrompt('C-1', task, ''), prompt);
   const withRules = checkPrompt('C-1', task, '<rules>\nR\n</rules>');
   assert.equal(withRules, prompt.replace('\n<task_file', '\n<rules>\nR\n</rules>\n\n<task_file'));
+  // The decision documents: none listed, the prompt as before, byte for byte; some, their
+  // instructions and block right after the other instructions.
+  assert.equal(checkPrompt('C-1', task, '', '', { docs: [], left_out: 0 }), prompt);
+  assert.ok(!prompt.includes('decision document') && !prompt.includes('<decision_documents>'));
+  const list = { docs: [{ path: 'GLOSSARY.md', bytes: 4100 }, { path: 'docs/adr/0001-example.md', bytes: 2100 }], left_out: 12 };
+  const withDocs = checkPrompt('C-1', task, '<rules>\nR\n</rules>', '', list);
+  const verdictLine = 'whatever you write.\n';
+  assert.equal(withDocs, withRules.replace(verdictLine, `${verdictLine}${DECISION_CHECK_LINES.join('\n')}\n`
+    + '<decision_documents>\nGLOSSARY.md (4100 bytes)\ndocs/adr/0001-example.md (2100 bytes)\n(12 more are not listed)\n</decision_documents>\n'));
+  assert.ok(withDocs.indexOf('</decision_documents>') < withDocs.indexOf('<rules>'));
+});
+
+test('a contradiction with a decision document parses, is always a blocker and makes the Task not ready', () => {
+  const conflict = { kind: 'contradiction' as const, severity: 'major' as const, where: 'GLOSSARY.md#Reader', problem: 'The Task names the reader a visitor; GLOSSARY.md says "A reader is a signed-in user."', expected: 'Call them readers.' };
+  const output = checkOutput.parse({ ...OUTPUT, findings: [conflict], verdict: 'ready' });
+  const settled = settleCheck(taskText('C-1'), output);
+  assert.deepEqual(settled.findings, [{ ...conflict, severity: 'blocker' }]);
+  assert.equal(settled.verdict, 'not_ready');
 });
 
 test('the session is the review\'s, read-only, and may not read the .software-factory folder, the state or the config', () => {
@@ -365,6 +385,36 @@ test('sf check-task with coding rules (SF-059): the prompt gives the <rules> blo
   const [entry] = await reviewLog(env);
   assert.equal(entry!.prompt, checkPrompt('C-9', content, block));
   assert.ok(!entry!.prompt.includes('Uncommitted rules.'));
+});
+
+test('sf check-task with decision documents: the prompt lists those at the Task\'s base; a contradiction with one is a blocker in task_check\'s answer', async () => {
+  const content = taskText('C-11');
+  const { env, repo } = await checkEnv('check-decisions', 'C-11', content);
+  await mkdir(join(repo, 'docs', 'adr'), { recursive: true });
+  await writeFile(join(repo, 'GLOSSARY.md'), '# Glossary\n\n## Reader\n\nA reader is a signed-in user.\n'); // 53 bytes
+  await writeFile(join(repo, 'docs', 'adr', '0001-greeting.md'), '# Greeting\n');
+  git(repo, 'add', 'GLOSSARY.md', 'docs');
+  git(repo, 'commit', '-q', '-m', 'decisions');
+  // Not committed: not at the base the check reads.
+  await writeFile(join(repo, 'docs', 'adr', '0002-later.md'), '# Later\n');
+  const conflict = { kind: 'contradiction', severity: 'major', where: 'GLOSSARY.md#Reader', problem: 'The Task greets visitors; GLOSSARY.md says "A reader is a signed-in user."', expected: 'Greet signed-in readers.' } as const;
+  await reviewScript(env, [{ output: { ...OUTPUT, findings: [conflict], verdict: 'ready' } }]);
+  const run = await runCli(env, ['check-task', 'app', 'C-11']);
+  assert.equal(run.code, 0, run.stderr);
+  const [entry] = await reviewLog(env);
+  const list = { docs: [{ path: 'GLOSSARY.md', bytes: 53 }, { path: 'docs/adr/0001-greeting.md', bytes: 11 }], left_out: 0 };
+  assert.equal(entry!.prompt, checkPrompt('C-11', content, '', '', list));
+  assert.ok(entry!.prompt.includes('<decision_documents>\nGLOSSARY.md (53 bytes)\ndocs/adr/0001-greeting.md (11 bytes)\n</decision_documents>'));
+  assert.ok(!entry!.prompt.includes('0002-later'));
+  assert.ok(run.stdout.includes('Verdict: not ready (1 blocker, 0 major, 0 nit)'), run.stdout);
+  const served = await serve(env);
+  try {
+    const answer = (await served.client.callTool({ name: 'task_check', arguments: { workspace: 'app', ticket: 'C-11' } })).structuredContent as Record<string, any>;
+    assert.equal(answer.verdict, 'not_ready');
+    assert.deepEqual(answer.findings, [{ ...conflict, severity: 'blocker' }]);
+  } finally {
+    await stop(served);
+  }
 });
 
 test('a failed check is stored as failed with its redacted error, exits 1 and never counts as ready', async () => {

@@ -857,7 +857,16 @@ runs it by itself after each change of a Task file (below); the user can always 
   the checkout; `maxTurns` `SF_TASK_CHECK_MAX_TURNS` (default 30), model `SF_REVIEW_MODEL`. Its
   prompt is fixed instructions, the coding rules read at the commit of its checkout (SF-059,
   section Coding rules) and the Task file, nothing else: not the Context owner's conversation, the
-  user's request, the jobs, their reviews or the ledger.
+  user's request, the jobs, their reviews or the ledger. When the workspace has decision documents
+  (the tracked files of its checkout that the `decision_docs` globs of `norms.json` match, section
+  Norms; listed as for the reviewers, section Jobs, by `src/decisions.ts`), four more instruction
+  lines and the `<decision_documents>` block (paths and sizes only) follow the fixed instructions:
+  read the glossary and terminology pages, and the decision records and architecture pages whose
+  titles bear on the Task; a Task that contradicts one is a `contradiction` (always a blocker) with
+  `where` `<path>#<heading>` and the contradicted sentence quoted in `problem`; a Task that decides
+  something of the product no document covers (a concept's name or meaning, a rule of the domain,
+  what the user sees or may do) is a `decision`; coding style is not part of this. Without
+  documents the prompt is as before, byte for byte.
 - **What it can read** (the repository, nothing else):
   - It runs in its own checkout: a detached worktree of the workspace's work checkout at the Task's
     `base` (fetched from `origin` when there is one, as Start does: the code the Implementer starts
@@ -894,8 +903,9 @@ runs it by itself after each change of a Task file (below); the user can always 
 - **The output** (one zod definition, `checkOutput`, sent as the JSON schema): `paraphrase` first,
   what the Task proposes in the checker's own words (3–8 sentences), written before any finding;
   `findings`, each `{kind, severity, where, problem, expected}` with `kind` `decision` (a choice the
-  Implementer would have to make), `contradiction` (a claim about the code that the code
-  contradicts, with its `path:line`), `missing` (a file, test or acceptance criterion the goal
+  Implementer would have to make, or a product decision no decision document covers),
+  `contradiction` (a claim about the code that the code contradicts, with its `path:line`, or a
+  contradiction with a decision document, with its `<path>#<heading>`), `missing` (a file, test or acceptance criterion the goal
   needs and the Task does not name), `overreach` (a part the goal does not need) or `unclear`, and
   severity `blocker`, `major` or `nit` as for the reviews (SF-051); `files`, `{path, action:
   create | modify | delete}`, the files the checker expects to change; `verdict`.
@@ -1340,7 +1350,7 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   review: no sub-agents and no question for a fixed point or a spec (the fixed point is the base
   commit, the change the uncommitted worktree against it, the spec the Task file and the user's
   messages, the standards the documents the method names plus the rules); the Spec axis first,
-  then the Standards axis; every item's `problem` begins with `Spec:` or `Standards:`; a baseline
+  then the Standards axis; every item's `problem` begins with `Spec:`, `Standards:` or `Decision:`; a baseline
   code smell (the method's Fowler smells) is always a `nit`, never `major` or `blocker`, while a
   breach of a documented standard or of the Task keeps its severity; the answer is the output schema
   alone, no `## Standards`/`## Spec` report and no word limits; the issue-tracker and setup
@@ -1356,8 +1366,17 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   disagree), the Report, the
   marked paths of the iteration (`<marked_paths>`: sensitive, outside the Task's scope, deleted;
   below), the ledger's settled findings
-  (`<settled_findings>`, SF-052) and the Patch inline up to 256 KiB (beyond that, the
-  first 256 KiB and a note to read the changed files). Its output is structured
+  (`<settled_findings>`, SF-052), the Patch inline up to 256 KiB (beyond that, the
+  first 256 KiB and a note to read the changed files) and, last, the workspace's decision documents
+  (`<decision_documents>`, `src/decisions.ts`): the tracked files of the job's worktree that the
+  workspace's `decision_docs` globs of `norms.json` match (section Norms), symbolic links and paths
+  through one left out, sorted by path, one `<path> (<bytes> bytes)` line each with the size in the
+  worktree, at most 60 and a line counting the rest; paths and sizes only, the reviewers read the
+  files themselves. A workspace whose globs match nothing gets no block. The Handbook's review rule
+  of them: an item that conflicts with one begins `Decision:`, cites the path and heading and quotes
+  the sentence, with the usual severities; a product question no document answers is not an item
+  but a `For the user:` line of the verdict's `summary`, which the job page's review entry shows.
+  Its output is structured
   (`outputFormat: {type: "json_schema"}`), validated with zod: `{verdict: "clean" | "fix", summary,
   items: [{path, problem, expected, severity, reopens, caused_by}], accepted_sensitive}`, `severity`
   one of `blocker` (the change is wrong, unsafe or breaks the Task's acceptance), `major` (a real
@@ -5342,7 +5361,9 @@ one line). The problems are the whole file's: every workspace's entry is checked
 order, whichever workspace is asked (or none); only the asked one's values are used.
 
 `norms(workspace, configDir)` gives the values in force and never throws; `effectiveNorms(file,
-workspace)` is the same over the parsed file. Nothing reads the values yet.
+workspace)` is the same over the parsed file. `decision_docs` is read by the Task check and both
+reviewers, which get the list of the documents it matches (`src/decisions.ts`; section Task check,
+and the review's prompt in section Jobs); nothing reads the other values yet.
 
 `sf norms [workspace]` (a command of `sf serve`, open while `sf update` drains or builds) prints the
 file's path, each effective value with its source (`default`, `file` or `workspace`), the decision

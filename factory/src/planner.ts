@@ -20,7 +20,8 @@ import { writeFileAtomic } from './atomic.js';
 import { FactoryError } from './errors.js';
 import { MAX_REPORT_BYTES } from './execution/shared.js';
 import { type GateRecord, type Job, type JobState, type JobStore, type ReviewRecord, statesWith } from './jobs.js';
-import { cutBuffer, MAX_USER_MESSAGE_CHARS, type Severity } from './review.js';
+import { MAX_USER_MESSAGE_CHARS } from './prompts.js';
+import { cutBuffer, type Severity } from './review.js';
 
 export { MAX_REPORT_BYTES };
 

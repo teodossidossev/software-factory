@@ -16,6 +16,7 @@ import type * as Coordinator from '../../src/coordinator.js';
 import type * as CoordinatorSkills from '../../src/coordinator-skills.js';
 import type * as Dashboard from '../../src/dashboard.js';
 import type * as JobStream from '../../src/job-stream.js';
+import type * as Pins from '../../src/pins.js';
 import type * as ReviewJob from '../../src/review-job.js';
 import type * as SkillRoles from '../../src/skill-roles.js';
 import type * as Skills from '../../src/skills.js';
@@ -254,6 +255,8 @@ export interface Checks {
   SkillText: Copy<SkillText, Awaited<ReturnType<typeof Skills.skillText>>>;
   CoordinatorQuestion: Copy<CoordinatorQuestion, Coordinator.CoordinatorQuestion>;
   CoordinatorState: Copy<CoordinatorState, Awaited<ReturnType<typeof Coordinator.readCoordinator>>>;
+  Pin: Copy<Pin, Pins.Pin>;
+  PinsView: Copy<PinsView, Awaited<ReturnType<typeof Pins.readPins>>>;
 }
 
 // true when every check passes, else each failure as "<page type>: <what differs>".

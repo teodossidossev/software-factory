@@ -21,6 +21,7 @@
   <script src="setup.js" defer></script>
   <script src="skills.js" defer></script>
   <script src="health.js" defer></script>
+  <script src="pins.js" defer></script>
   <script src="main.js" defer></script>
 </head>
 <body>
@@ -68,6 +69,7 @@
           </div>
         </div>
       </div>
+      <button id="point-toggle" type="button" class="btn point" aria-pressed="false" title="Point at something on the page (Shift+P)">Point</button>
       <button id="open-new-ticket" type="button" class="btn primary">New ticket</button>
     </header>
     <p id="board-hint" class="bhint" hidden></p>
@@ -144,6 +146,26 @@
   <!-- The Merge requests page: a job from an open merge request's review comments (review-page.js). -->
   <section id="merge-requests" hidden aria-label="Merge requests"></section>
 
+  <!-- Point mode (pins.js): the pins' markers and the outline of the element under the pointer,
+       both letting every pointer event through; the note field of a new pin; the pins panel and
+       its button while the mode is off. -->
+  <div id="pin-layer" aria-hidden="true"></div>
+  <div id="pin-outline" aria-hidden="true" hidden></div>
+  <div id="pin-note" role="dialog" aria-label="Note for pin" hidden>
+    <textarea id="pin-note-text" rows="3" maxlength="500" aria-label="Note" placeholder="What about it? (optional)"></textarea>
+    <div class="pn-row"><button id="pin-note-save" type="button" class="btn primary">Save</button><button id="pin-note-skip" type="button" class="btn">Skip</button></div>
+  </div>
+  <section id="pins" aria-label="Pins" hidden>
+    <div class="pins-head">
+      <h3 id="pins-title">Pins (0 open)</h3>
+      <button id="pins-refresh" type="button" class="btn">Refresh</button>
+      <button id="pins-stop" type="button" class="btn">Stop pointing (Esc)</button>
+      <button id="pins-close" type="button" class="btn">Close</button>
+    </div>
+    <ul id="pins-list"></ul>
+    <p id="pins-status" class="pins-status" role="status" aria-live="polite"></p>
+  </section>
+  <button id="pins-open" type="button" class="btn" aria-label="Open the pins panel" hidden></button>
   <div id="toast" hidden role="status"><span id="toast-text"></span><button id="toast-close" type="button" class="toast-x" aria-label="Close the message">×</button></div>
   <div id="ticket-confirm" class="confirm modal" role="dialog" aria-modal="true" aria-labelledby="ticket-confirm-title" aria-describedby="ticket-confirm-text" hidden>
     <h4 id="ticket-confirm-title"></h4>

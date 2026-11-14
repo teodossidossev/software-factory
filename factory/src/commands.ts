@@ -1,5 +1,5 @@
-// The commands that go to sf serve over its socket, in one table (sf coordinator's and sf norms's
-// entries are written in src/coordinator.ts and src/norms.ts and spread into it): for each, its name, its
+// The commands that go to sf serve over its socket, in one table (sf coordinator's, sf norms's and sf pins's
+// entries are written in src/coordinator.ts, src/norms.ts and src/pins.ts and spread into it): for each, its name, its
 // arguments and flags as the help shows them, its help description, whether it answers while sf
 // update drains or builds, and the call it makes in sf serve. The CLI (src/cli.ts) builds its help
 // lines, its argument check and its socket call from it; sf serve's socket handler
@@ -14,6 +14,7 @@ import type { OpenRequest, ReviewThread } from './forge-comments.js';
 import { type Decision, DECISIONS } from './ledger.js';
 import { localTime } from './local-time.js';
 import { NORMS_ANSWERS, NORMS_COMMANDS } from './norms.js';
+import { PINS_ANSWERS, PINS_COMMANDS } from './pins.js';
 import { MAX_RUNNING, MIN_RUNNING, ON_LIMIT_RULES, type QueueView, type RunQueue } from './queue.js';
 import { WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN } from './registry.js';
 import { ROLES } from './skill-roles.js';
@@ -58,6 +59,8 @@ export interface Command {
   openWhileUpdating?: true;
   // Answered only with SF_TEST_HOOKS=on.
   testOnly?: true;
+  // A check of the arguments beyond their words (sf pins resolve's id): the UsageError's message, or undefined.
+  refuse?(args: readonly string[]): string | undefined;
   // The call in sf serve, with the checked arguments.
   run(serve: Serve, args: readonly string[], flags: Flags): Promise<unknown>;
 }
@@ -231,6 +234,7 @@ export const COMMANDS = {
   // sf coordinator: the dashboard's Coordinator card (src/coordinator.ts); each write tells the pages.
   ...COORDINATOR_COMMANDS,
   ...NORMS_COMMANDS, // sf norms: the norms in force, norms.json read at each call (src/norms.ts).
+  ...PINS_COMMANDS, // sf pins: the dashboard's pins, pins.json (src/pins.ts).
 
   // The requests of sf's own steps, no command of their own.
   // sf info: whether sf serve answers; sf service install: which process does.
@@ -399,6 +403,10 @@ export function checkArgs(command: Command, argv: readonly string[]): { args: st
       wholeNumber(arg, 'N');
     }
   });
+  const refusal = command.refuse?.(args);
+  if (refusal !== undefined) {
+    throw new UsageError(refusal);
+  }
   return { args, flags };
 }
 
@@ -572,6 +580,7 @@ const ANSWERS = new Map<Command, (result: Result, flags: Flags) => Answer>([
   [COMMANDS.skillsSet, (result) => ({ lines: skillsLines(result as unknown as SkillsView), failed: false })],
   ...COORDINATOR_ANSWERS,
   ...NORMS_ANSWERS,
+  ...PINS_ANSWERS,
   [COMMANDS.abort, (result, flags) => ({
     lines: [
       ...resultLines(result),

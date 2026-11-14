@@ -1,6 +1,6 @@
 // The dashboard's reads: the GET route table (the page's files, the JSON payloads, a job's
 // detail, Stream, MR text, Merge request screen, Changes and iteration files, the Stats page, the
-// digests, the health checks, the coordinator's state, the planned ticket page, a Task file, a
+// digests, the health checks, the coordinator's state, the pins, the planned ticket page, a Task file, a
 // ticket's images, a workspace's merge requests) and the Task check's GET. Nothing here changes anything; every
 // answer is written through the context.
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -12,6 +12,7 @@ import { FactoryError } from './errors.js';
 import { sendJson, statusOf } from './http.js';
 import { lineEntries, type StreamEntry, streamContext } from './job-stream.js';
 import type { Job } from './jobs.js';
+import { readPins } from './pins.js';
 import { WORKSPACE_NAME_PATTERN } from './registry.js';
 import { skillsForClients, skillsView, skillText } from './skills.js';
 import { STATS_DAYS, type StatsDays } from './stats.js';
@@ -62,6 +63,9 @@ export function readHandlers(ctx: DashboardContext) {
     // name that is not an installed skill's is refused).
     { pattern: 'api/skills', when: noQuery, handler: async ({ res }) => sendJson(res, 200, skillsForClients(await skillsView(ctx.stateDir))) },
     { pattern: 'api/skills/*', when: noQuery, handler: ({ res, params: [name] }) => hostRead(res, skillText(name!)) },
+    // The dashboard's pins (src/pins.ts), every one in id order; an unreadable pins.json is refused
+    // (pins_unreadable) as the writes refuse it.
+    { pattern: 'api/pins', when: noQuery, handler: ({ res }) => hostRead(res, readPins(ctx.stateDir)) },
     // The morning digest: the list, newest first, and one stored record.
     { pattern: 'api/digests', when: (query) => digests !== undefined && noQuery(query), handler: async ({ res }) => sendJson(res, 200, await digests!.list()) },
     { pattern: 'api/digests/*', when: (query) => digests !== undefined && noQuery(query), handler: ({ res, params: [id] }) => digestRecord(res, id!) },

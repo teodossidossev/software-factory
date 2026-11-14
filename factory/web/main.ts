@@ -346,6 +346,8 @@ function init(): void {
   // The top bar and its factory pill with the health checks.
   initHeader();
   initHealth();
+  // Point mode: the Point button, Shift+P, the pins' markers and panel (pins.js).
+  initPins();
   renderSetup();
   // "Since when" on the cards moves on by itself, unless the focus is on the board (a redraw
   // would take it away). The test stand-in has no interval.

@@ -134,6 +134,7 @@ the primary action; one that is off says why when you hover it).
 | Changes | `/` filters the tree, `n` / `p` (or F7 / Shift+F7) the next or previous file, arrows and Enter in the tree |
 | Message box | Enter adds a line, Ctrl+Enter sends |
 | Merge request, Task file editor | Ctrl+S saves |
+| Any page | Shift+P point mode on or off; Escape leaves it |
 
 In a terminal, `sf watch my-app APP-12` shows the same session live (Ctrl+C stops watching, not
 the job); `--once` prints what is there and exits.

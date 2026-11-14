@@ -117,13 +117,17 @@ export type Target =
   // .../attachments/<name> is a read.
   | { kind: 'ticket-attachment-add'; workspace: string | undefined; ticket: string | undefined }
   | { kind: 'ticket-attachment-remove'; workspace: string | undefined; ticket: string | undefined; name: string | undefined }
-  | { kind: 'both'; route: 'workspace-add' | 'ticket-new' }
+  // GET lists, POST adds: api/workspaces, api/tickets and api/pins (the dashboard's pins).
+  | { kind: 'both'; route: 'workspace-add' | 'ticket-new' | 'pin-add' }
   // The run queue: api/queue/<action>, POST only; name is its POST_ROUTES name.
   | { kind: 'queue'; name: string; route: QueueRoute }
   // A job from a merge request's review comments: api/workspaces/<ws>/merge-requests/<number>/job, POST only.
   | { kind: 'mr-job'; workspace: string | undefined; number: string | undefined }
   // An agent role's skills: PUT api/skills/roles/<role>, PUT only.
   | { kind: 'skill-roles'; role: string }
+  // One of the dashboard's pins: POST api/pins/<id> changes it and POST api/pins/<id>/remove
+  // removes it (id as the path has it, checked by the post), POST only.
+  | { kind: 'pin'; id: string; remove: boolean }
   | { kind: 'read' };
 
 export function targetOf(path: string[]): Target {
@@ -176,6 +180,12 @@ export function targetOf(path: string[]): Target {
   }
   if (kind === 'skills' && path.length === 4 && a === 'roles' && b !== undefined) {
     return { kind: 'skill-roles', role: b };
+  }
+  if (kind === 'pins' && path.length === 2) {
+    return { kind: 'both', route: 'pin-add' };
+  }
+  if (kind === 'pins' && a !== undefined && (path.length === 3 || (path.length === 4 && b === 'remove'))) {
+    return { kind: 'pin', id: a, remove: path.length === 4 };
   }
   const change = kind === 'queue' && path.length === 3 ? postRoute(`queue-${a}`, 'queue') : undefined;
   if (change !== undefined) {

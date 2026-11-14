@@ -513,7 +513,7 @@ function onChange(event: Event): void {
   }
 }
 
-// The delegated keys: j and k move between the board's cards, Enter opens the focused one. On a
+// The delegated keys, after point mode's (pins.js pinKey): j and k move between the board's cards, Enter opens the focused one. On a
 // job page: Escape closes an open confirmation, then goes back one level (a screen of the job to
 // its Stream, the Stream to the board); c, m and s switch the screens; on the Stream j and k select
 // an entry, G the last, Enter toggles the selected one; Ctrl+Enter in the message box sends.
@@ -522,6 +522,10 @@ function onChange(event: Event): void {
 // (treeKey), F7 / Shift+F7 and n / p the next and previous file, Arrow Left and Right on the
 // divider its width.
 function onKey(event: KeyboardEvent): void {
+  // Point mode's keys first (pins.js): Shift+P, and Escape while pointing.
+  if (pinKey(event)) {
+    return;
+  }
   if (event.defaultPrevented) {
     return;
   }

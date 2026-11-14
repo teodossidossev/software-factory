@@ -843,3 +843,19 @@ interface ReviewJobResult {
   path: string;
   position: number;
 }
+
+// GET api/pins and the answers of the pins' POSTs (src/pins.ts Pin and PinsView): every stored
+// pin in id order, open and resolved; the page shows the open ones.
+interface Pin {
+  id: number;
+  route: string;
+  selector: string;
+  text: string;
+  rect: { x: number; y: number; w: number; h: number; vw: number; vh: number };
+  note: string;
+  at: string;
+  resolved: boolean;
+}
+interface PinsView {
+  pins: Pin[];
+}

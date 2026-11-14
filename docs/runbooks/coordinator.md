@@ -119,6 +119,9 @@ the user asks; never discard their files.
 - Keep the coordinator's context lean: background watchers instead of polling, short summaries,
   few screenshots (prefer page text and JavaScript checks), short chat updates.
 - `SF_MAX_TURNS=300` is set in `auth.env` (2026-11-05): big tickets need more than 150 steps.
+- When the user names a pin ("see pin 3"), read it with `sf pins` (its page, the element's text and
+  the note); take a screenshot only when the text is not enough (the markers 📍<id> show on it).
+  Run `sf pins resolve <id>` once it is dealt with.
 
 ## The user's preferences for the dashboard
 

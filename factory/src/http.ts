@@ -86,6 +86,9 @@ export const ERROR_STATUS: Readonly<Record<string, number>> = {
   // one the ticket does not have (also an image to remove that is not there); a Start, Restart or
   // Resume whose Task file refers to images that cannot be used.
   attachment_type: 400, attachment_too_large: 413, attachment_limit: 409, attachment_missing: 400, attachment_invalid: 409,
+  // The dashboard's pins (src/pins.ts): no such pin, too many open ones, a pins.json that only
+  // sf pins clear may replace.
+  pin_not_found: 404, too_many_pins: 409, pins_unreadable: 409,
 };
 
 // The HTTP status of a FactoryError's code: ERROR_STATUS's, else fallback.

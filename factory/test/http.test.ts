@@ -91,6 +91,8 @@ test('statusOf maps each code as the dashboard did before SF-139; any other code
     digest_running: 409, invalid_digest_settings: 400,
     already_queued: 409, not_queued: 409, invalid_limit: 400, invalid_position: 400, invalid_rule: 400,
     attachment_type: 400, attachment_too_large: 413, attachment_limit: 409, attachment_missing: 400, attachment_invalid: 409,
+    // SF-211: the dashboard's pins.
+    pin_not_found: 404, too_many_pins: 409, pins_unreadable: 409,
   };
   assert.deepEqual({ ...ERROR_STATUS }, before);
   for (const [code, status] of Object.entries(before)) {

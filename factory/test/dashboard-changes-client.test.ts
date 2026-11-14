@@ -387,6 +387,8 @@ test('changes client: no iteration yet says when the changes come; the divider r
 
   const page = await openChanges();
   const html = page.document.documentElement;
+  // No layout here: without the tree's box the page counts from the width it set itself.
+  Object.assign(page.document.querySelector('#scrChanges .tree')!, { getBoundingClientRect: undefined });
   page.$('vdiv').focus();
   page.key('ArrowRight');
   assert.equal(html.style.getPropertyValue('--tree-w'), '352px');

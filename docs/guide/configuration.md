@@ -628,6 +628,7 @@ check: required
 | `may_touch` | no | **Files it will change**, marked 🔒 | Sensitive paths (manifests, lockfiles, CI, configuration) the ticket may change on purpose. A sensitive path not named here needs a reviewer's acceptance. Also counts as in scope. |
 | `lands_after` | no | **Waits for** (and "Waits for" on the Queue card) | The tickets this one waits for: `APP-11` in the same workspace, `my-api/API-7` in another. The queue starts it only when all are merged; Start by hand does not wait. |
 | `check` | no | **Plan check** (`not needed` with the reason, or the check's result) | Whether the Task needs a plan check. `check: skip`: never. `check: required` (or any other value): always. Without it a Task needs one when it has no `scope`, more than 10 scope entries, a glob in `scope`, a `lands_after` ticket of another workspace or more than 1,200 words (the whitespace-separated words of the whole file, front matter included); otherwise it is small and starts from the queue without a check (`write_task` answers `not_needed`). A Check pressed by hand always runs, and its verdict counts as before. |
+| `size` | no | (not shown) | The planner's estimate of the Task: `small`, `medium` or `complex`. It picks the job's lead-time target, `lead_time_hours.<size>` of the [norms](#norms-normsjson). Without it, or with any other value, the Task is `medium`. |
 
 Other keys are kept but ignored. The body's sections (the task, `## Files`, `## Review brief`)
 are described in [Planning](planning.md#what-makes-a-good-task-file) and in the

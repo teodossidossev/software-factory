@@ -8,7 +8,7 @@ import { after, before, test } from 'node:test';
 import { FactoryError } from '../src/errors.js';
 import { JobStore } from '../src/jobs.js';
 import type { Workspace } from '../src/registry.js';
-import { appendFix, checkNeed, checkTaskContent, landsAfter, MAX_TASK_BYTES, mayTouch, parseFrontMatter, taskReview, taskScope, taskSha256, writeTask } from '../src/task-file.js';
+import { appendFix, checkNeed, checkTaskContent, landsAfter, MAX_TASK_BYTES, mayTouch, parseFrontMatter, taskReview, taskScope, taskSha256, taskSize, writeTask } from '../src/task-file.js';
 
 const VALID = '---\nticket: PROJ-1\ntitle: Export as CSV\nbase: master\n---\n\n# PROJ-1: Export as CSV\n';
 
@@ -158,6 +158,16 @@ test('taskReview (SF-131) reads review: claude or codex, quoted or with a commen
   assert.equal(taskReview(fields('review: "codex"  # the gate alone')), 'codex');
   for (const other of ['review: Claude', 'review: both', 'review:', 'scope: [a]']) {
     assert.equal(taskReview(fields(other)), undefined, other);
+  }
+});
+
+test('taskSize (SF-219) reads size: small, medium or complex, quoted or with a comment too; absent or any other value is medium', () => {
+  const fields = (text: string) => parseFrontMatter(`---\nticket: T-1\ntitle: t\nbase: main\n${text}\n---\n`)!;
+  assert.equal(taskSize(fields('size: small')), 'small');
+  assert.equal(taskSize(fields('size: medium')), 'medium');
+  assert.equal(taskSize(fields('size: "complex"  # the planner\'s estimate')), 'complex');
+  for (const other of ['size: Complex', 'size: large', 'size:', 'scope: [a]']) {
+    assert.equal(taskSize(fields(other)), 'medium', other);
   }
 });
 

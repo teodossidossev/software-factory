@@ -11,7 +11,7 @@ import { appendFile, mkdir, readdir, readFile, readlink, stat, writeFile } from 
 import { join } from 'node:path';
 import { mock, test } from 'node:test';
 import {
-  checkDashboardPorts, DASHBOARD_SCRIPTS, dashboardRemoteLogins, dashboardScriptFiles, dashboardRemoteOrigins, MAX_STREAMS, remoteDashboardUrls, removeToken, startDashboard, STREAM_PAGE_LINES, TOKEN_FILE,
+  checkDashboardPorts, DASHBOARD_SCRIPTS, dashboardRemoteLogins, dashboardScriptFiles, dashboardRemoteOrigins, jobDetail, MAX_STREAMS, remoteDashboardUrls, removeToken, startDashboard, STREAM_PAGE_LINES, TOKEN_FILE,
 } from '../src/dashboard.js';
 import { POST_ROUTES, type RouteName } from '../src/dashboard-routes.js';
 import { FactoryError } from '../src/errors.js';
@@ -1044,7 +1044,7 @@ test('dashboard (SF-040): no reviewer or subscription in the data; the subscript
   await withDashboard('dash-no-reviewer', fakeActions(), async (dashboard) => {
     const base = dashboard.url;
     const detail = JSON.parse((await fetchRaw(new URL('api/jobs/app/T-1', base))).body);
-    assert.deepEqual(Object.keys(detail).sort(), ['confirm_actions', 'explanation', 'gate', 'history', 'iterations', 'job', 'ledger', 'mr', 'mr_title', 'settle_ids']);
+    assert.deepEqual(Object.keys(detail).sort(), ['confirm_actions', 'explanation', 'gate', 'history', 'iterations', 'job', 'lead', 'ledger', 'mr', 'mr_title', 'settle_ids']);
     const { jobs: all } = JSON.parse((await fetchRaw(new URL('api/jobs', base))).body);
     assert.ok(all.every((job: Record<string, unknown>) => !('reviewer' in job)));
     assert.deepEqual([(await fetchRaw(new URL('api/subscriptions', base))).status], [404]);
@@ -1062,6 +1062,40 @@ test('dashboard (SF-040): no reviewer or subscription in the data; the subscript
       stream.close();
     }
   });
+});
+
+test('dashboard (SF-219): the detail\'s lead: the clock of a running job to now, and of a pushed job to its push, with the size and target of its Task copy and the norms', async () => {
+  const { jobs, job } = await fixture('dash-lead');
+  const norms = join(temp, 'dash-lead-norms');
+  await mkdir(norms, { recursive: true });
+  await writeFile(join(norms, 'norms.json'), JSON.stringify({ version: 1, lead_time_hours: { small: 1 } }));
+  // T-1 (test/support/dashboard-state.ts) started on 2026-11-01 and is awaiting_review; its Task copy says small.
+  await jobs.writeTaskCopy('app', 'T-1', Buffer.from('---\nticket: T-1\ntitle: t\nbase: main\nsize: small\n---\n'));
+  const before = Date.now();
+  const running = (await jobDetail(jobs, job, true, fakeActions(), fakeSetup(), norms)).lead;
+  const open = Math.round((before - Date.parse('2026-11-01T10:00:00.000Z')) / 1000);
+  assert.deepEqual([running.size, running.target_hours, running.started_at, running.ready_at, running.done_at, running.returns], ['small', 1, '2026-11-01T10:00:00.000Z', null, null, 0]);
+  assert.ok(running.seconds.working >= open && running.seconds.working < open + 60, String(running.seconds.working));
+  assert.deepEqual([running.seconds.total, running.seconds.waiting_for_user, running.over_target], [running.seconds.working, 0, true]);
+
+  // A pushed job without a Task copy: medium, the default target; a state the clock does not know
+  // breaks nothing.
+  const pushed: Job = { ...job, ticket: 'T-2', state: 'pushed' };
+  await jobs.write(pushed);
+  const change = (ts: string, from: string | null, to: string): Promise<void> => jobs.appendEvent('app', 'T-2', { ts, iteration: 0, state: { from, to } } as EventRecord);
+  await change('2026-11-02T08:00:00.000Z', null, 'starting');
+  await change('2026-11-02T08:00:00.000Z', 'starting', 'working');
+  await change('2026-11-02T09:00:00.000Z', 'working', 'ready_for_human_review');
+  await change('2026-11-02T09:30:00.000Z', 'ready_for_human_review', 'working');
+  await change('2026-11-02T10:00:00.000Z', 'working', 'mystery');
+  await change('2026-11-02T10:10:00.000Z', 'mystery', 'handed_over');
+  await change('2026-11-02T12:10:00.000Z', 'handed_over', 'pushed');
+  const detail = await jobDetail(jobs, pushed, true, fakeActions(), fakeSetup(), norms);
+  assert.deepEqual(detail.lead, {
+    size: 'medium', target_hours: 4, started_at: '2026-11-02T08:00:00.000Z', ready_at: '2026-11-02T09:00:00.000Z', done_at: '2026-11-02T12:10:00.000Z',
+    seconds: { working: 5400, waiting_for_user: 1800, in_user_hands: 7200, parked: 0, total: 14_400 }, returns: 1, over_target: false,
+  });
+  assert.equal(detail.history.length, 7);
 });
 
 // One events.jsonl line of a fixture: a record at a fixed time, in iteration 1.

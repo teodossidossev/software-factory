@@ -73,6 +73,16 @@ export function taskReview(fields: Map<string, string>): TaskReview | undefined 
   return value === 'claude' || value === 'codex' ? value : undefined;
 }
 
+// The planner's estimate of a Task's size: `size: small | medium | complex`; it picks the lead-time
+// target of the workspace's norms (src/lead-time.ts).
+export type TaskSize = 'small' | 'medium' | 'complex';
+
+// The Task's size; medium without the key or with any other value.
+export function taskSize(fields: Map<string, string>): TaskSize {
+  const value = fields.get('size');
+  return value === 'small' || value === 'complex' ? value : 'medium';
+}
+
 // The file scope of the Task: `scope:` in the front matter, in the forms of may_touch, the
 // files the ticket is expected to create, modify or delete, tests and docs included. Undefined when
 // the Task declares none (no field, or an empty list): then nothing is checked.

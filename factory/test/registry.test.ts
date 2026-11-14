@@ -6,7 +6,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { FactoryError } from '../src/errors.js';
-import { configDir, digestSettings, editedEntry, explainSettings, loadRegistry, parseRegistry, resolveWorkspace, saveRegistry, WORKSPACE_COLORS, workspaceApp, workspaceColor, workspaceDigest } from '../src/registry.js';
+import {
+  configDir, digestSettings, editedEntry, explainSettings, isNotifyMode, loadRegistry, NOTIFY_MODES, parseRegistry, resolveWorkspace, saveRegistry, WORKSPACE_COLORS, workspaceApp, workspaceColor,
+  workspaceDigest, workspaceNotify, workspaceNotifyMode,
+} from '../src/registry.js';
 
 let temp: string;
 let repo: string;
@@ -97,6 +100,34 @@ test('parseRegistry, resolveWorkspace and editedEntry (SF-128): test_command is 
   assert.deepEqual(await resolveWorkspace('without', dir), { name: 'without', readCheckout: repo, workCheckout: repo });
   const edit = { read_checkout: '/srv/b', description: 'B', app: '', handoff: 'off', color: 'auto', digest: { track: false, my_work: false } } as const;
   assert.deepEqual(editedEntry({ read_checkout: '/srv/a', test_command: 'npm test' }, edit), { read_checkout: '/srv/b', handoff: 'off', description: 'B', test_command: 'npm test' });
+});
+
+test('parseRegistry, workspaceNotify and editedEntry (SF-215): notify is full, brief or off, absent full; any other value is refused; the Edit keeps it', () => {
+  for (const notify of ['full', 'brief', 'off'] as const) {
+    const parsed = parseRegistry(JSON.stringify({ workspaces: { app: { read_checkout: '/srv/app', notify } } })).workspaces.app!;
+    assert.deepEqual(parsed, { read_checkout: '/srv/app', notify });
+    assert.equal(workspaceNotify(parsed), notify);
+  }
+  assert.equal(workspaceNotify(parseRegistry(JSON.stringify({ workspaces: { app: { read_checkout: '/srv/app' } } })).workspaces.app!), 'full');
+  assert.throws(() => parseRegistry(JSON.stringify({ workspaces: { app: { read_checkout: '/srv/app', notify: 'quiet' } } })), /workspaces\.app\.notify/);
+  assert.deepEqual(NOTIFY_MODES, ['full', 'brief', 'off']);
+  assert.equal(isNotifyMode('brief'), true);
+  assert.equal(isNotifyMode('quiet'), false);
+  const edit = { read_checkout: '/srv/b', description: '', app: '', handoff: 'default', color: 'auto', digest: { track: false, my_work: false } } as const;
+  assert.deepEqual(editedEntry({ read_checkout: '/srv/a', notify: 'off' }, edit), { read_checkout: '/srv/b', notify: 'off' });
+});
+
+test('workspaceNotifyMode (SF-215): read from the registry on each call; a workspace not registered, or a registry that cannot be read, is full', async () => {
+  const dir = join(temp, 'notify-mode');
+  await saveRegistry({ workspaces: { quiet: { read_checkout: '/srv/q', notify: 'off' }, plain: { read_checkout: '/srv/p' } } }, dir);
+  assert.equal(await workspaceNotifyMode('quiet', dir), 'off');
+  assert.equal(await workspaceNotifyMode('plain', dir), 'full');
+  assert.equal(await workspaceNotifyMode('gone', dir), 'full');
+  assert.equal(await workspaceNotifyMode('constructor', dir), 'full');
+  await saveRegistry({ workspaces: { quiet: { read_checkout: '/srv/q', notify: 'brief' } } }, dir);
+  assert.equal(await workspaceNotifyMode('quiet', dir), 'brief');
+  await writeFile(join(dir, 'workspaces.json'), '{ not json');
+  assert.equal(await workspaceNotifyMode('quiet', dir), 'full');
 });
 
 test('parseRegistry (SF-084): a workspace may set color to one of the palette names; anything else is refused', () => {

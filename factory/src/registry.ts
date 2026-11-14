@@ -10,7 +10,8 @@
 // language) and `explain` (the plain explanation of each stop: on, model and language). A workspace
 // has an optional `guard` (src/guard.ts: its pushes and MR texts are checked for the names of the
 // user's other workspaces; absent: false) and an optional `test_command` (src/test-command.ts: the
-// factory runs it in a sandbox before a job is ready; absent: no run).
+// factory runs it in a sandbox before a job is ready; absent: no run) and an optional `notify`
+// (full, brief or off: how much its notifications tell; absent: full).
 import { mkdir, readFile, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
@@ -46,6 +47,16 @@ export const HANDOFF_OFF_CODE = 'handoff_off';
 
 export function isHandoffMode(value: unknown): value is HandoffMode {
   return (HANDOFF_MODES as readonly unknown[]).includes(value);
+}
+
+// How much a workspace's notifications tell (src/notify.ts): full, the whole notification; brief,
+// on ntfy only the title and one line with the workspace's name (and an error's code); off, none.
+// Absent: full.
+export const NOTIFY_MODES = ['full', 'brief', 'off'] as const;
+export type NotifyMode = (typeof NOTIFY_MODES)[number];
+
+export function isNotifyMode(value: unknown): value is NotifyMode {
+  return (NOTIFY_MODES as readonly unknown[]).includes(value);
 }
 
 // The workspace colours: the board's palette, each a light and a dark token --ws-<name> in
@@ -100,6 +111,7 @@ const registrySchema = z.strictObject({
     z.string().regex(WORKSPACE_NAME_PATTERN),
     z.strictObject({
       read_checkout: absolutePath, work_checkout: absolutePath.optional(), handoff: z.enum(HANDOFF_MODES).optional(), color: z.enum(WORKSPACE_COLORS).optional(),
+      notify: z.enum(NOTIFY_MODES).optional(),
       rules_skip: z.array(z.string().min(1)).optional(),
       description: z.string().max(MAX_DESCRIPTION_CHARS).optional(),
       app: z.string().trim().min(1).max(MAX_APP_CHARS).optional(),
@@ -150,9 +162,38 @@ export function workspaceApp(name: string, entry: WorkspaceEntry): string {
   return entry.app ?? name;
 }
 
+// A workspace's notify setting, absent full.
+export function workspaceNotify(entry: WorkspaceEntry): NotifyMode {
+  return entry.notify ?? 'full';
+}
+
+// The notify setting of a workspace as the registry holds it now: read for each notification, so
+// sf workspace notify applies to the next one; a workspace not registered, or a registry that
+// cannot be read, is full.
+export async function workspaceNotifyMode(name: string, dir = configDir()): Promise<NotifyMode> {
+  try {
+    const { workspaces } = await loadRegistry(dir);
+    return Object.hasOwn(workspaces, name) ? workspaceNotify(workspaces[name]!) : 'full';
+  } catch { // an unreadable or invalid registry: the notification goes out in full
+    return 'full';
+  }
+}
+
+// sf workspace notify: sets the notify setting of a registered workspace (full removes the key,
+// the default); workspace_not_found when it is not registered.
+export async function setWorkspaceNotify(name: string, notify: NotifyMode, dir = configDir()): Promise<void> {
+  const registry = await loadRegistry(dir);
+  if (!Object.hasOwn(registry.workspaces, name)) {
+    throw new FactoryError('workspace_not_found', `workspace "${name}" is not registered.`);
+  }
+  const { notify: _old, ...rest } = registry.workspaces[name]!;
+  registry.workspaces[name] = notify === 'full' ? rest : { ...rest, notify };
+  await saveRegistry(registry, dir);
+}
+
 // What the Setup's Edit replaces; "" removes description and app, 'default' the handoff
 // key, 'auto' the color key, and digest with both false the digest key. work_checkout, rules_skip,
-// guard and test_command stay as they are.
+// guard, test_command and notify stay as they are.
 export interface WorkspaceEdit {
   read_checkout: string;
   description: string;

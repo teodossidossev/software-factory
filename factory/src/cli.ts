@@ -41,7 +41,10 @@ import { collectMetrics, metricsLines } from './metrics.js';
 import { QueueStore, RunQueue } from './queue.js';
 import { followJobs, lockPath, runJob } from './runner.js';
 import { jobNotification, notifyConfig, notifyTaskCheck, sendNotification, stateNotifier } from './notify.js';
-import { configDir, HANDOFF_MODES, ignoredWorkCheckouts, isHandoffMode, isWorkspaceColor, loadRegistry, resolveWorkspace, saveRegistry, verifyCheckout, WORKSPACE_COLORS, workspaceColor, type WorkspaceEntry } from './registry.js';
+import {
+  configDir, HANDOFF_MODES, ignoredWorkCheckouts, isHandoffMode, isNotifyMode, isWorkspaceColor, loadRegistry, resolveWorkspace, saveRegistry, setWorkspaceNotify, verifyCheckout,
+  WORKSPACE_COLORS, workspaceColor, type WorkspaceEntry, workspaceNotify, workspaceNotifyMode,
+} from './registry.js';
 import {
   ensureMcpToken, keepProfilePrivate, loadHandbook, mcpBaseUrl, mcpUrl, packageVersion, probeMcp, profileHasUrl, readMcpToken, redactMcpToken, requireMcpToken,
   replaceMcpToken, rewriteProfileUrl, SERVER_NAME, startServer, TOKEN_LABEL,
@@ -89,7 +92,8 @@ const USAGE = `Usage:
   sf up [--no-open] [--no-tunnel]                       sf serve (with its tunnel; --no-tunnel: SF_TUNNEL=off) in one terminal, and open the dashboard; Ctrl+C stops both
   sf dashboard [--open] [--rotate]                      Print the dashboard URL; --open also opens it (xdg-open); --rotate removes the token so the next sf serve makes a new one
   sf workspace add <name> --read <path> [--handoff checkout|off] [--color <name>]  Register a workspace: the local checkout (every job works in a worktree of it); --handoff: its own hand-over setting, over SF_HANDOFF; --color: its colour on the board (blue, teal, green, olive, orange, red, purple or grey; default: by its name). Again with the same path: changes the --handoff and --color given
-  sf workspace list                                     List registered workspaces, their hand-over setting and colour
+  sf workspace list                                     List registered workspaces, their hand-over setting and colour, and their notify setting when it is not full
+  sf workspace notify <name> full|brief|off             How much the notifications of the workspace's jobs and Task checks tell: full (the default); brief, ntfy gets the title and one line (the workspace and an error's code; a plan not ready keeps its counts; the desktop stays full); off, none. Applies to the next notification
   sf workspace remove <name>                            Unregister a workspace
   sf check-task <workspace> <ticket>                    Check the Task file before Start: a read-only Claude session reads it and the repository, and prints its paraphrase, its findings by severity and its verdict (stored by the Task file's sha256; it only advises). sf serve checks a written Task file by itself 60 s after its last change (SF_TASK_CHECK_AUTO)
   sf rules <workspace> [ticket]                         List the coding rules the agents would be given (AGENTS.md and the Markdown files it links to, the user's rules files): paths, sources, sizes and the files left out, without their text; a started job's stored list, else read at the Task file's base, else at the checkout's HEAD
@@ -169,7 +173,8 @@ async function serve(options: { tunnel?: 'off' } = {}): Promise<{ dashboard: URL
   const queueStore = new QueueStore(config.stateDir, config.maxJobs);
   await queueStore.read();
   const jobs = new JobStore(config.stateDir);
-  const notify = stateNotifier(notifyConfig(), jobs);
+  // Each notification reads the workspace's notify setting from the registry.
+  const notify = stateNotifier(notifyConfig(), jobs, workspaceNotifyMode);
   // The dashboard starts after recovery; until then its listener is a no-op. So does the run queue's scheduler.
   let dashboard: RunningDashboard | undefined;
   let scheduling = false;
@@ -245,7 +250,7 @@ async function serve(options: { tunnel?: 'off' } = {}): Promise<{ dashboard: URL
       workspaces: async () => Object.entries((await loadRegistry()).workspaces).map(([name, entry]) => ({ name, workCheckout: entry.read_checkout })),
       onCheckEnded: (record) => {
         dashboard?.refreshSetup();
-        void notifyTaskCheck(record, notifyConfig());
+        void notifyTaskCheck(record, notifyConfig(), workspaceNotifyMode);
       },
       // The updating marker: a check due meanwhile is recorded for the catch-up.
       update: { updating: () => updateMarked(config.stateDir), skipped: (workspace, ticket) => recordSkippedCheck(config.stateDir, { workspace, ticket }) },
@@ -474,8 +479,23 @@ async function workspace(args: string[]): Promise<void> {
       console.log('No workspaces registered.');
     }
     for (const [name, entry] of entries) {
-      console.log(`${name}\n  checkout: ${entry.read_checkout}\n  hand-over: ${handoffLabel(entry)}\n  colour: ${colorLabel(name, entry)}`);
+      // The notify setting only when it is not the default.
+      const notify = workspaceNotify(entry);
+      console.log(`${name}\n  checkout: ${entry.read_checkout}\n  hand-over: ${handoffLabel(entry)}\n  colour: ${colorLabel(name, entry)}${notify !== 'full' ? `\n  notify: ${notify}` : ''}`);
     }
+    return;
+  }
+  // sf workspace notify <name> full|brief|off: full removes the key (the default).
+  if (command === 'notify') {
+    if (positionals.length > 2) {
+      throw new UsageError(`unexpected argument "${positionals[2]}".`);
+    }
+    const [name, notify] = [checkName(positionals[0]), positionals[1]];
+    if (!isNotifyMode(notify)) {
+      throw new UsageError(notify === undefined ? 'workspace notify needs <name> full|brief|off.' : `notify must be full, brief or off, got "${notify}".`);
+    }
+    await setWorkspaceNotify(name, notify);
+    console.log(`Workspace "${name}" notifies ${notify}.`);
     return;
   }
   if (positionals.length > 1) {
@@ -571,7 +591,7 @@ async function run(args: string[]): Promise<void> {
   if ((await jobs.read(workspace, ticket)) === undefined) {
     throw new FactoryError('job_not_found', `There is no job for ${workspace}/${ticket}.`);
   }
-  const notify = stateNotifier(notifyConfig(), jobs);
+  const notify = stateNotifier(notifyConfig(), jobs, workspaceNotifyMode);
   const sending = new Set<Promise<void>>();
   const onStateChange: StateListener = (job, from, lines) => {
     const sent = notify(job, from, lines);

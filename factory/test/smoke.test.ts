@@ -243,6 +243,39 @@ test('sf workspace add, list and remove manage the registry with the documented 
   await rm(join(broken, '.git'), { recursive: true });
 });
 
+test('sf workspace notify (SF-215) sets and changes a workspace\'s notify setting; list shows it when it is not full; an unknown workspace or value is refused', async () => {
+  const added = await runCli(['workspace', 'add', 'loud', '--read', repo, '--color', 'blue']);
+  assert.equal(added.code, 0, added.stderr);
+  const entry = async (): Promise<unknown> => JSON.parse(await readFile(join(configDir, 'workspaces.json'), 'utf8')).workspaces.loud;
+  const listed = async (): Promise<string> => (await runCli(['workspace', 'list'])).stdout;
+  assert.doesNotMatch(await listed(), /notify:/);
+
+  const wrong = await runCli(['workspace', 'notify', 'loud', 'quiet']);
+  assert.equal(wrong.code, 2);
+  assert.match(wrong.stderr, /notify must be full, brief or off, got "quiet"\./);
+  assert.equal((await runCli(['workspace', 'notify', 'loud'])).code, 2);
+  assert.equal((await runCli(['workspace', 'notify', 'loud', 'off', 'extra'])).code, 2);
+  assert.equal((await runCli(['workspace', 'notify', 'Loud', 'off'])).code, 1);
+  const missing = await runCli(['workspace', 'notify', 'absent', 'off']);
+  assert.equal(missing.code, 1);
+  assert.match(missing.stderr, /workspace "absent" is not registered\./);
+  assert.deepEqual(await entry(), { read_checkout: repo, color: 'blue' });
+
+  const brief = await runCli(['workspace', 'notify', 'loud', 'brief']);
+  assert.equal(brief.code, 0, brief.stderr);
+  assert.match(brief.stdout, /Workspace "loud" notifies brief\./);
+  assert.deepEqual(await entry(), { read_checkout: repo, color: 'blue', notify: 'brief' });
+  assert.match(await listed(), /^loud\n(?: {2}.*\n){3} {2}notify: brief$/m);
+  assert.equal((await runCli(['workspace', 'notify', 'loud', 'off'])).code, 0);
+  assert.deepEqual(await entry(), { read_checkout: repo, color: 'blue', notify: 'off' });
+  assert.match(await listed(), /^ {2}notify: off$/m);
+  // full is the default: the key goes.
+  assert.equal((await runCli(['workspace', 'notify', 'loud', 'full'])).code, 0);
+  assert.deepEqual(await entry(), { read_checkout: repo, color: 'blue' });
+  assert.doesNotMatch(await listed(), /notify:/);
+  assert.equal((await runCli(['workspace', 'remove', 'loud'])).code, 0);
+});
+
 test('sf serve on a fresh state directory syncs the skills and gives the Quick start and the Planning method as instructions and the planning and execution tools', async () => {
   const state = join(temp, 'fresh-state');
   const served = await serve({ SF_STATE_DIR: state });

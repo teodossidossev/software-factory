@@ -13,8 +13,8 @@ import { test } from 'node:test';
 import { loadConfig } from '../src/config.js';
 import { FactoryError } from '../src/errors.js';
 import type { Job, JobState } from '../src/jobs.js';
-import { type Notification, notifyTaskCheck, taskCheckNotification } from '../src/notify.js';
-import type { Workspace } from '../src/registry.js';
+import { type ChannelResult, type Notification, notifyTaskCheck, taskCheckNotification } from '../src/notify.js';
+import type { NotifyMode, Workspace } from '../src/registry.js';
 import { type CheckRecord, CheckStore, TaskChecks, taskSha256 } from '../src/task-check.js';
 import { AutoChecks, planCheck, type WatchFolder } from '../src/task-check-auto.js';
 import { FakeClock, FakeRunner } from './support/auto-checks.js';
@@ -309,11 +309,11 @@ test('the notification: "plan not ready" with the counts as the board writes the
   const original = console.error;
   console.error = (line: unknown) => logged.push(String(line));
   try {
-    await notifyTaskCheck(notReady, { desktop: true, iterations: false, ntfyUrl: undefined, ntfyToken: undefined }, async (notification) => {
+    await notifyTaskCheck(notReady, { desktop: true, iterations: false, ntfyUrl: undefined, ntfyToken: undefined }, async () => 'full', async (notification) => {
       sent.push(notification);
       return [{ channel: 'desktop', status: 'failed', message: 'notify-send exited with 1' }, { channel: 'ntfy', status: 'skipped', message: 'SF_NTFY_URL is not set' }];
     });
-    await notifyTaskCheck(checkRecord('app', 'SF-086', 'x', 'ready'), { desktop: true, iterations: false, ntfyUrl: undefined, ntfyToken: undefined }, async (notification) => {
+    await notifyTaskCheck(checkRecord('app', 'SF-086', 'x', 'ready'), { desktop: true, iterations: false, ntfyUrl: undefined, ntfyToken: undefined }, async () => 'full', async (notification) => {
       sent.push(notification);
       return [];
     });
@@ -322,6 +322,30 @@ test('the notification: "plan not ready" with the counts as the board writes the
   }
   assert.deepEqual(sent.map((notification) => notification.title), ['SF-086: plan not ready']);
   assert.deepEqual(logged, ['app/SF-086: plan-check notification via desktop failed: notify-send exited with 1']);
+});
+
+test('SF-215: a Task check\'s notification as the workspace\'s notify setting has it: off sends nothing; brief keeps "plan not ready" and names only the workspace for "plan check failed"', async () => {
+  const config = { desktop: true, iterations: false, ntfyUrl: undefined, ntfyToken: undefined };
+  const failed = { ...checkRecord('app', 'SF-086', 'x', 'failed'), error: 'git fetch failed for /home/me/app: https://example.org/acme/app.git\nmore' };
+  const sent: Notification[] = [];
+  const asked: string[] = [];
+  const send = async (notification: Notification): Promise<ChannelResult[]> => {
+    sent.push(notification);
+    return [];
+  };
+  const mode = (setting: NotifyMode) => async (workspace: string): Promise<NotifyMode> => {
+    asked.push(workspace);
+    return setting;
+  };
+  await notifyTaskCheck(checkRecord('app', 'SF-086', 'x', 'not_ready'), config, mode('off'), send);
+  await notifyTaskCheck(failed, config, mode('off'), send);
+  assert.deepEqual([sent, asked], [[], ['app', 'app']]);
+  await notifyTaskCheck(checkRecord('app', 'SF-086', 'x', 'not_ready'), config, mode('brief'), send);
+  await notifyTaskCheck(failed, config, mode('brief'), send);
+  assert.deepEqual(sent, [
+    { title: 'SF-086: plan not ready', body: '1 blocker, 1 major · app', ntfyBody: '1 blocker, 1 major · app', priority: 'default', tags: 'warning' },
+    { title: 'SF-086: plan check failed', body: 'git fetch failed for /home/me/app: https://example.org/acme/app.git', ntfyBody: 'app', priority: 'default', tags: 'warning' },
+  ]);
 });
 
 test('Fix 1 R1: an automatic check\'s record is committed only when no cancel came first, a cancel during the write included; one after the commit leaves it', async () => {

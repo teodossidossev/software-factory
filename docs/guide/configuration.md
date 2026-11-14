@@ -292,6 +292,7 @@ The top level is `{"workspaces": {<name>: <entry>}}` and, optionally, the mornin
 | `work_checkout` | no | an absolute path | Retired. Still accepted and checked as an absolute path, then ignored: every job uses a worktree of `read_checkout`. When it differs from `read_checkout`, `sf serve` prints one warning. `sf workspace add --work` is refused. |
 | `handoff` | no | `"checkout"` or `"off"` | The workspace's own hand-over setting; wins over `SF_HANDOFF`. Use `off` for a checkout that must not be switched to every job's branch. |
 | `color` | no | `blue`, `teal`, `green`, `olive`, `orange`, `red`, `purple`, `grey` | The workspace's colour on the board. Without it, one is picked from the name. |
+| `notify` | no | `"full"`, `"brief"` or `"off"` | How much the notifications of the workspace's jobs and Task checks tell. `full` (absent): all of it. `brief`: ntfy gets the title, priority and tags and one line, the workspace's name (and an error's code when the job has one; a "plan not ready" Task check keeps its counts); no branch, path, error message, MR title or link. The desktop notification stays full, since it does not leave the machine. `off`: none on either channel. Health, usage limit reset and digest notifications ignore it. Read for each notification, so a change applies to the next one. Set it with `sf workspace notify <name> full\|brief\|off`; the dashboard's Edit keeps it. |
 | `rules_skip` | no | a list of paths or globs | Repository rule files not given to the agents ([Coding rules](#coding-rules)). Only by editing the file. |
 | `description` | no | text, at most 2,000 characters | What the repository is, for the morning digest. Without it the digest reads the first paragraph of the repository's `README.md` (else its `package.json`'s `description`). When it and the Git data disagree, the data wins. |
 | `app` | no | text, 1 to 64 characters | Workspaces with the same app share one daily and are compared in "One ticket across the app" (a backend and its frontend). Without it the workspace is its own app. |
@@ -340,6 +341,7 @@ The same from the command line:
 ```sh
 sf workspace add my-app --read ~/work/my-app --handoff checkout --color blue
 sf workspace add my-api --read ~/work/my-api --handoff off --color teal
+sf workspace notify my-api brief
 sf workspace list
 ```
 

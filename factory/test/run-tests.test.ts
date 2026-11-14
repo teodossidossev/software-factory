@@ -1,8 +1,9 @@
 // The test runner behind npm test and npm run test:browser (SF-108, SF-152): each file in a child of
 // its own, half the cores at once, at nice 10, a file past SF_TEST_FILE_TIMEOUT_MS killed with every
-// process below it, up to three failed files retried once, one at a time (SF-184). main runs here
-// with a fake spawn, a fake setPriority and a fake kill over a folder of fake test files, and once
-// for real over a file that hangs.
+// process below it, up to three failed files retried once, one at a time (SF-184), fewer files at
+// once while the machine is busy and a file killed at its limit then retried too. main runs
+// here with a fake spawn, a fake setPriority, a fake kill and a fake load over a folder of fake test
+// files, and once for real over a file that hangs.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
@@ -10,7 +11,7 @@ import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
-import { CLOSE_GRACE_MS, COMPILE_CACHE_DIR, concurrency, DEFAULT_FILE_TIMEOUT_MS, fileTimeout, killTree, main, marked, niceValue, RUN_MARK, testArgs, type ChildLike, type RunTestsDeps } from '../src/run-tests.js';
+import { BUSY_POLL_MS, busyLoad, CLOSE_GRACE_MS, COMPILE_CACHE_DIR, concurrency, DEFAULT_FILE_TIMEOUT_MS, fileTimeout, killTree, main, marked, niceValue, RUN_MARK, testArgs, type ChildLike, type RunTestsDeps } from '../src/run-tests.js';
 
 type Spawned = { command: string; args: readonly string[]; cwd: string; detached: boolean; env: Record<string, string | undefined> };
 type FakeChild = EventEmitter & { pid: number | undefined; stdout: EventEmitter; stderr: EventEmitter; file: string };
@@ -41,6 +42,9 @@ function fakeDeps(opts: {
   setPriority?: (pid: number, priority: number) => void;
   marked?: (mark: string) => number[];
   closeGraceMs?: number;
+  // The machine's load: calm (0) unless a test sets it.
+  load?: () => number;
+  busyPollMs?: number;
 }) {
   const spawned: Spawned[] = [];
   const children: FakeChild[] = [];
@@ -81,6 +85,8 @@ function fakeDeps(opts: {
     root: opts.root ?? root,
     ...(opts.marked !== undefined ? { marked: opts.marked } : {}),
     ...(opts.closeGraceMs !== undefined ? { closeGraceMs: opts.closeGraceMs } : {}),
+    load: opts.load ?? (() => 0),
+    ...(opts.busyPollMs !== undefined ? { busyPollMs: opts.busyPollMs } : {}),
   };
   return { deps, spawned, children, priorities, killed, logs, written };
 }
@@ -133,6 +139,31 @@ test('SF_TEST_NICE: unset or empty is 10, exactly 0 is 0, anything else is refus
     const result = niceValue({ SF_TEST_NICE: bad });
     assert.equal(result.ok, false, bad);
     if (!result.ok) assert.match(result.error, /SF_TEST_NICE/);
+  }
+});
+
+const BAD_BUSY_LOADS = ['0', '0.0', '12.', '.5', '-1', 'abc', '1e3', '9'.repeat(400)];
+
+test('SF_TEST_BUSY_LOAD: unset or empty is 0.75 times the cores, unrounded; a positive number replaces it; anything else is refused', () => {
+  assert.deepEqual(busyLoad({}, 20), { ok: true, value: 15 });
+  assert.deepEqual(busyLoad({}, 7), { ok: true, value: 5.25 });
+  assert.deepEqual(busyLoad({ SF_TEST_BUSY_LOAD: '' }, 20), { ok: true, value: 15 });
+  assert.deepEqual(busyLoad({ SF_TEST_BUSY_LOAD: '12' }, 20), { ok: true, value: 12 });
+  assert.deepEqual(busyLoad({ SF_TEST_BUSY_LOAD: '12.5' }, 20), { ok: true, value: 12.5 });
+  assert.deepEqual(busyLoad({ SF_TEST_BUSY_LOAD: '0.5' }, 20), { ok: true, value: 0.5 });
+  assert.deepEqual(busyLoad({ SF_TEST_BUSY_LOAD: '012' }, 20), { ok: true, value: 12 });
+  assert.equal(Number(BAD_BUSY_LOADS.at(-1)), Infinity);
+  for (const bad of BAD_BUSY_LOADS) {
+    assert.deepEqual(busyLoad({ SF_TEST_BUSY_LOAD: bad }, 20), { ok: false, error: `SF_TEST_BUSY_LOAD must be a positive number, not ${JSON.stringify(bad)}` }, bad);
+  }
+});
+
+test('an invalid SF_TEST_BUSY_LOAD exits 2 with its line before any test runs', async () => {
+  for (const bad of BAD_BUSY_LOADS) {
+    const { deps, spawned, logs } = fakeDeps({ env: { SF_TEST_BUSY_LOAD: bad }, emit: exitWith(0) });
+    assert.equal(await main(['unit'], deps), 2, bad);
+    assert.equal(spawned.length, 0);
+    assert.deepEqual(logs, [`run-tests: SF_TEST_BUSY_LOAD must be a positive number, not ${JSON.stringify(bad)}`]);
   }
 });
 
@@ -574,6 +605,155 @@ test('an interrupt during a retry kills it and starts no more; the run exits 1',
   assert.deepEqual(killed, [4245]);
 });
 
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+// The lines of a run that gave way, on 20 cores (a busy limit of 15) at a load of 15.
+const BUSY_LINE = 'run-tests: the machine is busy (load 15.0 at or above 15.0): fewer files at once until it calms';
+const UNDER_A_MINUTE = "; it gave way to the machine's load for under a minute";
+
+// An emit that ends each file with code 0 after ms, and counts the most files running at once.
+function counting(ms: number): { most: () => number; emit: (child: FakeChild) => void } {
+  let now = 0;
+  let most = 0;
+  return {
+    most: () => most,
+    emit: (child) => {
+      now += 1;
+      most = Math.max(most, now);
+      setTimeout(() => {
+        now -= 1;
+        exitWith(0)(child);
+      }, ms);
+    },
+  };
+}
+
+test('below the busy limit, min(N, files) files start at once, and the run prints what it printed before', async () => {
+  for (const [env, most] of [[{}, 3], [{ SF_TEST_CONCURRENCY: '2' }, 2]] as const) {
+    const count = counting(20);
+    const { deps, spawned, logs } = fakeDeps({ env, cores: 20, load: () => 14.9, busyPollMs: 5, emit: count.emit });
+    assert.equal(await main(['unit'], deps), 0);
+    assert.equal(spawned.length, 3);
+    assert.equal(count.most(), most);
+    assert.deepEqual(logs, []);
+  }
+});
+
+test("at or above the busy limit one file runs at a time, the next starting as soon as it ends; the busy line comes once and the summary says the run gave way", async () => {
+  assert.equal(BUSY_POLL_MS, 5000);
+  const count = counting(20);
+  // No poll comes during the run: only a file's end lets the next one start.
+  const { deps, spawned, logs } = fakeDeps({ cores: 20, load: () => 15, busyPollMs: 60_000, emit: count.emit });
+  const started = Date.now();
+  assert.equal(await main(['unit'], deps), 0);
+  assert.ok(Date.now() - started < 10_000, `took ${Date.now() - started} ms`);
+  assert.deepEqual(spawned.map(({ args }) => args.at(-1)), FILES);
+  assert.equal(count.most(), 1);
+  assert.deepEqual(logs, [BUSY_LINE, `run-tests: 3 test files passed${UNDER_A_MINUTE}`]);
+});
+
+test('when the load drops below the limit, every waiting lane starts at the next poll; the time waited counts once, however many lanes waited', async (t) => {
+  let clock = 1_000_000;
+  t.mock.method(Date, 'now', () => clock);
+  let load = 20;
+  const held: FakeChild[] = [];
+  const { deps, spawned, logs } = fakeDeps({ cores: 20, load: () => load, busyPollMs: 10, emit: (child) => void held.push(child) });
+  const run = main(['unit'], deps);
+  // Several polls at a busy load: the first file runs alone.
+  await sleep(80);
+  assert.equal(spawned.length, 1);
+  // Two lanes wait for 125 s together: 2 min, not 4.
+  clock += 125_000;
+  load = 3;
+  await sleep(80);
+  assert.equal(spawned.length, 3);
+  for (const child of held) exitWith(0)(child);
+  assert.equal(await run, 0);
+  assert.deepEqual(logs, [
+    'run-tests: the machine is busy (load 20.0 at or above 15.0): fewer files at once until it calms',
+    "run-tests: 3 test files passed; it gave way to the machine's load for 2 min",
+  ]);
+});
+
+test("the busy limit is 0.75 times the machine's cores, not the cores of the run's quota", async () => {
+  // A run under a quota of 8 cores on a 20-core machine: a load of 10 is not busy (the limit is 15, not 6).
+  const calm = fakeDeps({ cores: 8, load: () => 10, busyPollMs: 5, emit: exitWith(0) });
+  calm.deps.machineCores = 20;
+  assert.equal(await main(['unit'], calm.deps), 0);
+  assert.deepEqual(calm.logs, []);
+  const busy = fakeDeps({ cores: 8, load: () => 15, busyPollMs: 5, emit: exitWith(0) });
+  busy.deps.machineCores = 20;
+  assert.equal(await main(['unit'], busy.deps), 0);
+  assert.deepEqual(busy.logs, [BUSY_LINE, `run-tests: 3 test files passed${UNDER_A_MINUTE}`]);
+});
+
+test('an interrupt while lanes give way kills the running file and starts no other; no summary', async () => {
+  let interrupt: (() => void) | undefined;
+  const { deps, spawned, killed, logs } = fakeDeps({ cores: 20, load: () => 15, busyPollMs: 60_000, emit: () => void setTimeout(() => interrupt!(), 20) });
+  deps.onInterrupt = (stop) => {
+    interrupt = stop;
+    return () => undefined;
+  };
+  const started = Date.now();
+  assert.equal(await main(['unit'], deps), 1);
+  // No wait lasts until its poll.
+  assert.ok(Date.now() - started < 10_000, `took ${Date.now() - started} ms`);
+  assert.equal(spawned.length, 1);
+  assert.deepEqual(killed, [4242]);
+  assert.deepEqual(logs, [BUSY_LINE, 'run-tests: interrupted; the running test files are killed']);
+});
+
+test('a file killed at its limit while the machine is busy is retried once, alone, and passes on the retry', async () => {
+  const { deps, spawned, logs, written } = fakeDeps({
+    env: { SF_TEST_FILE_TIMEOUT_MS: '50' },
+    cores: 20,
+    load: () => 15,
+    busyPollMs: 5,
+    emit: (child) => {
+      // b hangs on its first run and passes on its retry.
+      if (child.file === FILES[1] && spawned.filter(({ args }) => args.at(-1) === FILES[1]).length === 1) return;
+      exitWith(0)(child);
+    },
+  });
+  assert.equal(await main(['unit'], deps), 0);
+  assert.deepEqual(spawned.map(({ args }) => args.at(-1)), [...FILES, FILES[1]]);
+  assert.deepEqual(logs, [BUSY_LINE, `run-tests: ${FILES[1]} exceeded 50 ms and was killed`, `run-tests: 3 test files passed (1 after a retry: ${FILES[1]})${UNDER_A_MINUTE}`]);
+  assert.equal(
+    timeless(written.at(-1)!),
+    `--- ${FILES[1]} failed on the first run, passed on the retry ---\nrun-tests: ${FILES[1]} (exceeded 50 ms and was killed, T s)\nrun-tests: ${FILES[1]} (exit 0, T s)\n`,
+  );
+});
+
+test('a file killed at its limit while the machine is busy, and again on its retry, fails the run; the failure line says the run gave way', async () => {
+  const { deps, spawned, logs } = fakeDeps({
+    env: { SF_TEST_FILE_TIMEOUT_MS: '50' },
+    cores: 20,
+    load: () => 15,
+    busyPollMs: 5,
+    emit: (child) => {
+      if (child.file !== FILES[1]) exitWith(0)(child);
+    },
+  });
+  assert.equal(await main(['unit'], deps), 1);
+  assert.deepEqual(spawned.map(({ args }) => args.at(-1)), [...FILES, FILES[1]]);
+  const killedLine = `run-tests: ${FILES[1]} exceeded 50 ms and was killed`;
+  assert.deepEqual(logs, [BUSY_LINE, killedLine, killedLine, `run-tests: 1 of 3 test files failed: ${FILES[1]}${UNDER_A_MINUTE}`]);
+});
+
+test('a file killed at its limit while the load is below the busy limit is not retried, and the run prints what it printed before', async () => {
+  const { deps, spawned, logs } = fakeDeps({
+    env: { SF_TEST_FILE_TIMEOUT_MS: '50' },
+    cores: 20,
+    load: () => 14.9,
+    busyPollMs: 5,
+    emit: (child) => {
+      if (child.file !== FILES[1]) exitWith(0)(child);
+    },
+  });
+  assert.equal(await main(['unit'], deps), 1);
+  assert.equal(spawned.length, 3);
+  assert.deepEqual(logs, [`run-tests: ${FILES[1]} exceeded 50 ms and was killed`, `run-tests: 1 of 3 test files failed: ${FILES[1]}`]);
+});
+
 // The pids of the processes whose argv is exactly argv.
 async function processesOf(argv: string[]): Promise<number[]> {
   const wanted = `${argv.join('\0')}\0`;
@@ -628,6 +808,7 @@ test('for real: a file that hangs is killed after its limit with the detached pr
       kill: (pid) => killTree(pid),
       env: { SF_TEST_FILE_TIMEOUT_MS: '3000', SF_TEST_CONCURRENCY: '2' },
       cores: 2,
+      load: () => 0,
       log: (line) => void logs.push(line),
       write: (text) => void written.push(text),
       root: real,
@@ -674,6 +855,7 @@ test('for real: a file that exits while a detached process it started holds its 
       closeGraceMs: 1000,
       env: { SF_TEST_FILE_TIMEOUT_MS: '60000', SF_TEST_RETRY: '0' },
       cores: 2,
+      load: () => 0,
       log: (line) => void logs.push(line),
       write: (text) => void written.push(text),
       root: real,

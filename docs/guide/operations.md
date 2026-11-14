@@ -357,6 +357,7 @@ Use `tailscale serve`, never `tailscale funnel`: Funnel puts the address on the 
 | `mr_auth_failed`, `mr_token_missing` | the GitHub or GitLab token is missing, expired or lacks a permission | set or renew `SF_GITHUB_TOKEN` / `SF_GITLAB_TOKEN` in `auth.env`, restart `sf serve` |
 | a job sits in `working` with no new Stream entries, or `runner_failed` / `runner_timeout` | its runner died (killed, out of memory) | look at `runner.log`; restart `sf serve` (a job found `working` without a runner becomes `needs_human`, `serve_restarted`), then *Tell it to go on* |
 | `sandbox_unavailable` | bubblewrap or socat missing, or user namespaces disabled | install them; see Claude Code's sandbox documentation |
+| a merge check or a job's tests fail with files that "exceeded" their limit (`run-tests: <file> exceeded 300000 ms and was killed`) while other runs of the suite go on (other jobs' tests, an Implementer's `npm test`) | load: several full runs at once on one machine slow every file down; each run gives way above `SF_TEST_BUSY_LOAD` (0.75 times the machine's cores) and retries a file killed under that load, but each run still keeps at least one file running | land jobs one at a time (merge checks on a quiet machine), or lower the limit (`SF_TEST_BUSY_LOAD`, in the environment the tests run in) so the runs give way sooner |
 | `max_turns` on big tickets | `SF_MAX_TURNS` (150) too low | `SF_MAX_TURNS=300` in `auth.env`, restart `sf serve`, *Tell it to go on* |
 | the tunnel says `not started` or `exited` | profile or key missing, or the factory not answering | `scripts/sf-tunnel.sh check`; the [connection runbook](../runbooks/chatgpt-connection.md#diagnostics) |
 | ChatGPT shows old tools | the connector caches its tool list | *Refresh* the plugin in ChatGPT and open a new chat |
@@ -379,7 +380,11 @@ test process inherits, so the IDE and other work stay responsive while the suite
 suites) run. Its exit code is the tests' own (1 when `node --test` was killed by a signal).
 `SF_TEST_CONCURRENCY=4 npm test` runs 4 files at once; `SF_TEST_NICE=0 npm test` keeps the normal
 priority; any other value of either stops with exit code 2 before a test runs
-([Configuration](configuration.md#for-running-the-tests)). Since SF-114 every sf process a test
+([Configuration](configuration.md#for-running-the-tests)). Since SF-223 a run gives way when the
+machine is busy: while the 1-minute load average is at or above `SF_TEST_BUSY_LOAD` (0.75 times the
+machine's cores by default, also under the service's CPUQuota), it starts no further file as long as another of its files runs, prints `run-tests:
+the machine is busy …` once, ends its last line with how long it gave way, and retries a file killed
+at its limit under that load like a failed file. Since SF-114 every sf process a test
 starts is tracked by `factory/test/support/children.ts` and stopped (SIGTERM, then SIGKILL after 5 s)
 at the end of its file, also on a failure or a signal, and a file whose tests leave an `sf serve`
 running fails; an `sf serve` a test expected to refuse fails the test after 30 s instead of hanging.

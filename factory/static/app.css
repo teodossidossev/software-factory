@@ -779,20 +779,41 @@ pre.raw.doc .heading { font-weight: 700; }
   .st-tile-value { font-size: 18px; }
 }
 
-/* Merge requests: a full page like the Stats', up to 960 px wide; the merge requests as a list of
-   choices, the chosen one's threads with their checkboxes, each comment's body as plain text. */
+/* Merge requests: a full page like the Stats', up to 960 px wide; each merge request one compact
+   row (mr-row.js) that wraps on a narrow screen, its badges in the diff colours (green, red, amber,
+   grey; the dark themes swap the variables), the expanded one's threads under it with their
+   checkboxes, each comment's body as plain text. */
 #merge-requests { position: fixed; inset: 0; display: flex; flex-direction: column; background: var(--bg); z-index: 6; padding-top: env(safe-area-inset-top, 0px); padding-bottom: calc(56px + env(safe-area-inset-bottom, 0px)); }
 #merge-requests .jhead .t1 .title { font-size: 16px; font-weight: 600; }
 #merge-requests .jhead .tools { flex-wrap: wrap; }
 .mq-body { max-width: 960px; margin: 0 auto; display: grid; gap: 14px; min-width: 0; }
 .mq-list, .mq-threads { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; min-width: 0; }
-.mq-req { all: unset; box-sizing: border-box; width: 100%; display: grid; gap: 2px; padding: 8px 12px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer; min-width: 0; }
-.mq-req:hover, .mq-req.on { border-color: var(--accent); }
-.mq-req:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.mq-title { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
-.mq-meta { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
-.mq-chosen h3 { text-transform: none; letter-spacing: 0; font-size: 14px; color: var(--fg); flex-wrap: wrap; overflow-wrap: anywhere; }
+.mq-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 8px 12px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); min-width: 0; }
+.mq-row:hover, .mq-row.on { border-color: var(--accent); }
+.mq-rhead { display: inline-flex; align-items: baseline; gap: 6px; min-width: 0; flex: 1 1 220px; }
+.mq-title, .mq-comments { all: unset; cursor: pointer; overflow-wrap: anywhere; }
+.mq-title { font-size: 13px; font-weight: 600; }
+.mq-title:hover { color: var(--accent); }
+.mq-title:focus-visible, .mq-comments:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+.mq-open { font-size: 12px; color: var(--accent); text-decoration: none; }
+.mq-branches { font: 12px var(--mono); color: var(--muted); overflow-wrap: anywhere; }
+.mq-status { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; font-size: 12px; min-width: 0; }
+.mq-badge { font-size: 11.5px; font-weight: 600; line-height: 18px; padding: 0 7px; border-radius: 999px; border: 1px solid currentColor; overflow-wrap: anywhere; text-decoration: none; }
+a.mq-badge:hover { text-decoration: underline; }
+.mq-badge.ok { color: var(--add); background: var(--add-bg); }
+.mq-badge.bad { color: var(--del); background: var(--del-bg); }
+.mq-badge.warn { color: var(--warn); background: var(--warn-bg); }
+.mq-badge.grey { color: var(--muted); background: var(--panel-2); border-color: var(--border); }
+.mq-comments { font-size: 12px; color: var(--accent); margin-left: auto; }
+.mq-comments:hover { text-decoration: underline; }
+.mq-chosen { margin-top: 6px; }
 .mq-chosen > .btn { justify-self: start; }
+.mq-chosen > .linkish { justify-self: start; }
+@media (max-width: 767px) {
+  .mq-row { gap: 4px 8px; padding: 8px 10px; }
+  .mq-rhead { flex-basis: 100%; }
+  .mq-comments { margin-left: 0; }
+}
 .mq-thread { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; display: grid; gap: 6px; min-width: 0; }
 .mq-tick { display: flex; gap: 8px; align-items: baseline; cursor: pointer; font: 12px var(--mono); overflow-wrap: anywhere; }
 .mq-tag { font: 11px var(--sans); color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; }

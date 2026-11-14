@@ -7,7 +7,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { readCoordinator } from './coordinator.js';
 import { type DashboardContext, iterationParam, jobKey, matchPath, noQuery } from './dashboard-context.js';
 import { jobDetail, planOf, ticketEntry, ticketsPayload, workspacesPayload } from './dashboard-payloads.js';
-import { mergeRequestThreadsRead, openMergeRequestsRead } from './dashboard-routes.js';
+import { mergeRequestOverviewRead, mergeRequestThreadsRead, openMergeRequestsRead } from './dashboard-routes.js';
 import { FactoryError } from './errors.js';
 import { sendJson, statusOf } from './http.js';
 import { lineEntries, type StreamEntry, streamContext } from './job-stream.js';
@@ -80,6 +80,7 @@ export function readHandlers(ctx: DashboardContext) {
     // A workspace's merge requests on its Git host, read when asked; a refusal as refuseRead says.
     { pattern: 'api/workspaces/*/merge-requests', when: noQuery, handler: ({ res, params }) => hostRead(res, openMergeRequestsRead(actions, params)) },
     { pattern: 'api/workspaces/*/merge-requests/*/threads', when: noQuery, handler: ({ res, params }) => hostRead(res, mergeRequestThreadsRead(actions, params)) },
+    { pattern: 'api/workspaces/*/merge-requests/*/overview', when: noQuery, handler: ({ res, params }) => hostRead(res, mergeRequestOverviewRead(actions, params)) },
   ];
 
   async function hostRead(res: ServerResponse, found: Promise<unknown>): Promise<void> {

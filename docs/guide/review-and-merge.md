@@ -199,10 +199,16 @@ text"); edit the commit message in your IDE instead. After the push it is read-o
 When a merge request (yours or a colleague's) has review comments on the Git host, the factory can
 implement them on that merge request's branch:
 
-1. Open **Merge requests** in the top bar, choose the workspace and press **Load**: its open merge
-   requests.
-2. Choose one and press **Fetch comments**: its review threads, the open ones first (the resolved
-   ones behind *Show resolved*).
+1. Open **Merge requests** in the top bar: the chosen workspace's open merge requests are read at
+   once, one compact row each, newest update first. A row shows the pipeline (passed, failed,
+   running), whether the merge request can be merged (*Ready to merge*, or *Not ready* and why),
+   *Rebase needed: N behind main* when its branch lacks commits of the target, and a red SonarQube
+   badge only when SonarQube found a problem (a failed gate or new issues). Choosing another
+   workspace reads its list at once. **Refresh** reads everything again; *Read 14 min ago* beside
+   it says how old the rows are. Nothing reads the host while the page is closed.
+2. Press a row's comments button (or its title): its review threads, the open ones first (the
+   resolved ones behind *Show resolved*, the bots' comments, SonarQube's long summaries among them,
+   behind *Show bot comments*).
 3. Tick the comments to implement, and write **Your instructions** if you want more ("fix this and
    that"); instructions alone are enough.
 4. Press **Create job**. The factory reads the comments from the host again and writes a Task file

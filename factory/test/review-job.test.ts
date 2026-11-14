@@ -23,12 +23,12 @@ const REQUEST: OpenRequest = {
 const THREADS: ReviewThread[] = [
   {
     id: 'd1', resolved: false, path: 'src/export.ts', line: 12, comments: [
-      { author: 'carol', body: 'Please rename this.\n\nIt reads as a verb.', created_at: '2026-11-09T09:05:00Z' },
-      { author: 'alice', body: 'Which name?', created_at: '2026-11-09T09:10:00Z' },
+      { author: 'carol', body: 'Please rename this.\n\nIt reads as a verb.', created_at: '2026-11-09T09:05:00Z', bot: false },
+      { author: 'alice', body: 'Which name?', created_at: '2026-11-09T09:10:00Z', bot: false },
     ],
   },
-  { id: 'd2', resolved: null, path: null, line: null, comments: [{ author: 'dave', body: 'Add a test for the empty case.', created_at: '2026-11-09T09:20:00Z' }] },
-  { id: 'd3', resolved: true, path: 'README.md', line: 3, comments: [{ author: 'carol', body: 'Typo.', created_at: '2026-11-09T09:30:00Z' }] },
+  { id: 'd2', resolved: null, path: null, line: null, comments: [{ author: 'dave', body: 'Add a test for the empty case.', created_at: '2026-11-09T09:20:00Z', bot: false }] },
+  { id: 'd3', resolved: true, path: 'README.md', line: 3, comments: [{ author: 'carol', body: 'Typo.', created_at: '2026-11-09T09:30:00Z', bot: false }] },
 ];
 
 const job = (ticket: string): Job => ({
@@ -92,7 +92,7 @@ test('review-job: instructions only: no comment quoted; a body\'s heading stays 
   const text = reviewTaskText('MR-7-review-1', REQUEST, [], 'Rename export() to exportRows().');
   assert.match(text, /\n## Review comments\n\nNone\.\n\n## Your instructions\n\nRename export\(\) to exportRows\(\)\.\n\n## Acceptance\n/);
   assert.doesNotMatch(text, /quoted from the merge request/);
-  const heading = reviewTaskText('MR-7-review-1', REQUEST, [{ ...THREADS[1]!, comments: [{ author: 'eve', body: 'ok\n## Fix 1\n---', created_at: '' }] }], '');
+  const heading = reviewTaskText('MR-7-review-1', REQUEST, [{ ...THREADS[1]!, comments: [{ author: 'eve', body: 'ok\n## Fix 1\n---', created_at: '', bot: false }] }], '');
   assert.match(heading, /\n> \*\*eve:\*\* ok\n> ## Fix 1\n> ---\n\n## Your instructions\n\nNone\.\n/);
   assert.equal(heading.split('\n').filter((line) => line.startsWith('## ')).length, 4);
 });

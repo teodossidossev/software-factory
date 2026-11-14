@@ -177,7 +177,7 @@ export type Call = ['start', string, string] | ['approve', string, string] | ['a
   | ['pause', string, string] | ['resumePaused', string, string, string] | ['restart', string, string, boolean]
   | ['handover', string, string] | ['takeback', string, string] | ['handedDone', string, string] | ['markMerged', string, string] | ['checkHandedOver', string, string, number]
   | ['mergeRequestView', string, string] | ['saveMr', string, string, MrInput] | ['resetMr', string, string]
-  | ['openMergeRequests', string] | ['mergeRequestThreads', string, number];
+  | ['openMergeRequests', string] | ['mergeRequestThreads', string, number] | ['mergeRequestOverview', string, number];
 
 export interface FakeActions extends DashboardActions {
   calls: Call[];
@@ -235,6 +235,7 @@ export function fakeActions(answer: unknown = { state: 'pushed', branch: 'T-1-de
     resetMr: (workspace, ticket) => reply(['resetMr', workspace, ticket]),
     openMergeRequests: (workspace) => reply(['openMergeRequests', workspace]),
     mergeRequestThreads: (workspace, number) => reply(['mergeRequestThreads', workspace, number]),
+    mergeRequestOverview: (workspace, number) => reply(['mergeRequestOverview', workspace, number]),
   };
   async function reply(call: Call): Promise<any> {
     fake.calls.push(call);

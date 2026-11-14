@@ -2972,7 +2972,23 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    merges as before.
 10. `sf mr status` (the dashboard's Refresh MR status): what the host says now: open, merged or
     closed, draft, mergeable or why not, and the checks (GitHub's check runs of the head commit,
-    GitLab's head pipeline) when the host reports them. A merge request merged or closed on the
+    GitLab's head pipeline) when the host reports them. The status read (`Forge.status`) also
+    carries three fields the Merge requests page shows (section Reading the open merge requests and
+    their review comments), which the lines of `sf mr status` and Refresh MR status do not print:
+    `conflicts` (only when `true`: GitLab's `has_conflicts`; GitHub's `mergeable: false` or
+    `mergeable_state: dirty`), `behind` (how many commits of the target the source lacks, `0`
+    included) and `pipeline` (`{state, text, url}`: `state` `passed`, `failed`, `running` or
+    `other`). GitLab's `GET …/merge_requests/<iid>` asks with `include_diverged_commits_count=true`
+    and `behind` is its `diverged_commits_count`; the pipeline is `head_pipeline` (else `pipeline`):
+    `success` passed, `failed` failed, `created`, `waiting_for_resource`, `preparing`, `pending`,
+    `running` and `scheduled` running, any other `other`, `text` the host's word, `url` its
+    `web_url` when it is `http(s)`. GitHub, only while the pull request is open: `behind` is
+    `behind_by` of `GET /repos/:owner/:repo/compare/<base ref>...<head sha>`, best effort like the
+    check runs (any failure, a token without Contents read too, leaves `behind` out and changes
+    nothing else); the pipeline comes from the check runs (any failed: failed, else any running:
+    running, else any passed: passed, else other; none read: no pipeline), `text` the checks'
+    summary, `url` `<pull request URL>/checks`. The other fields, reasons and refusals are as
+    before, so Merge and Refresh MR status behave the same. A merge request merged or closed on the
     host meanwhile is recorded so, without a notification. A job with no merge request recorded
     (SF-200: the user pushed it and opened its merge request by hand, after a hand-over), in
     `handed_over`, `ready_for_human_review` or `pushed`, is looked up by its branch: the factory
@@ -3011,10 +3027,11 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
 ### Reading the open merge requests and their review comments
 
 Any open merge request of a registered workspace's origin, the user's or a colleague's, and its
-review comments can be read on the host when the user asks (a command or the dashboard's API; never
-in the background). Nothing is written to the host: no reply, no resolve; every request is a `GET`
-with the workspace's token (`src/forge-comments.ts`, the same client, token rules and refusals as
-above, and the same codes in the table above).
+review comments can be read on the host when the user asks: a command, or the dashboard's
+Merge requests page when the user opens it, chooses a workspace on it, expands a merge request or
+presses Refresh; never in the background and never on a timer. Nothing is written to the host: no
+reply, no resolve; every request is a `GET` with the workspace's token (`src/forge-comments.ts`,
+the same client, token rules and refusals as above, and the same codes in the table above).
 
 - `sf mr list <workspace>`: the open merge requests, newest update first, at most 50, one line each:
   `!<number>  <source> → <target>  <author>  <title>` (`No open merge requests.` when there are
@@ -3035,7 +3052,29 @@ Both exit 1 with the refusal (`mr_token_missing`, `mr_host_unsupported`, `mr_aut
 drains or builds. Comment bodies are shown as the host gives them and never logged.
 
 The dashboard's Merge requests page (section Dashboard, Merge requests) reads the same two lists
-and turns the threads the user ticks into a job on the merge request's branch.
+and turns the threads the user ticks into a job on the merge request's branch. It also reads each
+listed merge request's overview (`GET api/workspaces/<ws>/merge-requests/<number>/overview`,
+`src/mr-overview.ts`): two reads of the host, the status of item 10 above (with its `conflicts`,
+`behind` and `pipeline`; on GitHub the pull request, its check runs and the compare) and the
+threads, so about four to six `GET`s per merge request, at most 4 merge requests at a time. From
+them:
+
+- `ready`: `false` when the host says it cannot be merged or `behind` is 1 or more; `null` while the
+  host has not decided; else `true`. `reasons`: the host's reason first (approvals missing are the
+  host's own words: GitLab's `it needs approvals`, GitHub's `blocked`), then `it has conflicts with
+  the target branch`, `it is a draft` and `it is <N> commit(s) behind the target branch` when the
+  reason does not say them already (a rebase or behind reason covers the last), each once.
+- `comments`: the human and the bot comments of every thread, resolved ones too. Every comment of
+  the threads carries `bot`: a bot author (GitHub's `user.type` `Bot`, a login ending in `[bot]`;
+  on both hosts a name with the word `bot` in it, such as `project_12_bot_ab12` or `ci-bot`, or
+  with `sonar`; GitLab's `author.bot` when the host sends it), or a SonarQube comment (its body
+  says `Quality Gate passed` or `failed` and its author is a bot or the body names SonarQube),
+  whoever posted it. `sf mr comments` prints its threads as before, without `bot`.
+- `sonar`: SonarQube's verdict from the newest SonarQube comment, only when it found a problem:
+  `gate_failed`, `new_issues` (`N New issues`, else the sum of the older `N Bugs`, `N
+  Vulnerabilities` and `N Code Smells`, else `null`) and `url` (the first `http(s)` Markdown link
+  whose text says new issues, else analysis details, else `null`); `null` for a passed gate with no
+  new issue or without a SonarQube comment.
 
 ## Guard
 
@@ -4251,6 +4290,8 @@ naming the type, when a type of `web/types.d.ts` has neither.
 - `routing.js`: the view shown, routing, the delegated click, input, change and key handlers.
 - `ticket-page.js`: Markdown preview, the planned ticket page, a ticket's images.
 - `reports.js`: the morning digest and the Stats page.
+- `mr-row.js`: `mrRow`, one compact row of an open merge request (its pipeline, readiness, rebase
+  need, SonarQube's problem, its comments button); it reads no page state, so any page can draw it.
 - `review-page.js`: the Merge requests page (a job from review comments) and `leavePages`.
 - `setup.js`: the drawer and the setup (workspaces, new ticket, archived, ticket actions).
 - `skills.js`: the Skills page (each agent role's skills, switched by a click).
@@ -4268,7 +4309,8 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 | `api/jobs/<ws>/<ticket>` | `{job, iterations: [{number, started_at, ended_at, cost_usd, changed_files, patch_truncated, denials, files, review, gate, gate_override, simplify}], mr, gate, history: [{ts, from, to, error?} or {ts, event: "gate_overridden", code, unapplied} or {ts, event: "merge_request", action, number, url, state}], mr_title, ledger, settle_ids, confirm_actions, explanation}`; `job` has the fields of an `api/jobs` row's job part, `stop_code`, `stop_kind`, `stop_group`, `actions` and `availability` included (SF-129); `settle_ids` the ids of the ledger entries the stop block offers *Accept risk* / *Must fix* for (`[]` unless the stop's row has a settlement); `confirm_actions` the actions that need the job's ticket typed again on the remote port (SF-139: `approve`, `retry`, `archive`, `mr-create`, `mr-merge`, `merged-archive`), on both ports; `mr_title` is the MR text's first line or `null`; `explanation` is the job's `explanation.json` while it is the current stop's (SF-106, section Stop explanations), else `null`; `ledger` is `ledger.json` as written (`[]` before the first Fix section, SF-052); `gate` is whether the Codex gate is on, `gate_override` the iteration's `gate-override.json` or `null`, `simplify` its `simplify.json` (SF-055) or `null` |
 | `api/workspaces` | `{workspaces: [{name, path, liveJobs, problem, handoff, color, app, description, derived_description, digest}], handoff_default, digest}`: the registry, the checkout's path, its non-terminal jobs, why the checkout cannot be used now or `null`, its own hand-over setting or `null`, and its colour on the board (SF-084: its `color`, else the one its name picks); SF-103: its app (its own, else its name), its own description or `null`, the description derived from the repository or `null`, `digest: {track, my_work}`; at the top `handoff_default` (`checkout` or `off`, from `SF_HANDOFF`) and the morning digest's `digest: {at, weekdays_only, language}` |
 | `api/workspaces/<ws>/merge-requests` | the open merge requests of the workspace's origin on its Git host, as `sf mr list` reads them (section Reading the open merge requests and their review comments): `[{number, title, author, source, target, url, updated_at, draft}]`, newest update first, at most 50; read on the host at each request, nothing written to it; `409 mr_token_missing` or `mr_host_unsupported`, `502 mr_auth_failed`, `mr_host_error` or `mr_host_unreachable`; a name that is not a workspace's, an unknown workspace or any query is an empty 404 |
-| `api/workspaces/<ws>/merge-requests/<number>/threads` | the review threads of one merge request, as `sf mr comments` reads them: `[{id, resolved, path, line, comments: [{author, body, created_at}]}]`, oldest first; `path` and `line` `null` for a general comment, `resolved` `null` where the host has no such state (GitHub); the refusals as above; a number that is not a whole number from 1 is an empty 404 |
+| `api/workspaces/<ws>/merge-requests/<number>/threads` | the review threads of one merge request, as `sf mr comments` reads them: `[{id, resolved, path, line, comments: [{author, body, created_at, bot}]}]`, oldest first; `path` and `line` `null` for a general comment, `resolved` `null` where the host has no such state (GitHub); `bot` a bot's or SonarQube's comment; the refusals as above; a number that is not a whole number from 1 is an empty 404 |
+| `api/workspaces/<ws>/merge-requests/<number>/overview` | the overview of one merge request (section Reading the open merge requests and their review comments): `{number, ready, reasons, behind, pipeline: {state, text, url} \| null, sonar: {gate_failed, new_issues, url} \| null, comments: {human, bot}}`; read on the host at each request (its status and threads), nothing written to it; the refusals and empty 404s as for `.../threads` |
 | `api/digests` | `{running, digests: [{id, trigger, period, ended_at, counts: {landed, live_branches, impact}, cost_usd, error}]}`, newest first (SF-103); the counts from the Git data, never from the model; 404 without the digest (in-process dashboards) |
 | `api/digests/<id>` | the stored record `digest/<id>.json` (SF-103); an unknown id or any query is an empty 404 |
 | `api/coordinator` | the coordinator's state, `coordinator.json` read as `sf coordinator` reads it (section Coordinator card): `{version, status: {text, at} \| null, questions: [{id, text, at}], link, next_question}`; any query is an empty 404; written only by `sf coordinator` |
@@ -4530,16 +4572,35 @@ The Merge requests tab in the header (or `#merge-requests`, `web/review-page.ts`
 an open merge request's review comments, the user's merge request or a colleague's. Nothing is
 written to the Git host from it: no reply, no resolve.
 
-1. Choose a registered workspace and press **Load**: its open merge requests (`GET
-   api/workspaces/<ws>/merge-requests`): number, title, author, source → target, last update, and
-   whether it is a draft.
-2. Choose one, then **Fetch comments** (`GET .../merge-requests/<number>/threads`): each thread
-   with an unticked checkbox, its place (`<path>:<line>` or General) and its comments (author,
-   time, body). The open threads come first; the resolved ones (GitLab) behind "Show resolved
-   (N)". Every host text is set as text, never as HTML.
-3. Tick the threads to implement and, or instead, write **Your instructions** (at most 4,000
+1. Opening the page (the tab, the page select or the hash; at the dashboard's start, as soon as the
+   workspaces are known) reads the chosen workspace's open merge requests (`GET
+   api/workspaces/<ws>/merge-requests`) at once, then each one's overview (`GET
+   .../merge-requests/<number>/overview`, at most 4 at a time, in the list's order). Choosing
+   another workspace reads its list at once; a redraw for any other reason never reads.
+   **Refresh** reads the list and every overview again (it is off while they are read); beside it,
+   `Read just now` or `Read <dur> ago`, from the time the list's answer arrived, which the board's
+   one-minute tick moves on without a read or a redraw. There is no timer of the page's own.
+2. One compact row per merge request, newest update first, wrapping on a narrow screen
+   (`web/mr-row.ts`, `mrRow`): `!<number> <title>` (its tooltip the author and the last update)
+   and a `↗` link to the host (only an `http(s)` URL); `<source> → <target>`; the pipeline
+   (`passed` green, `failed` red, `running` amber, the host's own word grey; a link to it when its
+   URL is known); `Ready to merge` (green), `Not ready: <reasons>` (amber) or `Checking
+   mergeability` (grey); `Rebase needed: <N> behind <target>` (red) when the source lacks commits
+   of the target; a red SonarQube badge only when SonarQube found a problem (`Sonar: gate failed,
+   <N> new issues`, `Sonar: gate failed` or `Sonar: <N> new issues`, a link when the comment gives
+   one); and the comments button (`<N> comments`, the human ones; its tooltip counts the bot
+   comments hidden). While its overview is read the row says `Reading status…`; a refused one
+   `Status unavailable: <message>`.
+3. The comments button or the title expands the row (one at a time) and reads its threads (`GET
+   .../merge-requests/<number>/threads`): each thread with an unticked checkbox, its place
+   (`<path>:<line>` or General) and its comments (author, time, body). The open threads come
+   first; the resolved ones (GitLab) behind "Show resolved (N)"; the threads only bots wrote
+   (SonarQube's among them) behind "Show bot comments (M)". Refresh keeps the expanded merge
+   request and the instructions while it is still open, reads its threads again and drops the
+   ticks of threads that are gone. Every host text is set as text, never as HTML.
+4. Tick the threads to implement and, or instead, write **Your instructions** (at most 4,000
    characters). **Create job** is on when a thread is ticked or the instructions are not blank.
-4. Create job posts only the thread ids and the instructions (`POST
+5. Create job posts only the thread ids and the instructions (`POST
    .../merge-requests/<number>/job`); the server reads the merge request and its threads from the
    host again. The page shows the new ticket with a link to its ticket page, or the server's
    message.

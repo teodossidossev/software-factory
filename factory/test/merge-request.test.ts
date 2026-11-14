@@ -290,7 +290,7 @@ test('sf mr status without a record (SF-200): a handed-over job\'s merge request
     const again = await runCli(env, ['mr', 'status', 'app', 'T-1']);
     assert.doesNotMatch(again.stdout, /Found by branch/);
     assert.match(again.stdout, /^merge request: #3 open$/m);
-    assert.deepEqual(fake.requests.slice(before).map((r) => `${r.method} ${r.path}`), ['GET /api/v4/projects/group%2Fapp/merge_requests/3']);
+    assert.deepEqual(fake.requests.slice(before).map((r) => `${r.method} ${r.path}`), ['GET /api/v4/projects/group%2Fapp/merge_requests/3?include_diverged_commits_count=true']);
     assert.equal((await events()).length, 1);
 
     // Two open: the newest, with the count.

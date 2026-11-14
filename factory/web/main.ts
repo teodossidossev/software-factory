@@ -351,6 +351,10 @@ function init(): void {
   // would take it away). The test stand-in has no interval.
   if (typeof setInterval === 'function') {
     setInterval(() => {
+      // The Merge requests page's read age: its text only, whatever has the focus.
+      if (ui.screen === 'merge-requests') {
+        tickMergeRequestAge();
+      }
       if (!byId('board').contains(document.activeElement)) {
         renderBoard();
       }

@@ -1,13 +1,14 @@
 // The Git host's merge requests: GitHub (github.com, REST API v3) and GitLab (gitlab.com or the
 // host of SF_GITLAB_URL, REST API v4), chosen from the workspace checkout's origin URL. Opens a
 // pull request / merge request from the job's branch into its base (or reuses the open one), reads
-// its state and merges it through the host's API; finds the open and the merged ones of a branch (GET only); lists
+// its state (with its pipeline and how far it is behind its base) and merges it through the host's API; finds the open and the merged ones of a branch (GET only); lists
 // the open ones and reads one's review threads (src/forge-comments.ts); nothing is pushed or forced here. The tokens
 // come from the environment file (SF_GITHUB_TOKEN, SF_GITLAB_TOKEN); each goes only in the
 // Authorization header of a request to its own host's API, redirects are refused, and no message
 // carries it.
 import { FactoryError } from './errors.js';
 import { allPages, githubReads, gitlabReads, type OpenRequest, type ReviewThread } from './forge-comments.js';
+import { checkSummary, countOf, gitlabPipeline, type PipelineSummary } from './mr-overview.js';
 import { parseOrigin } from './mr.js';
 
 export type ForgeKind = 'github' | 'gitlab';
@@ -101,13 +102,18 @@ export interface MergeRequest {
 
 // What the host says of a merge request: mergeable is null while the host does not know yet;
 // reason says why it cannot be merged; checks summarizes the checks or the pipeline when the host
-// reports them.
+// reports them. conflicts is there only when true; behind is how many commits of the target the
+// source lacks, when the host says (GitLab's diverged_commits_count, GitHub's compare); pipeline
+// when the host gives a pipeline or at least one check run.
 export interface MergeRequestStatus extends MergeRequest {
   draft: boolean;
   mergeable: boolean | null;
   reason?: string;
   checks?: string;
   merge_commit?: string;
+  conflicts?: boolean;
+  behind?: number;
+  pipeline?: PipelineSummary;
 }
 
 export type MergedRequest = MergeRequest & { merged_at: string; merge_commit?: string };
@@ -364,23 +370,6 @@ function mergedEntry(client: HostClient, data: Json, key: 'number' | 'iid', urlK
 const latestMerged = (list: Array<MergedRequest | undefined>): MergedRequest[] =>
   list.filter((entry): entry is MergedRequest => entry !== undefined).sort((a, b) => Date.parse(b.merged_at) - Date.parse(a.merged_at));
 
-// "2 passed, 1 failed, 1 running" from GitHub's check runs.
-function checkSummary(runs: Json[]): string | undefined {
-  if (runs.length === 0) {
-    return undefined;
-  }
-  const counts = new Map<string, number>();
-  for (const run of runs) {
-    const conclusion = str(run.conclusion);
-    const word = run.status !== 'completed' ? 'running'
-      : conclusion === 'success' ? 'passed'
-        : conclusion === 'skipped' || conclusion === 'neutral' ? 'skipped'
-          : 'failed';
-    counts.set(word, (counts.get(word) ?? 0) + 1);
-  }
-  return ['passed', 'failed', 'running', 'skipped'].filter((word) => counts.has(word)).map((word) => `${counts.get(word)} ${word}`).join(', ');
-}
-
 function githubForge(client: HostClient, path: string): Forge {
   const [owner, repo] = path.split('/') as [string, string];
   const base = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
@@ -443,17 +432,28 @@ function githubForge(client: HostClient, path: string): Forge {
       } else if (mergeable === null) {
         reason = 'GitHub has not computed yet whether it can be merged';
       }
+      const numberedPull = numbered(client, data, 'number', 'html_url', state);
       const sha = str(asRecord(data.head).sha);
-      let checks: string | undefined;
+      let summary: ReturnType<typeof checkSummary>;
+      let behind: number | undefined;
       if (sha !== undefined && state === 'open') {
         // Best effort: a token without Checks read sees none.
         const runs = await client.request('GET', `${base}/commits/${encodeURIComponent(sha)}/check-runs?per_page=100`).catch(() => undefined);
-        checks = runs?.status === 200 ? checkSummary(asArray(asRecord(runs.data).check_runs)) : undefined;
+        summary = runs?.status === 200 ? checkSummary(asArray(asRecord(runs.data).check_runs), numberedPull.url) : undefined;
+        // Best effort too: how many commits of the base the head lacks; any failure leaves it out.
+        const targetRef = str(asRecord(data.base).ref);
+        if (targetRef !== undefined) {
+          const ref = targetRef.split('/').map(encodeURIComponent).join('/');
+          const compare = await client.request('GET', `${base}/compare/${ref}...${encodeURIComponent(sha)}`).catch(() => undefined);
+          behind = compare?.status === 200 ? countOf(asRecord(compare.data).behind_by) : undefined;
+        }
       }
+      const conflicts = data.mergeable === false || mergeableState === 'dirty';
       const mergeCommit = state === 'merged' ? commitOf(data.merge_commit_sha) : undefined;
       return {
-        ...numbered(client, data, 'number', 'html_url', state), draft, mergeable,
-        ...(reason !== undefined ? { reason } : {}), ...(checks !== undefined ? { checks } : {}), ...(mergeCommit !== undefined ? { merge_commit: mergeCommit } : {}),
+        ...numberedPull, draft, mergeable,
+        ...(reason !== undefined ? { reason } : {}), ...(summary !== undefined ? { checks: summary.checks } : {}), ...(mergeCommit !== undefined ? { merge_commit: mergeCommit } : {}),
+        ...(conflicts ? { conflicts } : {}), ...(behind !== undefined ? { behind } : {}), ...(summary !== undefined ? { pipeline: summary.pipeline } : {}),
       };
     },
     async merge(number, head) {
@@ -539,7 +539,7 @@ function gitlabForge(client: HostClient, path: string): Forge {
       return { ...numbered(client, created, 'iid', 'web_url', 'open'), reused: false };
     },
     async status(number) {
-      const data = asRecord(client.expect(await client.request('GET', `${project}/merge_requests/${number}`), `read merge request !${number}`, 200));
+      const data = asRecord(client.expect(await client.request('GET', `${project}/merge_requests/${number}?include_diverged_commits_count=true`), `read merge request !${number}`, 200));
       const state = stateOf(data.state);
       const draft = data.draft === true || data.work_in_progress === true;
       const detailed = str(data.detailed_merge_status);
@@ -558,12 +558,16 @@ function gitlabForge(client: HostClient, path: string): Forge {
         mergeable = data.merge_status === 'can_be_merged' ? !draft : null;
         reason = draft ? 'it is a draft' : mergeable === null ? 'GitLab is still checking whether it can be merged' : undefined;
       }
-      const pipeline = str(asRecord(data.head_pipeline ?? data.pipeline).status);
+      const pipelineData = asRecord(data.head_pipeline ?? data.pipeline);
+      const pipeline = str(pipelineData.status);
       const mergeCommit = state === 'merged' ? commitOf(data.merge_commit_sha) ?? commitOf(data.squash_commit_sha) : undefined;
+      const behind = countOf(data.diverged_commits_count);
       return {
         ...numbered(client, data, 'iid', 'web_url', state), draft, mergeable,
         ...(reason !== undefined ? { reason } : {}), ...(pipeline !== undefined ? { checks: `pipeline ${pipeline}` } : {}),
         ...(mergeCommit !== undefined ? { merge_commit: mergeCommit } : {}),
+        ...(data.has_conflicts === true ? { conflicts: true } : {}), ...(behind !== undefined ? { behind } : {}),
+        ...(pipeline !== undefined ? { pipeline: gitlabPipeline(pipeline, pipelineData.web_url) } : {}),
       };
     },
     async merge(number, head) {

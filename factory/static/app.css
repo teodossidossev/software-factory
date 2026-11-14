@@ -442,6 +442,19 @@ textarea.mdedit.fld { font: 12.5px/1.5 var(--mono); padding: 8px; border: 1px so
 /* Plan with: ChatGPT · Claude Code; the owner in use is pressed, not faded as a disabled button. */
 .tk-owner { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .tk-owner .btn.on { border-color: var(--accent); color: var(--accent); font-weight: 600; opacity: 1; cursor: default; }
+/* Back to the planner: the job page's planner block in the composer (the planner's note as plain
+   text, Send and Dismiss, the links), a card's suggestion clamped to three lines, and the planning
+   chat link's field on the job page and the ticket page. */
+.composer .planner { display: grid; gap: 6px; font-size: 13px; }
+.planner-suggestion { display: grid; gap: 6px; border: 1px solid var(--border-strong); border-left: 3px solid var(--accent); border-radius: var(--radius-sm); padding: 8px 10px; background: var(--panel-2); }
+.planner-note { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; }
+.planner-acts, .planner-links { display: flex; gap: 8px 12px; align-items: center; flex-wrap: wrap; }
+.planner-card { display: grid; gap: 4px; margin-top: 6px; }
+.planner-clip { font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
+.card .planner-links { margin-top: 4px; font-size: 12px; }
+.chat-field { display: grid; gap: 4px; }
+.chat-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.chat-input { flex: 1 1 260px; min-width: 0; font: 12.5px var(--sans); padding: 5px 8px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--bg); color: var(--fg); }
 
 /* The live page's own pieces, which the prototype does not show, in its style: the hidden
    attribute (the prototype page's first style element), the board's hint, the toast's close button and its error, an

@@ -5,8 +5,9 @@ client), runs the jobs and provides the `sf` command. How to work with it is in 
 vocabulary is in [../CONTEXT.md](../CONTEXT.md).
 
 The MCP endpoint serves only the planning tools (`guide`, `read_file`, `search`, `write_task`,
-`task_check`, `read_attachment` (a ticket's image, section Ticket images), and the run queue's
-`queue_list` and `queue_add`, section Run queue): the Context owner reads the repository, grills the user on the ticket (section MCP endpoint, The instructions) and
+`task_check`, `read_attachment` (a ticket's image, section Ticket images), the run queue's
+`queue_list` and `queue_add`, section Run queue, and, while a job waits for the user, `read_job`
+and `suggest_changes`, section MCP endpoint, Back to the planner): the Context owner reads the repository, grills the user on the ticket (section MCP endpoint, The instructions) and
 writes the Task file with its `## Review brief`. Before Start, the Task check (section Task check)
 reads the Task file and the repository and says whether it is ready to build; `sf serve` runs it by
 itself after each write (SF-086). The user starts the job, with the Start button of the ticket on the
@@ -339,6 +340,27 @@ started by the run queue as before.
   other skills`) once at start; a `planner` role with no skill logs `warning: the planner role has
   no skill (sf skills set planner <skill> on); the instructions are the Quick start alone`; an
   empty `SF_PLAN_SKILL` logs nothing.
+- **Back to the planner** (SF-208): while a job waits for the user (`needs_human`,
+  `ready_for_human_review`, `handed_over`: the `waiting` trait), the user can talk the result over
+  with the planner (the job page's and card's Discuss the result) and send the Implementer the
+  change they agree on.
+  - `read_job(workspace, ticket, iteration?)`, read-only, starts nothing: `{ state, iteration,
+    shown_iteration, stop, report, report_truncated, review, gate }`. `shown_iteration` is the
+    argument, else the job's last iteration (0 before the first: `report`, `review` and `gate` are
+    null); `stop` is the job's `error` while `needs_human`; `report` is the iteration's
+    `report.md`, at most 64 KiB (`MAX_REPORT_BYTES`, cut on a character boundary, flagged in
+    `report_truncated`); `review` and `gate` are its `review.json` and `gate.json` reduced to
+    `{ verdict, summary, items: [{ path, problem, expected, severity }] }` or `{ error }`. Every text
+    has the job's worktree as `<worktree>` and the checkout as `<checkout>`; only the job's own
+    directory is read. Refused: `workspace_not_found`, `job_not_found`, `invalid_iteration`.
+  - `suggest_changes(workspace, ticket, note)` starts nothing: it stores one note in
+    `<job dir>/planner-suggestion.json` (`{ note, sha256, at, iteration }`, written atomically),
+    replacing any earlier one, and answers `{ stored: true, sha256 }`; the open pages get the job
+    again. Refused: `job_not_found`, `invalid_state` (the job does not wait for the user),
+    `invalid_content` (empty after trimming, NUL, over 4000 characters, the cap of one user message
+    for the reviewers). The note is shown only while the job waits for the user at the iteration it
+    was stored at; a stale file stays until the next store. Only the user's Send on the job page
+    gives it to the Implementer, through `say` (section Dashboard, Composer).
 
 ## Environment
 
@@ -4051,7 +4073,7 @@ itself), each card with a short help line:
 | **Files it will change** | `scope` and `may_touch`, in one list | The files the job is expected to create, change or delete (one path or pattern per row). A change outside the list needs your OK before it can ship. 🔒 marks a `may_touch` entry: a sensitive file (build, CI, packages, credentials) the ticket may change on purpose. Without `scope`: "No list: the job may change any file, and nothing is checked." |
 | **Waits for** | `lands_after` | Each ticket with SF-084's state in words: ✓ merged, pushed, not merged yet, running, planned, not started, unknown ticket (another workspace's as `<workspace>/<ticket>`). Start now still starts it. |
 | **Plan check** | (the Task check) | "Ready: …", "Not ready: N blockers, M majors." with the findings (their kind in words: needs a decision, contradicts itself, something is missing, does more than asked, unclear), what the checker understood and the files it expects to change; "Not checked yet.", "Checking…", "The plan changed after this check: check it again."; the date, the model and the cost. It only advises. |
-| **Planning conversation** | | *Plan with: ChatGPT · Claude Code* (the Context owner, switchable); for ChatGPT the link, for Claude Code where to paste; the first message and its Copy (below). |
+| **Planning conversation** | | *Plan with: ChatGPT · Claude Code* (the Context owner, switchable); for ChatGPT the link, for Claude Code where to paste; the first message and its Copy (below); the ticket's planning chat link (SF-208): *Open the planning chat ↗* when one is stored, and the field *Planning chat link* with Save and Remove. |
 | **Images** | | The ticket's images (SF-064, section Ticket images): each opens whole in a new tab, with **Copy image** and ×; "Paste an image here (Ctrl+V) or drop one." |
 | **History** | | What happened to the plan (below). |
 
@@ -4163,6 +4185,14 @@ each, facts looked up by itself), write the Task file over the skeleton with `wr
 approves a job; the user reads the Task file and presses Start. A ticket with images gets the
 sentence of section Ticket images before the last one. A message too long for a link
 (over 7500 characters of URL) has no link: the page offers it to copy.
+The card ends with the ticket's **planning chat link** (SF-208): the conversation the ticket was
+planned in, pasted by the user into the field *Planning chat link* and saved with Save (`POST
+api/tickets/<ws>/<ticket>/chat`; Remove posts `null`), kept in `<state dir>/requests/<ws>/<ticket>.chat`
+and removed with the ticket. Only a `https://chatgpt.com/` link is kept (no other scheme, host,
+subdomain, port or credentials, at most 2048 characters; else `invalid_chat_link`, shown next to
+the field); it can be set while a job of the ticket is live. A stored link shows as *Open the
+planning chat ↗* (`target=_blank`, `rel=noopener`) here, on the job's card and on its page, and
+only when it starts with `https://chatgpt.com/`.
 Whether ChatGPT sends a prefilled message by itself is up to ChatGPT, so the page says to press
 Enter if it is not. Only the server's ChatGPT URL becomes a link. A change made with `sf workspace
 add|remove` or `write_task` shows at the next refresh of the stream (a state change, an action
@@ -4230,6 +4260,22 @@ a header, then the Stream with the composer pinned at the bottom.
   `failed`: no message box, Restart… and Archive. A confirmation opens inline in the composer, before anything is sent;
   under it the outcome line and the warning of an unknown outcome, with *Refresh state* when the
   read after it failed.
+- **Planner block** (SF-208), in the composer right after its sentence: while the job waits for
+  the user and the planner's suggestion is shown (section MCP endpoint, Back to the planner), the
+  heading *Planner suggests changes*, the note as plain text and **Send** (primary; off with the
+  reason when the job takes no message) and **Dismiss**. Send posts the `sha256` of the note the
+  page shows (`suggestion-send`): the server sends its stored note through `say`, exactly as the
+  user's own message (on a handed-over job, Ask for changes), only while it is still that one
+  (`409 suggestion_changed` when the planner replaced it, `409 no_suggestion` when none is shown);
+  Dismiss removes it. Their outcomes show in the status line as the other actions'. Then, while
+  the job waits for the user, *Discuss the result ↗*: a new ChatGPT conversation prefilled with
+  the message of `resultConversation` (read the Task file and the Report with `read_job`, sum up,
+  discuss, propose with `suggest_changes`), or *Copy the message for the planner* when Claude Code
+  plans the ticket or the link would be too long; *Open the planning chat ↗* with a stored link,
+  and the field *Planning chat link*. The job's board card shows, in a waiting state, *Planner
+  suggests changes* with the note clamped to three lines (the whole note in its title) and *Review
+  the suggestion*, which opens this page with the composer focused (no Send on the card), and the
+  same two links.
 - **Changes** (SF-079): the file tree on the left and the diff of the selected file on the right,
   as IntelliJ shows them; see Changes below.
 - **Merge request** (SF-080): the branch, the base, the MR title and text, editable before the
@@ -4406,6 +4452,8 @@ shares; the setup, Task check, task and attachment posts have their own handlers
 | `POST api/jobs/<ws>/<ticket>/approve` | `{"as_is"?: boolean}` | `Execution.approve(ws, ticket, as_is)`: the push of the prepared branch; `as_is` pushes a tip edited by hand; it waits up to 10 s for the job's runner to end and is refused with `409 runner_active` while the runner runs or a request (`sf say`, a fix) waits for it (SF-042) |
 | `POST api/jobs/<ws>/<ticket>/abort` | `{"discard": false}`; `discard` optional, default false | `Execution.abort(ws, ticket, discard)` |
 | `POST api/jobs/<ws>/<ticket>/say` | `{"message": "<text>"}` | `Execution.say(ws, ticket, message)`; the text goes as it is (nothing trimmed or split); answered by the job's runner (SF-042), so `500 runner_failed` or `500 runner_timeout` can come back |
+| `POST api/jobs/<ws>/<ticket>/suggestion-send` | `{"sha256": "<hex>"}` | `Execution.sendSuggestion(ws, ticket, sha256)` (SF-208, dashboard only): `409 no_suggestion` when the job shows no planner suggestion (none, a job that does not wait for the user, an older iteration's), `409 suggestion_changed` when the shown one has another sha256 (nothing is sent); else `say` with the stored note and its result and refusals; the check, the `say` and the removal of the file are one step that a store or a Dismiss waits for, and while the `say` runs `planner-send.json` in the job directory names the note, so the job's runner refuses it with `409 no_suggestion` when another message moved the job out of its waiting state or to another iteration first; the pages get the job again |
+| `POST api/jobs/<ws>/<ticket>/suggestion-dismiss` | `{}` | `Execution.dismissSuggestion(ws, ticket)` (SF-208, dashboard only): removes the planner's suggestion; result `{dismissed}` (false when there was none); the pages get the job again |
 | `POST api/jobs/<ws>/<ticket>/retry` | `{}` | `Execution.retryMr(ws, ticket)` (`sf retry`, SF-087): MR preparation runs again without a new review; result `{state, iteration, branch}`; on `mr_push_failed` it is `approve` without `as_is` and its result; `409 invalid_state` unless the job is `needs_human` with one of `MR_RETRY_CODES`, its worktree, no prepared commit and no conflict turn; answered by the job's runner, so `500 runner_failed` or `500 runner_timeout` can come back |
 | `POST api/jobs/<ws>/<ticket>/review` | `{}` | `Execution.retryReview(ws, ticket)` (`sf review`): the failed review of the last iteration runs again; result `{state, iteration}`; `409 invalid_state` unless the job is `needs_human` with `review_failed`, `409 review_off` with `SF_REVIEW=off`; answered by the job's runner, so `500 runner_failed` or `500 runner_timeout` can come back |
 | `POST api/jobs/<ws>/<ticket>/settle` | `{"id": string, "decision": "accept" \| "fix", "note"?: string}` | `Execution.settle(ws, ticket, id, decision, note)` (`sf settle`, SF-052): the settlement of an escalated or contested ledger entry; result `{state, id, status, waiting}`; `409 invalid_state` unless the job is `needs_human` and the entry escalated or contested; `400 invalid_content` for a bad id, decision or note; `500 ledger_invalid` when `ledger.json` cannot be read; answered by the job's runner |
@@ -4426,6 +4474,7 @@ shares; the setup, Task check, task and attachment posts have their own handlers
 | `POST api/workspaces/<name>/remove` | `{}` | `Setup.removeWorkspace`; `409 workspace_busy` while the workspace has a live job; result `{removed}` |
 | `POST api/tickets` | `{"workspace", "ticket", "title", "request", "owner"?: "chatgpt" \| "claude_code"}` | `Setup.createTicket`: the ticket skeleton through the Task file writer, the request and the Context owner (`chatgpt` when left out) kept for the conversation; result `{workspace, ticket, path, base}` |
 | `POST api/tickets/<ws>/<ticket>/owner` | `{"owner": "chatgpt" \| "claude_code"}` | `Setup.setTicketOwner` (the ticket page's *Plan with*): rewrites `<state dir>/requests/<ws>/<ticket>.owner`; the names checked, `409 job_active` while a job of the ticket is live, `404 task_not_found` without a Task file listed as a ticket; result the ticket's row as the tickets payload has it (with `owner` and its `conversation`, without the queue fields); every page gets the tickets again; POST only |
+| `POST api/tickets/<ws>/<ticket>/chat` | `{"url": string \| null}` | `Setup.setPlanningChat` (SF-208, the planning chat link's Save and Remove): writes `<state dir>/requests/<ws>/<ticket>.chat` (null removes it); the names checked, allowed while a job of the ticket is live, `404 task_not_found` without the ticket's active Task file, `400 invalid_chat_link` for anything but a `https://chatgpt.com/` link; result `{workspace, ticket, planning_chat}`; every page gets the tickets and the jobs again; POST only |
 | `POST api/tickets/<ws>/<ticket>/start` | `{}` | `Execution.start(ws, ticket)` (`sf start`, SF-040, SF-046): the job's record, branch and worktree, then iteration 1; result `{branch, state, check_after_minutes, worktree}`; refusals as they come (`409 task_draft` for a skeleton, `409 job_exists`, `409 branch_exists`, `404 task_not_found`, ...; a start by hand is never held by the run limit); every page gets the jobs, the workspaces and the tickets again |
 | `POST api/tickets/<ws>/<ticket>/archive`, `.../restore`, `.../delete` | `{}` | `Setup.archiveTicket`, `restoreTicket`, `deleteTicket` (SF-027); the ticket's images folder with them (SF-064) |
 | `POST api/tickets/<ws>/<ticket>/attachments?name=<name>` | the image's raw bytes, `Content-Type: application/octet-stream` (not JSON), at most 5 MB | `Setup.addAttachment` (SF-064, section Ticket images): `name` optional (the next number when left out; another query key or a second `name` is an empty 404); result `{name, bytes, type}`; `400 attachment_type`, `400 invalid_name`, `413 attachment_too_large` (also a body over 5 MB, checked against `Content-Length` and while reading), `409 attachment_limit`, `409 job_active`, `404 task_not_found`; every page gets the tickets again |
@@ -4471,9 +4520,10 @@ under `409` for `invalid_state`, `turn_running`, `rebase_in_progress`, `review_o
 `worktree_exists`, `worktree_missing`, `sensitive_unacknowledged`, `ticket_exists`,
 `workspace_exists`, `workspace_busy`, `branch_locked` and `base_unrelated` (SF-080),
 `already_queued` and `not_queued` (SF-071), `attachment_limit` (SF-064), `digest_running` (SF-103),
+`no_suggestion` and `suggestion_changed` (SF-208),
 `413` for `attachment_too_large` (SF-064),
 `404` for `job_not_found`, `workspace_not_found` and `task_not_found`, `400` for `invalid_content`, `invalid_ticket`, `invalid_name`,
-`workspace_invalid`, `mr_text_invalid` (SF-080), `invalid_limit` and `invalid_position` (SF-071), `attachment_type` and `attachment_missing` (SF-064), `invalid_digest_settings` (SF-103), and `500` for any other code (a Git failure before the preparation, for
+`workspace_invalid`, `mr_text_invalid` (SF-080), `invalid_limit` and `invalid_position` (SF-071), `attachment_type` and `attachment_missing` (SF-064), `invalid_digest_settings` (SF-103), `invalid_chat_link` (SF-208), and `500` for any other code (a Git failure before the preparation, for
 example; `runner_failed` and `runner_timeout` of a request the job's runner answers: say,
 review, accept). Any other failure is `500`
 with `internal_error` and a fixed message; the cause is logged, never the body or the token.

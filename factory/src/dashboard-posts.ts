@@ -77,6 +77,8 @@ const BODIES = {
   },
   // The ticket page's switch of who plans the ticket.
   'ticket-owner': { shape: '{"owner": "chatgpt" | "claude_code"}', schema: z.strictObject({ owner: z.enum(TICKET_OWNERS) }) },
+  // The ticket's planning chat link: a https://chatgpt.com/ URL, or null to remove it.
+  'ticket-chat': { shape: '{"url": string | null}', schema: z.strictObject({ url: z.string().nullable() }) },
   // The dashboard's pins (src/pins.ts, with their bounds): a new one, a change of one, a removal.
   'pin-add': { shape: PIN_INPUT_SHAPE, schema: PIN_INPUT },
   'pin-change': { shape: PIN_CHANGE_SHAPE, schema: PIN_CHANGE },
@@ -303,6 +305,24 @@ export function postHandlers(ctx: DashboardContext, feed: Pick<ChangeFeed, 'chan
           return parsed.success ? async () => ticketEntry(await setup.setTicketOwner(...key, parsed.data.owner), checks) : undefined;
         },
         refreshSetup: true,
+      };
+    }
+    if (target.kind === 'ticket-chat') {
+      // Setup.setPlanningChat: the names and a missing Task file refused, a live job allowed, a link
+      // that is not a https://chatgpt.com/ one refused (invalid_chat_link); the ticket and the jobs
+      // reach every page again (the job's card and page show the link).
+      const key = jobKey(target.workspace, target.ticket);
+      if (key === undefined) {
+        return undefined;
+      }
+      return {
+        ...setupBody('ticket-chat'),
+        call: (data) => {
+          const parsed = BODIES['ticket-chat'].schema.safeParse(data);
+          return parsed.success ? () => setup.setPlanningChat(...key, parsed.data.url) : undefined;
+        },
+        refreshSetup: true,
+        refreshJobs: true,
       };
     }
     if (target.kind === 'workspace-remove') {

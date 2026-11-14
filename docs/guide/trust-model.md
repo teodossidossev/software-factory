@@ -240,6 +240,13 @@ with `forbidden_path`:
 Both the requested path and, for a link, the path it resolves to in the checkout are checked; a
 link out of the checkout is refused. The check runs Git like every other factory Git call (below).
 
+`read_job` sends a job's result to the same provider: the job's state and stop, one iteration's
+Report (up to 64 KiB) and the Claude review's and the gate's verdicts, summaries and items (paths,
+problems, expectations). It reads only the job's own directory, and every text has the job's
+worktree path as `<worktree>` and the checkout's as `<checkout>`, so no real path leaves the
+machine through it. Whatever the Implementer or a reviewer quoted from your code in those texts
+goes too. `suggest_changes` sends nothing out; it stores a note you send or dismiss.
+
 ## What runs outside the sandbox
 
 The factory itself, as you: `git fetch`, the worktrees, the commit and rebase at Clean, the push,

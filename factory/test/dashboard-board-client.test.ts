@@ -1691,3 +1691,68 @@ test('board client: the Coordinator card reads api/coordinator on each coordinat
   assert.equal(part(coord, 'coord-status')!.textContent, 'Planning');
   assert.equal(page.timers.length, timers);
 });
+
+test('board client (SF-208): a waiting card shows the planner\'s note clamped with Review the suggestion and no Send, Discuss the result or its Copy, and Open the planning chat on any card; a link or Copy does not open the job', async () => {
+  const note = 'Keep the button,\nrename it,\nand add a test,\nthen stop.';
+  const suggestion = { note, sha256: 'a'.repeat(64), at: '2026-11-01T10:06:00.000Z' };
+  const planner = (extra: Record<string, unknown>) => ({ planner: { chat: null, discuss: null, suggestion: null, ...extra } });
+  const waiting = job('W', 'needs_human', { error: { code: 'max_turns', message: 'x' }, ...planner({ suggestion, chat: 'https://chatgpt.com/c/w', discuss: { message: 'm', url: 'https://chatgpt.com/?q=m' } }) });
+  const claude = job('C', 'ready_for_human_review', planner({ discuss: { message: 'Use the software-factory MCP server.', url: null } }));
+  const running = job('R', 'working', planner({ suggestion, chat: 'https://chatgpt.com/c/r', discuss: { message: 'm', url: 'https://chatgpt.com/?q=m' } }));
+  const evil = job('E', 'handed_over', planner({ chat: 'https://evil.example/c/e', discuss: { message: 'm', url: 'https://evil.example/?q=m' } }));
+  const written: string[] = [];
+  const page = await loadBoard([waiting, claude, running, evil], { writeText: async (text: string) => void written.push(text) });
+  const links = (item: FakeElement): Array<[string, string, string, string]> => item.querySelectorAll('a').map((link) => [link.textContent, link.href, link.target, link.rel]);
+
+  const w = card(page, 'app/W');
+  const clip = part(w, 'planner-clip')!;
+  assert.deepEqual([part(w, 'planner-card')!.children.map((child) => (child as FakeElement).textContent)[0], clip.textContent, clip.getAttribute('title')], ['Planner suggests changes', note, note]);
+  const review = button(w, 'Review the suggestion')!;
+  assert.deepEqual([review.dataset.open, review.dataset.focus], ['app/W', 'composer']);
+  assert.equal(labels(w).includes('Send'), false);
+  assert.deepEqual(links(w), [
+    ['Discuss the result ↗', 'https://chatgpt.com/?q=m', '_blank', 'noopener noreferrer'],
+    ['Open the planning chat ↗', 'https://chatgpt.com/c/w', '_blank', 'noopener noreferrer'],
+  ]);
+  // A running card: no suggestion and no Discuss, its planning chat only.
+  const r = card(page, 'app/R');
+  assert.deepEqual([part(r, 'planner-card'), labels(r).includes('Review the suggestion'), links(r).map(([text]) => text)], [undefined, false, ['Open the planning chat ↗']]);
+  // A stored link or a discuss URL that is not ChatGPT's is never linked.
+  assert.deepEqual(links(card(page, 'app/E')), []);
+  // Claude Code plans C: Copy the message, which does not open the job.
+  button(card(page, 'app/C'), 'Copy the message for the planner')!.click();
+  await page.flush();
+  assert.deepEqual([written, onJobPage(page)], [['Use the software-factory MCP server.'], false]);
+  // A click on a link does not open the job either.
+  w.querySelector('a')!.click();
+  await page.flush();
+  assert.equal(onJobPage(page), false);
+  // Review the suggestion opens the job page at the composer.
+  button(card(page, 'app/W'), 'Review the suggestion')!.click();
+  await page.flush();
+  page.streams.at(-1)!.emit('job', detail(waiting));
+  await page.flush();
+  assert.ok(onJobPage(page));
+  assert.equal(page.document.activeElement, page.$('msg'));
+  assert.equal(page.$('suggestion-send-button').textContent, 'Send');
+});
+
+async function loadBoard(jobs: Job[], clipboard: { writeText(text: string): Promise<void> }): Promise<Page> {
+  const page = await loadPage(STATIC_DIR, (path) => {
+    if (path === 'api/jobs') {
+      return { jobs };
+    }
+    const match = /^api\/jobs\/([^/]+)\/([^/]+)$/.exec(path);
+    const found = match ? jobs.find((row) => row.ticket === match[2]) : undefined;
+    return found ? detail(found) : undefined;
+  }, clipboard);
+  page.document.dispatch('DOMContentLoaded');
+  await page.flush();
+  const stream = page.streams.at(-1)!;
+  stream.emit('open');
+  stream.emit('jobs', { jobs });
+  stream.emit('workspaces', { workspaces: [workspace('app')] });
+  stream.emit('tickets', { tickets: [], archived: [] });
+  await page.flush();
+  return page;
+}

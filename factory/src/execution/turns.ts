@@ -1,7 +1,7 @@
 // The Implementer's turns: the session of each job, the end of a turn (#idle: the Report, the
 // Patch and the published iteration), the turn limit, the answers to the Fix items, say (a user
-// message), requestFix and the Fix section the factory appends, and goOn (the path after a
-// verdict).
+// message; the Send of the planner's suggestion takes it too), requestFix and the Fix section the
+// factory appends, and goOn (the path after a verdict).
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { readFile, stat } from 'node:fs/promises';
 import { join, resolve as resolvePath, sep } from 'node:path';
@@ -13,6 +13,7 @@ import { jobUserMessages } from '../job-stream.js';
 import { claudeReviews, type FileChange, type Handover, type Job, type JobState, now, type PauseStep, statesWith } from '../jobs.js';
 import { answerFix, escalationMessage, headings, type LedgerEntry, userFixItems } from '../ledger.js';
 import { rebaseInProgress } from '../mr.js';
+import { checkSuggestionSend, removeSuggestion, sendShownSuggestion } from '../planner.js';
 import { buildPatch, changedFilesSection, fileChanges, notificationLine, type Patch } from '../patch.js';
 import { factoryPrompt, iterationCost } from '../prompts.js';
 import { DENIED_TOOLS, type Marks, marksOf } from '../rules.js';
@@ -533,6 +534,22 @@ export class TurnsPart {
     return this.#peers.control.request(workspaceName, ticket, { kind: 'say', message }) as Promise<{ state: JobState; queued: boolean }>;
   }
 
+  // Send of the planner's suggestion on the dashboard: the note the page showed (sha256), sent
+  // verbatim through say as the User's own message (on a handed_over job, Ask for changes). The check,
+  // the say and the file's removal are one step under the suggestion's lock (sendShownSuggestion), so
+  // a note the planner replaces or the User dismisses meanwhile is never sent. Refused without sending
+  // when no suggestion is shown (no_suggestion: none, a job that does not wait for the User, an older
+  // iteration's) and when the shown one is not the page's (suggestion_changed).
+  sendSuggestion(workspaceName: string, ticket: string, sha256: string): Promise<{ state: JobState; queued: boolean }> {
+    return sendShownSuggestion(this.#store.jobs, workspaceName, ticket, sha256, () => this.#store.job(workspaceName, ticket), (note) => this.say(workspaceName, ticket, note));
+  }
+
+  // Dismiss of the planner's suggestion: its file removed; whether there was one.
+  async dismissSuggestion(workspaceName: string, ticket: string): Promise<{ dismissed: boolean }> {
+    await this.#store.job(workspaceName, ticket);
+    return { dismissed: await removeSuggestion(this.#store.jobs, workspaceName, ticket) };
+  }
+
   // sf say needs a job with a session to go on with and a non-empty text message.
   checkSay(job: Job, message: string): void {
     // A step of the hand-over that was cut off is repaired by recover() first.
@@ -559,6 +576,9 @@ export class TurnsPart {
     return this.#locks.locked(async () => {
       let job = await this.#store.job(workspaceName, ticket);
       this.checkSay(job, message);
+      // The planner's note a Send is sending goes only while the job still waits for the User at
+      // the iteration the Send checked: a message that came first may have moved it on.
+      await checkSuggestionSend(this.#store.jobs, job, message);
       const workspace = this.#sessions.live.get(`${workspaceName}/${ticket}`)?.workspace ?? (await this.#settings.resolve(workspaceName));
       if (job.state === 'handed_over') {
         // Ask for changes: the checkout's state back into the job; by hand, so the run queue's

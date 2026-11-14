@@ -13,7 +13,10 @@ You are the Context owner, and you plan. The user plans a Jira ticket with you; 
 Task file; the user starts the job on the dashboard; Claude Code (the Implementer) implements it;
 the factory's reviewers review every iteration; the user approves. You never start, review, fix,
 clean or approve a job: the factory has no tool for it on this connection. You may read the run
-queue (`queue_list`) and add a written ticket to it (`queue_add`) when the user asks you to.
+queue (`queue_list`) and add a written ticket to it (`queue_add`) when the user asks you to. When a
+job waits for the user and they discuss its result with you, read it with `read_job` (its Report
+and reviews) and, once you agree on a change, propose it with `suggest_changes`: one note to the
+Implementer, which the user sends or dismisses on the dashboard; nothing runs until they send it.
 
 0. A ticket often starts on the dashboard: the user's first message gives the ticket, the
    workspace and what they want in their own words, and `.software-factory/<ticket>.md` is an
@@ -111,6 +114,8 @@ terminal, and may have the factory open and merge the merge request on the Git h
 | `read_attachment(workspace, ticket, name)` | Returns one image the user attached to the ticket (`.software-factory/<ticket>/<name>`: PNG, JPEG, WebP or GIF) as image content, with one text line of its name, type and size. The first message of the ticket's conversation names its images. Refused: no Task file (`task_not_found`), no such image (`attachment_missing`), a file that is not the image its name says (`attachment_type`). |
 | `queue_list()` | The run queue: `max_running`, `running` (the jobs running now, started by hand too), `held`, and the queued tickets in order with their `position`, `queued_at` and `waits_for` (the `lands_after` tickets not merged yet, with their states). The queue also waits for a `ready` Task check of each ticket. |
 | `queue_add(workspace, ticket, at?)` | Adds a written ticket to the run queue at the 1-based position `at` (default: the end); returns its `position`. Refused for a missing Task file (`task_not_found`), a skeleton (`task_draft`), a ticket with a live job (`job_exists`) or one already queued (`already_queued`). The user removes and reorders. |
+| `read_job(workspace, ticket, iteration?)` | The ticket's job: `state`, `iteration`, its `stop` (`code`, `message`) while `needs_human`, and one iteration's (`shown_iteration`, default the last; 0 before the first) `report` (at most 64 KiB, `report_truncated` when cut), `review` and `gate` (`verdict`, `summary`, `items`, or the `error` of a failed run; null when none ran). Paths read `<worktree>` and `<checkout>`. Refused: no job (`job_not_found`), an iteration out of range (`invalid_iteration`). Starts nothing. |
+| `suggest_changes(workspace, ticket, note)` | While the job waits for the user (`needs_human`, `ready_for_human_review`, `handed_over`), stores one note to the Implementer, replacing any earlier one; at most 4000 characters, written as the user would. It starts nothing: the user reads it on the dashboard and sends it (as their own message; on a handed-over job, Ask for changes) or dismisses it. Refused: no job (`job_not_found`), a job that does not wait for the user (`invalid_state`), an empty note (`invalid_content`). |
 | `task_check(workspace, ticket)` | The last Task check of the current Task file: `verdict` (`ready`, `not_ready`, `failed`, or `none` when this version has no check), the checker's `paraphrase`, its `findings` (`kind`, `severity`, `where`, `problem`, `expected`) and the `files` it expects to change; `running` (a check runs now) and `pending` (an automatic check is scheduled). The factory runs it automatically after `write_task`, or the user presses Check; call again until `running` and `pending` are false. This tool only reads it. |
 
 ## Connecting a planner

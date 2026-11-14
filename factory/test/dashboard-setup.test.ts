@@ -51,7 +51,7 @@ test('dashboard setup: the reads, the method rules per path and the token; nothi
     const tickets = await fetchRaw(new URL('api/tickets', base));
     assert.equal(tickets.status, 200);
     const rows = JSON.parse(tickets.body).tickets;
-    assert.deepEqual(Object.keys(rows[0]).sort(), ['attachments', 'base', 'conversation', 'draft', 'job', 'lands_after', 'owner', 'queue_error', 'queue_force', 'queue_position', 'queue_reason', 'request', 'ticket', 'title', 'workspace']);
+    assert.deepEqual(Object.keys(rows[0]).sort(), ['attachments', 'base', 'conversation', 'draft', 'job', 'lands_after', 'owner', 'planning_chat', 'queue_error', 'queue_force', 'queue_position', 'queue_reason', 'request', 'ticket', 'title', 'workspace']);
     // SF-071: without a run queue, no ticket is queued and the payload's queue is null.
     assert.deepEqual([rows[0].queue_position, rows[0].queue_error, JSON.parse(tickets.body).queue], [null, null, null]);
     assert.deepEqual([rows[1].draft, rows[1].job], [false, 'pushed']);
@@ -258,6 +258,40 @@ test('dashboard setup: the action checks apply to the setup POSTs; exact argumen
       assert.equal(reply.status, status, `${path} ${code}`);
       assert.deepEqual(JSON.parse(reply.body), { ok: false, error: { code, message: `The ${code} message.` } });
     }
+    stream.close();
+  }, setup);
+});
+
+test('dashboard setup (SF-208): POST api/tickets/<ws>/<ticket>/chat saves and removes the planning chat link through the setup, refuses bad bodies and maps the setup\'s refusals; every page gets the tickets and the jobs', async () => {
+  const fake = fakeActions();
+  const setup = fakeSetup([workspaceRow('app')], [ticketRow('app', 'T-5')]);
+  await withDashboard('dash-setup-chat', fake, async (dashboard) => {
+    const base = dashboard.url;
+    const stream = await openStream(new URL('api/stream', base));
+    await stream.next('tickets');
+    for (const body of ['{}', '{"url":1}', '{"url":"https://chatgpt.com/c/x","now":true}', '[]', 'null']) {
+      assert.deepEqual(error(await act(base, 'api/tickets/app/T-5/chat', undefined, { body })), { status: 400, code: 'invalid_body' }, body);
+    }
+    assert.deepEqual(result(await act(base, 'api/tickets/app/T-5/chat', { url: 'https://chatgpt.com/c/one' })), { workspace: 'app', ticket: 'T-5', planning_chat: 'https://chatgpt.com/c/one' });
+    assert.deepEqual(setup.calls.at(-1), ['setPlanningChat', 'app', 'T-5', 'https://chatgpt.com/c/one']);
+    await stream.next('jobs');
+    await stream.next('tickets');
+    assert.deepEqual(result(await act(base, 'api/tickets/app/T-5/chat', { url: null })), { workspace: 'app', ticket: 'T-5', planning_chat: null });
+    assert.deepEqual(setup.calls.at(-1), ['setPlanningChat', 'app', 'T-5', null]);
+    // POST only; a bad name is an empty 404 before any call.
+    const get = await fetchRaw(new URL('api/tickets/app/T-5/chat', base));
+    assert.deepEqual([get.status, get.headers.allow], [405, 'POST']);
+    const calls = setup.calls.length;
+    for (const path of ['api/tickets/App/T-5/chat', 'api/tickets/app/..%2FT-5/chat']) {
+      assert.deepEqual([(await act(base, path, { url: null })).status, setup.calls.length], [404, calls], path);
+    }
+    for (const [code, status] of [['invalid_chat_link', 400], ['task_not_found', 404], ['invalid_ticket', 400]] as const) {
+      setup.answer = new FactoryError(code, `The ${code} message.`);
+      const reply = await act(base, 'api/tickets/app/T-5/chat', { url: 'https://evil.example/' });
+      assert.equal(reply.status, status, code);
+      assert.deepEqual(JSON.parse(reply.body), { ok: false, error: { code, message: `The ${code} message.` } });
+    }
+    assert.deepEqual(fake.calls, []);
     stream.close();
   }, setup);
 });

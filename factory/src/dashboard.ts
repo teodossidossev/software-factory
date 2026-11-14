@@ -110,16 +110,18 @@ const STATIC_FILES: Record<string, { file: string; type: string }> = {
 // mr-view), saveMr and resetMr (POST mr-save and mr-reset).
 export type DashboardActions = Pick<Execution, 'start' | 'approve' | 'abort' | 'say' | 'retryReview' | 'retryMr' | 'acceptGate' | 'settle' | 'simplify' | 'archiveFinished'
   | 'createMergeRequest' | 'mergeMergeRequest' | 'mergeRequestStatus' | 'mergeRequestHost' | 'pause' | 'resumePaused' | 'restart'
-  | 'handover' | 'takeback' | 'handedDone' | 'markMerged' | 'checkHandedOver' | 'mergeRequestView' | 'saveMr' | 'resetMr' | 'openMergeRequests' | 'mergeRequestThreads' | 'mergeRequestOverview'>;
+  | 'handover' | 'takeback' | 'handedDone' | 'markMerged' | 'checkHandedOver' | 'mergeRequestView' | 'saveMr' | 'resetMr' | 'openMergeRequests' | 'mergeRequestThreads' | 'mergeRequestOverview'
+  | 'sendSuggestion' | 'dismissSuggestion'>;
 
 // The start screen's data and changes: the workspace registry and the Task files (src/setup.ts).
 // jobDependencies: the tickets a live job's Task file lands after. taskFile and saveTask:
 // the planned ticket page's Task file and its Save. addAttachment, removeAttachment and
 // readAttachment: a ticket's images. setTicketOwner: the ticket page's switch of who plans it.
+// setPlanningChat and planningOf: a ticket's planning chat link, and the job payloads' planner block.
 // editWorkspace, workspaceSettings and saveDigestSettings: the Workspaces dialog's Edit, the
 // payload's settings and the Morning digest section.
 export type DashboardSetup = Pick<Setup, 'workspaces' | 'addWorkspace' | 'editWorkspace' | 'workspaceSettings' | 'saveDigestSettings' | 'removeWorkspace' | 'tickets' | 'jobDependencies' | 'createTicket' | 'archiveTicket' | 'restoreTicket' | 'deleteTicket' | 'setTicketOwner' | 'archivedTickets' | 'taskText' | 'taskTitle'
-  | 'taskFile' | 'saveTask' | 'addAttachment' | 'removeAttachment' | 'readAttachment'>;
+  | 'taskFile' | 'saveTask' | 'addAttachment' | 'removeAttachment' | 'readAttachment' | 'setPlanningChat' | 'planningOf'>;
 
 // The morning digest: the list, one record, a manual run.
 export type DashboardDigests = Pick<Digests, 'list' | 'read' | 'start'>;
@@ -154,6 +156,8 @@ const NO_SETUP: DashboardSetup = {
   restoreTicket: unavailable,
   deleteTicket: unavailable,
   setTicketOwner: unavailable,
+  setPlanningChat: unavailable,
+  planningOf: async () => ({ owner: 'chatgpt', planning_chat: null }),
   addWorkspace: unavailable,
   removeWorkspace: unavailable,
   editWorkspace: unavailable,
@@ -435,7 +439,7 @@ export async function startDashboard(
       }
     };
     const what = targetOf(path);
-    if (what.kind === 'action' || what.kind === 'workspace-remove' || what.kind === 'ticket-action' || what.kind === 'ticket-owner' || what.kind === 'workspace-edit' || what.kind === 'digest-settings' || what.kind === 'digest-run' || what.kind === 'mr-job' || what.kind === 'pin') {
+    if (what.kind === 'action' || what.kind === 'workspace-remove' || what.kind === 'ticket-action' || what.kind === 'ticket-owner' || what.kind === 'ticket-chat' || what.kind === 'workspace-edit' || what.kind === 'digest-settings' || what.kind === 'digest-run' || what.kind === 'mr-job' || what.kind === 'pin') {
       if (req.method !== 'POST') {
         empty(res, 405, { allow: 'POST' });
         return;

@@ -590,3 +590,43 @@ test('ticket client (SF-140): a tickets event naming another ticket fetches noth
   await emit('Everything');
   assert.deepEqual(reads().slice(before).sort(), ['api/tickets/app/T-1/check', 'api/tickets/app/T-1/check', 'api/tickets/app/T-1/page', 'api/tickets/app/T-1/page']);
 });
+
+test('ticket client (SF-208): the Planning conversation card links a stored planning chat and has its field: Save, Remove and a refusal next to it; a stored link that is not a https://chatgpt.com/ one is never linked', async () => {
+  const chatLinks = (page: Page): string[] => cardOf(page, /^Planning conversation$/).querySelectorAll('a').filter((link) => link.textContent === 'Open the planning chat ↗').map((link) => `${link.href} ${link.target} ${link.rel}`);
+  const row = ticket('T-1', { planning_chat: 'https://chatgpt.com/c/one' });
+  const page = await openTicketPage([row], payload(row));
+  assert.deepEqual(chatLinks(page), ['https://chatgpt.com/c/one _blank noopener noreferrer']);
+  const input = page.$('tk-chat-input');
+  assert.equal(input.value, 'https://chatgpt.com/c/one');
+  assert.equal(cardOf(page, /^Planning conversation$/).querySelector('label')!.textContent, 'Planning chat link');
+
+  input.value = 'https://chatgpt.com.evil.com/';
+  action(page, 'chat-save').click();
+  await page.flush();
+  assert.deepEqual(posts(page).map((request) => [request.path, JSON.parse(request.body!)]), [['api/tickets/app/T-1/chat', { url: 'https://chatgpt.com.evil.com/' }]]);
+  assert.equal(action(page, 'chat-save').disabled, true);
+  posts(page)[0]!.respond(400, { ok: false, error: { code: 'invalid_chat_link', message: 'Only a https://chatgpt.com/ conversation link can be saved.' } });
+  await page.flush();
+  assert.equal(cardOf(page, /^Planning conversation$/).querySelector('.chat-field .err-text')!.textContent, 'Only a https://chatgpt.com/ conversation link can be saved.');
+  assert.deepEqual([page.$('tk-chat-input').value, chatLinks(page)], ['https://chatgpt.com.evil.com/', ['https://chatgpt.com/c/one _blank noopener noreferrer']]);
+
+  action(page, 'chat-remove').click();
+  await page.flush();
+  assert.deepEqual(JSON.parse(posts(page)[1]!.body!), { url: null });
+  posts(page)[1]!.respond(200, { ok: true, result: { workspace: 'app', ticket: 'T-1', planning_chat: null } });
+  await page.flush();
+  assert.deepEqual([chatLinks(page), page.$('tk-chat-input').value, root(page).querySelectorAll('button').some((node) => node.dataset.tk === 'chat-remove')], [[], '', false]);
+  assert.equal(cardOf(page, /^Planning conversation$/).querySelector('.chat-field .err-text')!.textContent, '');
+
+  page.$('tk-chat-input').value = 'https://chatgpt.com/c/two';
+  action(page, 'chat-save').click();
+  await page.flush();
+  posts(page)[2]!.respond(200, { ok: true, result: { workspace: 'app', ticket: 'T-1', planning_chat: 'https://chatgpt.com/c/two' } });
+  await page.flush();
+  assert.deepEqual(chatLinks(page), ['https://chatgpt.com/c/two _blank noopener noreferrer']);
+
+  // A stored value the page does not trust is shown in the box, never linked.
+  const odd = ticket('T-2', { planning_chat: 'javascript:alert(1)' });
+  const other = await openTicketPage([odd], payload(odd));
+  assert.deepEqual([chatLinks(other), other.$('tk-chat-input').value], [[], 'javascript:alert(1)']);
+});

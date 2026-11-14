@@ -69,6 +69,17 @@ interface JobSummary {
   // availability ('' or why it is off).
   actions: ShownAction[];
   availability: Readonly<Record<string, string>>;
+  // Back to the planner (src/dashboard-payloads.ts plannerOf).
+  planner: JobPlanner;
+}
+
+// A job's planner block: src/dashboard-payloads.ts plannerOf. chat: the ticket's planning chat
+// link; discuss: the message about the result and its ChatGPT link (null: copy it), only while the
+// job waits for the user; suggestion: the planner's note while it is shown (src/planner.ts).
+interface JobPlanner {
+  chat: string | null;
+  discuss: { message: string; url: string | null } | null;
+  suggestion: { note: string; sha256: string; at: string } | null;
 }
 
 // A job of api/jobs and of the stream's jobs events: src/dashboard.ts jobsPayload, jobSummary with
@@ -134,6 +145,8 @@ interface ActionResult {
   discarded?: boolean;
   worktree?: string | null;
   queued?: boolean;
+  // Dismiss of the planner's suggestion: whether there was one.
+  dismissed?: boolean;
 }
 
 // A running job's progress: src/progress.ts Progress, its phase src/progress.ts PHASES.
@@ -377,6 +390,8 @@ interface TicketEntry {
   base: string;
   draft: boolean;
   owner: TicketOwner;
+  // The ticket's planning chat link (src/setup.ts TicketRow), or null.
+  planning_chat: string | null;
   job: JobState | null;
   lands_after: DependencyRow[];
   // src/attachments.ts Attachment: only the name.

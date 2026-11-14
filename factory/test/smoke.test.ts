@@ -301,8 +301,9 @@ test('sf serve on a fresh state directory syncs the skills and gives the Quick s
   // SF-040: the planning tools only; jobs are started, reviewed and approved elsewhere. SF-054: the
   // Context owner reads the Task check (task_check), it never runs one. SF-071: it reads the run
   // queue and adds to it (queue_list, queue_add); it neither removes nor moves. SF-064: it reads a
-  // ticket's images (read_attachment).
-  assert.deepEqual(tools.map((tool) => tool.name).sort(), ['guide', 'queue_add', 'queue_list', 'read_attachment', 'read_file', 'search', 'task_check', 'write_task']);
+  // ticket's images (read_attachment). SF-208: it reads a job's result (read_job) and proposes a
+  // change the user sends or dismisses (suggest_changes), which starts nothing.
+  assert.deepEqual(tools.map((tool) => tool.name).sort(), ['guide', 'queue_add', 'queue_list', 'read_attachment', 'read_file', 'read_job', 'search', 'suggest_changes', 'task_check', 'write_task']);
   const annotations = Object.fromEntries(tools.map((tool) => [tool.name, tool.annotations]));
   assert.equal(annotations.task_check?.readOnlyHint, true);
   assert.equal(annotations.read_file?.readOnlyHint, true);
@@ -311,6 +312,8 @@ test('sf serve on a fresh state directory syncs the skills and gives the Quick s
   assert.equal(annotations.queue_list?.readOnlyHint, true);
   assert.equal(annotations.queue_add?.readOnlyHint, false);
   assert.equal(annotations.read_attachment?.readOnlyHint, true);
+  assert.equal(annotations.read_job?.readOnlyHint, true);
+  assert.deepEqual(annotations.suggest_changes, { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false });
   assert.deepEqual(await call(client, 'guide', {}), { text: `${handbook.trimEnd()}\n\n${method}\n` });
 
   await client.close();

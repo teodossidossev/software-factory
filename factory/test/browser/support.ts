@@ -255,7 +255,7 @@ export class FakeSetup implements DashboardSetup {
         continue;
       }
       rows.push({
-        workspace: WS, ticket, title: entry.title, base: 'main', draft: isDraft(entry.text), request: null, owner: 'chatgpt' as const,
+        workspace: WS, ticket, title: entry.title, base: 'main', draft: isDraft(entry.text), request: null, owner: 'chatgpt' as const, planning_chat: null,
         job: job?.state ?? null, lands_after: await this.#landsAfter(entry), attachments: [],
       });
     }
@@ -337,6 +337,14 @@ export class FakeSetup implements DashboardSetup {
 
   async readAttachment(): Promise<never> {
     return refuse('attachment_missing', 'The ticket has no images.');
+  }
+
+  async setPlanningChat(): Promise<never> {
+    return refuse('setup_unavailable', 'Not in the browser fixture.');
+  }
+
+  async planningOf() {
+    return { owner: 'chatgpt' as const, planning_chat: null };
   }
 }
 

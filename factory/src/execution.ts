@@ -197,6 +197,16 @@ export class Execution implements RunnerWork {
     return this.#parts.turns.say(workspaceName, ticket, message);
   }
 
+  // The dashboard's Send and Dismiss of the planner's suggestion (src/planner.ts): Send gives the
+  // shown note, by its sha256, to say.
+  sendSuggestion(workspaceName: string, ticket: string, sha256: string): Promise<{ state: JobState; queued: boolean }> {
+    return this.#parts.turns.sendSuggestion(workspaceName, ticket, sha256);
+  }
+
+  dismissSuggestion(workspaceName: string, ticket: string): Promise<{ dismissed: boolean }> {
+    return this.#parts.turns.dismissSuggestion(workspaceName, ticket);
+  }
+
   // execution/reviews.ts
   retryReview(workspaceName: string, ticket: string): Promise<{ state: JobState; iteration: number }> {
     return this.#parts.reviews.retryReview(workspaceName, ticket);

@@ -25,6 +25,8 @@
 </head>
 <body>
   <div id="board">
+    <!-- A card's Copy the message for the planner, where the clipboard cannot be written: the text to select. -->
+    <textarea id="card-copy-text" class="copy-fallback" rows="1" readonly aria-label="The message for the planner" hidden></textarea>
     <!-- The board's top bar (web/header.ts): one row from 1100 px, a second row with the page and
          workspace selects below; the factory pill's popover holds the checks (web/health.ts), the run
          limit and the reset rule. -->
@@ -89,6 +91,8 @@
       <div class="streamwrap" id="streamwrap" tabindex="-1"><ol id="stream" aria-label="Stream"></ol></div>
       <div class="composer" id="composer">
         <div class="cs" id="composer-sentence"></div>
+        <div class="planner" id="planner" aria-label="Planner" hidden></div>
+        <textarea id="planner-copy-text" class="copy-fallback" rows="1" readonly aria-label="The message for the planner" hidden></textarea>
         <div id="confirm" class="confirm" role="group" aria-labelledby="confirm-title" aria-describedby="confirm-text" hidden>
           <b id="confirm-title"></b>
           <span id="confirm-text"></span>

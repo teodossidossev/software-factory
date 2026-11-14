@@ -188,7 +188,7 @@ test('setup: tickets lists the Task files without a live job; createTicket write
   // The Task directory is excluded from Git, as write_task does it.
   assert.match(await readFile(join(repo, '.git', 'info', 'exclude'), 'utf8'), /^\.software-factory\/$/m);
   assert.equal(git(repo, 'status', '--porcelain'), '');
-  assert.deepEqual(await setup.tickets(), [{ workspace: 'app', ticket: 'T-1', title: 'Add a thing', base: 'main', draft: true, request: 'Please add\nthe thing.', owner: 'chatgpt', job: null, lands_after: [], attachments: [] }]);
+  assert.deepEqual(await setup.tickets(), [{ workspace: 'app', ticket: 'T-1', title: 'Add a thing', base: 'main', draft: true, request: 'Please add\nthe thing.', owner: 'chatgpt', planning_chat: null, job: null, lands_after: [], attachments: [] }]);
 
   // Refused: an existing ticket (never replaced), bad names, an empty or oversized title or request, an unknown workspace.
   assert.match(await refused(setup.createTicket({ workspace: 'app', ticket: 'T-1', title: 'Again', request: 'x' }), 'ticket_exists'), /already exists in workspace "app"/);
@@ -217,8 +217,8 @@ test('setup: tickets lists the Task files without a live job; createTicket write
   await writeFile(join(repo, '.software-factory', 'T-5.md'), '---\nticket: T-9\ntitle: Other\nbase: main\n---\n');
   await writeFile(join(repo, '.software-factory', '.T-6.md'), '---\nticket: .T-6\ntitle: Hidden\nbase: main\n---\n');
   assert.deepEqual(await setup.tickets(), [
-    { workspace: 'app', ticket: 'T-1', title: 'Add a thing', base: 'main', draft: true, request: 'Please add\nthe thing.', owner: 'chatgpt', job: null, lands_after: [], attachments: [] },
-    { workspace: 'app', ticket: 'T-3', title: 'Third', base: 'main', draft: false, request: null, owner: 'chatgpt', job: 'pushed', lands_after: [], attachments: [] },
+    { workspace: 'app', ticket: 'T-1', title: 'Add a thing', base: 'main', draft: true, request: 'Please add\nthe thing.', owner: 'chatgpt', planning_chat: null, job: null, lands_after: [], attachments: [] },
+    { workspace: 'app', ticket: 'T-3', title: 'Third', base: 'main', draft: false, request: null, owner: 'chatgpt', planning_chat: null, job: 'pushed', lands_after: [], attachments: [] },
   ]);
   await refused(setup.createTicket({ workspace: 'app', ticket: 'T-2', title: 't', request: 'r' }), 'ticket_exists');
 

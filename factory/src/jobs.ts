@@ -2,7 +2,9 @@
 // iterations/NNN/{report.md,patch.diff,meta.json,review.json,gate.json,gate-level.json,gate-override.json,simplify.json} (plus the
 // gate's schema and output files, and tree), ledger.json (the findings ledger) from the first Fix section on, task.md
 // (the Task file as the Implementer was last given it), from MR preparation on mr.md (and mr-factory.md once the user
-// edited it), tests-<N>.json (a run of the workspace's test command on iteration N), and objects/. Strictly parsed;
+// edited it), tests-<N>.json (a run of the workspace's test command on iteration N), planner-suggestion.json (the
+// planner's pending note while the job waits for the user, src/planner.ts), planner-send.json (while
+// a Send of that note runs), and objects/. Strictly parsed;
 // every file but the event log is replaced atomically. Knows nothing about the Implementer session, nor about Git:
 // tree and objects/ are only named here, src/changes.ts writes them.
 import { appendFile, type FileHandle, mkdir, readdir, readFile, rename, rm } from 'node:fs/promises';

@@ -74,6 +74,13 @@ export const POST_ROUTES = {
     shape: '{"message": string}', body: z.strictObject({ message: z.string() }), command: 'say',
     call: (actions, _queue, [w, t], body) => actions.say(w, t, body.message),
   }),
+  // The planner's suggestion (src/planner.ts), on the dashboard only: Send gives the note the page
+  // showed (its sha256) to say, as the User's own message; Dismiss removes it.
+  'suggestion-send': job({
+    shape: '{"sha256": string}', body: z.strictObject({ sha256: z.string() }), refresh: 'job',
+    call: (actions, _queue, [w, t], body) => actions.sendSuggestion(w, t, body.sha256),
+  }),
+  'suggestion-dismiss': job({ ...EMPTY, refresh: 'job', call: (actions, _queue, [w, t]) => actions.dismissSuggestion(w, t) }),
   // sf review: the Execution refuses any state but needs_human with review_failed.
   review: job({ ...EMPTY, command: 'review', call: (actions, _queue, [w, t]) => actions.retryReview(w, t) }),
   // sf retry: the Execution refuses any job but one a transient MR preparation failure

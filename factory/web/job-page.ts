@@ -116,6 +116,7 @@ function renderComposer(): void {
   byId('refresh-button').hidden = state.key === null || state.unresolved.get(state.key)?.failed !== true;
   if (job === null) {
     placeHandoverPanel(null);
+    renderPlanner(null);
     byId('composer-sentence').replaceChildren(el('span', 'muted', 'Loading the job…'));
     byId('acts').replaceChildren();
     byId('acts-why').replaceChildren();
@@ -148,6 +149,7 @@ function renderComposer(): void {
     cs.push(el('span', 'muted', 'The message box is hidden on a finished job.'));
   }
   byId('composer-sentence').replaceChildren(...cs);
+  renderPlanner(job);
   msg.hidden = finished;
   msg.disabled = !(job.availability?.say === '' || pausedTurn(job));
   const resumeWord = job.state === 'waiting_limit' ? 'Resume now' : 'Resume';
@@ -163,6 +165,76 @@ function renderComposer(): void {
   }
   const confirm = byId('confirm');
   byId('acts-why').replaceChildren(...whyLines([...byId('composer').querySelectorAll('button')].filter((node) => !confirm.contains(node))));
+}
+
+// Why Send or Dismiss of the planner's suggestion is off, or '': either one's request out keeps both
+// off; Send takes what say takes (the note goes as the user's message).
+function plannerAvailability(action: 'suggestion-send' | 'suggestion-dismiss', job: JobRow): string {
+  for (const other of ['suggestion-send', 'suggestion-dismiss']) {
+    if (state.pending.has(pendingId(other, keyOf(job)))) {
+      return PENDING_REASONS[other] ?? '';
+    }
+  }
+  return action === 'suggestion-send' ? availability('say', job) : '';
+}
+
+// The planner block, right after the composer's sentence: the planner's suggestion while it
+// is shown, as plain text, with Send (the note as the user's message) and Dismiss; Discuss the result
+// (the ChatGPT link, or the message to copy) while the job waits for the user; Open the planning chat
+// and its field. Every href is checked against its fixed prefix.
+function renderPlanner(job: JobRow | null): void {
+  const block = byId('planner');
+  const planner = job?.planner;
+  if (job === null || planner === undefined || planner === null) {
+    withChatFocus(() => block.replaceChildren());
+    block.hidden = true;
+    return;
+  }
+  const key = keyOf(job);
+  const content: HTMLElement[] = [];
+  const suggestion = planner.suggestion;
+  if (suggestion !== null && typeof suggestion.note === 'string') {
+    const box = el('div', 'planner-suggestion');
+    box.id = 'planner-suggestion';
+    const note = el('p', 'planner-note', suggestion.note);
+    const send = button('btn primary', 'Send', { act: 'suggestion-send' });
+    send.id = 'suggestion-send-button';
+    const sendOff = plannerAvailability('suggestion-send', job);
+    send.disabled = sendOff !== '';
+    if (sendOff !== '') {
+      send.setAttribute('title', sendOff);
+    }
+    const dismiss = button('btn', 'Dismiss', { act: 'suggestion-dismiss' });
+    dismiss.id = 'suggestion-dismiss-button';
+    const dismissOff = plannerAvailability('suggestion-dismiss', job);
+    dismiss.disabled = dismissOff !== '';
+    if (dismissOff !== '') {
+      dismiss.setAttribute('title', dismissOff);
+    }
+    const buttons = el('div', 'planner-acts');
+    buttons.append(send, dismiss);
+    box.append(el('b', 'planner-title', 'Planner suggests changes'), note, buttons);
+    content.push(box);
+  }
+  const links = el('div', 'planner-links');
+  const discuss = planner.discuss;
+  if (discuss !== null && typeof discuss.message === 'string') {
+    if (typeof discuss.url === 'string' && discuss.url.startsWith(CHATGPT_PREFILL_URL)) {
+      links.append(tabLink('fs13', 'Discuss the result ↗', discuss.url));
+    } else {
+      links.append(button('btn small', 'Copy the message for the planner', { act: 'planner-copy' }));
+    }
+  }
+  const chat = planningChatHref(planner.chat);
+  if (chat !== null) {
+    links.append(tabLink('fs13', 'Open the planning chat ↗', chat));
+  }
+  if (links.children.length > 0) {
+    content.push(links);
+  }
+  content.push(chatLinkField('job', key, typeof planner.chat === 'string' ? planner.chat : null, (what) => ({ act: `chat-${what}` })));
+  withChatFocus(() => keepFocus(block, () => block.replaceChildren(...content)));
+  block.hidden = content.length === 0;
 }
 
 // The reasons of the disabled buttons (their titles), as text for a phone or a device
@@ -546,6 +618,9 @@ function describeOutcome(action: string, result: unknown): Outcome {
   if (action === 'review') {
     return { level: 'ok', text: `The review of iteration ${data.iteration} runs again (state ${data.state}).` };
   }
+  if (action === 'suggestion-dismiss') {
+    return data.dismissed === true ? { level: 'ok', text: 'Dismissed the planner\'s suggestion.' } : { level: 'info', text: 'There was no suggestion of the planner to dismiss.' };
+  }
   if (action === 'retry') {
     return { level: 'ok', text: `MR preparation runs again (state ${data.state}).` };
   }
@@ -597,6 +672,7 @@ const DONE_TEXT: Readonly<Record<string, string>> = {
   simplify: 'Simplify sent to the Implementer', archive: 'Archived', 'mr-create': 'Merge request opened', 'mr-merge': 'Merged', 'mr-status': 'MR status read',
   pause: 'Paused', resume: 'Resumed', restart: 'Restarted', handover: 'Handed over to your checkout', takeback: 'Taken back', 'handed-done': 'Your push is recorded',
   'merged-archive': 'Merged and archived',
+  'suggestion-send': 'Suggestion sent', 'suggestion-dismiss': 'Suggestion dismissed',
 };
 
 // The jobs of an api/jobs answer or a jobs event; its remote says which port the page uses.
@@ -1054,6 +1130,8 @@ function act(action: string): void {
   const key = keyOf(job);
   if (action === 'say' || action === 'goon') {
     sendSay(action === 'goon');
+  } else if (action === 'suggestion-send' || action === 'suggestion-dismiss' || action === 'planner-copy' || action === 'chat-save' || action === 'chat-remove') {
+    plannerAct(action, job);
   } else if (action === 'review-mr') {
     go(key, 'mr');
   } else if (['abort', 'restart', 'approve', 'accept', 'simplify', 'mr-create', 'mr-merge', 'archive'].includes(action)) {
@@ -1065,6 +1143,28 @@ function act(action: string): void {
     }
   } else if (POSTED_AT_ONCE.includes(action) && availability(action, job) === '') {
     armOrRun(action, key);
+  }
+}
+
+// The planner block's buttons: Send posts the sha256 of the suggestion the page shows (the server
+// sends its stored note only while it is that one), Dismiss removes it; Copy puts the message for
+// the planner on the clipboard; Save and Remove of the planning chat link.
+function plannerAct(action: string, job: JobRow): void {
+  const key = keyOf(job);
+  const planner = job.planner;
+  if (action === 'suggestion-send' || action === 'suggestion-dismiss') {
+    const suggestion = planner?.suggestion ?? null;
+    if (suggestion === null || plannerAvailability(action, job) !== '') {
+      return;
+    }
+    void run(action, key, action === 'suggestion-send' ? { sha256: suggestion.sha256 } : {});
+  } else if (action === 'planner-copy') {
+    const message = planner?.discuss?.message;
+    if (typeof message === 'string') {
+      copyValue(message, byIdAs('planner-copy-text', 'textarea'), (text) => toast({ level: 'info', text: `${text} The message for the planner.` }));
+    }
+  } else {
+    void saveChatLink('job', key, action === 'chat-remove');
   }
 }
 

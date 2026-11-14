@@ -34,8 +34,31 @@ file, and an empty value turns the section off. A missing file leaves the Quick 
 | `read_attachment(workspace, ticket, name)` | Returns one image of the ticket. |
 | `queue_list()` | Reads the run queue. |
 | `queue_add(workspace, ticket, at?)` | Adds a written ticket to the queue. |
+| `read_job(workspace, ticket, iteration?)` | Reads a job's state, its stop, and one iteration's Report and reviews, with the real paths replaced by `<worktree>` and `<checkout>`. |
+| `suggest_changes(workspace, ticket, note)` | While the job waits for you, stores one note to the Implementer for you to send or dismiss on the dashboard. |
 
-None of them starts, reviews, approves or pushes a job: those stay yours.
+None of them starts, reviews, approves or pushes a job: those stay yours. `suggest_changes` only
+proposes: the note reaches the Implementer only when you press Send.
+
+## Back to the planner
+
+When a job waits for you (`needs_human`, `ready_for_human_review`, `handed_over`), you can talk its
+result over with the planner and send the Implementer the change you agree on.
+
+- **Discuss the result ↗** on the job's page (in the composer) and on its card opens a new ChatGPT
+  conversation prefilled with a message that has the planner read the Task file and the job's
+  latest Report and reviews (`read_job`), sum them up, discuss what should change with you and
+  propose it with `suggest_changes`. When Claude Code plans the ticket (or the link would be too
+  long), the page offers the message to copy instead.
+- **The planning chat link**: paste the link of the conversation the ticket was planned in into the
+  field *Planning chat link* (the ticket's page, Planning conversation; or the job's page) and
+  Save. Only a `https://chatgpt.com/` link is kept. Then *Open the planning chat ↗* on the ticket's
+  page, the job's card and its page takes you back to it.
+- **Planner suggests changes**: the note `suggest_changes` stored shows on the job's page with
+  **Send** and **Dismiss**, and on its card clamped, with *Review the suggestion*. Send gives the
+  note to the Implementer as your own message (on a handed-over job, as Ask for changes), only the
+  note the page showed: if the planner replaced it meanwhile, nothing is sent and the page shows the
+  new one. A note stops showing once the job moves to another iteration or stops waiting for you.
 
 ## 1. With ChatGPT, through the tunnel
 

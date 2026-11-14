@@ -2,15 +2,18 @@
 // through the SDK's stateless handler, with the Handbook as instructions and the planning tools
 // guide, read_file, search, write_task, task_check (the last Task check of the current Task
 // file; checked automatically after write_task), queue_list and queue_add (the
-// run queue), and read_attachment (a ticket's image as MCP image content). It
+// run queue), read_attachment (a ticket's image as MCP image content), and, while a job waits for
+// the user, read_job (its Report and reviews, real paths replaced) and suggest_changes (one note
+// the user sends or dismisses on the dashboard; src/planner.ts). It
 // listens on loopback only and answers only a request with the MCP token of the state directory:
 // in the path, /mcp/<token>, or as Authorization: Bearer <token> on /mcp, read from the
 // token file on every request. Jobs are started, reviewed and approved by the user (the
-// dashboard, the CLI) and the reviewers, never through this endpoint.
+// dashboard, the CLI) and the reviewers, never through this endpoint: suggest_changes only writes
+// its file, and only the user's Send gives the note to the Implementer.
 import { constants } from 'node:fs';
 import { lstat, mkdir, open, readFile, stat } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { join } from 'node:path';
+import { join, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { localhostHostValidation, localhostOriginValidation, toNodeHandler } from '@modelcontextprotocol/node';
 import { createMcpHandler, McpServer } from '@modelcontextprotocol/server';
@@ -24,7 +27,10 @@ import { replaceSecret } from './redact.js';
 import type { Execution } from './execution.js';
 import type { RunQueue } from './queue.js';
 import { DEPENDENCY_STATES } from './setup.js';
-import { stateDir } from './config.js';
+import { stateDir, worktreeRoot } from './config.js';
+import { JOB_STATES } from './jobs.js';
+import { MAX_NOTE_CHARS, MAX_REPORT_BYTES, readJob, storeSuggestion } from './planner.js';
+import { SEVERITIES } from './review.js';
 import { handbookSection } from './prompts.js';
 import { resolveWorkspace, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN } from './registry.js';
 import { DEFAULT_PAGE_BYTES, MAX_FILE_BYTES, MAX_PAGE_BYTES, MAX_PATH_LENGTH, MIN_PAGE_BYTES, RepoFiles, RepoReadError } from './repo-files.js';
@@ -424,13 +430,35 @@ export type ServerQueue = Pick<RunQueue, 'view' | 'add' | 'withTicket'>;
 
 const dependencyRow = z.object({ workspace: z.string(), ticket: z.string(), state: z.enum(DEPENDENCY_STATES) });
 
-// execution: only its JobStore, for write_task's guard against replacing the Task file of a live job.
+// A review or gate as read_job gives it.
+const reviewView = z.union([
+  z.object({
+    verdict: z.enum(['clean', 'fix']), summary: z.string(),
+    items: z.array(z.object({ path: z.string(), problem: z.string(), expected: z.string(), severity: z.enum(SEVERITIES) })),
+  }),
+  z.object({ error: z.string() }),
+]).nullable();
+
+// Where the factory puts the jobs' worktrees, for read_job's path replacement; undefined when the
+// setting cannot be read (sf serve would not have started).
+function jobWorktreeRoot(): string | undefined {
+  try {
+    return resolvePath(worktreeRoot());
+  } catch { // an invalid SF_WORKTREE_ROOT: the recorded worktree is still replaced
+    return undefined;
+  }
+}
+
+// execution: only its JobStore, for write_task's guard against replacing the Task file of a live job,
+// read_job's reads and suggest_changes' file.
+// onSuggested: called after suggest_changes stored a note, so the open pages get the job again.
 // history: the tickets' history, where write_task records "written"; none records nothing.
 // queue: the run queue; without it queue_list and queue_add answer queue_unavailable.
 // auto: the automatic Task checks; without it write_task triggers none (check: off) and
 // task_check's pending is false.
 function createMcpServer(
   handbook: Handbook, version: string, execution: Pick<Execution, 'jobs'>, checks: ServerChecks | undefined, history?: TicketHistory, queue?: ServerQueue, auto?: ServerAutoChecks,
+  onSuggested?: (workspace: string, ticket: string) => void,
 ): McpServer {
   const served = servedHandbook(handbook);
   const server = new McpServer({ name: SERVER_NAME, version }, { instructions: served.instructions });
@@ -723,6 +751,76 @@ function createMcpServer(
     },
   );
 
+  server.registerTool(
+    'read_job',
+    {
+      title: 'Read a job\'s result',
+      description:
+        `Returns the job of the ticket: its state and iteration, its stop (code and message) while it is needs_human, and one iteration's Report (at most ${MAX_REPORT_BYTES} bytes; ` +
+        'report_truncated says it was cut), Claude review and Codex gate (verdict, summary and items, or the error of a failed run; null when none ran). iteration: 1 to the job\'s iteration, ' +
+        'default its last; shown_iteration is the one returned (0 before the first). Paths of the job\'s worktree read <worktree>, of the checkout <checkout>. Refused: no job (job_not_found), ' +
+        'an iteration out of range (invalid_iteration). Use it when the user discusses a job that waits for them. Starts nothing.',
+      inputSchema: z.strictObject({
+        workspace: workspaceName,
+        ticket: ticketKey,
+        iteration: z.number().int().optional().describe('The iteration to read, 1 to the job\'s iteration; default its last.'),
+      }),
+      outputSchema: z.object({
+        state: z.enum(JOB_STATES),
+        iteration: z.number().int(),
+        shown_iteration: z.number().int(),
+        stop: z.object({ code: z.string(), message: z.string() }).nullable(),
+        report: z.string().nullable(),
+        report_truncated: z.boolean(),
+        review: reviewView,
+        gate: reviewView,
+      }),
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    },
+    async ({ workspace, ticket, iteration }) => {
+      try {
+        const target = await resolveWorkspace(workspace);
+        return toolResult({ ...(await readJob(execution.jobs, { name: workspace, readCheckout: target.readCheckout }, ticket, iteration, jobWorktreeRoot())) });
+      } catch (error) {
+        return toolError(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'suggest_changes',
+    {
+      title: 'Propose a change to the Implementer',
+      description:
+        'Stores one note to the Implementer for the ticket\'s job while the job waits for the user (needs_human, ready_for_human_review or handed_over), replacing any earlier one. ' +
+        'It starts nothing: the user reads the note on the dashboard and sends it (as their own message to the Implementer) or dismisses it; nothing runs until then. Write the note as ' +
+        `the user would, after you agreed on it with them; at most ${MAX_NOTE_CHARS} characters. Refused: no job (job_not_found), a job that does not wait for the user (invalid_state), ` +
+        'an empty note (invalid_content).',
+      inputSchema: z.strictObject({
+        workspace: workspaceName,
+        ticket: ticketKey,
+        // maxLength is published only: checkNote refuses an over-long note with invalid_content.
+        note: z.string().meta({ description: `The note to the Implementer, 1-${MAX_NOTE_CHARS} characters.`, maxLength: MAX_NOTE_CHARS }),
+      }),
+      outputSchema: z.object({ stored: z.literal(true), sha256: z.string() }),
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    },
+    async ({ workspace, ticket, note }) => {
+      try {
+        await resolveWorkspace(workspace);
+        const stored = await storeSuggestion(execution.jobs, workspace, ticket, note);
+        try {
+          onSuggested?.(workspace, ticket);
+        } catch (error) {
+          console.error(error);
+        }
+        return toolResult({ ...stored });
+      } catch (error) {
+        return toolError(error);
+      }
+    },
+  );
+
   return server;
 }
 
@@ -760,12 +858,14 @@ function unauthorized(res: ServerResponse): void {
 
 // stateDir: where the MCP token is read, on every request (no cache: a rotated token counts at once); a file that cannot be
 // used refuses every request (fail closed). The planning method is read again before a request when skill-roles.json's mtime changed.
+// onSuggested: called once after each note suggest_changes stored (sf serve: the open pages get the job again).
 export async function startServer(
   port: number, stateDir: string, handbook: Handbook, version: string, execution: Pick<Execution, 'jobs'>, checks?: ServerChecks, history?: TicketHistory, queue?: ServerQueue, auto?: ServerAutoChecks,
+  onSuggested?: (workspace: string, ticket: string) => void,
 ): Promise<RunningServer> {
   const rolesTime = async (): Promise<number | undefined> => (await stat(rolesFile(stateDir)).catch(() => undefined))?.mtimeMs;
   let [served, readAt] = [handbook, await rolesTime()];
-  const mcpHandler = createMcpHandler(() => createMcpServer(served, version, execution, checks, history, queue, auto));
+  const mcpHandler = createMcpHandler(() => createMcpServer(served, version, execution, checks, history, queue, auto, onSuggested));
   const nodeHandler = toNodeHandler(mcpHandler);
   const validateHost = localhostHostValidation();
   const validateOrigin = localhostOriginValidation();

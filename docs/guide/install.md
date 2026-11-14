@@ -146,7 +146,7 @@ the root, `factory/bin/sf`, or `sf` on your `PATH`).
 | Location | Contents |
 | --- | --- |
 | `~/.config/software-factory/` (`SF_CONFIG_DIR`) | `workspaces.json` (the workspaces), `auth.env` (the settings), `rules/` (your coding rules), `tunnel-runtime.key` (the tunnel's key) |
-| `~/.local/state/software-factory/` (`SF_STATE_DIR`) | `jobs/<workspace>/<ticket>/` (each job: `job.json`, `events.jsonl`, `iterations/`, `ledger.json`, `mr.md`, `runner.log`), archived jobs as `<ticket>.<stamp>/`, `queue.json`, `checks/` (Task checks), `tickets/` (ticket history), `requests/` (your New ticket words), `locks/`, `tmp/`, `sf.sock` (while `sf serve` runs), `dashboard-token`, `state-version` (the state's format), `update.log` and, while `sf update` runs, `updating` |
+| `~/.local/state/software-factory/` (`SF_STATE_DIR`) | `jobs/<workspace>/<ticket>/` (each job: `job.json`, `events.jsonl`, `iterations/`, `ledger.json`, `mr.md`, `runner.log`), archived jobs as `<ticket>.<stamp>/`, `queue.json`, `checks/` (Task checks), `tickets/` (ticket history), `requests/` (your New ticket words), `pins.json` (the dashboard's pins, `sf pins`), `locks/`, `tmp/`, `sf.sock` (while `sf serve` runs), `dashboard-token`, `state-version` (the state's format), `update.log` and, while `sf update` runs, `updating` |
 | `~/.local/state/software-factory/worktrees/<workspace>/<ticket>/` (`SF_WORKTREE_ROOT`) | each job's worktree, while the job needs it |
 | `.software-factory/` in each workspace's checkout | the Task files `<ticket>.md`, their images `<ticket>/`, the MR texts, `archive/`; excluded from Git through `.git/info/exclude` |
 

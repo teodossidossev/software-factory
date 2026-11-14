@@ -136,6 +136,6 @@ test('the pill is in the header; header.js loads before board.js, health.js befo
   assert.ok(page.$('health-light').closest('.topbar') !== null);
   assert.equal(page.document.querySelectorAll('#connection').length, 0);
   const scripts = page.document.querySelectorAll('script').map((node) => node.getAttribute('src'));
-  assert.deepEqual(scripts.slice(-2), ['health.js', 'main.js']);
+  assert.deepEqual(scripts.slice(-3), ['health.js', 'pins.js', 'main.js']);
   assert.equal(scripts.indexOf('header.js') + 1, scripts.indexOf('board.js'));
 });

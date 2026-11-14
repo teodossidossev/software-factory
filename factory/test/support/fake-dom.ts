@@ -6,7 +6,8 @@
 // selectors), events that bubble to the document (so the page's delegated listeners get them),
 // document.visibilityState, document.createElementNS (the Stats page's SVG, SF-117), a scripted
 // fetch (a Blob body sent or answered too), a scripted EventSource, timers that fire only when
-// the test says so and, when the test gives one, a clipboard; for a ticket's images (SF-064) Node's Blob and File (with arrayBuffer), paste and drop
+// the test says so, the viewport's size, element boxes the test sets, a MutationObserver the test
+// notifies, animation frames that run once the page's pending work did and CSS.escape (point mode's pins) and, when the test gives one, a clipboard; for a ticket's images (SF-064) Node's Blob and File (with arrayBuffer), paste and drop
 // events with clipboardData / dataTransfer files (the test's dispatch gives them), URL.createObjectURL,
 // ClipboardItem, createImageBitmap and a canvas whose toBlob gives a PNG. It is not a browser: layout, focus order,
 // CSS and default actions (Enter in a textarea, a form's own submission) are out of its reach; the
@@ -271,6 +272,19 @@ export class FakeElement {
   // Every attribute the element has, data-* included, for the checks of the markup.
   attributeNames(): string[] {
     return [...this.attributes.keys(), ...Object.keys(this.dataset).map((key) => `data-${kebab(key)}`)];
+  }
+
+  // A browser's getAttributeNames (the pins' selector reads the data-* ones in order).
+  getAttributeNames(): string[] {
+    return this.attributeNames();
+  }
+
+  // The element's box in the viewport, as the test sets rect (no layout here): zero by default.
+  rect = { x: 0, y: 0, width: 0, height: 0 };
+
+  getBoundingClientRect(): { x: number; y: number; left: number; top: number; width: number; height: number; right: number; bottom: number } {
+    const { x, y, width, height } = this.rect;
+    return { x, y, left: x, top: y, width, height, right: x + width, bottom: y + height };
   }
 
   addEventListener(name: string, listener: Listener): void {
@@ -665,7 +679,10 @@ export interface Page {
   // The URLs history.pushState was given, in order.
   pushed: string[];
   // window.open: blockPopups set, it returns null, as a browser that blocks the new tab.
-  window: { dispatch(name: string, event?: Record<string, unknown>): Record<string, unknown>; open(url?: string, target?: string): FakeTab | null; blockPopups: boolean };
+  // innerWidth and innerHeight: the viewport's size (1280 x 800 unless the test sets them).
+  window: { dispatch(name: string, event?: Record<string, unknown>): Record<string, unknown>; open(url?: string, target?: string): FakeTab | null; blockPopups: boolean; innerWidth: number; innerHeight: number };
+  // The page's MutationObservers, in order; none sees a change by itself: the test calls notify.
+  observers: FakeMutationObserver[];
   // Every window.open call, in order, with the tab it returned (null: blocked).
   opened: Array<{ url: string; target: string; tab: FakeTab | null }>;
   // URL.createObjectURL's URLs (blob:fake/1, ...) with their Blobs, and the ones revoked (SF-064).
@@ -728,6 +745,50 @@ export class FakeEventSource {
 
   close(): void {
     this.closed = true;
+  }
+}
+
+// CSS.escape as the CSSOM serializes an identifier: NUL as U+FFFD, a control character, a digit
+// first (or second after a hyphen) as a hex escape; a lone hyphen escaped; any other character but
+// letters, digits, -, _ and non-ASCII escaped with a backslash.
+export function cssEscape(value: string): string {
+  return [...value].map((char, index) => {
+    const code = char.codePointAt(0)!;
+    if (code === 0) {
+      return '�';
+    }
+    if ((code >= 1 && code <= 0x1f) || code === 0x7f || (/\d/.test(char) && (index === 0 || (index === 1 && value[0] === '-')))) {
+      return `\\${code.toString(16)} `;
+    }
+    if (index === 0 && char === '-' && value.length === 1) {
+      return '\\-';
+    }
+    return code >= 0x80 || /[\w-]/.test(char) ? char : `\\${char}`;
+  }).join('');
+}
+
+// A MutationObserver that sees nothing by itself: the test hands it the changes (notify), each a
+// record with the element whose children changed.
+export class FakeMutationObserver {
+  static instances: FakeMutationObserver[] = [];
+  readonly callback: (records: Array<{ type: string; target: unknown }>) => void;
+  readonly observed: Array<{ target: unknown; options: unknown }> = [];
+
+  constructor(callback: (records: Array<{ type: string; target: unknown }>) => void) {
+    this.callback = callback;
+    FakeMutationObserver.instances.push(this);
+  }
+
+  observe(target: unknown, options: unknown): void {
+    this.observed.push({ target, options });
+  }
+
+  disconnect(): void {
+    this.observed.length = 0;
+  }
+
+  notify(...targets: unknown[]): void {
+    this.callback(targets.map((target) => ({ type: 'childList', target })));
   }
 }
 
@@ -797,6 +858,8 @@ export async function loadPage(
   const opened: Page['opened'] = [];
   const window = {
     blockPopups: false,
+    innerWidth: 1280,
+    innerHeight: 800,
     open: (url = '', target = ''): FakeTab | null => {
       const tab: FakeTab | null = window.blockPopups ? null : {
         opener: window, location: { href: url }, closed: false,
@@ -832,6 +895,7 @@ export async function loadPage(
     },
   };
   FakeEventSource.instances.length = 0;
+  FakeMutationObserver.instances.length = 0;
   const timers: Page['timers'] = [];
   const fakeSetTimeout = (callback: () => void, ms: number): number => {
     const timer = {
@@ -867,7 +931,14 @@ export async function loadPage(
   const createImageBitmap = async (blob: Blob): Promise<{ width: number; height: number; blob: Blob }> => ({ width: 4, height: 3, blob });
   const context = createContext({
     document, window, location, history, navigator, fetch, EventSource: FakeEventSource, setTimeout: fakeSetTimeout, clearTimeout: fakeClearTimeout, URLSearchParams, console,
-    Blob, File, URL: objectUrl, ClipboardItem: FakeClipboardItem, createImageBitmap, ...globals,
+    Blob, File, URL: objectUrl, ClipboardItem: FakeClipboardItem, createImageBitmap, MutationObserver: FakeMutationObserver,
+    CSS: { escape: cssEscape },
+    // An animation frame comes right after the page's pending work (flush lets it run).
+    requestAnimationFrame: (callback: (time: number) => void): number => {
+      setImmediate(() => callback(0));
+      return 0;
+    },
+    ...globals,
   });
   for (const { file, source } of sources) {
     runInContext(source, context, { filename: file });
@@ -903,5 +974,6 @@ export async function loadPage(
     opened,
     objectUrls,
     revokedUrls,
+    observers: FakeMutationObserver.instances,
   };
 }

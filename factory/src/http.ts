@@ -89,6 +89,9 @@ export const ERROR_STATUS: Readonly<Record<string, number>> = {
   // Back to the planner: no suggestion shown, or not the one the page showed; a planning chat link
   // that is not a https://chatgpt.com/ one.
   no_suggestion: 409, suggestion_changed: 409, invalid_chat_link: 400,
+  // The dashboard's pins (src/pins.ts): no such pin, too many open ones, a pins.json that only
+  // sf pins clear may replace.
+  pin_not_found: 404, too_many_pins: 409, pins_unreadable: 409,
 };
 
 // The HTTP status of a FactoryError's code: ERROR_STATUS's, else fallback.

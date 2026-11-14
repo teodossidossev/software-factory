@@ -46,6 +46,9 @@ bin/sf coordinator status [text...] [--clear]  # what the coordinator does now (
 bin/sf coordinator ask <text...>  # a question that waits for the user's answer (at most 1,000 characters, 10 open: too_many_questions); prints its id, q1, q2, ...; needs sf serve
 bin/sf coordinator answered <id>  # take the answered question off the card (unknown_question for an id not open); needs sf serve
 bin/sf coordinator link <url> | --clear  # the chat's link for Open the chat: an https://claude.ai/ URL only (bad_link otherwise); --clear removes it; needs sf serve
+bin/sf pins                       # the open pins the user placed on the dashboard in point mode (section Pins): <id>  #<route>  "<text>", then the note; "No open pins." without; needs sf serve
+bin/sf pins resolve <id>          # mark a pin resolved (also one resolved already; pin_not_found for an unknown id); it leaves the page at its next read; needs sf serve
+bin/sf pins clear                 # remove every pin, open and resolved, and start the ids at 1 again (also over an unreadable pins.json): "Removed N pins."; needs sf serve
 bin/sf norms [workspace]          # the norms in force (section Norms): each value of norms.json with its source (default, file or workspace), then the file's problems; exit 0 with problems too; needs sf serve
 bin/sf queue list                 # the run queue (section Run queue): the limit, the running count, held or not, the queued tickets in order with what each waits for, the next one, the starts that failed; needs sf serve
 bin/sf queue add <workspace> <ticket> [--at N]  # queue a planned ticket at position N (1-based; default the end); needs sf serve
@@ -3828,7 +3831,8 @@ there); the page tabs *Board* (current), *Digest*, *Stats*, *Archived (n)* and *
 workspace filter, a select of *All workspaces (n)* and each workspace's full name with its count of
 jobs (one workspace keeps its cards and counts); the factory pill (section Health checks: the
 health dot, its words and "R/L running", R the queue's running count and L its limit, or "R
-running", the running jobs of every workspace, without the run queue); and *New ticket*. Below
+running", the running jobs of every workspace, without the run queue); *Point* (point mode on or
+off, as Shift+P on any page; pressed while it is on; section Pins, SF-211); and *New ticket*. Below
 1100 px the tabs go and a second row holds a page select and the workspace select, half the width
 each; below 420 px the name keeps its icon only, and nothing scrolls sideways. The pill's popover
 holds, with the run queue (SF-071, section Run queue): "Run up to [− N +] jobs at once" (the
@@ -4041,7 +4045,8 @@ on a job's page `s`, `c` and `m` switch to the Stream, Changes and Merge request
 Ctrl+Enter in the message box sends it; Escape closes an open confirmation, then goes back one
 level (Changes or Merge request to the job's Stream, the Stream or a planned ticket to the board)
 and the focus returns to the card that opened it. Alt+Up and Alt+Down move the focused queued card
-one place (SF-071).
+one place (SF-071). On every page Shift+P (not in a text field) turns point mode on or off, and
+Escape leaves it before any other Escape action (section Pins, SF-211).
 
 **The planned ticket page** (SF-081). A planned ticket opens as a full page with everything about
 its planning, read from `GET api/tickets/<ws>/<ticket>/page` (the tickets row with its
@@ -4377,12 +4382,15 @@ naming the type, when a type of `web/types.d.ts` has neither.
 - `setup.js`: the drawer and the setup (workspaces, new ticket, archived, ticket actions).
 - `skills.js`: the Skills page (each agent role's skills, switched by a click).
 - `health.js`: the factory pill's health dot and words and its popover with the checks.
+- `pins.js`: point mode (section Pins): the Point button and Shift+P, the stopped clicks, the
+  outline, the selector, the note field, the markers and the pins panel; `pinKey` goes first in
+  `onKey`.
 - `main.js`: the stream, the job selected, the page's start and loading; it loads last.
 
 Endpoints under `/d/<token>/`. The read endpoints are GET only (anything else `405` with
 `Allow: GET`); the action endpoints are POST only (anything else `405` with `Allow: POST`; GET,
-HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and act on POST
-(anything else `405` with `Allow: GET, POST`):
+HEAD and OPTIONS never act); `api/workspaces`, `api/tickets` and `api/pins` list on GET and act on
+POST (anything else `405` with `Allow: GET, POST`):
 
 | Path | Answer |
 |---|---|
@@ -4394,6 +4402,7 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 | `api/workspaces/<ws>/merge-requests/<number>/overview` | the overview of one merge request (section Reading the open merge requests and their review comments): `{number, ready, reasons, behind, pipeline: {state, text, url} \| null, sonar: {gate_failed, new_issues, url} \| null, comments: {human, bot}}`; read on the host at each request (its status and threads), nothing written to it; the refusals and empty 404s as for `.../threads` |
 | `api/digests` | `{running, digests: [{id, trigger, period, ended_at, counts: {landed, live_branches, impact}, cost_usd, error}]}`, newest first (SF-103); the counts from the Git data, never from the model; 404 without the digest (in-process dashboards) |
 | `api/digests/<id>` | the stored record `digest/<id>.json` (SF-103); an unknown id or any query is an empty 404 |
+| `api/pins` | the dashboard's pins (section Pins), `pins.json` read as `sf pins` reads it: `{pins: [{id, route, selector, text, rect: {x, y, w, h, vw, vh}, note, at, resolved}]}`, every stored pin in id order, open and resolved; any query is an empty 404; `409 pins_unreadable` for a file that is not JSON or not this shape |
 | `api/coordinator` | the coordinator's state, `coordinator.json` read as `sf coordinator` reads it (section Coordinator card): `{version, status: {text, at} \| null, questions: [{id, text, at}], link, next_question}`; any query is an empty 404; written only by `sf coordinator` |
 | `api/tickets` | `{tickets: [{workspace, ticket, title, base, draft, request, job, lands_after, attachments, conversation: {message, url}, queue_position, queue_error, queue_reason, queue_force}], archived: [{workspace, ticket, title}], job_lands_after: [{workspace, ticket, lands_after}], queue: {max_running, running, held, hold_reason, next, on_limit, limit_hold}}`: the Task files without a live job; `queue_position` its 1-based place in the run queue or `null`, `queue_error` the queue's failed start `{code, message}` or `null`, `queue_reason` why its plan holds it in the queue ("plan not ready: N blocker, M major", "plan check failed", "plan being checked", "plan not checked") or `null`, `queue_force` whether Start anyway was given (SF-086), `queue` the run queue (`next`: `{workspace, ticket}` of the first entry that waits for nothing and whose plan does not hold it, or `null`; `on_limit` the rule at a usage limit's reset and `limit_hold` `{parked, resets_at}` while a job is parked, else `null`, SF-072; the whole `queue` is `null` without a run queue) (SF-071, section Run queue); `lands_after` the tickets its Task file waits for, `[{workspace, ticket, state}]` with `state` `merged`, `pushed`, `running`, `planned` or `missing` (SF-084, section Dashboard), and `job_lands_after` the same for the Task files with a live job; `attachments` its images `[{name, bytes, type}]` (SF-064, section Ticket images); `draft` is true for a skeleton; `request` the user's words of New ticket or `null`; `job` is the last job's state or `null`; `url` is `https://chatgpt.com/?q=<message URL-encoded>`, or `null` when too long |
 | `api/jobs/<ws>/<ticket>/iterations/<n>/report` | the Report, `text/markdown` |
@@ -4470,6 +4479,9 @@ shares; the setup, Task check, task and attachment posts have their own handlers
 | `POST api/tickets/<ws>/<ticket>/archive`, `.../restore`, `.../delete` | `{}` | `Setup.archiveTicket`, `restoreTicket`, `deleteTicket` (SF-027); the ticket's images folder with them (SF-064) |
 | `POST api/tickets/<ws>/<ticket>/attachments?name=<name>` | the image's raw bytes, `Content-Type: application/octet-stream` (not JSON), at most 5 MB | `Setup.addAttachment` (SF-064, section Ticket images): `name` optional (the next number when left out; another query key or a second `name` is an empty 404); result `{name, bytes, type}`; `400 attachment_type`, `400 invalid_name`, `413 attachment_too_large` (also a body over 5 MB, checked against `Content-Length` and while reading), `409 attachment_limit`, `409 job_active`, `404 task_not_found`; every page gets the tickets again |
 | `POST api/tickets/<ws>/<ticket>/attachments/<name>/remove` | `{}` | `Setup.removeAttachment` (SF-064): result `{name}`; `400 attachment_missing`, `400 invalid_name`, `409 job_active`; there is no DELETE method |
+| `POST api/pins` | `{"route": string, "selector": string, "text": string, "rect": {"x", "y", "w", "h", "vw", "vh": number}, "note": string}` | `src/pins.ts` `addPin` (section Pins): a new open pin with the next id; result `{pin, pins}`; `400 invalid_body` beyond a bound or with a control character, `409 too_many_pins` with 50 open, `409 pins_unreadable` |
+| `POST api/pins/<id>` | `{"note"?: string, "resolved"?: boolean}`, at least one | `changePin`: the pin's note, resolved or open again (which counts toward the 50 open); result `{pins}`; an id that is not a whole number from 1 without a leading zero is an empty 404, an unknown one `404 pin_not_found`; there is no PATCH method |
+| `POST api/pins/<id>/remove` | `{}` | `removePin`: result `{pins}`; its id is not given again; `404 pin_not_found`; there is no DELETE method |
 | `POST api/workspaces/<ws>/merge-requests/<number>/job` | `{"threads": string[], "instructions": string}` | `src/review-job.ts` (the Merge requests page): the merge request and its threads read on the host again (the comment text never comes from the page), the Task file `<key>-review-<n>` written with `writeTask` and added to the run queue; result `{workspace, ticket, path, position}`; `400 invalid_request` for no thread and blank instructions, instructions over 4,000 characters or a thread id the host does not list; `409 mr_not_open` when the merge request is not among the open ones; the host's reads' refusals; `400 invalid_content` from the Task file writer (a source branch `continues:` refuses); nothing is written to the host; an empty 404 for a bad workspace name or number, or without the run queue; every page gets the tickets again |
 | `POST api/queue/add` | `{"workspace": string, "ticket": string, "at"?: integer >= 1}` | `RunQueue.add` (`sf queue add`, SF-071): result `{position}`; `404 task_not_found`, `409 task_draft`, `409 job_exists`, `409 already_queued` |
 | `POST api/queue/remove` | `{"workspace": string, "ticket": string}` | `RunQueue.remove` (`sf queue remove`); `409 not_queued` |
@@ -4905,6 +4917,60 @@ dashboard writes the state, answers go to the chat.
   shown). The open questions follow in the order asked (newest last), each with its age; with any
   open question the card has the accent border. Every text is set as text, never HTML.
 
+### Pins
+
+Point mode (SF-211, `web/pins.ts`, `src/pins.ts`) lets the user show the coordinator what they
+mean on the dashboard: they click the thing, a numbered pin (📍1, 📍2, …) stays on it with an
+optional note, and the coordinator reads the same pins with `sf pins` and sees their markers on a
+screenshot. Nothing leaves the machine.
+
+- **On and off.** The top bar's *Point* button (pressed while the mode is on) or Shift+P on any
+  page (not while the focus is in a text field) turns it on or off; Escape leaves it, before any
+  other Escape action. While it is on the cursor is a crosshair and the element under the pointer
+  gets an outline (a box over it; nothing is added to the element).
+- **No action.** While the mode is on, a press, release, click, double click, middle click or drag start on
+  anything but the pins' own elements (the Point button, the panel, the note field, the 📍 N
+  button) is stopped on `window` in the capture phase, so the element's own action never runs: no
+  request, no navigation. The click places a pin (`POST api/pins`: the page's hash, a selector, the
+  element's text with its white space folded, at most 200 characters, and its position), unless it
+  is on the page itself or the note field is open; then a note field opens next to it: Save (or
+  Enter; Shift+Enter is a new line) stores the note, Skip (or Escape) leaves the pin without one.
+- **The selector.** Walking up from the element to `body`, the first element with an id that is
+  unique in the document is the anchor (`#<id>`, escaped with `CSS.escape`, so any id works);
+  failing that (no element on the way has one), the first with a `data-*` attribute (the first, in
+  attribute order, of at most 100 characters without `"` or `\`) that finds only it
+  (`<tag>[data-<name>="<value>"]`); each element below the anchor adds `<tag>:nth-of-type(<k>)`. A selector
+  that does not find the element again gives way to the plain `body > …` path; one over 1,000
+  characters places nothing (*This element cannot be pinned.*).
+- **Markers.** The open pins of the current hash show as `📍<id>` at their element's top-left
+  corner, kept inside the window by the width each one takes (a long id is wider), in a layer that lets every pointer event through, with the mode
+  on or off; their title is the note, else the text. A selector that finds nothing (or that the
+  page cannot parse) is *element gone*, an element without a size *element hidden*; neither has a
+  marker. They are drawn again on a scroll, a resize, a hashchange, a pins read or write and the
+  page's DOM changes (one animation frame for many); no timer.
+- **The panel** (bottom right): *Pins (N open)*, *Refresh*, *Stop pointing (Esc)* while the mode
+  is on, *Close*; the open pins (the current hash's first), each with its route as a link (*Board*
+  for the board), its text, its note, element gone or hidden, *Resolve* and *Delete*; the last
+  refusal under them. With the mode off and open pins, a small *📍 N* button opens it. The page
+  reads the pins at its start, on every hashchange, when the mode is turned on and on Refresh; a
+  write's answer replaces them. A pin resolved with `sf pins resolve` leaves the page at its next
+  read. Every text is set as text, never HTML.
+- **The store.** `<state dir>/pins.json` (mode 0600, written atomically, one write at a time per
+  file, by `sf serve` only: the dashboard's checked POSTs and `sf pins`): `{version: 1, next,
+  pins: [{id, route, selector, text, rect: {x, y, w, h, vw, vh}, note, at, resolved}]}`. Ids count
+  up from 1 and are never given again until `sf pins clear`. At most 50 open pins (the 51st is
+  `409 too_many_pins`, as is opening a resolved one again then); of the resolved ones the 50 newest
+  are kept. Bounds: route 300 characters, selector 1,000, text 200, note 500 (as JavaScript counts
+  them); no control character but `\n` and `\t` in text and note, none in route and selector;
+  every position finite, x and y within ±1,000,000, sizes from 0 to 1,000,000; anything else is
+  `400 invalid_body` and never stored. A file that is not JSON or not this shape is refused on
+  every read and write (`409 pins_unreadable`) and only `sf pins clear` replaces it. A new file no
+  older factory reads, so `STATE_VERSION` stays.
+- **`sf pins`** prints the open pins, `<id>  #<route>  "<text>"` (the board as `board`), then
+  `  note: <note>`, with `\n` and `\t` as spaces (`No open pins.` without); `sf pins resolve <id>`
+  prints `Resolved pin <id>.`; `sf pins clear` prints `Removed N pins.` The three answer while
+  `sf update` drains or builds; they touch no job.
+
 ### Phone and tablet
 
 The dashboard works from a phone (360-430 px wide) and a tablet (768 px) with nothing scrolling
@@ -4938,7 +5004,7 @@ and the other pages keep their desktop layout, which fits there; from 1024 px no
   cut with an ellipsis, a time, a dependency chip's state) its detail appears in the toast, and
   the Merge request tab without MR text says why. A desktop with a mouse is unchanged, apart from
   the column headings' fold marks and the Move up / Move down items.
-- **Keys.** Every key works at every width (j, k, G, s, c, m, n, p, F7, Shift+F7, /, Escape,
+- **Keys.** Every key works at every width (j, k, G, s, c, m, n, p, F7, Shift+F7, Shift+P, /, Escape,
   Ctrl+Enter, Ctrl+S, Alt+Up / Alt+Down, the tree's keys); the new controls are buttons reached by
   Tab.
 
@@ -4969,7 +5035,14 @@ Edit and Save, Ctrl+S, the history), the Stats page (its chart boxes side by sid
 least 4.5:1, and a 390 x 844 window, and the job page's Stream at 600, 1200 and 2000 px (full
 width, long tool rows cut with an ellipsis, long outputs wrapped, no sideways scroll), and the phone
 and tablet layout at 360, 390 and 768 px (no sideways scroll on any screen, the board as one list,
-44 px buttons, Changes unified, SF-119). A failing
+44 px buttons, Changes unified, SF-119), and point mode (section Pins, SF-211: a click on a card's
+button and on a link runs neither and places 📍1 over it with the note field, whose Save stores the
+note; the outline follows the pointer; the selectors of an element with an id, with a data-
+attribute and with neither find it again after the board redraws (an ancestor's unique id wins over
+a nearer data- attribute; an id that is not a plain name is escaped; a data- attribute anchors
+where no id is above); a marker stays inside the window however wide its id; a marker sits at its element's
+corner and moves with a scroll; Escape leaves the mode; at 390 px the panel scrolls nothing
+sideways). A failing
 test saves a screenshot to `dist/test-results/<file>-<test name>.png` and prints its path. They
 run headless; `SF_BROWSER_HEADED=1 npm run test:browser` shows the window. A check that fails
 because of a defect in the factory's own code is kept and marked as a node:test todo until the

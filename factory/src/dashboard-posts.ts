@@ -1,8 +1,8 @@
 // The dashboard's posts: the User's actions as POST endpoints, each validated and dispatched as
 // the one call it stands for: the job and queue actions of POST_ROUTES (src/dashboard-routes.ts,
 // routePost), the setup actions (setupPost), the Task check's start (checkPost), the planned
-// ticket page's Save (taskPost), a ticket's images (attachmentAddPost, attachmentRemovePost) and an
-// agent role's skills (skillRolesPost, the one PUT); handlePost runs the transport checks, the call, and tells the open pages through the change
+// ticket page's Save (taskPost), a ticket's images (attachmentAddPost, attachmentRemovePost), the
+// pins (through setupPost) and an agent role's skills (skillRolesPost, the one PUT); handlePost runs the transport checks, the call, and tells the open pages through the change
 // feed. Nothing here changes a job by itself.
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import * as z from 'zod/v4';
@@ -14,6 +14,7 @@ import { ticketEntry } from './dashboard-payloads.js';
 import { type JobKey, type JobRoute, openWhileUpdating, type PostRoute, type QueueRoute } from './dashboard-routes.js';
 import { FactoryError } from './errors.js';
 import { internalError, sendJson, statusOf } from './http.js';
+import { addPin, changePin, PIN_CHANGE, PIN_CHANGE_SHAPE, PIN_ID, PIN_INPUT, PIN_INPUT_SHAPE, PIN_REMOVE, pinIdOf, removePin } from './pins.js';
 import { HANDOFF_MODES, WORKSPACE_COLORS, WORKSPACE_NAME_PATTERN } from './registry.js';
 import { REVIEW_JOB_SHAPE, reviewJobCall } from './review-job.js';
 import { setRoleSkills, skillsForClients } from './skills.js';
@@ -30,7 +31,7 @@ const MAX_SKILL_NAME = 200;
 // A file of mostly non-ASCII or control characters can need more and is written with write_task.
 export const MAX_TASK_BODY_BYTES = 2 * MAX_TASK_BYTES + 1024;
 
-// The request body of each setup, Task check, task and attachment POST, strict: unknown keys, null,
+// The request body of each setup, Task check, task, attachment and pin POST, strict: unknown keys, null,
 // arrays and wrong types are refused; shape is what the refusal names. The job and queue actions
 // have theirs in POST_ROUTES (src/dashboard-routes.ts).
 const BODIES = {
@@ -78,6 +79,10 @@ const BODIES = {
   'ticket-owner': { shape: '{"owner": "chatgpt" | "claude_code"}', schema: z.strictObject({ owner: z.enum(TICKET_OWNERS) }) },
   // The ticket's planning chat link: a https://chatgpt.com/ URL, or null to remove it.
   'ticket-chat': { shape: '{"url": string | null}', schema: z.strictObject({ url: z.string().nullable() }) },
+  // The dashboard's pins (src/pins.ts, with their bounds): a new one, a change of one, a removal.
+  'pin-add': { shape: PIN_INPUT_SHAPE, schema: PIN_INPUT },
+  'pin-change': { shape: PIN_CHANGE_SHAPE, schema: PIN_CHANGE },
+  'pin-remove': { shape: '{}', schema: PIN_REMOVE },
 };
 type SetupRoute = keyof typeof BODIES;
 // A setup POST's route and the body as its refusal names it.
@@ -195,7 +200,44 @@ export function postHandlers(ctx: DashboardContext, feed: Pick<ChangeFeed, 'chan
     };
   }
 
+  // POST api/pins: a new open pin (too_many_pins past the open ones' bound); the answer is the pin
+  // and every pin.
+  function pinAddPost(): Post {
+    return {
+      ...setupBody('pin-add'),
+      call: (data) => {
+        const parsed = BODIES['pin-add'].schema.safeParse(data);
+        return parsed.success ? () => addPin(stateDir, parsed.data) : undefined;
+      },
+    };
+  }
+
+  // POST api/pins/<id> (its note, resolved or open again) and POST api/pins/<id>/remove; an id that
+  // is not a whole number from 1 without a leading zero is an empty 404, an unknown one pin_not_found.
+  // The answer is every pin.
+  function pinPost(id: string, remove: boolean): Post | undefined {
+    if (!PIN_ID.test(id)) {
+      return undefined;
+    }
+    if (remove) {
+      return { ...setupBody('pin-remove'), call: (data) => (BODIES['pin-remove'].schema.safeParse(data).success ? () => removePin(stateDir, pinIdOf(id)) : undefined) };
+    }
+    return {
+      ...setupBody('pin-change'),
+      call: (data) => {
+        const parsed = BODIES['pin-change'].schema.safeParse(data);
+        return parsed.success ? async () => changePin(stateDir, pinIdOf(id), parsed.data) : undefined;
+      },
+    };
+  }
+
   function setupPost(target: Exclude<Target, { kind: 'read' | 'action' | 'ticket-check' | 'ticket-task' | 'queue' | 'ticket-attachment-add' | 'ticket-attachment-remove' | 'skill-roles' }>): Post | undefined {
+    if (target.kind === 'pin') {
+      return pinPost(target.id, target.remove);
+    }
+    if (target.kind === 'both' && target.route === 'pin-add') {
+      return pinAddPost();
+    }
     if (target.kind === 'workspace-edit') {
       const name = target.name;
       if (name === undefined || !WORKSPACE_NAME_PATTERN.test(name)) {

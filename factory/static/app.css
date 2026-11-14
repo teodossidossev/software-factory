@@ -993,3 +993,39 @@ a.mq-badge:hover { text-decoration: underline; }
 .rules legend { margin-bottom: 6px; }
 .rules label { display: flex; gap: 8px; align-items: baseline; cursor: pointer; }
 @media (max-width: 560px) { .hpanel { position: fixed; top: 56px; left: 16px; right: 16px; width: auto; max-height: calc(100vh - 72px); } }
+
+/* Point mode (web/pins.ts): the Point button pressed, a crosshair while pointing, the outline over
+   the element under the pointer and the markers of the pins, both fixed and letting every pointer
+   event through; the note field of a new pin; the pins panel at the bottom right and its button
+   with the mode off. Light and dark through the tokens; 44 px targets on a phone and nothing wider
+   than the viewport. */
+.btn.point[aria-pressed="true"] { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+body.pointing, body.pointing * { cursor: crosshair; }
+body.pointing :is(#pins, #pin-note, #pins-open, #point-toggle), body.pointing :is(#pins, #pin-note, #pins-open) * { cursor: auto; }
+body.pointing :is(#pins, #pins-open, #point-toggle) :is(button, a), body.pointing #pin-note button, body.pointing #pins-open, body.pointing #point-toggle { cursor: pointer; }
+#pin-layer { position: fixed; inset: 0; z-index: 70; pointer-events: none; overflow: hidden; }
+#pin-outline { position: fixed; z-index: 69; pointer-events: none; outline: 2px solid var(--accent); outline-offset: 1px; background: color-mix(in srgb, var(--accent) 10%, transparent); border-radius: 3px; }
+.pin-marker { position: absolute; display: inline-flex; align-items: center; height: 24px; padding: 0 6px 0 3px; border-radius: 999px; font: 600 12px/1 var(--sans); white-space: nowrap;
+  background: var(--bar); color: var(--bar-fg); box-shadow: 0 2px 6px rgba(0, 0, 0, .3); }
+#pin-note { position: fixed; z-index: 75; width: min(300px, calc(100vw - 16px)); display: grid; gap: 8px; padding: 10px; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--panel); box-shadow: 0 6px 20px rgba(0, 0, 0, .25); }
+#pin-note textarea { width: 100%; min-width: 0; resize: vertical; font: inherit; color: var(--fg); background: var(--panel-2); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); padding: 6px 8px; }
+.pn-row { display: flex; gap: 8px; justify-content: flex-end; }
+#pins { position: fixed; z-index: 72; right: max(16px, env(safe-area-inset-right, 0px)); bottom: max(16px, env(safe-area-inset-bottom, 0px)); width: min(380px, calc(100vw - 32px)); max-height: min(60vh, 520px);
+  display: grid; grid-template-rows: auto minmax(0, 1fr) auto; gap: 8px; padding: 12px; overflow: hidden; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--panel); box-shadow: 0 6px 20px rgba(0, 0, 0, .25); }
+.pins-head { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; min-width: 0; }
+.pins-head h3 { margin: 0 auto 0 0; font-size: 14px; }
+#pins-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; overflow: auto; min-height: 0; }
+.pin-row { display: grid; gap: 4px; padding: 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--panel-2); min-width: 0; }
+.pin-rhead { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; min-width: 0; }
+.pin-id { font-weight: 600; white-space: nowrap; }
+.pin-route { font: 12px var(--mono); color: var(--accent); overflow-wrap: anywhere; min-width: 0; }
+.pin-place { font-size: 12px; color: var(--warn); }
+.pin-text, .pin-note { overflow-wrap: anywhere; white-space: pre-wrap; min-width: 0; }
+.pin-note { color: var(--muted); }
+.pin-acts { display: flex; gap: 6px; justify-content: flex-end; }
+.pins-status:empty { display: none; }
+.pins-status { margin: 0; color: var(--del); overflow-wrap: anywhere; }
+#pins-open { position: fixed; z-index: 72; right: max(16px, env(safe-area-inset-right, 0px)); bottom: max(16px, env(safe-area-inset-bottom, 0px)); box-shadow: 0 2px 8px rgba(0, 0, 0, .2); }
+@media (max-width: 767px), (hover: none) {
+  .pin-acts .btn, .pins-head .btn, .pn-row .btn, #pins-open { min-height: 44px; min-width: 44px; }
+}

@@ -132,6 +132,12 @@ refused), and the factory's test command passed in a sandbox without network on 
     in the state directory. Only `sf coordinator`, through `sf serve`, writes it; the dashboard
     only reads it, and shows every text as text. The chat link is limited to `https://claude.ai/`,
     checked when it is written and again on the page.
+  - A pin of point mode stores the page's hash, a selector, up to 200 characters of the element's
+    text, its position and the note, in `<state dir>/pins.json` (mode 0600), on this machine
+    only. It is written only through the dashboard's checked POSTs (the exact Origin, JSON, the
+    body's bound, strict bounded fields) or `sf pins`, both in `sf serve`. The page shows every pin
+    text as text, never as HTML, and no control character is stored (none but a line break and a
+    tab in the text and the note), so `sf pins` prints nothing a terminal would act on.
 - **What is published is checked.**
   - The guard refuses a push or an MR text that holds a secret, in every workspace.
   - In a workspace with `"guard": true`, it also refuses the names on your private list and the

@@ -252,7 +252,9 @@ test('once per job: the pass is marked on the job before it runs; one the user m
   try {
     await call(served, 'start', { workspace: 'app', ticket: 'S-8' });
     const jobs = new JobStore(env.state);
-    const deadline = Date.now() + 15_000;
+    // The pass starts after two iterations and two reviews: the harness's 20 s (waitFor) for each
+    // of the two iterations, so a full test run's load does not end the wait before the pass does.
+    const deadline = Date.now() + 40_000;
     while ((await reviewLog(env).catch(() => [])).length < 3) {
       assert.ok(Date.now() < deadline, 'the pass did not start');
       await new Promise((resolve) => setTimeout(resolve, 100));

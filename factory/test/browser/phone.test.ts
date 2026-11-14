@@ -106,7 +106,8 @@ browserTest('phone (SF-119, SF-160): at 390 px every top-bar button and select i
       const rect = node.getBoundingClientRect();
       return { text: (node as HTMLElement).id || (node as HTMLElement).innerText.trim(), x: rect.x, right: rect.x + rect.width, height: rect.height };
     }));
-  assert.deepEqual(controls.map((control) => control.text).sort(), ['health-light', 'open-new-ticket', 'page-select', 'waits', 'workspace-filter'], JSON.stringify(controls));
+  // SF-211: point mode's Point button too.
+  assert.deepEqual(controls.map((control) => control.text).sort(), ['health-light', 'open-new-ticket', 'page-select', 'point-toggle', 'waits', 'workspace-filter'], JSON.stringify(controls));
   const off = controls.filter((control) => control.x < 0 || control.right > 390 || control.height < 44);
   assert.deepEqual(off, []);
   await fx.page.locator('#health-light').click();

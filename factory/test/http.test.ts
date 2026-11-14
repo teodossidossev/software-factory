@@ -93,6 +93,8 @@ test('statusOf maps each code as the dashboard did before SF-139; any other code
     attachment_type: 400, attachment_too_large: 413, attachment_limit: 409, attachment_missing: 400, attachment_invalid: 409,
     // SF-208: the planner's suggestion and the planning chat link.
     no_suggestion: 409, suggestion_changed: 409, invalid_chat_link: 400,
+    // SF-211: the dashboard's pins.
+    pin_not_found: 404, too_many_pins: 409, pins_unreadable: 409,
   };
   assert.deepEqual({ ...ERROR_STATUS }, before);
   for (const [code, status] of Object.entries(before)) {

@@ -7,9 +7,10 @@ import { readFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { type ImageRef, imageRefs } from '../attachments.js';
+import { workspaceDecisionDocs } from '../decisions.js';
 import { FactoryError } from '../errors.js';
 import { gateDecision } from '../gate-level.js';
-import { findBwrap, GATE_REVIEWER, type GateOutcome, gatePrompt, noTokens, runGate } from '../gate.js';
+import { findBwrap, GATE_REVIEWER, type GateOutcome, gatePrompt, noTokens, redactedGateOutcome, runGate } from '../gate.js';
 import { jobUserMessages } from '../job-stream.js';
 import { claudeReviews, type FileChange, type GateOverride, type GateRecord, type IterationMeta, type Job, type JobState, now, type PauseStep, type ReviewRecord, type SimplifyRecord } from '../jobs.js';
 import { applyVerdict, entryItem, isSimplification, SIMPLIFIER, type Applied, type Decision, DECISIONS, LEDGER_ID, type LedgerEntry, FACTORY_PROBLEMS, settle, unappliedEntries, unsettled } from '../ledger.js';
@@ -353,6 +354,8 @@ export class ReviewsPart {
       ticket, iteration, report, patch, patchTruncated: meta.patch_truncated, files: meta.files, handbook: this.#settings.handbook,
       task: await readFile(join(worktree, TASK_DIR, `${ticket}.md`), 'utf8'), ledger: await this.#store.jobs.readLedger(name, ticket),
       rules: await readJobRules(this.#store.jobs.dir(name, ticket)),
+      // The workspace's decision documents as they are in the job's worktree.
+      decision_docs: await workspaceDecisionDocs(name, worktree),
       // Every message sent up to and including the reviewed iteration.
       userMessages: (await jobUserMessages(this.#store.jobs, name, ticket)).filter((m) => m.iteration <= iteration),
       ...(await reviewerSkills(await jobSkills(this.#settings.config.stateDir, this.#store.jobs.eventsPath(name, ticket)), role, this.#settings.config.reviewSkill, this.#settings.config.reviewSkillSet)),
@@ -633,16 +636,7 @@ export class ReviewsPart {
     }
     // A usage limit of the plan, read before redaction.
     const limit = outcome.ok ? undefined : usageLimit(outcome.message, new Date(), 'codex');
-    // The failure message (Codex's stderr or error event) goes to gate.json, the event and the job's
-    // error: withheld or redacted like the run's prose (src/redact.ts, failure). A gate the factory
-    // refused to start (a code: gate_sandbox_unavailable) keeps its own text, naming the cause.
-    if (!outcome.ok && outcome.code === undefined) {
-      outcome = { ...outcome, message: redactor.failure(outcome.message) };
-    } else if (outcome.ok) {
-      // The verdict redacted before gate.json, the events, the Fix section and the prompts.
-      outcome = { ...outcome, output: redactor.output(outcome.output) };
-    }
-    const ended = outcome;
+    const ended = redactedGateOutcome(outcome, redactor);
     await this.#sessions.afterSession(job);
     await this.#locks.locked(() => this.#gated(job, running, claude, ended, method, limit));
   }

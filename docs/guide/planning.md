@@ -303,14 +303,34 @@ finding of its own), then lists findings, each with a kind and a severity:
 
 | Kind | Meaning |
 | --- | --- |
-| `decision` | a choice the Implementer would have to make |
-| `contradiction` | a claim about the code that the code contradicts, with its `path:line` (always a blocker) |
+| `decision` | a choice the Implementer would have to make, or a product decision no decision document covers (below) |
+| `contradiction` | a claim about the code that the code contradicts, with its `path:line`, or a contradiction with a decision document, with its `<path>#<heading>` and the sentence quoted (always a blocker) |
 | `missing` | a file, test or acceptance criterion the goal needs and the Task does not name |
 | `overreach` | a part the goal does not need |
 | `unclear` | a passage that can be read two ways |
 
 and the files it expects to change. With a `scope`, an expected file outside it is a `missing`
 major finding, and a scope entry no expected file matches is an `overreach` nit.
+
+**The decision documents.** What was decided about your product (its concepts, its domain rules,
+its architecture) lives in documents the coding rules do not cover: the glossary, the decision
+records (ADRs), the terminology and architecture pages. Which files those are is the
+`decision_docs` list of `norms.json` in the configuration directory (`sf norms <workspace>` shows
+it; [Configuration](configuration.md#norms-normsjson) describes the file). The rule is "cite or ask":
+
+- The planner reads them with the project documentation and names in the Task the ones the plan
+  relies on.
+- The Task check gets their list (the tracked files that match, at the Task's base; paths and
+  sizes, at most 60) and reads the glossary, the terminology pages and the records that bear on
+  the Task. A Task that contradicts one is a `contradiction` blocker quoting the sentence; a Task
+  that decides something of the product no document covers (a concept's name or meaning, a domain
+  rule, what the user sees or may do) is a `decision` finding, which comes back to you.
+- Both reviewers get the list as it is in the job's worktree. An item that conflicts with a
+  document begins `Decision:` and quotes it; a product question no document answers is never a
+  fix item: the verdict's summary carries it on a `For the user:` line, which you read in the
+  review entry of the job page.
+
+A workspace whose globs match no file gets none of this: its prompts are as they were.
 
 **Verdicts.**
 

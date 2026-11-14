@@ -4,7 +4,8 @@
 // base (the code the Implementer starts from), which has no .software-factory folder, and a
 // PreToolUse hook refuses every Read, Grep or Glob that reaches outside that worktree and every other
 // tool but the SDK's StructuredOutput. Its prompt holds the repository's and the user's
-// coding rules read at the checkout's commit (src/rules-docs.ts) and the Task file, and
+// coding rules read at the checkout's commit (src/rules-docs.ts), the list of the workspace's
+// decision documents in that checkout (src/decisions.ts; prompt: src/prompts.ts) and the Task file, and
 // nothing of the Context owner's conversation, the jobs or the ledger; its output is a paraphrase first, then
 // findings, the files it expects to change and a verdict. A check is stored by the sha256 of the Task file it read, under the state
 // directory, never in the work checkout. It only advises: nothing here starts, refuses or changes
@@ -19,17 +20,19 @@ import { writeFileAtomic } from './atomic.js';
 import { attachmentReferences, imageHashes, type ImageRef, type ResolvedImage, resolveImages, writeImages } from './attachments.js';
 import type { Config } from './config.js';
 import { taskStartBranch } from './continues.js';
+import { workspaceDecisionDocs } from './decisions.js';
 import { FactoryError } from './errors.js';
 import { inTmpRoot, TMP_REFUSAL, tmpRoots } from './host-tmp.js';
 import { Redactor } from './redact.js';
 import { runGit } from './git.js';
 import { resolveTarget } from './mr.js';
+import { checkPrompt } from './prompts.js';
 import type { Workspace } from './registry.js';
 import { runStructuredSession, SEVERITIES, SEVERITY_DEFINITIONS, type Severity } from './review.js';
 import { collectRules } from './rules-docs.js';
 import { matchesGlob, scopeOf } from './rules.js';
 import { absoluteRule, pathDenials, prepareTaskChecksDir, TASK_CHECK_DIR_UNSAFE } from './sandbox-denials.js';
-import { roleSkillBlocks, SKILL_BLOCKS_LINE, type SkillNames } from './skills.js';
+import { roleSkillBlocks, type SkillNames } from './skills.js';
 import { ARCHIVE_DIR, checkNeed, isDraft, mayTouch, parseFrontMatter, readTask, TASK_DIR, taskScope, TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
 import { addDetachedWorktree, removeWorktree } from './worktree.js';
 
@@ -116,30 +119,6 @@ export function settleCheck(task: string, output: CheckOutput): CheckOutput {
     ...scopeFindings(task, output.files, output.findings),
   ];
   return { paraphrase: output.paraphrase, findings, files: output.files, verdict: checkVerdict(findings) };
-}
-
-// The prompt of the check: what it is and how to answer, the task_check role's <skill> blocks and the
-// <rules> block when there are any, then the Task file. Nothing else: no conversation, job, review or ledger.
-export function checkPrompt(ticket: string, task: string, rules = '', skills = ''): string {
-  return [
-    `Readiness check of the Task file of ticket ${ticket}, before an Implementer builds it. You check; you change nothing.`,
-    'The current directory is a checkout of the repository the Task is about, at the Task\'s base: the code the Implementer starts from. Your tools are Read, Grep and Glob, inside this directory only; nothing else is available. The Task file below is all you get of the plan.',
-    '',
-    '- First, before you look for findings, write paraphrase: what the Task proposes, in your own words, in 3 to 8 sentences: the goal, the change and how it is accepted. Where you cannot paraphrase a part, or your paraphrase could differ from what the author meant, that is a finding about the Task (`unclear`).',
-    '- Readiness, the Zero-Decision Rule: the Implementer makes no design decision. Each choice the Task leaves open that the Implementer would have to make is a `decision`. Every file to change must be named as Create, Modify or Delete, and the Task must have a test plan and acceptance criteria; what the goal needs and the Task does not name is `missing`.',
-    '- Codebase: check every claim of the Task about the code (files, functions, behaviour, settings) against the repository. A claim the code contradicts is a `contradiction`, always a blocker, with the path:line that contradicts it in where.',
-    '- Zoom out: a part of the Task the stated goal does not need is `overreach`.',
-    '- Give every finding a kind, a severity, where (the Task section, or path:line), the problem and what the Task should say instead. Severities:',
-    ...SEVERITIES.map((severity: Severity) => `  - \`${severity}\`: ${SEVERITY_DEFINITIONS[severity]}.`),
-    '- files: every file you expect the change to create, modify or delete, tests and docs included. When the front matter has `scope:`, a file you expect outside it is `missing`, and a scope entry no expected file needs is `overreach`.',
-    '- verdict: `ready` when no finding is a blocker or major; `not_ready` otherwise. The factory applies this rule to your findings, whatever you write.',
-    '',
-    ...(skills !== '' ? [SKILL_BLOCKS_LINE, skills, ''] : []),
-    ...(rules !== '' ? [rules.trimEnd(), ''] : []),
-    `<task_file path="${TASK_DIR}/${ticket}.md">`,
-    task.trimEnd(),
-    '</task_file>',
-  ].join('\n');
 }
 
 // The sha256 of a Task file's text (UTF-8), as write_task reports it.
@@ -662,11 +641,12 @@ export async function runTaskCheck(workspace: Workspace, ticket: string, task: s
       return failed('The check was cancelled.');
     }
     // The paths off limits to every session, but the Task checks' parent directory the check runs in: on top of checkDeniedRules for the tools, and for the sandbox, with the session's
-    // temporary folder and the check's own folder (not its siblings) kept. The check's own guard (guardHooks) holds the tools, not the job's. Its skills: the choice and the link now.
+    // temporary folder and the check's own folder (not its siblings) kept. The check's own guard (guardHooks) holds the tools, not the job's. Its skills: the choice and the link now;
+    // the workspace's decision documents: listed in the check's checkout, at the Task's base.
     let outcome: Awaited<ReturnType<typeof runStructuredSession<CheckOutput>>>;
     const skills = await roleSkillBlocks(options.stateDir, 'task_check');
     try {
-      outcome = await runStructuredSession(checkPrompt(ticket, task, rules, skills.text), {
+      outcome = await runStructuredSession(checkPrompt(ticket, task, rules, skills.text, await workspaceDecisionDocs(workspace.name, cwd, options.configDir)), {
         cwd, claudePath: options.claudePath, sandbox: options.sandbox, model: options.model, maxTurns: options.maxTurns,
         pathDenials: async (sessionTmp) => ({ ...(await pathDenials({ session: 'task_check', workspace: workspace.name, checkout: workspace.workCheckout, sessionTmp,
           checkFolder: dirname(cwd), stateDir: options.stateDir, worktreeRoot: options.worktreeRoot, configDir: options.configDir })), hooks: undefined }),

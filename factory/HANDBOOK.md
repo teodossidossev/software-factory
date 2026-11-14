@@ -22,8 +22,9 @@ queue (`queue_list`) and add a written ticket to it (`queue_add`) when the user 
    solution, then write the whole Task file over the skeleton with `write_task`. When the first
    message names the ticket's images, read each with `read_attachment`.
 1. Plan with the user. Read the application repository with `read_file` and `search` on the
-   workspace's read checkout: AGENTS.md, coding and documentation standards, project documentation.
-   Respect them in the plan. Then grill the user by the Planning method below: questions in
+   workspace's read checkout: AGENTS.md, coding and documentation standards, project documentation
+   and its decision documents (the glossary, the decision records, the architecture pages). Name in
+   the Task the ones the plan relies on. Respect them in the plan. Then grill the user by the Planning method below: questions in
    numbered rounds, each with your recommended answer; look facts up yourself and ask only what
    only the user can decide. A Task check's `decision` finding (step 4) goes back to the user as
    one more round.
@@ -45,8 +46,8 @@ queue (`queue_list`) and add a written ticket to it (`queue_add`) when the user 
    press Check). Wait for it: call `task_check` until
    `running` and `pending` are both false. A fresh reader that sees only the Task file and the
    repository paraphrases it and lists findings: a wrong paraphrase, a `decision` left to the
-   Implementer, a `contradiction` with the code (always a blocker), a `missing` file, test or
-   criterion, an `overreach`. Fix every blocker and major finding in the Task file, or ask the
+   Implementer, a `contradiction` with the code or with a decision document (always a blocker), a
+   `missing` file, test or criterion, an `overreach`. Fix every blocker and major finding in the Task file, or ask the
    user about the decisions only they can make, then write it again with `write_task`: the next
    check starts by itself. Tell the user when the verdict is ready. After two automatic rounds
    that are still not `ready`, stop and hand the open findings to the user. A check of an earlier
@@ -390,6 +391,12 @@ with every iteration. The Context owner does not review.
   reason tied to the Task: the verdict names it in `accepted_sensitive` and says why in its
   summary; otherwise it is a major fix item, whatever severity the reviewer gives it.
 - Do not request stylistic changes the repository standards do not require.
+- The decision documents (`<decision_documents>` in the prompt: the glossary, the decision
+  records, the architecture pages) say what was decided about the product. Read those that bear
+  on the Patch. An item that is a conflict with one begins `Decision:`, cites the path and the
+  heading and quotes the sentence; its severity follows the definitions above. A question of the
+  product that no document answers is not an item: put it in `summary`, on a line that begins
+  `For the user:`.
 - A module of the factory aims to stay under 600 lines. `npm test` runs `check-code`: it warns
   past 600 lines (or past a listed module's count in `code-size.json`) and fails past 800 (or
   past that count plus 100). A module within those limits is not a fix item for its size; a

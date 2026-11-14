@@ -12,6 +12,7 @@ import { accessSync, constants } from 'node:fs';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { delimiter, isAbsolute, join } from 'node:path';
 import type { GateTokens } from './jobs.js';
+import type { Redactor } from './redact.js';
 import { filterSupports, spawnSeccomped } from './seccomp.js';
 import { issues, oneLine, REVIEW_SCHEMA, reviewBody, type ReviewInput, reviewOutput, type ReviewOutput } from './review.js';
 
@@ -111,6 +112,17 @@ export type GateOutcome = { tokens: GateTokens; startedAt: string; endedAt: stri
 
 // The usage of a run that reported none.
 export const noTokens = (): GateTokens => ({ input: 0, cached_input: 0, output: 0 });
+
+// The outcome as gate.json, the events, the job's error, the Fix section and the prompts get it.
+// A failure message (Codex's stderr or error event) is withheld or redacted like the run's prose
+// (src/redact.ts, failure); a gate the factory refused to start (a code: gate_sandbox_unavailable)
+// keeps its own text, naming the cause. A verdict is redacted.
+export function redactedGateOutcome(outcome: GateOutcome, redactor: Pick<Redactor, 'failure' | 'output'>): GateOutcome {
+  if (!outcome.ok) {
+    return outcome.code === undefined ? { ...outcome, message: redactor.failure(outcome.message) } : outcome;
+  }
+  return { ...outcome, output: redactor.output(outcome.output) };
+}
 
 // The argv of `codex exec`; the prompt goes to stdin ("-"). The user's Codex memories stay out:
 // the memories feature off, and no memories injected should a later Codex read them without it.

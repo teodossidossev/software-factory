@@ -8,11 +8,12 @@ import { dirname, join, resolve } from 'node:path';
 import { type Options, query, type SandboxSettings, type SDKMessage, type SDKResultMessage, type SettingSource } from '@anthropic-ai/claude-agent-sdk';
 import * as z from 'zod/v4';
 import { type ImageRef, promptInput } from './attachments.js';
+import { type DecisionDocs, reviewDecisionLines } from './decisions.js';
 import { type ClaudeTmp, makeSessionTmp, removeSessionTmp } from './host-tmp.js';
 import type { UserMessage } from './job-stream.js';
 import type { FileChange } from './jobs.js';
 import { type FixItem, fixItemLine, LEDGER_REF, type LedgerEntry, SCOPE_PROBLEM, SENSITIVE_PROBLEM, settledLines } from './ledger.js';
-import { handbookSection } from './prompts.js';
+import { handbookSection, userDecisionLines } from './prompts.js';
 import { ENV_FILE_RULES } from './rules.js';
 import { type PathDenials, type SandboxDenials, withSandboxDenials } from './sandbox-denials.js';
 import { JOB_SESSION_SETTINGS, sessionEnvironment, withSandboxEnvDenials } from './session.js';
@@ -27,9 +28,6 @@ export const REVIEW_TOOLS = ['Read', 'Grep', 'Glob'];
 // Denied as well, should a tool outside REVIEW_TOOLS still be offered.
 // 'mcp__*': every MCP server's tools, though readOnlySessionOptions loads none (strictMcpConfig).
 export const REVIEW_DENIED_TOOLS = ['Bash', 'Edit', 'Write', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Task', 'Agent', 'mcp__*', ...ENV_FILE_RULES];
-// The caps of <user_decisions>, in characters: one message's text, and all the texts sent.
-export const MAX_USER_MESSAGE_CHARS = 4000;
-export const MAX_USER_DECISIONS_CHARS = 16000;
 
 // The weight of a review item. Only blocker and major items make a fix; nits never block.
 export const SEVERITIES = ['blocker', 'major', 'nit'] as const;
@@ -74,7 +72,7 @@ export type ReviewMethod = 'none' | { path: string; sha256: string };
 // The lines in front of the <review_method> block: how the skill's method fits a factory review.
 export const REVIEW_METHOD_LINES = [
   '- Follow the review method below (the user\'s code-review skill), adapted to this review: do not spawn sub-agents and do not ask for a fixed point or a spec. The fixed point is the base commit; the spec is the Task file and the user\'s messages; the standards are the documents the method names plus the rules below. Cover the Spec axis first, then the Standards axis.',
-  '- Begin each item\'s `problem` with `Spec:` or `Standards:`.',
+  '- Begin each item\'s `problem` with `Spec:`, `Standards:` or `Decision:`.',
   '- A baseline smell is always a `nit`, never `major` or `blocker`. A breach of a documented standard or of the Task keeps the severities below.',
   '- The change is the uncommitted worktree against the base commit (`git diff <base>`, or the Patch below), not `<fixed-point>...HEAD`; do not stop on an empty `...HEAD` diff.',
   '- Answer only with the output schema: no `## Standards`/`## Spec` report, no word limits.',
@@ -145,6 +143,8 @@ export interface ReviewInput {
   review_method?: ReviewMethod;
   // The <skill> blocks of the reviewer's other skills (reviewerSkills); absent or '': none.
   skillBlocks?: string;
+  // The workspace's decision documents in the job's worktree (src/decisions.ts); absent or none listed: no block.
+  decision_docs?: DecisionDocs;
 }
 
 // The buffer's first maxBytes bytes as text, never splitting a UTF-8 character.
@@ -154,44 +154,6 @@ export function cutBuffer(buffer: Buffer, maxBytes: number): string {
     end -= 1;
   }
   return buffer.subarray(0, end).toString('utf8');
-}
-
-// A text cut to at most limit characters, the last one "…", without splitting a surrogate pair (as
-// cut in src/job-stream.ts).
-function cutText(text: string, limit: number): string {
-  if (text.length <= limit) {
-    return text;
-  }
-  let end = limit - 1;
-  const code = text.charCodeAt(end - 1);
-  if (code >= 0xd800 && code <= 0xdbff) {
-    end -= 1;
-  }
-  return `${text.slice(0, end)}…`;
-}
-
-// The lines inside <user_decisions>: one <user_message> per message, oldest first, each
-// text cut to MAX_USER_MESSAGE_CHARS; the newest messages whose texts fit in
-// MAX_USER_DECISIONS_CHARS (the newest always), after a line counting the older ones left out;
-// "None." without messages.
-export function userDecisionLines(messages: UserMessage[]): string[] {
-  if (messages.length === 0) {
-    return ['None.'];
-  }
-  const texts = messages.map((message) => cutText(message.text.trimEnd(), MAX_USER_MESSAGE_CHARS));
-  // The newest is always kept; then older ones while they fit, up to the first that does not.
-  let first = texts.length - 1;
-  let size = texts[first]!.length;
-  while (first > 0 && size + texts[first - 1]!.length <= MAX_USER_DECISIONS_CHARS) {
-    first -= 1;
-    size += texts[first]!.length;
-  }
-  const lines = first === 0 ? [] : [`(${first} earlier ${first === 1 ? 'message is' : 'messages are'} left out; the job's Stream has them.)`];
-  for (let index = first; index < messages.length; index += 1) {
-    const { iteration, at } = messages[index]!;
-    lines.push(`<user_message iteration="${iteration}"${at !== null ? ` at="${at}"` : ''}>`, texts[index]!, '</user_message>');
-  }
-  return lines;
 }
 
 function pathLines(files: FileChange[] | undefined): string[] {
@@ -221,7 +183,8 @@ export function reviewPrompt(input: ReviewInput): string {
 // there is one (the user's code-review skill, before the review rules, which win where they differ),
 // the Handbook's review rules and the material of the iteration: the job's coding rules when it has them, the
 // Task file, the user's messages to the job, the Report, the marked paths (sensitive,
-// outside the Task's scope, deleted) and the Patch, inline up to MAX_REVIEW_PATCH_BYTES.
+// outside the Task's scope, deleted), the Patch, inline up to MAX_REVIEW_PATCH_BYTES, and last the
+// list of the workspace's decision documents when it has any.
 export function reviewBody(input: ReviewInput): string[] {
   const { ticket } = input;
   const rules = input.rules ?? '';
@@ -278,6 +241,7 @@ export function reviewBody(input: ReviewInput): string[] {
     '<patch>',
     (cut ? cutBuffer(input.patch, MAX_REVIEW_PATCH_BYTES) : input.patch.toString('utf8')).trimEnd(),
     '</patch>',
+    ...reviewDecisionLines(input.decision_docs),
   ];
 }
 

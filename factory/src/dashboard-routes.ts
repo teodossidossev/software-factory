@@ -209,11 +209,12 @@ export function openWhileUpdating(route: PostRoute): boolean {
 // job's detail sends them to the page as confirm_actions.
 export const CONFIRM_ACTIONS: readonly RouteName[] = (Object.keys(POST_ROUTES) as RouteName[]).filter((name) => POST_ROUTES[name].confirm === true);
 
-// GET api/workspaces/<ws>/merge-requests and api/workspaces/<ws>/merge-requests/<number>/threads:
-// the open merge requests of the workspace's origin and the review threads of one, read on the host
-// when the page asks (sf mr list and sf mr comments). undefined (an empty 404) for a name or a
-// number that is not one; the host's refusals are the Execution's FactoryErrors.
-export type MergeRequestReads = Pick<DashboardActions, 'openMergeRequests' | 'mergeRequestThreads'>;
+// GET api/workspaces/<ws>/merge-requests, api/workspaces/<ws>/merge-requests/<number>/threads and
+// .../<number>/overview: the open merge requests of the workspace's origin, the review threads of
+// one (sf mr list and sf mr comments) and its overview (src/mr-overview.ts), read on the host when
+// the page asks. undefined (an empty 404) for a name or a number that is not one; the host's
+// refusals are the Execution's FactoryErrors.
+export type MergeRequestReads = Pick<DashboardActions, 'openMergeRequests' | 'mergeRequestThreads' | 'mergeRequestOverview'>;
 
 export async function openMergeRequestsRead(actions: MergeRequestReads, [workspace = '']: readonly string[]): Promise<unknown> {
   return WORKSPACE_NAME_PATTERN.test(workspace) ? actions.openMergeRequests(workspace) : undefined;
@@ -221,4 +222,8 @@ export async function openMergeRequestsRead(actions: MergeRequestReads, [workspa
 
 export async function mergeRequestThreadsRead(actions: MergeRequestReads, [workspace = '', number = '']: readonly string[]): Promise<unknown> {
   return WORKSPACE_NAME_PATTERN.test(workspace) && MR_NUMBER.test(number) ? actions.mergeRequestThreads(workspace, Number(number)) : undefined;
+}
+
+export async function mergeRequestOverviewRead(actions: MergeRequestReads, [workspace = '', number = '']: readonly string[]): Promise<unknown> {
+  return WORKSPACE_NAME_PATTERN.test(workspace) && MR_NUMBER.test(number) ? actions.mergeRequestOverview(workspace, Number(number)) : undefined;
 }

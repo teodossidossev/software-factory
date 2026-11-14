@@ -47,6 +47,7 @@ import type { Decision } from './ledger.js';
 import type { ForgeKind } from './forge.js';
 import { type OpenRequest, type ReviewThread, workspaceForge } from './forge-comments.js';
 import type { Job, JobMr, JobState, JobStore, PauseStep } from './jobs.js';
+import { type MergeRequestOverview, mergeRequestOverview } from './mr-overview.js';
 import type { Workspace } from './registry.js';
 import type { RunnerRequest, RunnerWork } from './runner.js';
 import { DEFAULT_PAGE_BYTES } from './repo-files.js';
@@ -261,10 +262,14 @@ export class Execution implements RunnerWork {
   }
 
   async mergeRequestThreads(workspaceName: string, number: number): Promise<ReviewThread[]> {
-    if (!Number.isSafeInteger(number) || number < 1) {
-      throw new FactoryError('invalid_content', 'The merge request number must be a whole number from 1.');
-    }
+    checkMrNumber(number);
     return (await workspaceForge(this.#config, this.#resolve, workspaceName)).threads(number);
+  }
+
+  // The Merge requests page's row of one: its status and threads read on the host (src/mr-overview.ts).
+  async mergeRequestOverview(workspaceName: string, number: number): Promise<MergeRequestOverview> {
+    checkMrNumber(number);
+    return mergeRequestOverview(await workspaceForge(this.#config, this.#resolve, workspaceName), number);
   }
 
   // execution/handover-steps.ts
@@ -358,5 +363,12 @@ export class Execution implements RunnerWork {
 
   status(workspace?: string, ticket?: string): Promise<Job[]> {
     return this.#parts.status.status(workspace, ticket);
+  }
+}
+
+// A merge request number of the host reads: a whole number from 1, else invalid_content.
+function checkMrNumber(number: number): void {
+  if (!Number.isSafeInteger(number) || number < 1) {
+    throw new FactoryError('invalid_content', 'The merge request number must be a whole number from 1.');
   }
 }

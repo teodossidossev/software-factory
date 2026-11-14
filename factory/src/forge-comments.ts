@@ -2,10 +2,13 @@
 // project and the review threads of one of them, for GitHub (REST v3) and GitLab (REST v4). Every
 // request is a GET through the host's client of src/forge.ts (its token only to its own host, no
 // redirect followed, failures as its FactoryErrors); nothing is written to the host. Comment bodies
-// are returned as the host gives them: they are data, never logged here.
+// are returned as the host gives them: they are data, never logged here. Each comment says whether
+// it is a bot's (GitHub's user.type, GitLab's author.bot when the host sends it, and the rules of
+// src/mr-overview.ts).
 import type { Config } from './config.js';
 import { FactoryError } from './errors.js';
 import { asArray, asRecord, type Forge, forgeFor, type HostClient, str } from './forge.js';
+import { isBotComment } from './mr-overview.js';
 import { originUrl } from './mr.js';
 import type { Workspace } from './registry.js';
 
@@ -25,10 +28,12 @@ export interface OpenRequest {
   draft: boolean;
 }
 
+// bot: a bot's comment or SonarQube's (src/mr-overview.ts isBotComment).
 export interface ReviewComment {
   author: string;
   body: string;
   created_at: string;
+  bot: boolean;
 }
 
 // path and line are null for a general comment; resolved is null where the host has no such
@@ -83,7 +88,11 @@ const oldestFirst = (threads: ReviewThread[]): ReviewThread[] =>
   threads.filter((thread) => thread.comments.length > 0).sort((a, b) => a.comments[0]!.created_at.localeCompare(b.comments[0]!.created_at));
 
 export function githubReads(client: HostClient, base: string): ForgeReads {
-  const comment = (entry: Json, time: unknown = entry.created_at): ReviewComment => ({ author: userOf(entry.user, 'login'), body: text(entry.body), created_at: text(time) });
+  const comment = (entry: Json, time: unknown = entry.created_at): ReviewComment => {
+    const author = userOf(entry.user, 'login');
+    const body = text(entry.body);
+    return { author, body, created_at: text(time), bot: isBotComment(author, asRecord(entry.user).type === 'Bot', body) };
+  };
   return {
     async openRequests() {
       const query = new URLSearchParams({ state: 'open', sort: 'updated', direction: 'desc', per_page: String(OPEN_REQUESTS_LIMIT) });
@@ -159,7 +168,11 @@ export function gitlabReads(client: HostClient, project: string): ForgeReads {
           resolved: resolvable === undefined ? null : resolvable.resolved === true,
           path,
           line: path === null ? null : lineOf(position.new_line) ?? lineOf(position.old_line),
-          comments: notes.map((note) => ({ author: userOf(note.author, 'username'), body: text(note.body), created_at: text(note.created_at) })),
+          comments: notes.map((note) => {
+            const author = userOf(note.author, 'username');
+            const body = text(note.body);
+            return { author, body, created_at: text(note.created_at), bot: isBotComment(author, asRecord(note.author).bot === true, body) };
+          }),
         };
       }));
     },

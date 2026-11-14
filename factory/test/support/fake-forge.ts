@@ -2,7 +2,8 @@
 // /repos/<owner>/<repo>/ and GitLab's merge requests API under /api/v4/projects/<id>/, with the
 // merge requests in memory. Every request is recorded (method, path, headers, body); a test can
 // set what the next merge answers or make a route fail with a status, and give a GET path a list
-// of the host's own entries (lists), answered page by page (page, per_page).
+// of the host's own entries (lists), answered page by page (page, per_page). How far the branches are
+// behind (behind) answers GitHub's compare and GitLab's diverged_commits_count, as the hosts document them.
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
@@ -28,6 +29,9 @@ export interface FakeMr {
   merge_commit: string | null;
   // When it was merged: set by the merge routes, or by a test to place a merge before or after a job.
   merged_at?: string;
+  // GitLab's has_conflicts, and its head pipeline's status and web_url (default: success, no URL).
+  conflicts?: boolean;
+  pipeline?: { status: string; web_url?: string };
 }
 
 export interface FakeForge {
@@ -38,6 +42,9 @@ export interface FakeForge {
   fail: Array<{ match: RegExp; status: number; body: unknown }>;
   // GitHub's check runs of every head commit.
   checkRuns: Array<{ status: string; conclusion: string | null }>;
+  // How many commits of the base every branch lacks: GitLab's diverged_commits_count (only when the
+  // request asks with include_diverged_commits_count=true) and GitHub's compare behind_by.
+  behind: number;
   // The entries a GET of the path answers (the path as the client sends it, without the query):
   // page (default 1) of per_page (default 30) of them.
   lists: Record<string, unknown[]>;
@@ -48,7 +55,7 @@ const MERGE_SHA = 'c'.repeat(40);
 const HEAD_SHA = 'd'.repeat(40);
 
 export async function startFakeForge(kind: 'github' | 'gitlab', repoPath: string): Promise<FakeForge> {
-  const fake: FakeForge = { url: '', requests: [], mrs: [], fail: [], checkRuns: [], lists: {}, close: async () => undefined };
+  const fake: FakeForge = { url: '', requests: [], mrs: [], fail: [], checkRuns: [], behind: 0, lists: {}, close: async () => undefined };
   const github = `/repos/${repoPath}`;
   const gitlab = `/api/v4/projects/${encodeURIComponent(repoPath)}`;
   const server: Server = createServer((req, res) => {
@@ -132,13 +139,19 @@ export async function startFakeForge(kind: 'github' | 'gitlab', repoPath: string
           send(200, { total_count: fake.checkRuns.length, check_runs: fake.checkRuns });
           return;
         }
+        // GET .../compare/<base>...<head>: how many commits of the base the head lacks.
+        if (req.method === 'GET' && new RegExp(`^${github}/compare/.+\\.\\.\\.${HEAD_SHA}$`).test(path)) {
+          send(200, { status: fake.behind > 0 ? 'diverged' : 'ahead', ahead_by: 1, behind_by: fake.behind, total_commits: 1 });
+          return;
+        }
         send(404, { message: 'Not Found' });
         return;
       }
       const mrJson = (mr: FakeMr) => ({
         iid: mr.number, web_url: `${fake.url}/${repoPath}/-/merge_requests/${mr.number}`, state: mr.state === 'open' ? 'opened' : mr.state,
-        draft: mr.draft, detailed_merge_status: mr.detailed, merge_commit_sha: mr.merge_commit, head_pipeline: { status: 'success' },
-        source_branch: mr.branch, target_branch: mr.base, title: mr.title, description: mr.body, merged_at: mergedAt(mr),
+        draft: mr.draft, detailed_merge_status: mr.detailed, merge_commit_sha: mr.merge_commit, head_pipeline: mr.pipeline ?? { status: 'success' },
+        source_branch: mr.branch, target_branch: mr.base, title: mr.title, description: mr.body, merged_at: mergedAt(mr), has_conflicts: mr.conflicts === true,
+        ...(url.searchParams.get('include_diverged_commits_count') === 'true' ? { diverged_commits_count: fake.behind } : {}),
       });
       if (req.method === 'GET' && path === `${gitlab}/merge_requests`) {
         // state=merged: the merged ones; without it or opened: the open ones.

@@ -78,7 +78,7 @@ const SECURITY_HEADERS = {
 // The dashboard's script: classic scripts that share the page's globals, in load order.
 // dashboard.html has one deferred <script> per entry, in this order; nothing at the top level of a
 // file uses a name defined in a later one.
-export const DASHBOARD_SCRIPTS = ['core.js', 'job-screens.js', 'job-page.js', 'header.js', 'board.js', 'coordinator.js', 'routing.js', 'ticket-page.js', 'reports.js', 'review-page.js', 'setup.js', 'skills.js', 'health.js', 'main.js'] as const;
+export const DASHBOARD_SCRIPTS = ['core.js', 'job-screens.js', 'job-page.js', 'header.js', 'board.js', 'coordinator.js', 'routing.js', 'ticket-page.js', 'reports.js', 'mr-row.js', 'review-page.js', 'setup.js', 'skills.js', 'health.js', 'main.js'] as const;
 export type DashboardScript = (typeof DASHBOARD_SCRIPTS)[number];
 // The files of each entry of DASHBOARD_SCRIPTS, in load order: url, the file
 // served, is the build output dist/web/<name>.js; source, the file written by hand, is
@@ -101,7 +101,7 @@ const STATIC_FILES: Record<string, { file: string; type: string }> = {
 // archiveFinished (terminal only), never the any-state reset.
 // The merge request on the Git host: mr-create, mr-merge and mr-status as sf mr create,
 // merge and status, and mergeRequestHost for whether they are on for a job's workspace; the reads
-// openMergeRequests and mergeRequestThreads (GET, src/dashboard-routes.ts).
+// openMergeRequests, mergeRequestThreads and mergeRequestOverview (GET, src/dashboard-routes.ts).
 // Pause, Resume and Restart as sf pause, resume and restart.
 // The hand-over to the user's checkout: handover, takeback, handedDone and markMerged (Merged —
 // archive) as sf handover, takeback, handed-done and handed-done --merged, and checkHandedOver, the check for the
@@ -109,7 +109,7 @@ const STATIC_FILES: Record<string, { file: string; type: string }> = {
 // mr-view), saveMr and resetMr (POST mr-save and mr-reset).
 export type DashboardActions = Pick<Execution, 'start' | 'approve' | 'abort' | 'say' | 'retryReview' | 'retryMr' | 'acceptGate' | 'settle' | 'simplify' | 'archiveFinished'
   | 'createMergeRequest' | 'mergeMergeRequest' | 'mergeRequestStatus' | 'mergeRequestHost' | 'pause' | 'resumePaused' | 'restart'
-  | 'handover' | 'takeback' | 'handedDone' | 'markMerged' | 'checkHandedOver' | 'mergeRequestView' | 'saveMr' | 'resetMr' | 'openMergeRequests' | 'mergeRequestThreads'>;
+  | 'handover' | 'takeback' | 'handedDone' | 'markMerged' | 'checkHandedOver' | 'mergeRequestView' | 'saveMr' | 'resetMr' | 'openMergeRequests' | 'mergeRequestThreads' | 'mergeRequestOverview'>;
 
 // The start screen's data and changes: the workspace registry and the Task files (src/setup.ts).
 // jobDependencies: the tickets a live job's Task file lands after. taskFile and saveTask:

@@ -773,13 +773,26 @@ interface OpenMergeRequest {
 
 // A review thread of a merge request (GET api/workspaces/<ws>/merge-requests/<number>/threads):
 // src/forge-comments.ts ReviewThread and ReviewComment. path and line are null for a general
-// comment; resolved is null where the host has no such notion.
+// comment; resolved is null where the host has no such notion; bot marks a bot's or SonarQube's comment.
 interface ReviewThread {
   id: string;
   resolved: boolean | null;
   path: string | null;
   line: number | null;
-  comments: Array<{ author: string; body: string; created_at: string }>;
+  comments: Array<{ author: string; body: string; created_at: string; bot: boolean }>;
+}
+
+// The overview of one open merge request (GET api/workspaces/<ws>/merge-requests/<number>/overview):
+// src/mr-overview.ts MergeRequestOverview. ready is null while the host has not decided; behind is
+// null when the host does not say; sonar only when SonarQube found a problem.
+interface MergeRequestOverview {
+  number: number;
+  ready: boolean | null;
+  reasons: string[];
+  behind: number | null;
+  pipeline: { state: 'passed' | 'failed' | 'running' | 'other'; text: string; url: string | null } | null;
+  sonar: { gate_failed: boolean; new_issues: number | null; url: string | null } | null;
+  comments: { human: number; bot: number };
 }
 
 // An agent role whose skills the user chooses: src/skill-roles.ts Role.

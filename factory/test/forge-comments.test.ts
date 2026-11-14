@@ -104,13 +104,13 @@ test('threads on GitLab: system notes left out, a diff note\'s path and line, a 
     const threads = await forge.threads(4);
     assert.equal(threads.length, 3 + 101);
     assert.deepEqual(threads.slice(0, 3), [
-      { id: 'd-general', resolved: null, path: null, line: null, comments: [{ author: 'user1', body: 'Note 1', created_at: minute(1) }] },
+      { id: 'd-general', resolved: null, path: null, line: null, comments: [{ author: 'user1', body: 'Note 1', created_at: minute(1), bot: false }] },
       {
         id: 'd-diff', resolved: true, path: 'src/a.ts', line: 12, comments: [
-          { author: 'user2', body: 'Note 2', created_at: minute(2) }, { author: 'user3', body: 'Note 3', created_at: minute(3) },
+          { author: 'user2', body: 'Note 2', created_at: minute(2), bot: false }, { author: 'user3', body: 'Note 3', created_at: minute(3), bot: false },
         ],
       },
-      { id: 'd-old', resolved: false, path: 'src/gone.ts', line: 4, comments: [{ author: 'user6', body: 'Note 6', created_at: minute(6) }] },
+      { id: 'd-old', resolved: false, path: 'src/gone.ts', line: 4, comments: [{ author: 'user6', body: 'Note 6', created_at: minute(6), bot: false }] },
     ]);
     assert.equal(threads.at(-1)!.comments[0]!.body, 'Bulk 100');
     assert.deepEqual(fake.requests.map((r) => `${r.method} ${r.path}`), [
@@ -160,16 +160,16 @@ test('threads on GitHub: review comments grouped by in_reply_to_id with their pa
     ];
     const forge = forgeFor('https://github.com/acme/app.git', forgeSettings({ SF_GITHUB_TOKEN: GH_TOKEN, SF_GITHUB_API: fake.url }));
     assert.deepEqual(await forge.threads(9), [
-      { id: 'issue-comment-21', resolved: null, path: null, line: null, comments: [{ author: 'dave', body: 'Looks good overall.', created_at: minute(1) }] },
-      { id: 'review-31', resolved: null, path: null, line: null, comments: [{ author: 'alice', body: 'Please fix the naming.', created_at: minute(2) }] },
+      { id: 'issue-comment-21', resolved: null, path: null, line: null, comments: [{ author: 'dave', body: 'Looks good overall.', created_at: minute(1), bot: false }] },
+      { id: 'review-31', resolved: null, path: null, line: null, comments: [{ author: 'alice', body: 'Please fix the naming.', created_at: minute(2), bot: false }] },
       {
         id: 'comment-11', resolved: null, path: 'src/b.ts', line: 30, comments: [
-          { author: 'alice', body: 'Rename this.', created_at: minute(3) },
-          { author: 'bob', body: 'Done.', created_at: minute(5) },
-          { author: 'alice', body: '**Thanks**\n```ts\nx\n```', created_at: minute(6) },
+          { author: 'alice', body: 'Rename this.', created_at: minute(3), bot: false },
+          { author: 'bob', body: 'Done.', created_at: minute(5), bot: false },
+          { author: 'alice', body: '**Thanks**\n```ts\nx\n```', created_at: minute(6), bot: false },
         ],
       },
-      { id: 'comment-13', resolved: null, path: 'src/c.ts', line: 7, comments: [{ author: 'carol', body: 'Why?', created_at: minute(4) }] },
+      { id: 'comment-13', resolved: null, path: 'src/c.ts', line: 7, comments: [{ author: 'carol', body: 'Why?', created_at: minute(4), bot: false }] },
     ]);
     assert.deepEqual(fake.requests.map((r) => `${r.method} ${r.path}`), [
       'GET /repos/acme/app/pulls/9/comments?per_page=100&page=1',
@@ -178,6 +178,48 @@ test('threads on GitHub: review comments grouped by in_reply_to_id with their pa
     ]);
   } finally {
     await fake.close();
+  }
+});
+
+test('bot (SF-209) on GitHub and GitLab: a Bot user type, a [bot] login, a bot word or sonar in the name, GitLab\'s author.bot, a SonarQube body by a human; abbott is no bot', async () => {
+  const github = await startFakeForge('github', 'acme/app');
+  const gitlab = await startFakeForge('gitlab', 'group/app');
+  const SONAR_BODY = '## Quality Gate failed\nFailed conditions: see SonarQube.';
+  try {
+    github.lists['/repos/acme/app/pulls/9/comments'] = [];
+    github.lists['/repos/acme/app/issues/9/comments'] = [
+      { id: 1, body: 'Deployed.', user: { login: 'deployer', type: 'Bot' }, created_at: minute(1) },
+      { id: 2, body: 'Analysis done.', user: { login: 'sonarcloud[bot]', type: 'Bot' }, created_at: minute(2) },
+      { id: 3, body: 'Pinged.', user: { login: 'project_12_bot_x', type: 'User' }, created_at: minute(3) },
+      { id: 4, body: 'Scan.', user: { login: 'sonarqube', type: 'User' }, created_at: minute(4) },
+      { id: 5, body: 'Looks fine.', user: { login: 'abbott', type: 'User' }, created_at: minute(5) },
+      { id: 6, body: SONAR_BODY, user: { login: 'carol', type: 'User' }, created_at: minute(6) },
+      // A human who says "quality gate passed" without naming SonarQube: a person's comment.
+      { id: 7, body: 'The quality gate passed for me.', user: { login: 'dave', type: 'User' }, created_at: minute(7) },
+      { id: 8, body: 'CI is green.', user: { login: 'ci-bot' }, created_at: minute(8) },
+    ];
+    github.lists['/repos/acme/app/pulls/9/reviews'] = [];
+    const hub = forgeFor('https://github.com/acme/app.git', forgeSettings({ SF_GITHUB_TOKEN: GH_TOKEN, SF_GITHUB_API: github.url }));
+    assert.deepEqual((await hub.threads(9)).map((thread) => [thread.comments[0]!.author, thread.comments[0]!.bot]), [
+      ['deployer', true], ['sonarcloud[bot]', true], ['project_12_bot_x', true], ['sonarqube', true], ['abbott', false], ['carol', true], ['dave', false], ['ci-bot', true],
+    ]);
+
+    const note = (n: number, author: Record<string, unknown>, body = `Note ${n}`) => ({ id: n, individual_note: true, notes: [{ id: n, body, author, created_at: minute(n), system: false }] });
+    gitlab.lists['/api/v4/projects/group%2Fapp/merge_requests/4/discussions'] = [
+      note(1, { username: 'project_12_bot_ab12' }),
+      note(2, { username: 'renovate', bot: true }),
+      note(3, { username: 'sonarqube' }),
+      note(4, { username: 'abbott', bot: false }),
+      note(5, { username: 'carol' }, SONAR_BODY),
+      note(6, { username: 'erin' }),
+    ];
+    const lab = forgeFor(`${gitlab.url}/group/app.git`, forgeSettings({ SF_GITLAB_TOKEN: GL_TOKEN, SF_GITLAB_URL: `${gitlab.url}/api/v4` }));
+    assert.deepEqual((await lab.threads(4)).map((thread) => [thread.comments[0]!.author, thread.comments[0]!.bot]), [
+      ['project_12_bot_ab12', true], ['renovate', true], ['sonarqube', true], ['abbott', false], ['carol', true], ['erin', false],
+    ]);
+  } finally {
+    await github.close();
+    await gitlab.close();
   }
 });
 

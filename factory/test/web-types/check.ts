@@ -244,6 +244,7 @@ export interface Checks {
   HealthCheck: Copy<HealthCheck, ReturnType<Dashboard.DashboardHealth['list']>[number]>;
   OpenMergeRequest: Copy<OpenMergeRequest, Awaited<ReturnType<ServerActions['openMergeRequests']>>[number]>;
   ReviewThread: Copy<ReviewThread, Awaited<ReturnType<ServerActions['mergeRequestThreads']>>[number]>;
+  MergeRequestOverview: Copy<MergeRequestOverview, Awaited<ReturnType<ServerActions['mergeRequestOverview']>>>;
   ReviewJobResult: Copy<ReviewJobResult, Awaited<ReturnType<typeof ReviewJob.createReviewJob>>>;
   SkillRole: Same<SkillRole, SkillRoles.Role>;
   SkillRow: Copy<SkillRow, Skills.InstalledSkill>;

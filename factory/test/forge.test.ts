@@ -137,7 +137,10 @@ test('GitHub: create opens a pull request with the title and body, then reuses i
     assert.equal(fake.mrs.length, 1);
 
     fake.checkRuns.push({ status: 'completed', conclusion: 'success' }, { status: 'completed', conclusion: 'success' }, { status: 'in_progress', conclusion: null });
-    assert.deepEqual(await forge.status(1), { number: 1, url: 'https://github.com/acme/app/pull/1', state: 'open', draft: false, mergeable: true, checks: '2 passed, 1 running' });
+    assert.deepEqual(await forge.status(1), {
+      number: 1, url: 'https://github.com/acme/app/pull/1', state: 'open', draft: false, mergeable: true, checks: '2 passed, 1 running', behind: 0,
+      pipeline: { state: 'running', text: '2 passed, 1 running', url: 'https://github.com/acme/app/pull/1/checks' },
+    });
 
     assert.deepEqual(await forge.merge(1), { merge_commit: FAKE_MERGE_SHA });
     const merge = fake.requests.find((r) => r.method === 'PUT')!;
@@ -216,7 +219,9 @@ test('GitLab: create (new and reused) with the description, status with the pipe
     assert.deepEqual(fake.requests[1]!.body, { source_branch: 'T-1-demo', target_branch: 'develop', title: 'feat(T-1): Demo', description: 'Body.' });
     assert.deepEqual(await forge.open(input), { ...created, reused: true });
     assert.equal(fake.mrs.length, 1);
-    assert.deepEqual(await forge.status(1), { number: 1, url: created.url, state: 'open', draft: false, mergeable: true, checks: 'pipeline success' });
+    assert.deepEqual(await forge.status(1), {
+      number: 1, url: created.url, state: 'open', draft: false, mergeable: true, checks: 'pipeline success', behind: 0, pipeline: { state: 'passed', text: 'success', url: null },
+    });
 
     fake.mrs[0]!.detailed = 'conflict';
     assert.deepEqual(await refusal(forge.merge(1)), { code: 'mr_not_mergeable', message: 'GitLab cannot merge merge request !1: it has conflicts with the target branch.' });
@@ -345,5 +350,93 @@ test('findOpen reads every page: 150 open merge requests of the branch (two page
     } finally {
       await fake.close();
     }
+  }
+});
+
+test('GitLab status (SF-209): asks for diverged_commits_count and maps it to behind, has_conflicts to conflicts, head_pipeline to the pipeline (an http(s) web_url only); GET only', async () => {
+  const fake = await startFakeForge('gitlab', 'group/app');
+  try {
+    const forge = forgeFor(`${fake.url}/group/app.git`, forgeSettings({ SF_GITLAB_TOKEN: GL_TOKEN, SF_GITLAB_URL: `${fake.url}/api/v4` }));
+    fake.mrs.push(opened(1, 'T-1-demo', 'main'));
+    fake.behind = 3;
+    fake.mrs[0]!.conflicts = true;
+    fake.mrs[0]!.detailed = 'conflict';
+    fake.mrs[0]!.pipeline = { status: 'failed', web_url: `${fake.url}/group/app/-/pipelines/9` };
+    assert.deepEqual(await forge.status(1), {
+      number: 1, url: `${fake.url}/group/app/-/merge_requests/1`, state: 'open', draft: false, mergeable: false, reason: 'it has conflicts with the target branch',
+      checks: 'pipeline failed', conflicts: true, behind: 3, pipeline: { state: 'failed', text: 'failed', url: `${fake.url}/group/app/-/pipelines/9` },
+    });
+    assert.deepEqual(fake.requests.map((r) => `${r.method} ${r.path}`), ['GET /api/v4/projects/group%2Fapp/merge_requests/1?include_diverged_commits_count=true']);
+    // The pipeline's words: the ones still to finish are running; any other is the host's own.
+    const words: Array<[string, string]> = [
+      ['success', 'passed'], ['created', 'running'], ['waiting_for_resource', 'running'], ['preparing', 'running'], ['pending', 'running'], ['running', 'running'],
+      ['scheduled', 'running'], ['canceled', 'other'], ['skipped', 'other'], ['manual', 'other'],
+    ];
+    fake.mrs[0]!.conflicts = false;
+    for (const [status, state] of words) {
+      fake.mrs[0]!.pipeline = { status, web_url: 'javascript:alert(1)' };
+      const read = await forge.status(1);
+      assert.deepEqual(read.pipeline, { state, text: status, url: null }, status);
+      assert.equal(read.conflicts, undefined, status);
+    }
+    // behind 0 is said; without a pipeline, none.
+    fake.behind = 0;
+    fake.fail.push({ match: /^GET /, status: 200, body: { iid: 1, web_url: `${fake.url}/group/app/-/merge_requests/1`, state: 'opened', detailed_merge_status: 'mergeable', diverged_commits_count: 0 } });
+    assert.deepEqual(await forge.status(1), { number: 1, url: `${fake.url}/group/app/-/merge_requests/1`, state: 'open', draft: false, mergeable: true, behind: 0 });
+    // A count that is no whole number from 0 is left out.
+    fake.fail.push({ match: /^GET /, status: 200, body: { iid: 1, web_url: `${fake.url}/group/app/-/merge_requests/1`, state: 'opened', detailed_merge_status: 'mergeable', diverged_commits_count: -1 } });
+    assert.equal((await forge.status(1)).behind, undefined);
+    assert.deepEqual([...new Set(fake.requests.map((r) => r.method))], ['GET']);
+  } finally {
+    await fake.close();
+  }
+});
+
+test('GitHub status (SF-209): behind from the compare of the base with the head, best effort; the pipeline from the check runs (failed over running over passed, none without a run); conflicts; GET only', async () => {
+  const fake = await startFakeForge('github', 'acme/app');
+  try {
+    const forge = forgeFor('git@github.com:acme/app.git', forgeSettings({ SF_GITHUB_TOKEN: GH_TOKEN, SF_GITHUB_API: fake.url }));
+    fake.mrs.push(opened(1, 'T-1-demo', 'release/2.0'));
+    fake.behind = 4;
+    // No check run: no pipeline, no checks.
+    const base = { number: 1, url: 'https://github.com/acme/app/pull/1', state: 'open', draft: false, mergeable: true };
+    assert.deepEqual(await forge.status(1), { ...base, behind: 4 });
+    assert.deepEqual(fake.requests.map((r) => `${r.method} ${r.path}`), [
+      'GET /repos/acme/app/pulls/1', `GET /repos/acme/app/commits/${'d'.repeat(40)}/check-runs?per_page=100`, `GET /repos/acme/app/compare/release/2.0...${'d'.repeat(40)}`,
+    ]);
+    const runs = {
+      passed: { status: 'completed', conclusion: 'success' }, failed: { status: 'completed', conclusion: 'failure' },
+      running: { status: 'queued', conclusion: null }, skipped: { status: 'completed', conclusion: 'skipped' },
+    };
+    const cases: Array<[Array<keyof typeof runs>, string, string]> = [
+      [['passed', 'running', 'failed'], 'failed', '1 passed, 1 failed, 1 running'],
+      [['passed', 'running'], 'running', '1 passed, 1 running'],
+      [['passed', 'skipped'], 'passed', '1 passed, 1 skipped'],
+      [['skipped'], 'other', '1 skipped'],
+    ];
+    for (const [names, state, text] of cases) {
+      fake.checkRuns.splice(0, fake.checkRuns.length, ...names.map((name) => runs[name]));
+      assert.deepEqual(await forge.status(1), { ...base, checks: text, behind: 4, pipeline: { state, text, url: 'https://github.com/acme/app/pull/1/checks' } }, text);
+    }
+    // A compare that fails leaves behind out and changes nothing else.
+    const before = await forge.status(1);
+    fake.fail.push({ match: /^GET .*\/compare\//, status: 404, body: { message: 'Not Found' } });
+    const { behind: _behind, ...rest } = before;
+    assert.deepEqual(await forge.status(1), rest);
+    fake.fail.push({ match: /^GET .*\/compare\//, status: 500, body: 'oops' });
+    assert.deepEqual(await forge.status(1), rest);
+    // Conflicts: mergeable false or the dirty state; the reasons as before.
+    fake.mrs[0]!.mergeable = false;
+    fake.mrs[0]!.mergeableState = 'dirty';
+    const dirty = await forge.status(1);
+    assert.deepEqual([dirty.conflicts, dirty.mergeable, dirty.reason], [true, false, 'it has conflicts with release/2.0']);
+    // A merged one reads no check runs and no compare.
+    fake.mrs[0]!.state = 'merged';
+    const count = fake.requests.length;
+    const merged = await forge.status(1);
+    assert.deepEqual([merged.behind, merged.pipeline, fake.requests.length - count], [undefined, undefined, 1]);
+    assert.deepEqual([...new Set(fake.requests.map((r) => r.method))], ['GET']);
+  } finally {
+    await fake.close();
   }
 });

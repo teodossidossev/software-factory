@@ -1,5 +1,5 @@
 // The reads of a workspace's merge requests through `sf serve`: sf mr list and sf mr comments, and
-// the dashboard's GET api/workspaces/<ws>/merge-requests and .../merge-requests/<number>/threads,
+// the dashboard's GET api/workspaces/<ws>/merge-requests, .../merge-requests/<number>/threads and .../overview,
 // against the fake GitLab of test/support/fake-forge.ts; then the routes' dispatch and refusals
 // with fake actions. Nothing but GETs reaches the host, and no comment body reaches the log.
 import assert from 'node:assert/strict';
@@ -69,12 +69,27 @@ test('sf mr list and sf mr comments print the host\'s merge requests and threads
     const threads = await fetchRaw(new URL('api/workspaces/app/merge-requests/4/threads', served.dashboard));
     assert.equal(threads.status, 200, threads.body);
     assert.deepEqual(JSON.parse(threads.body), [
-      { id: 'd1', resolved: null, path: null, line: null, comments: [{ author: 'carol', body: 'Looks good.', created_at: '2026-11-09T09:00:00Z' }] },
+      { id: 'd1', resolved: null, path: null, line: null, comments: [{ author: 'carol', body: 'Looks good.', created_at: '2026-11-09T09:00:00Z', bot: false }] },
       {
         id: 'd2', resolved: false, path: 'src/export.ts', line: 12, comments: [
-          { author: 'carol', body: BODY, created_at: '2026-11-09T09:05:00Z' }, { author: 'alice', body: 'Done,\nrenamed.', created_at: '2026-11-09T09:10:00Z' },
+          { author: 'carol', body: BODY, created_at: '2026-11-09T09:05:00Z', bot: false }, { author: 'alice', body: 'Done,\nrenamed.', created_at: '2026-11-09T09:10:00Z', bot: false },
         ],
       },
+    ]);
+
+    // The overview: the status and the threads of !4 on the host.
+    fake.mrs.push({ number: 4, branch: 'feature/export', base: 'main', title: 'Add the export', body: '', state: 'open', draft: false, mergeable: true, mergeableState: 'clean', detailed: 'mergeable', merge_commit: null });
+    fake.behind = 2;
+    const sent = fake.requests.length;
+    const overview = await fetchRaw(new URL('api/workspaces/app/merge-requests/4/overview', served.dashboard));
+    assert.equal(overview.status, 200, overview.body);
+    assert.deepEqual(JSON.parse(overview.body), {
+      number: 4, ready: false, reasons: ['it is 2 commits behind the target branch'], behind: 2, pipeline: { state: 'passed', text: 'success', url: null },
+      sonar: null, comments: { human: 3, bot: 0 },
+    });
+    assert.deepEqual(fake.requests.slice(sent).map((r) => `${r.method} ${r.path}`).sort(), [
+      'GET /api/v4/projects/group%2Fapp/merge_requests/4/discussions?per_page=100&page=1',
+      'GET /api/v4/projects/group%2Fapp/merge_requests/4?include_diverged_commits_count=true',
     ]);
 
     // Merge request 0 is no number: refused before the host is asked.
@@ -109,20 +124,28 @@ test('the merge request read routes: the workspace and the number passed to the 
     assert.deepEqual(JSON.parse((await get('api/workspaces/app/merge-requests')).body), [{ number: 1 }]);
     fake.answer = [{ id: 't' }];
     assert.deepEqual(JSON.parse((await get('api/workspaces/app/merge-requests/12/threads')).body), [{ id: 't' }]);
-    assert.deepEqual(fake.calls, [['openMergeRequests', 'app'], ['mergeRequestThreads', 'app', 12]]);
-    for (const path of ['api/workspaces/bad%20name/merge-requests', 'api/workspaces/app/merge-requests/0/threads', 'api/workspaces/app/merge-requests/x/threads', 'api/workspaces/app/merge-requests?x=1']) {
+    fake.answer = { number: 12, ready: true };
+    assert.deepEqual(JSON.parse((await get('api/workspaces/app/merge-requests/12/overview')).body), { number: 12, ready: true });
+    assert.deepEqual(fake.calls, [['openMergeRequests', 'app'], ['mergeRequestThreads', 'app', 12], ['mergeRequestOverview', 'app', 12]]);
+    for (const path of [
+      'api/workspaces/bad%20name/merge-requests', 'api/workspaces/app/merge-requests/0/threads', 'api/workspaces/app/merge-requests/x/threads', 'api/workspaces/app/merge-requests?x=1',
+      'api/workspaces/bad%20name/merge-requests/12/overview', 'api/workspaces/app/merge-requests/0/overview', 'api/workspaces/app/merge-requests/x/overview',
+      'api/workspaces/app/merge-requests/12/overview?x=1',
+    ]) {
       const reply = await get(path);
       assert.deepEqual([reply.status, reply.body], [404, ''], path);
     }
     // Read only: a POST is 405 with Allow: GET.
-    for (const path of ['api/workspaces/app/merge-requests', 'api/workspaces/app/merge-requests/12/threads']) {
+    for (const path of ['api/workspaces/app/merge-requests', 'api/workspaces/app/merge-requests/12/threads', 'api/workspaces/app/merge-requests/12/overview']) {
       assert.equal((await act(dashboard.url, path, {})).status, 405, path);
     }
-    assert.equal(fake.calls.length, 2);
+    assert.equal(fake.calls.length, 3);
     fake.answer = new FactoryError('workspace_not_found', 'Workspace "gone" is not registered.');
-    assert.deepEqual([(await get('api/workspaces/gone/merge-requests')).status], [404]);
+    assert.deepEqual([(await get('api/workspaces/gone/merge-requests')).status, (await get('api/workspaces/gone/merge-requests/3/overview')).status], [404, 404]);
     fake.answer = new FactoryError('mr_token_missing', 'Merge requests are off for this workspace: SF_GITLAB_TOKEN is not set in the environment file.');
     const off = await get('api/workspaces/app/merge-requests');
     assert.deepEqual([off.status, JSON.parse(off.body).error.code], [409, 'mr_token_missing']);
+    const offOverview = await get('api/workspaces/app/merge-requests/12/overview');
+    assert.deepEqual([offOverview.status, JSON.parse(offOverview.body).error.code], [409, 'mr_token_missing']);
   });
 });

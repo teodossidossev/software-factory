@@ -97,7 +97,15 @@ refused), and the factory's test command passed in a sandbox without network on 
 - **ChatGPT reads no secret file of a workspace.** `read_file` refuses the files Git ignores
   (outside `.software-factory/`) and credential-like names tracked or not (`.env`, `.envrc`, `*.pem`,
   `*.key`, SSH keys, `credentials*.json`, `*.tfvars`), links resolved, as `search` already skipped
-  them.
+  them. `read_job` returns a job's Report and the reviews' items, read only from the job's own
+  directory, with the real paths of its worktree and of the checkout replaced (`<worktree>`,
+  `<checkout>`).
+- **The planner can only propose a change.** `suggest_changes` stores one note and starts nothing;
+  only your Send on the dashboard sends it, and only the note the page showed (its SHA-256 is
+  checked, so a note the planner replaced meanwhile is never sent unread). A note is refused unless
+  the job waits for you, and is bounded at 4000 characters. The planning chat link is only ever a
+  `https://chatgpt.com/` link, checked when it is saved and again before the page links it, and is
+  opened only by your click.
 - **The read-only sessions load no MCP server.** The morning digest, which reads other people's
   commit messages, the reviews and the Task check start without your MCP servers and deny every
   MCP tool, so nothing they read can drive one.

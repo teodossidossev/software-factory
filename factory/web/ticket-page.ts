@@ -666,7 +666,8 @@ function tkCheckCard(key: string, row: TicketEntry, view: CheckView, s: TicketEd
 }
 
 // Planning conversation: "Plan with: ChatGPT · Claude Code" (the one in use pressed, the other
-// switches), then for ChatGPT its link, for Claude Code where to paste; the first message and its Copy.
+// switches), then for ChatGPT its link, for Claude Code where to paste; the first message and its
+// Copy; then the ticket's planning chat link, opened and saved here.
 function tkConversation(row: TicketEntry): HTMLElement {
   const url = tkConversationUrl(row);
   const message = typeof row.conversation?.message === 'string' ? row.conversation.message : '';
@@ -693,6 +694,12 @@ function tkConversation(row: TicketEntry): HTMLElement {
   const fallback = Object.assign(el('textarea', 'copy-fallback'), { id: 'tk-copy-text', readOnly: true, hidden: true });
   fallback.setAttribute('aria-label', 'The first message');
   content.push(head, el('pre', 'cm', message), fallback);
+  // The ticket's planning chat: the stored link, only a https://chatgpt.com/ one, and its field.
+  const chat = planningChatHref(row.planning_chat);
+  if (chat !== null) {
+    content.push(tabLink('fs13', 'Open the planning chat ↗', chat));
+  }
+  content.push(chatLinkField('tk', keyOf(row), typeof row.planning_chat === 'string' ? row.planning_chat : null, (what) => ({ tk: `chat-${what}` })));
   return tkCard('Planning conversation', null, ...content);
 }
 
@@ -755,7 +762,7 @@ function renderTicket(): void {
   const form = el('div', 'form2');
   form.append(grid);
   const scroll = page.querySelector('.form2')?.scrollTop ?? 0;
-  keepFocus(page, () => page.replaceChildren(tkHead(key, row, view), form));
+  withChatFocus(() => keepFocus(page, () => page.replaceChildren(tkHead(key, row, view), form)));
   form.scrollTop = scroll;
   if (typing) {
     box.focus();
@@ -798,6 +805,8 @@ function tkAction(action: string | undefined): void {
     void loadTicket(key, true);
   } else if (action === 'owner-chatgpt' || action === 'owner-claude_code') {
     void tkOwner(key, action === 'owner-claude_code' ? 'claude_code' : 'chatgpt');
+  } else if (action === 'chat-save' || action === 'chat-remove') {
+    void saveChatLink('tk', key, action === 'chat-remove');
   } else if (action === 'copy') {
     const message = typeof row.conversation?.message === 'string' ? row.conversation.message : '';
     // The Copy button is drawn with its textarea (tkConversation).

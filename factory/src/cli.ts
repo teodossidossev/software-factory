@@ -279,7 +279,8 @@ async function serve(options: { tunnel?: 'off' } = {}): Promise<{ dashboard: URL
     }
     atStart = await markerAtServeStart(config.stateDir);
     await execution.recover({ startRunners: !atStart.gated });
-    server = await startServer(port, config.stateDir, handbook, await packageVersion(), execution, checks, history, runQueue, autoChecks);
+    // A note suggest_changes stored reaches the open pages of its job, as the Explainer's onWritten does.
+    server = await startServer(port, config.stateDir, handbook, await packageVersion(), execution, checks, history, runQueue, autoChecks, (workspace, ticket) => dashboard?.refreshJob(workspace, ticket));
     boundMcpPort = server.port;
   } catch (error) {
     await putMarkerBack(config.stateDir, atStart?.taken).catch((putError: unknown) => console.error(putError));

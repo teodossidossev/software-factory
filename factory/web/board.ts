@@ -630,6 +630,7 @@ function jobCard(job: JobRow): HTMLLIElement {
     }
     item.append(meta, ...doneFoot(job));
   }
+  item.append(...plannerLines(job));
   // The Implementer's turn went on by itself after the turn limit.
   if (typeof job.turn_limit === 'string') {
     item.append(el('div', 'meta note', job.turn_limit));
@@ -638,6 +639,55 @@ function jobCard(job: JobRow): HTMLLIElement {
   const { needed, cycle } = dependencyLines(key, board.graph, 'div');
   item.append(...[needed, cycle].filter((line) => line !== null));
   return item;
+}
+
+// The states in which a job waits for the user (src/jobs.ts, the waiting trait).
+const WAITING_STATES: readonly JobState[] = ['needs_human', 'ready_for_human_review', 'handed_over'];
+
+// The card's planner lines: in a waiting state, the planner's suggestion clamped to three
+// lines (the whole note in its title) with Review the suggestion, which opens the job page at the
+// composer, where Send is (never on the card); then Discuss the result ↗ (or its message to copy) in
+// a waiting state, and Open the planning chat ↗ on any card with a stored link. A click on a link
+// or on Copy does not open the job.
+function plannerLines(job: JobRow): HTMLElement[] {
+  const planner = job.planner;
+  if (planner === undefined || planner === null) {
+    return [];
+  }
+  const key = keyOf(job);
+  const waiting = WAITING_STATES.includes(job.state);
+  const lines: HTMLElement[] = [];
+  const suggestion = planner.suggestion;
+  if (waiting && suggestion !== null && typeof suggestion.note === 'string') {
+    const line = el('div', 'planner-card');
+    const note = el('div', 'planner-clip', suggestion.note);
+    note.setAttribute('title', suggestion.note);
+    line.append(el('b', 'fs12', 'Planner suggests changes'), note, button('btn small', 'Review the suggestion', { open: key, focus: 'composer' }));
+    lines.push(line);
+  }
+  const links = el('div', 'planner-links');
+  const discuss = waiting ? planner.discuss : null;
+  if (discuss !== null && typeof discuss.message === 'string') {
+    if (typeof discuss.url === 'string' && discuss.url.startsWith(CHATGPT_PREFILL_URL)) {
+      links.append(tabLink('fs12', 'Discuss the result ↗', discuss.url));
+    } else {
+      const copy = button('btn small', 'Copy the message for the planner');
+      const message = discuss.message;
+      copy.addEventListener('click', (event) => {
+        event.stopPropagation();
+        copyValue(message, byIdAs('card-copy-text', 'textarea'), (text) => toast({ level: 'info', text: `${text} The message for the planner of ${key}.` }));
+      });
+      links.append(copy);
+    }
+  }
+  const chat = planningChatHref(planner.chat);
+  if (chat !== null) {
+    links.append(tabLink('fs12', 'Open the planning chat ↗', chat));
+  }
+  if (links.children.length > 0) {
+    lines.push(links);
+  }
+  return lines;
 }
 
 // The one primary action of a Your turn card, and the job's last outcome. It opens the job's page

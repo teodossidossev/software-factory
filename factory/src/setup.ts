@@ -8,7 +8,7 @@ import { lstat, mkdir, readdir, readFile, realpath, rename, rm } from 'node:fs/p
 import { dirname, isAbsolute, join } from 'node:path';
 import { addAttachment, type Attachment, canHaveAttachments, listAttachments, readAttachment, removeAttachment } from './attachments.js';
 import { writeFileAtomic } from './atomic.js';
-import { ownerOf, type TicketOwner } from './conversation.js';
+import { ownerOf, planningChatUrl, storedChatUrl, type TicketOwner } from './conversation.js';
 import { FactoryError } from './errors.js';
 import type { ExclusiveScope, Retired } from './execution.js';
 import { runGit } from './git.js';
@@ -105,6 +105,9 @@ export interface TicketRow {
   // owner: who plans it, from its .owner file next to them (chatgpt without one).
   request: string | null;
   owner: TicketOwner;
+  // The ticket's planning chat link, from its .chat file next to them (a https://chatgpt.com/ URL),
+  // or null.
+  planning_chat: string | null;
   // The state of the ticket's last job when it ended, or null without a job.
   job: JobState | null;
   // The tickets it lands after, with their states, in the order of the Task file.
@@ -464,7 +467,8 @@ export class Setup {
         continue;
       }
       rows.push({
-        workspace: name, ticket, title: fields.get('title')!, base: fields.get('base')!, draft: isDraft(content), request: await this.#readRequest(name, ticket), owner: ownerOf(await this.#readRequest(name, ticket, 'owner')), job: job?.state ?? null,
+        workspace: name, ticket, title: fields.get('title')!, base: fields.get('base')!, draft: isDraft(content), request: await this.#readRequest(name, ticket), owner: ownerOf(await this.#readRequest(name, ticket, 'owner')),
+        planning_chat: storedChatUrl(await this.#readRequest(name, ticket, 'chat')), job: job?.state ?? null,
         lands_after: await states(landsAfter(fields, name)), attachments: await attachmentsOf(workspace, ticket),
       });
     }
@@ -617,7 +621,7 @@ export class Setup {
 
   // The User's words of New ticket live in the state directory, next to the jobs, never in the
   // repository: <state dir>/requests/<workspace>/<ticket>.md; who plans the ticket next to them,
-  // in <ticket>.owner (ext "owner").
+  // in <ticket>.owner (ext "owner"), and its planning chat link in <ticket>.chat (ext "chat").
   #requestPath(name: string, ticket: string, ext = 'md'): string {
     return join(dirname(this.#jobs.root), 'requests', name, `${ticket}.${ext}`);
   }
@@ -647,6 +651,34 @@ export class Setup {
   async #writeOwner(name: string, ticket: string, owner: TicketOwner): Promise<void> {
     await mkdir(dirname(this.#requestPath(name, ticket)), { recursive: true, mode: 0o700 });
     await writeFileAtomic(this.#requestPath(name, ticket, 'owner'), Buffer.from(ownerOf(owner), 'utf8'));
+  }
+
+  // The ticket's planning chat link: its .chat file next to the request (ext "chat"), saved as
+  // planningChatUrl returns it, or removed with null. Unlike the owner's switch it is allowed while a
+  // job of the ticket is live (the job's card shows it); the ticket's active Task file must exist.
+  async setPlanningChat(name: string, ticket: string, url: string | null): Promise<{ workspace: string; ticket: string; planning_chat: string | null }> {
+    checkNames(name, ticket);
+    const link = url === null ? null : planningChatUrl(url);
+    const workspace = await resolveWorkspace(name, this.#configDir);
+    if (!(await isFile(join(workspace.workCheckout, TASK_DIR, `${ticket}.md`)))) {
+      throw new FactoryError('task_not_found', `${TASK_DIR}/${ticket}.md does not exist in workspace "${name}".`);
+    }
+    if (link === null) {
+      await rm(this.#requestPath(name, ticket, 'chat'), { force: true });
+    } else {
+      await mkdir(dirname(this.#requestPath(name, ticket)), { recursive: true, mode: 0o700 });
+      await writeFileAtomic(this.#requestPath(name, ticket, 'chat'), Buffer.from(link, 'utf8'));
+    }
+    return { workspace: name, ticket, planning_chat: link };
+  }
+
+  // Who plans the ticket and its planning chat link, for a job's planner block; names that are
+  // not a workspace's and a ticket's read as chatgpt without a link.
+  async planningOf(name: string, ticket: string): Promise<{ owner: TicketOwner; planning_chat: string | null }> {
+    if (!WORKSPACE_NAME_PATTERN.test(name) || !TICKET_PATTERN.test(ticket)) {
+      return { owner: 'chatgpt', planning_chat: null };
+    }
+    return { owner: ownerOf(await this.#readRequest(name, ticket, 'owner')), planning_chat: storedChatUrl(await this.#readRequest(name, ticket, 'chat')) };
   }
 
   // The workspace of a ticket action, with both names checked; a live job refuses it. jobEnded:
@@ -760,7 +792,7 @@ export class Setup {
         await rm(join(target.dir, folder), { recursive: true, force: true });
         found.push(`${folder}/`);
       }
-      await Promise.all(['md', 'owner'].map((ext) => rm(this.#requestPath(name, ticket, ext), { force: true })));
+      await Promise.all(['md', 'owner', 'chat'].map((ext) => rm(this.#requestPath(name, ticket, ext), { force: true })));
       return { workspace: name, ticket, deleted: found.map((path) => `${TASK_DIR}/${path}`), jobArchived };
     });
   }

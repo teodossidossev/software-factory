@@ -177,7 +177,9 @@ export type Call = ['start', string, string] | ['approve', string, string] | ['a
   | ['pause', string, string] | ['resumePaused', string, string, string] | ['restart', string, string, boolean]
   | ['handover', string, string] | ['takeback', string, string] | ['handedDone', string, string] | ['markMerged', string, string] | ['checkHandedOver', string, string, number]
   | ['mergeRequestView', string, string] | ['saveMr', string, string, MrInput] | ['resetMr', string, string]
-  | ['openMergeRequests', string] | ['mergeRequestThreads', string, number] | ['mergeRequestOverview', string, number];
+  | ['openMergeRequests', string] | ['mergeRequestThreads', string, number] | ['mergeRequestOverview', string, number]
+  // The planner's suggestion (SF-208).
+  | ['sendSuggestion', string, string, string] | ['dismissSuggestion', string, string];
 
 export interface FakeActions extends DashboardActions {
   calls: Call[];
@@ -236,6 +238,8 @@ export function fakeActions(answer: unknown = { state: 'pushed', branch: 'T-1-de
     openMergeRequests: (workspace) => reply(['openMergeRequests', workspace]),
     mergeRequestThreads: (workspace, number) => reply(['mergeRequestThreads', workspace, number]),
     mergeRequestOverview: (workspace, number) => reply(['mergeRequestOverview', workspace, number]),
+    sendSuggestion: (workspace, ticket, sha256) => reply(['sendSuggestion', workspace, ticket, sha256]),
+    dismissSuggestion: (workspace, ticket) => reply(['dismissSuggestion', workspace, ticket]),
   };
   async function reply(call: Call): Promise<any> {
     fake.calls.push(call);
@@ -252,6 +256,8 @@ export type SetupCall = ['saveTask', string, string, string, string] | ['addWork
   // The Workspaces dialog's Edit and the Morning digest section (SF-103).
   | ['editWorkspace', string, Omit<WorkspaceEdit, 'read_checkout'> & { path: string }] | ['saveDigestSettings', { at: string; weekdays_only: boolean; language: string }]
   | ['archiveTicket', string, string] | ['restoreTicket', string, string] | ['deleteTicket', string, string] | ['setTicketOwner', string, string, TicketOwner]
+  // A ticket's planning chat link (SF-208).
+  | ['setPlanningChat', string, string, string | null]
   // A ticket's images (SF-064): the upload's bytes as hex and its name (null without one).
   | ['addAttachment', string, string, string, string | null] | ['removeAttachment', string, string, string];
 
@@ -272,6 +278,8 @@ export interface FakeSetup extends DashboardSetup {
   // The images readAttachment serves (SF-064), by "<ws>/<ticket>/<name>"; a missing one is
   // attachment_missing.
   images: Map<string, { type: 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'; data: Buffer }>;
+  // The planning chat links planningOf reads (SF-208), by "<ws>/<ticket>"; else the listed row's.
+  chats: Map<string, string>;
 }
 
 export function workspaceRow(name: string, path = `/srv/${name}`, liveJobs = 0, handoff: WorkspaceRow['handoff'] = null): WorkspaceRow {
@@ -279,7 +287,7 @@ export function workspaceRow(name: string, path = `/srv/${name}`, liveJobs = 0, 
 }
 
 export function ticketRow(workspace: string, ticket: string, title = `Ticket ${ticket}`, draft = true, job: TicketRow['job'] = null): TicketRow {
-  return { workspace, ticket, title, base: 'main', draft, request: null, owner: 'chatgpt', job, lands_after: [], attachments: [] };
+  return { workspace, ticket, title, base: 'main', draft, request: null, owner: 'chatgpt', planning_chat: null, job, lands_after: [], attachments: [] };
 }
 
 // Lists rows and records every change; the change answers with `answer` (thrown when it is an
@@ -294,6 +302,7 @@ export function fakeSetup(workspaces: WorkspaceRow[] = [], tickets: TicketRow[] 
     settings: { handoff_default: 'checkout', digest: { at: '08:00', weekdays_only: true, language: 'English' } },
     answer: undefined,
     images: new Map(),
+    chats: new Map(),
     addAttachment: (workspace, ticket, data, name) => reply(['addAttachment', workspace, ticket, Buffer.from(data).toString('hex'), name ?? null], { name: name ?? '1.png', bytes: data.byteLength, type: 'image/png' }),
     removeAttachment: (workspace, ticket, name) => reply(['removeAttachment', workspace, ticket, name], { name }),
     readAttachment: async (workspace, ticket, name) => {
@@ -337,6 +346,22 @@ export function fakeSetup(workspaces: WorkspaceRow[] = [], tickets: TicketRow[] 
     setTicketOwner: (workspace, ticket, owner) => {
       const row = fake.rows.tickets.find((each) => each.workspace === workspace && each.ticket === ticket) ?? ticketRow(workspace, ticket);
       return reply(['setTicketOwner', workspace, ticket, owner], { ...row, owner });
+    },
+    // The planning chat link (SF-208): recorded; by default kept in chats and answered as Setup does.
+    setPlanningChat: async (workspace, ticket, url) => {
+      const result = await reply(['setPlanningChat', workspace, ticket, url], { workspace, ticket, planning_chat: url });
+      if (fake.answer === undefined) {
+        if (url === null) {
+          fake.chats.delete(`${workspace}/${ticket}`);
+        } else {
+          fake.chats.set(`${workspace}/${ticket}`, url);
+        }
+      }
+      return result;
+    },
+    planningOf: async (workspace, ticket) => {
+      const row = fake.rows.tickets.find((each) => each.workspace === workspace && each.ticket === ticket);
+      return { owner: row?.owner ?? 'chatgpt', planning_chat: fake.chats.get(`${workspace}/${ticket}`) ?? row?.planning_chat ?? null };
     },
     addWorkspace: (name, path, options = {}) => reply(
       Object.keys(options).length === 0 ? ['addWorkspace', name, path] : ['addWorkspace', name, path, options],

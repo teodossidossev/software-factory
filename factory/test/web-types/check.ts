@@ -168,6 +168,7 @@ export interface Checks {
   StopKind: Same<StopKind, NonNullable<ServerJobRow['stop_kind']>>;
   StopGroup: Same<StopGroup, NonNullable<ServerJobRow['stop_group']>>;
   JobSummary: Copy<JobSummary, ServerDetail['job']>;
+  JobPlanner: Copy<JobPlanner, ServerDetail['job']['planner']>;
   JobRow: Copy<JobRow, ServerJobRow>;
   JobMr: Copy<JobMr, NonNullable<ServerJobRow['mr']>>;
   ProgressPhase: Same<ProgressPhase, NonNullable<ServerJobRow['progress']>['phase']>;

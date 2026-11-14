@@ -86,6 +86,9 @@ export const ERROR_STATUS: Readonly<Record<string, number>> = {
   // one the ticket does not have (also an image to remove that is not there); a Start, Restart or
   // Resume whose Task file refers to images that cannot be used.
   attachment_type: 400, attachment_too_large: 413, attachment_limit: 409, attachment_missing: 400, attachment_invalid: 409,
+  // Back to the planner: no suggestion shown, or not the one the page showed; a planning chat link
+  // that is not a https://chatgpt.com/ one.
+  no_suggestion: 409, suggestion_changed: 409, invalid_chat_link: 400,
 };
 
 // The HTTP status of a FactoryError's code: ERROR_STATUS's, else fallback.

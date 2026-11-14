@@ -43,6 +43,7 @@ const ACTION_LABELS: Readonly<Record<string, string>> = {
   handover: 'Hand over to my checkout', takeback: 'Take it back', 'handed-done': 'I opened the MR myself',
   'merged-archive': 'Merged — archive',
   'review-mr': 'Review the MR and push',
+  'suggestion-send': 'Send', 'suggestion-dismiss': 'Dismiss',
 };
 const PENDING_REASONS: Readonly<Record<string, string>> = {
   accept: 'the override was requested; waiting for its outcome.',
@@ -64,6 +65,8 @@ const PENDING_REASONS: Readonly<Record<string, string>> = {
   takeback: 'Take it back was requested; waiting for its outcome.',
   'handed-done': 'origin is being asked for your push.',
   'merged-archive': 'marking it merged and archiving; waiting for its outcome.',
+  'suggestion-send': 'the planner\'s suggestion is being sent.',
+  'suggestion-dismiss': 'the planner\'s suggestion is being dismissed.',
 };
 const PENDING_TEXT: Readonly<Record<string, string>> = {
   accept: 'Accepting over the gate…',
@@ -85,6 +88,8 @@ const PENDING_TEXT: Readonly<Record<string, string>> = {
   takeback: 'Taking the branch back from your checkout…',
   'handed-done': 'Asking origin for your push…',
   'merged-archive': 'Marking it merged and archiving…',
+  'suggestion-send': 'Sending the planner\'s suggestion…',
+  'suggestion-dismiss': 'Dismissing the planner\'s suggestion…',
 };
 // The actions whose button confirms in place, with its title: the first click arms it (state.armed),
 // a second click runs it; ARM_MS after the first click it is disarmed. No browser confirm().
@@ -311,6 +316,120 @@ const state: PageState = {
 // The only URL the page links to: the ChatGPT composer prefilled by the server (the prefix of
 // src/conversation.ts).
 const CHATGPT_PREFILL_URL = 'https://chatgpt.com/?q=';
+// A ticket's planning chat link: the server keeps only https://chatgpt.com/ links
+// (src/conversation.ts planningChatUrl), and the page links a stored one only with this prefix.
+const PLANNING_CHAT_PREFIX = 'https://chatgpt.com/';
+const planningChatHref = (value: unknown): string | null => (typeof value === 'string' && value.startsWith(PLANNING_CHAT_PREFIX) ? value : null);
+
+// The "Planning chat link" fields of the job page ('job') and the planned ticket page ('tk'), by
+// "<page>:<ws>/<ticket>": the input, kept across redraws so its text and caret stay, the link it
+// last showed, and the last refusal's message, shown next to it.
+const chatFields = new Map<string, { input: HTMLInputElement; stored: string | null; error: string | null }>();
+
+// The field of a ticket's planning chat link: the box, Save and, with a stored link, Remove; their
+// data-* attributes are the page's (data('save'), data('remove')). A link saved elsewhere replaces
+// the box's text only while the user has not changed it.
+function chatLinkField(page: 'job' | 'tk', key: string, stored: string | null, data: (what: 'save' | 'remove') => Readonly<Record<string, string>>): HTMLElement {
+  const id = `${page}:${key}`;
+  let field = chatFields.get(id);
+  if (field === undefined) {
+    const input = el('input', 'chat-input');
+    input.type = 'url';
+    input.placeholder = 'https://chatgpt.com/c/…';
+    input.value = stored ?? '';
+    input.autocomplete = 'off';
+    field = { input, stored, error: null };
+    chatFields.set(id, field);
+  } else if (field.stored !== stored) {
+    if (field.input.value === (field.stored ?? '')) {
+      field.input.value = stored ?? '';
+    }
+    field.stored = stored;
+  }
+  field.input.id = `${page}-chat-input`;
+  const pending = state.setupPending.has(`chat:${key}`);
+  const wrap = el('div', 'chat-field');
+  const label = el('label', 'fs12', 'Planning chat link');
+  label.htmlFor = field.input.id;
+  const row = el('div', 'chat-row');
+  const save = button('btn small', 'Save', data('save'));
+  save.disabled = pending;
+  row.append(field.input, save);
+  if (stored !== null) {
+    const remove = button('btn small', 'Remove', data('remove'));
+    remove.disabled = pending;
+    row.append(remove);
+  }
+  const status = el('span', 'err-text fs12', field.error ?? '');
+  status.setAttribute('role', 'status');
+  wrap.append(label, row, status);
+  return wrap;
+}
+
+// Redraws what holds a planning chat link field; the focused box keeps its focus and caret.
+function withChatFocus(work: () => void): void {
+  const active = document.activeElement;
+  const input = [...chatFields.values()].find((field) => field.input === active)?.input;
+  const caret = input === undefined ? null : [input.selectionStart, input.selectionEnd] as const;
+  work();
+  if (input !== undefined && input.parentElement !== null && document.activeElement !== input) {
+    input.focus();
+    if (caret !== null && typeof caret[0] === 'number' && typeof caret[1] === 'number') {
+      input.setSelectionRange(caret[0], caret[1]);
+    }
+  }
+}
+
+// Save (remove: Remove) of a ticket's planning chat link from the page's field: POST
+// api/tickets/<ws>/<ticket>/chat, once at a time per ticket; a refusal's message goes next to the
+// field. The ticket's rows and the job's planner block take the saved link at once (the server
+// sends every page the tickets and the jobs).
+async function saveChatLink(page: 'job' | 'tk', key: string, remove: boolean): Promise<void> {
+  const field = chatFields.get(`${page}:${key}`);
+  const id = `chat:${key}`;
+  if (field === undefined || state.setupPending.has(id)) {
+    return;
+  }
+  state.setupPending.add(id);
+  field.error = null;
+  redrawChat();
+  try {
+    const result = await post(`api/tickets/${jobPath(key)}/chat`, { url: remove ? null : field.input.value });
+    const saved = isRecord(result) && typeof result.planning_chat === 'string' ? result.planning_chat : null;
+    field.input.value = saved ?? '';
+    field.stored = saved;
+    noteChat(key, saved);
+    toast({ level: 'ok', text: saved === null ? `Removed the planning chat link of ${key}.` : `Saved the planning chat link of ${key}.` });
+  } catch (error) {
+    field.error = error instanceof ActionError ? error.message : `The link may not have been saved (${errorMessage(error)}).`;
+  }
+  state.setupPending.delete(id);
+  redrawChat();
+}
+
+// The ticket's planning chat link in the rows the page holds: the tickets, the jobs and the shown job.
+function noteChat(key: string, url: string | null): void {
+  const row = (state.tickets ?? []).find((each) => keyOf(each) === key);
+  if (row !== undefined) {
+    row.planning_chat = url;
+  }
+  for (const job of [...state.jobs, ...(state.detail === null ? [] : [state.detail.job])]) {
+    if (keyOf(job) === key && isRecord(job.planner)) {
+      job.planner = { ...job.planner, chat: url };
+    }
+  }
+}
+
+function redrawChat(): void {
+  withChatFocus(() => {
+    renderBoard();
+    if (ui.screen === 'ticket') {
+      renderTicket();
+    } else if (state.detail !== null) {
+      renderComposer();
+    }
+  });
+}
 // The localStorage key of the workspace the last ticket was created in, the New ticket form's default.
 const TICKET_WORKSPACE_KEY = 'sf-ticket-workspace';
 

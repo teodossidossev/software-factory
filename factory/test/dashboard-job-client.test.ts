@@ -763,3 +763,110 @@ test('job client (SF-119): on a phone or without hover the Merge request tab wit
   const mouse = await openJob(detail(job('working')), () => undefined, undefined, [], '', { matchMedia: mediaOf(false) });
   assert.equal(mouse.$('jhead').querySelector('[data-goto="mr"]')!.disabled, true);
 });
+
+// Back to the planner (SF-208): a job's planner block as plannerOf sends it.
+const SUGGESTION = { note: '<b>Keep</b> the button,\nrename it', sha256: 'a'.repeat(64), at: '2026-11-01T10:06:00.000Z' };
+const DISCUSS = { message: 'Use the Software Factory connector. Call guide.', url: 'https://chatgpt.com/?q=Use%20the' };
+const planned = (state: string, planner: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
+  job(state, { planner: { chat: null, discuss: null, suggestion: null, ...planner }, ...extra });
+const posted = (page: Page): Array<[string, unknown]> => page.requests.filter((request) => request.method === 'POST').map((request) => [request.path, JSON.parse(request.body!)]);
+const links = (node: FakeElement): Array<[string, string, string, string]> => node.querySelectorAll('a').map((link) => [link.textContent, link.href, link.target, link.rel]);
+
+test('job client: the planner block shows the planner\'s note as plain text with Send (the shown sha256) and Dismiss, their outcomes in the status line; Discuss the result and Open the planning chat open new tabs', async () => {
+  const shown = planned('needs_human', { chat: 'https://chatgpt.com/c/abc', discuss: DISCUSS, suggestion: SUGGESTION }, { error: { code: 'iteration_limit', message: 'Three Fix sections.' } });
+  const page = await openJob(detail(shown));
+  const block = page.$('planner');
+  assert.equal(block.hidden, false);
+  // Right after the composer's sentence.
+  const composer = page.$('composer').children as FakeElement[];
+  assert.equal(composer[composer.indexOf(page.$('composer-sentence')) + 1], block);
+  const box = page.$('planner-suggestion');
+  assert.equal((box.children[0] as FakeElement).textContent, 'Planner suggests changes');
+  const note = box.querySelector('.planner-note')!;
+  // The note as text: no element of it, never HTML.
+  assert.deepEqual([note.textContent, note.children.every((child) => (child as FakeElement).tagName === undefined)], [SUGGESTION.note, true]);
+  assert.deepEqual(links(block), [
+    ['Discuss the result ↗', DISCUSS.url, '_blank', 'noopener noreferrer'],
+    ['Open the planning chat ↗', 'https://chatgpt.com/c/abc', '_blank', 'noopener noreferrer'],
+  ]);
+  const send = page.$('suggestion-send-button');
+  assert.deepEqual([send.textContent, send.disabled, send.className], ['Send', false, 'btn primary']);
+  send.click();
+  await page.flush();
+  assert.deepEqual(posted(page), [['api/jobs/app/T-1/suggestion-send', { sha256: SUGGESTION.sha256 }]]);
+  // While it is out, Send and Dismiss are off with the reason.
+  assert.deepEqual([page.$('suggestion-send-button').disabled, page.$('suggestion-send-button').getAttribute('title')], [true, 'the planner\'s suggestion is being sent.']);
+  assert.equal(page.$('suggestion-dismiss-button').disabled, true);
+  assert.equal(page.$('action-status').textContent.includes('Sending the planner\'s suggestion…'), true);
+  page.requests.filter((request) => request.method === 'POST')[0]!.respond(200, { ok: true, result: { state: 'working', queued: false } });
+  await page.flush();
+  assert.match(page.$('action-status').textContent, /Sent: the Implementer is working on it \(state working\)\./);
+
+  page.$('suggestion-dismiss-button').click();
+  await page.flush();
+  assert.deepEqual(posted(page)[1], ['api/jobs/app/T-1/suggestion-dismiss', {}]);
+  page.requests.filter((request) => request.method === 'POST')[1]!.respond(200, { ok: true, result: { dismissed: true } });
+  await page.flush();
+  assert.match(page.$('action-status').textContent, /Dismissed the planner's suggestion\./);
+});
+
+test('job client: Send is off when the job takes no message; no suggestion, no Send; without a link Discuss is a Copy of the message; a stored link that is not a https://chatgpt.com/ one is never linked', async () => {
+  // The server says say is off (as for a cut-off step of the hand-over): so is Send, with its reason.
+  const reason = 'the hand-over was cut off; it is repaired first.';
+  const base = detail(planned('handed_over', { suggestion: SUGGESTION, discuss: DISCUSS }));
+  const row = base.job as unknown as { availability: Record<string, string> };
+  const off = await openJob({ ...base, job: { ...row, availability: { ...row.availability, say: reason } } as unknown as Job });
+  assert.deepEqual([off.$('suggestion-send-button').disabled, off.$('suggestion-send-button').getAttribute('title')], [true, reason]);
+  off.$('suggestion-send-button').click();
+  await off.flush();
+  assert.deepEqual(posted(off), []);
+
+  const written: string[] = [];
+  const page = await openJob(detail(planned('ready_for_human_review', { chat: 'https://evil.example/c/abc', discuss: { message: 'Use the software-factory MCP server.', url: null } })), () => undefined, { writeText: async (text) => void written.push(text) });
+  const block = page.$('planner');
+  assert.equal(page.document.getElementById('planner-suggestion'), null);
+  assert.deepEqual(links(block), []);
+  const copy = block.querySelector('[data-act="planner-copy"]')!;
+  assert.equal(copy.textContent, 'Copy the message for the planner');
+  copy.click();
+  await page.flush();
+  assert.deepEqual(written, ['Use the software-factory MCP server.']);
+  // A discuss URL that is not ChatGPT's prefill is not linked either.
+  await show(page, detail(planned('ready_for_human_review', { discuss: { message: 'm', url: 'https://evil.example/?q=m' } })));
+  assert.deepEqual(links(page.$('planner')), []);
+  // A job that does not wait for the user: no Discuss, the field only.
+  await show(page, detail(planned('working', {})));
+  assert.deepEqual([page.$('planner').hidden, links(page.$('planner')), page.$('planner').querySelector('[data-act="planner-copy"]')], [false, [], null]);
+  assert.notEqual(page.document.getElementById('job-chat-input'), null);
+});
+
+test('job client: the planning chat link field saves, removes and shows a refusal next to it', async () => {
+  const page = await openJob(detail(planned('needs_human', { discuss: DISCUSS }, { error: { code: 'iteration_limit', message: 'm' } })));
+  const input = page.$('job-chat-input');
+  assert.equal(input.value, '');
+  assert.equal(page.$('planner').querySelector('[data-act="chat-remove"]'), null);
+  input.value = 'https://evil.example/c/1';
+  page.$('planner').querySelector('[data-act="chat-save"]')!.click();
+  await page.flush();
+  assert.deepEqual(posted(page), [['api/tickets/app/T-1/chat', { url: 'https://evil.example/c/1' }]]);
+  page.requests.filter((request) => request.method === 'POST')[0]!.respond(400, { ok: false, error: { code: 'invalid_chat_link', message: 'Only a https://chatgpt.com/ conversation link can be saved.' } });
+  await page.flush();
+  assert.equal(page.$('planner').querySelector('.chat-field .err-text')!.textContent, 'Only a https://chatgpt.com/ conversation link can be saved.');
+  // The box keeps what was typed.
+  assert.equal(page.$('job-chat-input').value, 'https://evil.example/c/1');
+
+  page.$('job-chat-input').value = 'https://chatgpt.com/c/ok';
+  page.$('planner').querySelector('[data-act="chat-save"]')!.click();
+  await page.flush();
+  assert.deepEqual(posted(page)[1], ['api/tickets/app/T-1/chat', { url: 'https://chatgpt.com/c/ok' }]);
+  page.requests.filter((request) => request.method === 'POST')[1]!.respond(200, { ok: true, result: { workspace: 'app', ticket: 'T-1', planning_chat: 'https://chatgpt.com/c/ok' } });
+  await page.flush();
+  assert.equal(page.$('planner').querySelector('.chat-field .err-text')!.textContent, '');
+  assert.deepEqual(links(page.$('planner')).map(([text, href]) => [text, href]), [['Discuss the result ↗', DISCUSS.url], ['Open the planning chat ↗', 'https://chatgpt.com/c/ok']]);
+  page.$('planner').querySelector('[data-act="chat-remove"]')!.click();
+  await page.flush();
+  assert.deepEqual(posted(page)[2], ['api/tickets/app/T-1/chat', { url: null }]);
+  page.requests.filter((request) => request.method === 'POST')[2]!.respond(200, { ok: true, result: { workspace: 'app', ticket: 'T-1', planning_chat: null } });
+  await page.flush();
+  assert.deepEqual([page.$('job-chat-input').value, page.$('planner').querySelector('[data-act="chat-remove"]')], ['', null]);
+});

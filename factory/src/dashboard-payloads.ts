@@ -4,11 +4,12 @@
 // with its iterations and history). Read-only: every function reads the job store, the start
 // screen's data, the Task checks and the run queue it is given, and changes nothing.
 import { open, readFile } from 'node:fs/promises';
-import { conversationUrl, MAX_CONVERSATION_URL, ticketConversation } from './conversation.js';
+import { conversationUrl, MAX_CONVERSATION_URL, resultConversation, ticketConversation } from './conversation.js';
 import type { DashboardActions, DashboardChecks, DashboardQueue, DashboardSetup } from './dashboard.js';
 import { CONFIRM_ACTIONS } from './dashboard-routes.js';
 import { currentExplanation, ledgerStopEntries } from './explain.js';
 import { claudeReviews, type Job, type JobStore } from './jobs.js';
+import { shownSuggestion, waits } from './planner.js';
 import { historyOf, phaseOf, type Progress, progressOf, readSteps } from './progress.js';
 import type { TicketRow } from './setup.js';
 import type { CheckSummary } from './task-check.js';
@@ -337,7 +338,23 @@ async function stopOf(jobs: JobStore, job: Job): Promise<{ items: unknown[]; sav
   return { items: [], saves_lines: null };
 }
 
-// now: nowOf; tool_calls: the Implementer's tool calls in the job (ToolCallCounter); stop: stopOf.
+// A job's planner block: the ticket's planning chat link; while the job waits for the User, the
+// message that opens the conversation about its result (a ChatGPT link when ChatGPT plans the
+// ticket and it fits, else the message to copy); and the planner's suggestion while it is shown
+// (src/planner.ts).
+export async function plannerOf(jobs: JobStore, setup: DashboardSetup, job: Job) {
+  const { owner, planning_chat } = await setup.planningOf(job.workspace, job.ticket);
+  let discuss: { message: string; url: string | null } | null = null;
+  if (waits(job.state)) {
+    const message = resultConversation(job.workspace, job.ticket, owner);
+    const url = owner === 'chatgpt' ? conversationUrl(message) : null;
+    discuss = { message, url: url !== null && url.length <= MAX_CONVERSATION_URL ? url : null };
+  }
+  return { chat: planning_chat, discuss, suggestion: await shownSuggestion(jobs, job) };
+}
+
+// now: nowOf; tool_calls: the Implementer's tool calls in the job (ToolCallCounter); stop: stopOf;
+// planner: plannerOf.
 export async function jobsPayload(jobs: JobStore, setup: DashboardSetup, actions: DashboardActions, toolCalls: ToolCallCounter) {
   const list = [];
   const hosts = new Map<string, MrHost>();
@@ -351,6 +368,7 @@ export async function jobsPayload(jobs: JobStore, setup: DashboardSetup, actions
       ...jobSummary(job, await fileCounts(jobs, job), host, await taskChangedOf(setup, job), await ruleFacts(jobs, job, host), await progressFor(jobs, job)),
       title: await setup.taskTitle(job.workspace, job.ticket), ...facts,
       now: await nowOf(jobs, job, facts), tool_calls: await toolCalls.count(jobs.eventsPath(job.workspace, job.ticket)), stop: await stopOf(jobs, job),
+      planner: await plannerOf(jobs, setup, job),
     });
   }
   return { jobs: list };
@@ -499,7 +517,7 @@ export async function jobDetail(jobs: JobStore, job: Job, gate: boolean, actions
   const facts = await ruleFacts(jobs, job, mrHost);
   const ledger = job.state === 'needs_human' ? facts.ledger : await jobs.readLedger(job.workspace, job.ticket);
   return {
-    job: jobSummary(job, await fileCounts(jobs, job), mrHost, await taskChangedOf(setup, job), facts, await progressFor(jobs, job)),
+    job: { ...jobSummary(job, await fileCounts(jobs, job), mrHost, await taskChangedOf(setup, job), facts, await progressFor(jobs, job)), planner: await plannerOf(jobs, setup, job) },
     iterations,
     mr: mrText !== undefined,
     // The merge request's title on the Git host: the MR text's first line.

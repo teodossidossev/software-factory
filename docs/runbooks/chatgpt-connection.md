@@ -34,8 +34,9 @@ Credentials sit on two layers:
   directory nor Claude Code's `~/.claude.json`, where `claude mcp add` keeps the URL). Processes running as you outside the sandbox can read the token file anyway, and the
   tunnel client's own admin surface on loopback (`127.0.0.1:8790`) is accepted on the same grounds.
   The factory listens on loopback only and checks Host and Origin too. Its tools only plan: `guide`, `read_file`, `search`, `write_task`, `task_check`,
-  `read_attachment`, `queue_list` and `queue_add`. Nothing reached through them starts, reviews or
-  approves a job; `queue_add` only puts a written ticket in the run queue.
+  `read_attachment`, `queue_list`, `queue_add`, `read_job` and `suggest_changes`. Nothing reached
+  through them starts, reviews or approves a job; `queue_add` only puts a written ticket in the run
+  queue, and `suggest_changes` only stores a note you send or dismiss on the dashboard.
 
 ## Files and locations
 
@@ -174,7 +175,8 @@ The connector is created once and stays the same.
 4. Authentication: **No authentication**. The runtime key is **not** entered here.
 5. Read the warning, choose **I understand and want to continue**, then **Create as a plugin**.
 6. In the plugin details check that the tools are `guide`, `read_file`, `search`, `write_task`,
-   `task_check`, `read_attachment`, `queue_list` and `queue_add`. Then press **Install**.
+   `task_check`, `read_attachment`, `queue_list`, `queue_add`, `read_job` and `suggest_changes`.
+   Then press **Install**.
 
 After a change to the tools (or after switching the endpoint from the old bridge to the factory):
 restart `sf serve`, open the existing **Software Factory** plugin at https://chatgpt.com/plugins
@@ -202,10 +204,14 @@ and press **Start** on the ticket's Queue card (or **Start now** on its page, or
    reviewers; ChatGPT then tells you it is ready.
 4. You start the job on the dashboard (or with `sf start`). From there the factory runs it: a
    fresh Claude review and the Codex gate review each iteration and turn their findings into Fix
-   sections, and you approve or abort at the end. ChatGPT is not involved after planning.
+   sections, and you approve or abort at the end. ChatGPT is not involved after planning, unless
+   you bring it back: while a job waits for you, *Discuss the result ↗* opens a conversation in
+   which ChatGPT reads the job's Report and reviews (`read_job`) and proposes a change
+   (`suggest_changes`) that you send or dismiss on the job's page.
 
-`write_task` (the Task file) and `queue_add` (a written ticket into the run queue) are the only
-write actions; ChatGPT may ask for confirmation.
+`write_task` (the Task file), `queue_add` (a written ticket into the run queue) and
+`suggest_changes` (one note to the Implementer, which starts nothing until you send it) are the
+only write actions; ChatGPT may ask for confirmation.
 
 ## Diagnostics
 
@@ -243,6 +249,6 @@ write actions; ChatGPT may ask for confirmation.
   permission.
 - **403 from the factory.** A Host or Origin header that is not loopback; see `factory/README.md`.
 - **Old tools in ChatGPT.** Press **Refresh** on the plugin and open a new chat. The list holds
-  only the eight planning tools above (`guide`, `read_file`, `search`, `write_task`, `task_check`,
-  `read_attachment`, `queue_list`, `queue_add`), and the plugin's
+  only the ten planning tools above (`guide`, `read_file`, `search`, `write_task`, `task_check`,
+  `read_attachment`, `queue_list`, `queue_add`, `read_job`, `suggest_changes`), and the plugin's
   Authentication must be *No authentication* (edit it, or create the plugin again).

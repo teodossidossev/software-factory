@@ -195,6 +195,7 @@ scope: [src/export/**, test/export.test.ts, README.md]   # optional: every file 
 lands_after: [PROJ-120, web/WEB-7]   # optional: the tickets this one waits for; another workspace's as <workspace>/<ticket>
 check: required       # optional: required (always a Task check) or skip (never); without it only a Task that is not small is checked
 review: claude        # optional: claude (the Claude review, then the Codex gate) or codex (the gate alone); without it the user's SF_CLAUDE_REVIEW decides
+size: medium          # optional: small, medium or complex, your estimate; picks the job's lead-time target (any other value or none: medium)
 ---
 
 # PROJ-123: Short title

@@ -2513,6 +2513,11 @@ body holds three lines, so the ready notification shows the branch, the title an
 summary, the out-of-scope one included. `.env` files stay denied to the Implementer; listing
 them is a second net for files created by tools it runs.
 
+The Task's size (SF-219). The Task file's front matter may say `size: small | medium | complex`,
+the planner's estimate (`taskSize` in `src/task-file.ts`); without it, or with any other value, the
+Task is `medium`. It picks the job's lead-time target `lead_time_hours[size]` of the workspace's
+norms (section Lead time).
+
 Outside the Task's scope (SF-053). The Task file's front matter may declare `scope:`, in the forms
 of `may_touch` (`[a, b/**]` or `a, b`): the files the ticket is expected to create, modify or
 delete, tests and docs included. Each changed path gets `scope: "in" | "out" | "none"` in the file
@@ -4387,7 +4392,7 @@ HEAD and OPTIONS never act); `api/workspaces` and `api/tickets` list on GET and 
 | Path | Answer |
 |---|---|
 | `api/jobs` | `{jobs: [...]}`: workspace, ticket, branch, base, state, iteration, mr_attempts, fixes, gate_fixes, gate_tokens, updated_at, created_at, error, and for the board (SF-046) `title` (of the Task file, or `null`), `cost_usd` (the estimate of the iterations and their Claude reviews, or `null`), `review` and `gate` (the last iteration's verdicts: `clean`, `fix`, `failed` or `null`) and `review_ended_at` (the end of that clean or fix Claude review, or `null`); `mr` (the merge request on the Git host or `null`) and `mr_host` (`{host, reason}`: `github`, `gitlab` or `null`, and why the merge request actions are off or `null`); for the v3 card (SF-077) `now` (`{who, what, ts}` of a running job: the Implementer's last tool call or the first line of its last text, read from at most the last 256 KB of `events.jsonl`; the Claude review or the Codex gate reviewing iteration N; the MR writer; else `null`), `tool_calls` (the Implementer's tool calls in the job, counted incrementally: only the bytes added since the last count are read) and `stop` (for `needs_human`, `{items, saves_lines}`: the suggestions of the last simplification pass and the lines they save, the ledger entries to settle (`escalated`, `review_disputed`), the open ones (`review_churn`) or the last gate's items (`gate_rounds`, `gate_budget`), none for other codes; `null` otherwise); `progress` (`src/progress.ts`; the job detail's `job` has it too): for a running job (`starting`, `working`, `awaiting_review`, `preparing_mr`) `{steps, phase, fix_round, ready_from, ready_to}`, else `null` (`waiting_limit` and `paused` too). `steps` (`[{text, done}]`) are the checklist lines of the worktree's `.software-factory/<ticket>.steps.md`, read when the payload is built (none for a missing file, a link or a file without checklist lines; any number, each cut to 200 characters); `phase` is `code` (`starting`, `working`), `claude` (`awaiting_review` while the Claude review runs on the job and the iteration's `review.json` has no verdict yet), `codex` (else in `awaiting_review`) or `mr_text` (`preparing_mr`); `fix_round` is the job's `fixes`. The estimate reads the history of the finished jobs (pushed, aborted, failed, ready for review or handed over; current and archived) of the workspace, or of every workspace while it has fewer than 10, read again at most once an hour: per iteration the working turn (`meta.json` `ended_at − started_at`), the Claude review (`review.json` with a verdict) and the gate (`gate.json`), and the MR text (from the state change into `preparing_mr` to the next one in `events.jsonl`), each over the iterations that have it. Remaining from = (the steps left / the steps, 1 without steps, 0 outside `code`) × the working turn's p25 + the medians of the reviews still ahead (Claude's only on a job with it and until its verdict, the gate's until its verdict) + the MR text's median; to = the same with the p75, plus, while `fix_round` is 0, one fix round (the working turn's median and the medians of the job's reviews). `ready_from` and `ready_to` are now plus those (ISO strings). While the history has no working turn yet (a new installation), the estimate starts from the factory's own history when it was planned (`BASE_DURATIONS`: a working turn's p25, median and p75 10, 19 and 32 min, each review 2 min, the MR text 1 min); SF-129 (`src/stops.ts`): `stop_code`, `stop_kind` and `stop_group` (the canonical row of a `needs_human` job's stop, `null` otherwise), `actions` (`[{action, label, primary, danger}]`: the actions the job's page shows, in order) and `availability` (every action's `''` or why it is off; Accept from the real review) |
-| `api/jobs/<ws>/<ticket>` | `{job, iterations: [{number, started_at, ended_at, cost_usd, changed_files, patch_truncated, denials, files, review, gate, gate_override, simplify}], mr, gate, history: [{ts, from, to, error?} or {ts, event: "gate_overridden", code, unapplied} or {ts, event: "merge_request", action, number, url, state}], mr_title, ledger, settle_ids, confirm_actions, explanation}`; `job` has the fields of an `api/jobs` row's job part, `stop_code`, `stop_kind`, `stop_group`, `actions` and `availability` included (SF-129); `settle_ids` the ids of the ledger entries the stop block offers *Accept risk* / *Must fix* for (`[]` unless the stop's row has a settlement); `confirm_actions` the actions that need the job's ticket typed again on the remote port (SF-139: `approve`, `retry`, `archive`, `mr-create`, `mr-merge`, `merged-archive`), on both ports; `mr_title` is the MR text's first line or `null`; `explanation` is the job's `explanation.json` while it is the current stop's (SF-106, section Stop explanations), else `null`; `ledger` is `ledger.json` as written (`[]` before the first Fix section, SF-052); `gate` is whether the Codex gate is on, `gate_override` the iteration's `gate-override.json` or `null`, `simplify` its `simplify.json` (SF-055) or `null` |
+| `api/jobs/<ws>/<ticket>` | `{job, iterations: [{number, started_at, ended_at, cost_usd, changed_files, patch_truncated, denials, files, review, gate, gate_override, simplify}], mr, gate, history: [{ts, from, to, error?} or {ts, event: "gate_overridden", code, unapplied} or {ts, event: "merge_request", action, number, url, state}], mr_title, ledger, settle_ids, confirm_actions, explanation, lead: {size, target_hours, started_at, ready_at, done_at, seconds: {working, waiting_for_user, in_user_hands, parked, total}, returns, over_target}}`; `lead` is the job's lead time from `history` and its target by the Task's `size:` (SF-219, section Lead time); `job` has the fields of an `api/jobs` row's job part, `stop_code`, `stop_kind`, `stop_group`, `actions` and `availability` included (SF-129); `settle_ids` the ids of the ledger entries the stop block offers *Accept risk* / *Must fix* for (`[]` unless the stop's row has a settlement); `confirm_actions` the actions that need the job's ticket typed again on the remote port (SF-139: `approve`, `retry`, `archive`, `mr-create`, `mr-merge`, `merged-archive`), on both ports; `mr_title` is the MR text's first line or `null`; `explanation` is the job's `explanation.json` while it is the current stop's (SF-106, section Stop explanations), else `null`; `ledger` is `ledger.json` as written (`[]` before the first Fix section, SF-052); `gate` is whether the Codex gate is on, `gate_override` the iteration's `gate-override.json` or `null`, `simplify` its `simplify.json` (SF-055) or `null` |
 | `api/workspaces` | `{workspaces: [{name, path, liveJobs, problem, handoff, color, app, description, derived_description, digest}], handoff_default, digest}`: the registry, the checkout's path, its non-terminal jobs, why the checkout cannot be used now or `null`, its own hand-over setting or `null`, and its colour on the board (SF-084: its `color`, else the one its name picks); SF-103: its app (its own, else its name), its own description or `null`, the description derived from the repository or `null`, `digest: {track, my_work}`; at the top `handoff_default` (`checkout` or `off`, from `SF_HANDOFF`) and the morning digest's `digest: {at, weekdays_only, language}` |
 | `api/workspaces/<ws>/merge-requests` | the open merge requests of the workspace's origin on its Git host, as `sf mr list` reads them (section Reading the open merge requests and their review comments): `[{number, title, author, source, target, url, updated_at, draft}]`, newest update first, at most 50; read on the host at each request, nothing written to it; `409 mr_token_missing` or `mr_host_unsupported`, `502 mr_auth_failed`, `mr_host_error` or `mr_host_unreachable`; a name that is not a workspace's, an unknown workspace or any query is an empty 404 |
 | `api/workspaces/<ws>/merge-requests/<number>/threads` | the review threads of one merge request, as `sf mr comments` reads them: `[{id, resolved, path, line, comments: [{author, body, created_at, bot}]}]`, oldest first; `path` and `line` `null` for a general comment, `resolved` `null` where the host has no such state (GitHub); `bot` a bot's or SonarQube's comment; the refusals as above; a number that is not a whole number from 1 is an empty 404 |
@@ -5429,7 +5434,8 @@ order, whichever workspace is asked (or none); only the asked one's values are u
 `norms(workspace, configDir)` gives the values in force and never throws; `effectiveNorms(file,
 workspace)` is the same over the parsed file. `decision_docs` is read by the Task check and both
 reviewers, which get the list of the documents it matches (`src/decisions.ts`; section Task check,
-and the review's prompt in section Jobs); nothing reads the other values yet.
+and the review's prompt in section Jobs); `lead_time_hours` gives a job's lead-time target (SF-219,
+section Lead time); nothing reads the `slice` values yet.
 
 `sf norms [workspace]` (a command of `sf serve`, open while `sf update` drains or builds) prints the
 file's path, each effective value with its source (`default`, `file` or `workspace`), the decision
@@ -5452,6 +5458,34 @@ decision_docs                 default
   docs/terminology.md
   docs/architecture.md
 ```
+
+### Lead time
+
+A job's lead time (SF-219, `src/lead-time.ts`) is measured from its state changes in
+`events.jsonl`, as the job's detail reads them (`history` of `api/jobs/<ws>/<ticket>`):
+
+- `size`: the Task's `size:` front matter key (`small`, `medium` or `complex`, the planner's
+  estimate), read from the job's own copy of the Task file (`task.md` of the job directory);
+  without the key, with any other value or without a readable copy it is `medium`.
+- `target_hours`: `lead_time_hours[size]` of the workspace's norms.
+- `started_at`: the first state change; `ready_at`: the first change to `ready_for_human_review`
+  or `handed_over`; `done_at`: the change to `pushed`, or the first merge request record with
+  state `merged`; `null` for a job still running and for an aborted or failed one. The clock ends
+  at the first change to `pushed`, `aborted` or `failed` or the first merged record (later entries
+  are ignored; a merged record before any state change leaves the clock empty: no times, no
+  seconds), else it runs to now. The times are the log's own strings; an entry whose `ts` is
+  not a date is skipped.
+- `seconds`: the time from each state change to the next (or the end) counts for the part of the
+  state changed to, in whole seconds: `working` (`starting`, `working`, `awaiting_review`,
+  `preparing_mr`), `waiting_for_user` (`needs_human`, `ready_for_human_review`), `in_user_hands`
+  (`handed_over`) and `parked` (`paused`, `waiting_limit`); `total` is their sum, so time in a
+  state of no part (a name the factory does not know) counts nowhere.
+- `returns`: the changes to `working` right after a change to `ready_for_human_review` or
+  `handed_over` (a return through `needs_human` is not counted).
+- `over_target`: `seconds.total` is above `target_hours` hours (`target_hours * 3600` seconds).
+
+Only the job's detail (`api/jobs/<ws>/<ticket>`) carries it, as `lead`, computed from the history
+it already reads (one read of `events.jsonl`); the rows of `api/jobs` do not.
 
 ## History
 

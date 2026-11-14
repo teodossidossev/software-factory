@@ -9,8 +9,10 @@ import type { DashboardActions, DashboardChecks, DashboardQueue, DashboardSetup 
 import { CONFIRM_ACTIONS } from './dashboard-routes.js';
 import { currentExplanation, ledgerStopEntries } from './explain.js';
 import { claudeReviews, type Job, type JobStore } from './jobs.js';
+import { jobLead } from './lead-time.js';
 import { shownSuggestion, waits } from './planner.js';
 import { historyOf, phaseOf, type Progress, progressOf, readSteps } from './progress.js';
+import { configDir } from './registry.js';
 import type { TicketRow } from './setup.js';
 import type { CheckSummary } from './task-check.js';
 import { turnLimitLine } from './turn-limit.js';
@@ -487,7 +489,8 @@ async function stateHistory(jobs: JobStore, workspace: string, ticket: string) {
   return history;
 }
 
-export async function jobDetail(jobs: JobStore, job: Job, gate: boolean, actions: DashboardActions, setup: DashboardSetup) {
+// normsDir: where norms.json is read for the lead-time target (src/lead-time.ts).
+export async function jobDetail(jobs: JobStore, job: Job, gate: boolean, actions: DashboardActions, setup: DashboardSetup, normsDir: string = configDir()) {
   const iterations = [];
   for (let number = 1; number <= job.iteration; number += 1) {
     try {
@@ -516,6 +519,7 @@ export async function jobDetail(jobs: JobStore, job: Job, gate: boolean, actions
   const mrHost = await mrHostOf(actions, job.workspace);
   const facts = await ruleFacts(jobs, job, mrHost);
   const ledger = job.state === 'needs_human' ? facts.ledger : await jobs.readLedger(job.workspace, job.ticket);
+  const history = await stateHistory(jobs, job.workspace, job.ticket);
   return {
     job: { ...jobSummary(job, await fileCounts(jobs, job), mrHost, await taskChangedOf(setup, job), facts, await progressFor(jobs, job)), planner: await plannerOf(jobs, setup, job) },
     iterations,
@@ -532,7 +536,9 @@ export async function jobDetail(jobs: JobStore, job: Job, gate: boolean, actions
     // The actions that need the job's ticket typed again on the remote port (POST_ROUTES'
     // confirm routes); the page asks for it exactly for these.
     confirm_actions: [...CONFIRM_ACTIONS],
-    history: await stateHistory(jobs, job.workspace, job.ticket),
+    history,
+    // The lead time from the job's start, where it went, and its target by the Task's size.
+    lead: await jobLead(jobs, job.workspace, job.ticket, history, normsDir),
     // The plain explanation of the current stop: explanation.json while it is the job's
     // current stop's (pending, written or failed); null otherwise.
     explanation: await currentExplanation(jobs, job),

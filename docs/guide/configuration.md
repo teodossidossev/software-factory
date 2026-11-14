@@ -270,6 +270,7 @@ them in the shell that runs the tests, not in `auth.env`.
 | Key | Default | Allowed | Meaning | Example |
 | --- | --- | --- | --- | --- |
 | `SF_TEST_CONCURRENCY` | unset or empty: half the cores (`os.availableParallelism()`), rounded down, at least 1 | a positive integer (digits, no sign, no leading zero); anything else stops the run with exit code 2 before a test runs | The number of test files `node --test` runs at once (`--test-concurrency`). | `SF_TEST_CONCURRENCY=4 npm test` |
+| `SF_TEST_BUSY_LOAD` | unset or empty: 0.75 times the machine's cores (`os.cpus()`, not a CPU quota's), unrounded (15 on 20 cores) | a positive number, digits with an optional fraction (`12`, `12.5`, `0.5`); anything else (`0`, `.5`, `12.`, `1e3`, `-1`) stops the run with exit code 2 before a test runs | The busy limit of the 1-minute load average. At or above it a run gives way: no further file starts while another file of the run is running, until the load drops below it, so the run starts fewer files at once and always has one running. A file killed at its limit while the load is at or above it gets the retry of a failed file. | `SF_TEST_BUSY_LOAD=10 npm test` |
 | `SF_TEST_NICE` | unset or empty: nice 10 | exactly `0`; anything else stops the run with exit code 2 before a test runs | `0` leaves the priority of the tests alone; otherwise `node --test` and every test process it starts run at nice 10. A priority that cannot be set prints one warning and the tests still run. | `SF_TEST_NICE=0 npm test` |
 
 The full table with every detail is in the reference,

@@ -116,16 +116,32 @@ when a file could not start, was killed by a signal, ran past its limit or left 
 its output, or when no file matches; else the first failing file's exit code; a last line names the files that failed.
 Since SF-184 a file can fail under the load of a full run (two jobs testing on one machine, a
 time-sensitive test missing its deadline) and pass alone: when one to three files failed and none
-ran past its limit, each runs once more, one at a time, with the same arguments, environment and
+ran past its limit on a calm machine, each runs once more, one at a time, with the same arguments, environment and
 limit. One that passes then counts as passed, and the run's last line names it (`run-tests: <n>
 test files passed (<k> after a retry: <files>)`); its first, failing output is still printed, under
 `--- <file> failed on the first run, passed on the retry ---`. One that fails again fails the run,
 both outputs printed under `--- <file> failed on the first run and on the retry ---`. Four or more
-failed files, or a file killed at its limit, get no retry. `SF_TEST_RETRY=0` turns the retry off
-(any other value leaves it on).
+failed files, or a file killed at its limit on a calm machine, get no retry; a file killed at its
+limit while the machine was busy (the load at or above the busy limit below when it was killed)
+counts as a failed file and gets its retry, alone, after the parallel run. `SF_TEST_RETRY=0` turns
+the retry off (any other value leaves it on).
+Since SF-223 a run gives way when the machine is busy (other runs of the suite, a merge check and
+the jobs' own tests at once): before a lane takes its next file it reads the 1-minute load average
+(`os.loadavg()`, global on Linux, inside a sandbox too), and while it is at or above the busy limit
+(0.75 times the machine's cores, `os.cpus()`, unrounded: 15 on 20 cores, under `sf service`'s
+CPUQuota too, since the load is the whole machine's) and another file of the run is running, the lane
+waits, reading the load again every 5 s and as soon as a file of the run ends. A run so always has
+one file running and never stalls, N stays the upper bound, and the time a file waited to start
+does not count toward its limit. The first wait prints `run-tests: the machine is busy (load <load>
+at or above <limit>): fewer files at once until it calms`, once per run, and the run's last line
+then ends with `; it gave way to the machine's load for <m> min` (or `for under a minute`): the
+failure line, the line of a retry, or a new `run-tests: <n> test files passed` line. A run that
+never waited prints what it printed before.
 `SF_TEST_CONCURRENCY=<positive integer>` sets N, `SF_TEST_FILE_TIMEOUT_MS=<positive integer>` the
-limit of a file in ms (at most 2147483647, the longest timer Node keeps), and `SF_TEST_NICE=0`
-leaves the priority alone; any other value of any of them stops the run with exit code 2.
+limit of a file in ms (at most 2147483647, the longest timer Node keeps),
+`SF_TEST_BUSY_LOAD=<positive number>` the busy limit (digits with an optional fraction, `12` or
+`12.5`), and `SF_TEST_NICE=0` leaves the priority alone; any other value of any of them stops the
+run with exit code 2.
 `SF_TEST_LIVE_CLAUDE=1` runs the one test that starts the real Claude Code (SF-159,
 `test/session-settings.test.ts`: the file-tool guard with `disableAllHooks`), which needs a login and
 the network as `sf smoke` does; without it that test is skipped. Ctrl-C

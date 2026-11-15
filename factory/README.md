@@ -2338,6 +2338,10 @@ each agent role uses. The factory ships no copy, never edits one and installs no
 add` in a terminal does); where a skill's step conflicts with the factory (commit, push, ask the
 user), the factory's prompt rule wins and the sandbox refuses mutating Git.
 
+Apart from those, the factory ships one skill of its own, `factory/skills/planning-tasks`: the
+planning method for a Claude Code session that plans a ticket (the planning guide, "The planning
+skill"). It is no role's skill, and the snapshot does not hold it.
+
 - **The roles**: `implementer` (the Implementer's session), `claude_review`, `codex_gate`,
   `task_check` and `planner` (the ChatGPT Context owner's planning method). Without a choice each
   has today's set: `implementer` `implement`, `tdd`, `code-review` and `grilling`;

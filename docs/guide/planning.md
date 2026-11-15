@@ -185,6 +185,21 @@ A Claude Code session that runs in the workspace's checkout may also simply writ
 `.software-factory/APP-12.md` itself with its file tools: that is the same as writing it by hand
 (below). This is how a coordinating session works ([Ways of working](ways-of-working.md#3-with-a-coordinating-claude-code-session)).
 
+### The planning skill
+
+The factory ships its planning method as a Claude Code skill, `factory/skills/planning-tasks`: it
+grills you, cuts the work into slices by the slicing rules, has a sub-agent trace each slice
+through the code before the slice's Task file is written, and fixes what the Task check finds
+until the check is ready. To use it by hand:
+
+1. Clone the workspace's repository into a folder of its own (not your working checkout: the
+   skill fast-forwards the base branch) and register the software-factory MCP server there, as
+   above.
+2. Link the skill into that folder:
+   `mkdir -p .claude/skills && ln -s <factory repository>/factory/skills/planning-tasks .claude/skills/planning-tasks`.
+3. Start Claude Code there and send `/planning-tasks workspace my-app, ticket APP-12`, followed by
+   your words, or the first message the ticket's page offers.
+
 ## 3. New ticket on the dashboard, then plan on its page
 
 New ticket (above, step 2 and 3) always writes the skeleton first. From the planned ticket's page

@@ -96,6 +96,21 @@ test('the files against scope: an expected file outside it is missing (major), a
   assert.equal(settleCheck(task, { ...OUTPUT, findings: [], files }).verdict, 'not_ready');
 });
 
+test('settleCheck (SF-220): with the norm, a change Task over it gets the size finding after the scope findings; without the norm, or within it, the output is unchanged', () => {
+  const task = taskText('C-1', 'scope: [README.md]\n');
+  const files: CheckOutput['files'] = [{ path: 'README.md', action: 'modify' }, { path: 'src/a.ts', action: 'create' }];
+  const output = { ...OUTPUT, findings: [finding('nit', 'unclear')], files };
+  const over = settleCheck(task, output, 1);
+  assert.deepEqual(over.findings.map((item) => [item.kind, item.severity, item.where]), [['unclear', 'nit', '## Behaviour'], ['missing', 'major', 'scope:'], ['overreach', 'major', 'slice norm']]);
+  assert.equal(over.findings[2]!.problem, '2 files are expected; the norm of a change slice is 1.');
+  assert.deepEqual(settleCheck(task, output, 2), settleCheck(task, output));
+  assert.deepEqual(settleCheck(task, output).findings.map((item) => item.where), ['## Behaviour', 'scope:']);
+  // The size finding alone makes a Task not ready; a mechanical one stays ready.
+  const ready = { ...OUTPUT, findings: [], files };
+  assert.equal(settleCheck(taskText('C-1'), ready, 1).verdict, 'not_ready');
+  assert.equal(settleCheck(taskText('C-1', 'kind: mechanical\n'), ready, 1).verdict, 'ready');
+});
+
 test('the prompt holds the instructions and the Task file, nothing else', () => {
   const task = taskText('C-1', '', 'Greet the reader.\n\n## Fix 1\n\nReview by Claude: x');
   const prompt = checkPrompt('C-1', task);
@@ -385,6 +400,23 @@ test('sf check-task with coding rules (SF-059): the prompt gives the <rules> blo
   const [entry] = await reviewLog(env);
   assert.equal(entry!.prompt, checkPrompt('C-9', content, block));
   assert.ok(!entry!.prompt.includes('Uncommitted rules.'));
+});
+
+test('sf check-task (SF-220): the workspace\'s own slice.change_max_files of norms.json holds the expected files; the prompt does not change', async () => {
+  const content = taskText('C-12');
+  const { env } = await checkEnv('check-norms', 'C-12', content);
+  await mkdir(env.config, { recursive: true });
+  await writeFile(join(env.config, 'norms.json'), JSON.stringify({ slice: { change_max_files: 50 }, workspaces: { app: { slice: { change_max_files: 1 } } } }));
+  const files: CheckOutput['files'] = [{ path: 'README.md', action: 'modify' }, { path: 'docs/hello.md', action: 'create' }];
+  await reviewScript(env, [{ output: { ...OUTPUT, findings: [], files, verdict: 'ready' } }]);
+  const run = await runCli(env, ['check-task', 'app', 'C-12']);
+  assert.equal(run.code, 0, run.stderr);
+  const [entry] = await reviewLog(env);
+  assert.equal(entry!.prompt, checkPrompt('C-12', content));
+  assert.ok(run.stdout.includes('2 files are expected; the norm of a change slice is 1.'), run.stdout);
+  assert.ok(run.stdout.includes('Verdict: not ready (0 blocker, 1 major, 0 nit)'), run.stdout);
+  const stored = JSON.parse(await readFile(join(env.state, 'checks', 'app', 'C-12', `${taskSha256(content).slice(0, 16)}.json`), 'utf8')) as CheckRecord;
+  assert.deepEqual(stored.output!.findings.map((item) => [item.kind, item.severity, item.where]), [['overreach', 'major', 'slice norm']]);
 });
 
 test('sf check-task with decision documents: the prompt lists those at the Task\'s base; a contradiction with one is a blocker in task_check\'s answer', async () => {

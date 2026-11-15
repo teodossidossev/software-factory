@@ -178,7 +178,7 @@ Rules:
 - One huge slice left over means the switch is still all or nothing: go back to step 3 and build
   beside the old.
 - When a solution cannot be cut this way (a change that is only safe whole), say why in the Task
-  and get the user's agreement.
+  under `## Why whole` and get the user's agreement.
 - Each Task says in its first lines which slice it is, "Slice 2 of 5 (change): ...", and lists
   its siblings with one line each, so the reviewer of one slice sees the whole cut.
 
@@ -196,6 +196,9 @@ lands_after: [PROJ-120, web/WEB-7]   # optional: the tickets this one waits for;
 check: required       # optional: required (always a Task check) or skip (never); without it only a Task that is not small is checked
 review: claude        # optional: claude (the Claude review, then the Codex gate) or codex (the gate alone); without it the user's SF_CLAUDE_REVIEW decides
 size: medium          # optional: small, medium or complex, your estimate; picks the job's lead-time target (any other value or none: medium)
+part_of: PROJ-100     # optional: the task this slice belongs to (a ticket name)
+slice: 2/5            # optional: this slice's number and the count, 1 <= N <= M <= 20
+kind: change          # optional: mechanical, preparation, change, switch or cleanup (Slicing a solution); none: change
 ---
 
 # PROJ-123: Short title
@@ -250,6 +253,14 @@ the Codex gate: give it to risky tickets (authentication, the sandbox, the state
 product tickets the user names). `review: codex` has the gate alone even when the user set
 `SF_CLAUDE_REVIEW=always`. Without the key the user's setting decides (by default the gate alone).
 Any other value is ignored. It is read once, at Start.
+
+`part_of:`, `slice:` and `kind:` say which slice of a task the Task is (`## Slicing a solution`);
+with both `part_of` and `slice`, the merge request's `## Special things to note` begins "Slice N
+of M of <part_of>." A value that is not valid is ignored, and the Task check lists it as a nit.
+When the Task check expects more files than the workspace's norm of a change slice (10 by
+default, `slice.change_max_files` of `norms.json`) for a Task of kind `change` (or none) or
+`switch`, it adds an `overreach` major at "slice norm": cut the Task again. A Task that says
+under a `## Why whole` heading why it is only safe whole gets a nit instead.
 
 Coding rules reach the Implementer, the reviewers and the Task check without you: `AGENTS.md` and
 the Markdown files it links to, and the user's own rules files; reference them by path, never copy them into the Task.

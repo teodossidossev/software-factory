@@ -957,7 +957,12 @@ runs it by itself after each change of a Task file (below); the user can always 
 - **The factory's rules**: a `contradiction` is always a blocker; when the Task has `scope:`
   (SF-053), an expected file outside it (and outside `may_touch:`) is a `missing` major finding
   and a scope entry no expected file matches an `overreach` nit, unless the checker named them
-  already; the verdict is `ready` with no blocker or major and `not_ready` otherwise, whatever the
+  already; a `part_of:`, `slice:` or `kind:` value that is not valid (section The Task's slice) is
+  an `unclear` nit at `front matter`, one per key; for a Task of kind `change` or `switch`, more
+  expected files than the workspace's `slice.change_max_files` (section Norms) is an `overreach`
+  major at `slice norm` ("12 files are expected; the norm of a change slice is 10."), a nit when
+  the Task has a `## Why whole` heading with text under it (`src/slices.ts`); the checker's
+  prompt does not change; the verdict is `ready` with no blocker or major and `not_ready` otherwise, whatever the
   checker wrote.
 - **Storage**: `<state>/checks/<ws>/<ticket>/<first 16 hex of the Task file's sha256>.json`: the
   output, the model, the estimated cost and the times; never in the work checkout. A later check
@@ -2524,6 +2529,16 @@ The Task's size (SF-219). The Task file's front matter may say `size: small | me
 the planner's estimate (`taskSize` in `src/task-file.ts`); without it, or with any other value, the
 Task is `medium`. It picks the job's lead-time target `lead_time_hours[size]` of the workspace's
 norms (section Lead time).
+
+The Task's slice (SF-220). The front matter may say which slice of a task the Task is (the
+Handbook's Slicing a solution; `taskSlice` in `src/task-file.ts`): `part_of: <ticket>` (by the
+ticket name's rule), `slice: N/M` (digits, 1 <= N <= M <= 20) and `kind: mechanical | preparation
+| change | switch | cleanup`. A key with an empty value is absent; one that is not valid is
+ignored, and the Task check lists it as a nit (section Task check). Without a valid `kind` the Task
+is `change`. A `change` or `switch` Task whose Task check expects more files than the norm gets a
+size finding (section Task check). The MR text's prompt tells the writer to begin `## Special
+things to note` with `- Slice N of M of <part_of>.` when the Task file has both `part_of:` and
+`slice:` (`MR_SLICE_RULE` in `src/prompts.ts`).
 
 Outside the Task's scope (SF-053). The Task file's front matter may declare `scope:`, in the forms
 of `may_touch` (`[a, b/**]` or `a, b`): the files the ticket is expected to create, modify or

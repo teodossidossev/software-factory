@@ -83,6 +83,36 @@ export function taskSize(fields: Map<string, string>): TaskSize {
   return value === 'small' || value === 'complex' ? value : 'medium';
 }
 
+// Which slice of a task a Task is (Handbook: Slicing a solution): `part_of: <ticket>`,
+// `slice: N/M` and `kind:` in the front matter.
+export const SLICE_KINDS = ['mechanical', 'preparation', 'change', 'switch', 'cleanup'] as const;
+export type SliceKind = (typeof SLICE_KINDS)[number];
+export const MAX_SLICES = 20;
+// part_of and slice only when valid; kind is 'change' without a valid one; problems: one line per key set and not valid.
+export interface TaskSlice { part_of?: string; slice?: { n: number; of: number }; kind: SliceKind; problems: string[] }
+
+// The Task's slice keys; a key with an empty value counts as absent.
+export function taskSlice(fields: Map<string, string>): TaskSlice {
+  const problems: string[] = [];
+  // The key's value read by parse: undefined when absent, or when not valid (with its problem line).
+  const read = <T>(key: string, parse: (value: string) => T | undefined): T | undefined => {
+    const value = fields.get(key) ?? '';
+    const parsed = value === '' ? undefined : parse(value);
+    if (value !== '' && parsed === undefined) {
+      problems.push(`${key}: "${value}" is not valid; it is ignored.`);
+    }
+    return parsed;
+  };
+  const partOf = read('part_of', (value) => (TICKET_PATTERN.test(value) ? value : undefined));
+  const slice = read('slice', (value) => {
+    const match = /^(\d+)\/(\d+)$/.exec(value);
+    const [n, of] = [Number(match?.[1]), Number(match?.[2])];
+    return match !== null && n >= 1 && n <= of && of <= MAX_SLICES ? { n, of } : undefined;
+  });
+  const kind = read('kind', (value) => SLICE_KINDS.find((known) => known === value));
+  return { ...(partOf !== undefined ? { part_of: partOf } : {}), ...(slice !== undefined ? { slice } : {}), kind: kind ?? 'change', problems };
+}
+
 // The file scope of the Task: `scope:` in the front matter, in the forms of may_touch, the
 // files the ticket is expected to create, modify or delete, tests and docs included. Undefined when
 // the Task declares none (no field, or an empty list): then nothing is checked.

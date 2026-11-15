@@ -436,6 +436,8 @@ test('handbookSection extracts by heading and skips "## " lines inside fences; m
   assert.doesNotMatch(prompt, /previous attempt/);
   // SF-058: ## Testing lists only what was run; the rest goes on a `Not checked:` line.
   assert.match(prompt, /^`## Testing` lists only what was run in this job, with its result; anything not run \(manual steps, live checks, browsers\) goes on a line starting with `Not checked:`, saying who can run it\.$/m);
+  // SF-220: one fixed line, after the Testing rule; the writer reads part_of and slice from the Task file.
+  assert.match(prompt, /saying who can run it\.\nIf the Task file's front matter has both `part_of:` and `slice: N\/M`, begin `## Special things to note` with the bullet `- Slice N of M of <part_of>\.`\nChange no other file/);
   assert.match(mrPrompt({ ...input, attempt: 2, previousError: 'The MR text is missing.' }), /^This is attempt 2\. The previous attempt failed: The MR text is missing\.$/m);
 
   const conflict = conflictPrompt({ ticket: 'T-1', targetRef: 'origin/main', targetCommit: 'b'.repeat(40), files: ['a.txt', 'src/b.ts'] });

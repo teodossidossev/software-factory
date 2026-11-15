@@ -305,7 +305,7 @@ The top-level `digest` sets the morning digest; every key is optional:
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `at` | `"08:00"` | The local time (`HH:MM`) after which `sf serve` makes the day's digest. |
+| `times` | `["08:00"]` | 1 to 4 local times (`HH:MM`, 00:00 to 23:59, no time twice, any order) after each of which `sf serve` makes a digest that refreshes the brief. A file with the older `"at": "HH:MM"` still works as one time; a save from the dashboard replaces it with `times`. |
 | `weekdays_only` | `true` | No digest on Saturday and Sunday; Monday's covers the weekend. |
 | `model` | `"sonnet"` | The model of the digest's session. Only by editing the file. |
 | `language` | `"English"` | The language of the digest's text (1 to 40 characters). |
@@ -333,7 +333,7 @@ of `/home/you`):
       "digest": { "track": true, "my_work": true }
     }
   },
-  "digest": { "at": "07:30", "weekdays_only": true, "model": "sonnet", "language": "English" }
+  "digest": { "times": ["07:30", "12:00"], "weekdays_only": true, "model": "sonnet", "language": "English" }
 }
 ```
 
@@ -352,8 +352,10 @@ same name and path and `--handoff` or `--color` to change those fields; without 
 changes). On the dashboard, the Workspaces drawer adds a workspace (an absolute path), edits one
 (**Edit** on its card: the path, the description, the app, the hand-over, the colour and the two
 digest switches; the name stays, and the path cannot change while the workspace has a live job), and
-removes one that has no live job. Its **Morning digest** section sets `at`, `weekdays_only` and
-`language`. The CLI has no flags for the digest's fields: use the drawer or edit the file.
+removes one that has no live job. Its **Morning digest** section sets `times` (a "Times" field, up
+to 4 comma-separated), `weekdays_only` and `language`; the Digest page's schedule line (**Edit**)
+sets `times` too. The CLI has no flags for the digest's fields: use the drawer, the Digest page or
+edit the file.
 
 ## Norms (norms.json)
 

@@ -19,6 +19,7 @@
   <script src="reports.js" defer></script>
   <script src="mr-row.js" defer></script>
   <script src="review-page.js" defer></script>
+  <script src="digest-brief.js" defer></script>
   <script src="setup.js" defer></script>
   <script src="skills.js" defer></script>
   <script src="health.js" defer></script>
@@ -272,9 +273,9 @@
       <form id="digest-form" class="form">
         <h3 class="section-title">Morning digest</h3>
         <div class="field">
-          <label for="digest-at">Time</label>
-          <input id="digest-at" type="time" required>
-          <p class="hint">sf serve makes one digest a day after this time (local time) for the workspaces above that are followed or have My daily on; a machine that slept through it makes it on waking.</p>
+          <label for="digest-at">Times</label>
+          <input id="digest-at" type="text" autocomplete="off" spellcheck="false" placeholder="08:00, 12:30" required>
+          <p class="hint">Up to 4 times a day (HH:MM, local time), comma-separated. sf serve makes a digest after each for the workspaces above that are followed or have My daily on; a machine that slept through them makes one on waking.</p>
         </div>
         <div class="field">
           <label class="choice"><input id="digest-weekdays" type="checkbox"> Weekdays only</label>

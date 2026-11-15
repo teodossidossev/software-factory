@@ -45,7 +45,7 @@ test('dashboard setup: the reads, the method rules per path and the token; nothi
     // SF-103: the hand-over default and the morning digest's settings at the top level; each row its app, description, derived description and switches.
     assert.deepEqual(JSON.parse(workspaces.body), {
       workspaces: [{ name: 'app', path: '/srv/app', liveJobs: 1, problem: null, handoff: null, color: 'teal', app: 'app', description: null, derived_description: null, digest: { track: false, my_work: false } }, { name: 'web', path: '/srv/web', liveJobs: 0, problem: null, handoff: null, color: 'purple', app: 'web', description: null, derived_description: null, digest: { track: false, my_work: false } }],
-      handoff_default: 'checkout', digest: { at: '08:00', weekdays_only: true, language: 'English' },
+      handoff_default: 'checkout', digest: { times: ['08:00'], weekdays_only: true, language: 'English' },
     });
 
     const tickets = await fetchRaw(new URL('api/tickets', base));
@@ -593,7 +593,7 @@ test('dashboard setup end to end: a workspace from the page, a ticket draft, the
   const served = await serve(env);
   try {
     const base = served.dashboard!;
-    assert.deepEqual(JSON.parse((await fetchRaw(new URL('api/workspaces', base))).body), { workspaces: [], handoff_default: 'off', digest: { at: '08:00', weekdays_only: true, language: 'English' } });
+    assert.deepEqual(JSON.parse((await fetchRaw(new URL('api/workspaces', base))).body), { workspaces: [], handoff_default: 'off', digest: { times: ['08:00'], weekdays_only: true, language: 'English' } });
     const stream = await openStream(new URL('api/stream', base));
     assert.deepEqual((await stream.next('workspaces')).workspaces, []);
     assert.deepEqual((await stream.next('tickets')).tickets, []);
@@ -608,6 +608,16 @@ test('dashboard setup end to end: a workspace from the page, a ticket draft, the
     const listed = await runCli(env, ['workspace', 'list']);
     assert.match(listed.stdout, new RegExp(`^app\\n  checkout: ${repo}\\n  hand-over: off \\(this workspace\\)$`, 'm'));
     assert.deepEqual(error(await act(base, 'api/workspaces', { name: 'app', path: repo })), { status: 409, code: 'workspace_exists' });
+
+    // The digest's times: a partial body changes only its keys; a bad list is refused and changes
+    // nothing; the workspaces event carries the new settings.
+    assert.deepEqual(result(await act(base, 'api/digest-settings', { times: ['12:00', '08:30'] })), { times: ['08:30', '12:00'], weekdays_only: true, language: 'English' });
+    assert.deepEqual((await stream.next('workspaces', (data) => data.digest.times.length === 2)).digest, { times: ['08:30', '12:00'], weekdays_only: true, language: 'English' });
+    assert.deepEqual(result(await act(base, 'api/digest-settings', { weekdays_only: false })), { times: ['08:30', '12:00'], weekdays_only: false, language: 'English' });
+    for (const times of [[], ['01:00', '02:00', '03:00', '04:00', '05:00'], ['08:00', '08:00'], ['24:00']]) {
+      assert.deepEqual(error(await act(base, 'api/digest-settings', { times })), { status: 400, code: 'invalid_digest_settings' }, JSON.stringify(times));
+    }
+    assert.deepEqual((await loadRegistry(env.config)).digest, { times: ['08:30', '12:00'], weekdays_only: false });
 
     // A ticket skeleton: the exact file without the user's words; the words are in the
     // conversation's first message; a second ticket is refused.

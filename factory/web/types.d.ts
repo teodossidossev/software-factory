@@ -477,7 +477,8 @@ interface QueueView {
 // The morning digest's settings, as the workspaces payload carries them: src/registry.ts
 // DigestSettings without its model (src/setup.ts WorkspaceSettings).
 interface DigestSettings {
-  at: string;
+  // HH:MM, sorted ascending.
+  times: string[];
   weekdays_only: boolean;
   language: string;
 }
@@ -554,7 +555,23 @@ interface DigestRecord {
   cost_usd: number | null;
   error: string | null;
   notes: string[];
+  // My factory jobs in progress at the run; older records lack it (read as []).
+  in_progress?: DigestInProgress[];
 }
+// A job in progress at the run: src/digest-jobs.ts DigestInProgress.
+interface DigestInProgress {
+  workspace: string;
+  app: string;
+  ticket: string;
+  title: string;
+  state: JobState;
+  stop_code: string | null;
+  iteration: number;
+  since: string;
+}
+// A text of the model: src/digest-run.ts DigestText, text in the record's language and en in
+// English; a record written before both holds the plain string.
+type DigestText = string | { text: string; en: string };
 // A workspace of a digest: src/digest-run.ts DigestWorkspace, its fetch src/digest.ts MirrorResult.
 interface DigestWorkspace {
   name: string;
@@ -607,10 +624,10 @@ interface DigestDailySource {
 interface DigestOutput {
   repos: Array<{
     name: string;
-    headline: string;
-    merged: Array<{ sha: string; problem: string }>;
-    branches: Array<{ ref: string; what: string }>;
-    impact_on_me: string[];
+    headline: DigestText;
+    merged: Array<{ sha: string; problem: DigestText }>;
+    branches: Array<{ ref: string; what: DigestText }>;
+    impact_on_me: DigestText[];
   }>;
   cross_repo: DigestCross[];
   dailies: DigestDaily[];
@@ -618,17 +635,17 @@ interface DigestOutput {
 // A ticket across the workspaces: an entry of DigestOutput's cross_repo.
 interface DigestCross {
   ticket: string;
-  by_workspace: Readonly<Record<string, string>>;
-  for_me: string;
+  by_workspace: Readonly<Record<string, DigestText>>;
+  for_me: DigestText;
 }
 // A daily: an entry of DigestOutput's dailies.
 interface DigestDaily {
   app: string;
   workspaces: string[];
-  yesterday: string[];
-  problems: string[];
-  plan: string[];
-  next: string[];
+  yesterday: DigestText[];
+  problems: DigestText[];
+  plan: DigestText[];
+  next: DigestText[];
 }
 
 // The Stats page's payload, api/stats: src/stats.ts StatsPayload and its rows (named Stats* here, as

@@ -1,14 +1,15 @@
 // My daily's factory material (src/digest-jobs.ts): the jobs of the my_work workspaces handed over,
 // pushed or merged within the daily's two days, current and archived, as daily material; which open
 // branches of mine are live (a commit of mine in the two days, or a current job not done with it);
-// the dailies built from both; and the prompt's daily lines.
+// the dailies built from both; the prompt's daily lines and its two languages; and the jobs in
+// progress now (inProgressOf).
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { dailiesOf, dailyDays, type DigestWorkspace } from '../src/digest-run.js';
-import { jobsOf, liveBranch } from '../src/digest-jobs.js';
+import { inProgressOf, jobsOf, liveBranch } from '../src/digest-jobs.js';
 import type { LiveBranch, MyCommit } from '../src/digest.js';
 import { type Job, type JobState, JobStore } from '../src/jobs.js';
 import { digestPrompt } from '../src/prompts.js';
@@ -149,4 +150,40 @@ test('digestPrompt: yesterday counts the factory\'s jobs, today starts with what
   assert.match(prompt, /the jobs in daily\[\]\.jobs whose `at` is in it \(the factory's work for me counts as mine\), each ticket once/);
   assert.match(prompt, /first what is already done today \(commits or jobs dated in daily_days\.today\), each "<key> \(<topic>\): done: <what changed>", grouped by theme when more than 5; then what I do today/);
   assert.match(prompt, /only from daily\[\]\.open_branches \(the live ones\)/);
+});
+
+test('digestPrompt: every text is {text, en}, en in plain English (repeating text in English); the rule on English words holds for text only', () => {
+  const prompt = digestPrompt('2026-11-10', 'Bulgarian', null);
+  assert.match(prompt, /Every text of the output is an object \{"text", "en"\}: text in Bulgarian under these rules; en the same content in plain English, with ticket keys, people's names and product names unchanged and the same rules on SHAs, branch names and Git words\. When Bulgarian is English, en repeats text\. The rule on English words applies to text only\./);
+  assert.match(prompt, /Unless Bulgarian is English, no English word in any script in a text/);
+});
+
+test('inProgressOf: the live current jobs only, waiting for me first, then running, then paused or parked, each group oldest first; title and stop code', async () => {
+  const store = new JobStore(join(temp, 'state-progress'));
+  const at = (hour: number): string => new Date(Date.UTC(2026, 10, 10, hour)).toISOString();
+  const rows: Array<[string, JobState, string, Partial<Job>?]> = [
+    ['SHOP-31', 'working', at(9)],
+    ['SHOP-32', 'needs_human', at(10), { error: { code: 'gate_failed', message: 'The gate failed.' } }],
+    ['SHOP-33', 'paused', at(7)],
+    ['SHOP-34', 'ready_for_human_review', at(8)],
+    ['SHOP-35', 'awaiting_review', at(6)],
+    ['SHOP-36', 'pushed', at(5)],
+    ['SHOP-37', 'aborted', at(5)],
+    ['SHOP-38', 'failed', at(5)],
+    ['SHOP-39', 'waiting_limit', at(6)],
+    ['SHOP-40', 'handed_over', at(11)],
+  ];
+  for (const [ticket, state, updated, extra] of rows) {
+    await put(store, job(ticket === 'SHOP-31' ? 'web' : 'backend', ticket, state, updated, extra), ticket === 'SHOP-31' ? 'The order export' : undefined);
+  }
+  const { current } = await jobsOf(store, ['backend', 'web'], days);
+  const progress = await inProgressOf(store, current, [{ name: 'backend', app: 'shop' }]);
+  assert.deepEqual(progress.map((row) => [row.ticket, row.state]), [
+    ['SHOP-34', 'ready_for_human_review'], ['SHOP-32', 'needs_human'], ['SHOP-40', 'handed_over'],
+    ['SHOP-35', 'awaiting_review'], ['SHOP-31', 'working'],
+    ['SHOP-39', 'waiting_limit'], ['SHOP-33', 'paused'],
+  ]);
+  assert.deepEqual(progress.find((row) => row.ticket === 'SHOP-31'), { workspace: 'web', app: 'web', ticket: 'SHOP-31', title: 'The order export', state: 'working', stop_code: null, iteration: 1, since: at(9) });
+  assert.deepEqual(progress.find((row) => row.ticket === 'SHOP-32'), { workspace: 'backend', app: 'shop', ticket: 'SHOP-32', title: 'SHOP-32', state: 'needs_human', stop_code: 'gate_failed', iteration: 1, since: at(10) });
+  assert.equal(progress.find((row) => row.ticket === 'SHOP-40')!.stop_code, null);
 });

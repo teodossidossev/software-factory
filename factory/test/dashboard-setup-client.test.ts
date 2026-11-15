@@ -194,7 +194,7 @@ test('setup client (SF-103): the card shows the app, the description and the dig
   const stream = page.streams.at(-1)!;
   stream.emit('workspaces', {
     workspaces: [row103('api', { app: 'shop', description: 'The shop backend.', digest: { track: true, my_work: false } }), row103('web', { app: 'shop' }), row103('tools')],
-    handoff_default: 'off', digest: { at: '07:45', weekdays_only: false, language: 'Deutsch' },
+    handoff_default: 'off', digest: { times: ['07:45'], weekdays_only: false, language: 'Deutsch' },
   });
   await page.flush();
   const [api, web, tools] = items(page, 'workspace-list');
@@ -226,7 +226,7 @@ test('setup client (SF-103): Edit opens the card as a form with every field, Sav
   const page = await openPage([], [], []);
   const stream = page.streams.at(-1)!;
   const rows = [row103('api', { app: 'shop', description: 'The shop backend.', handoff: 'off', color: 'red', digest: { track: true, my_work: false } }), row103('web', { color: 'purple' })];
-  stream.emit('workspaces', { workspaces: rows, handoff_default: 'checkout', digest: { at: '08:00', weekdays_only: true, language: 'English' } });
+  stream.emit('workspaces', { workspaces: rows, handoff_default: 'checkout', digest: { times: ['08:00'], weekdays_only: true, language: 'English' } });
   await page.flush();
   named(items(page, 'workspace-list')[0]!, 'Edit').click();
   await page.flush();
@@ -241,7 +241,7 @@ test('setup client (SF-103): Edit opens the card as a form with every field, Sav
   assert.equal(named(items(page, 'workspace-list')[1]!, 'Edit').disabled, true);
   field('description').value = '';
   field('app').value = 'store';
-  stream.emit('workspaces', { workspaces: rows, handoff_default: 'checkout', digest: { at: '08:00', weekdays_only: true, language: 'English' } });
+  stream.emit('workspaces', { workspaces: rows, handoff_default: 'checkout', digest: { times: ['08:00'], weekdays_only: true, language: 'English' } });
   await page.flush();
   assert.equal(field('app').value, 'store');
   // Cancel: no request, the card again.
@@ -277,29 +277,38 @@ test('setup client (SF-103): Edit opens the card as a form with every field, Sav
   assert.equal(items(page, 'workspace-list')[1]!.querySelector('[data-wsf="color"]')!.value, 'auto');
 });
 
-test('setup client (SF-103): the Morning digest section saves the time, weekdays only and the language; typed values stay over a redraw', async () => {
+test('setup client (SF-103): the Morning digest section saves the times, weekdays only and the language; typed values stay over a redraw', async () => {
   const page = await openPage([], [], []);
   const stream = page.streams.at(-1)!;
-  stream.emit('workspaces', { workspaces: [row103('app')], handoff_default: 'checkout', digest: { at: '08:00', weekdays_only: true, language: 'English' } });
+  stream.emit('workspaces', { workspaces: [row103('app')], handoff_default: 'checkout', digest: { times: ['08:00', '12:30'], weekdays_only: true, language: 'English' } });
   await page.flush();
-  page.$('digest-at').value = '06:30';
+  // The Times field: a text field with the times comma-separated.
+  assert.deepEqual([page.$('digest-at').getAttribute('type'), page.$('digest-at').value], ['text', '08:00, 12:30']);
+  page.$('digest-at').value = ' 06:30 ,, 13:15, ';
   page.$('digest-at').dispatch('input');
   page.$('digest-weekdays').checked = false;
   page.$('digest-language').value = ' Български ';
-  stream.emit('workspaces', { workspaces: [row103('app')], handoff_default: 'checkout', digest: { at: '08:00', weekdays_only: true, language: 'English' } });
+  stream.emit('workspaces', { workspaces: [row103('app')], handoff_default: 'checkout', digest: { times: ['08:00'], weekdays_only: true, language: 'English' } });
   await page.flush();
-  assert.equal(page.$('digest-at').value, '06:30');
+  assert.equal(page.$('digest-at').value, ' 06:30 ,, 13:15, ');
   page.$('digest-form').dispatch('submit');
   await page.flush();
-  assert.deepEqual([posts(page)[0]!.path, JSON.parse(posts(page)[0]!.body!)], ['api/digest-settings', { at: '06:30', weekdays_only: false, language: 'Български' }]);
-  posts(page)[0]!.respond(200, { ok: true, result: { at: '06:30', weekdays_only: false, language: 'Български' } });
+  assert.deepEqual([posts(page)[0]!.path, JSON.parse(posts(page)[0]!.body!)], ['api/digest-settings', { times: ['06:30', '13:15'], weekdays_only: false, language: 'Български' }]);
+  posts(page)[0]!.respond(200, { ok: true, result: { times: ['06:30', '13:15'], weekdays_only: false, language: 'Български' } });
   await page.flush();
-  assert.equal(page.$('digest-status').textContent, 'Saved: 06:30 every day, in Български. sf serve uses it at its next check.');
+  assert.equal(page.$('digest-status').textContent, 'Saved: 06:30, 13:15 every day, in Български. sf serve uses it at its next check.');
   page.$('digest-language').value = '';
   page.$('digest-form').dispatch('submit');
   await page.flush();
   assert.equal(posts(page).length, 1);
-  assert.equal(page.$('digest-status').textContent, 'A time (HH:MM) and a language are needed.');
+  assert.equal(page.$('digest-status').textContent, 'At least one time (HH:MM, comma-separated) and a language are needed.');
+  page.$('digest-language').value = 'English';
+  for (const times of ['', ' , ', '8:00', '08:00, noon']) {
+    page.$('digest-at').value = times;
+    page.$('digest-form').dispatch('submit');
+    await page.flush();
+    assert.equal(posts(page).length, 1, times);
+  }
 });
 
 test('setup client: the new-ticket form posts the exact fields, clears on success, keeps them on a refusal', async () => {

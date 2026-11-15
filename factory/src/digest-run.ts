@@ -8,13 +8,14 @@ import { mkdir, readdir, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import * as z from 'zod/v4';
 import { writeFileAtomic } from './atomic.js';
-import { type DailyJob, type DailyJobs, jobsOf, liveBranch, within } from './digest-jobs.js';
+import { type DailyJob, type DailyJobs, type DigestInProgress, inProgressOf, jobsOf, liveBranch, within } from './digest-jobs.js';
 import { capModelInput, derivedDescription, MAX_MODEL_INPUT_CHARS, extractRepo, type LiveBranch, maskCredentials, type MirrorResult, type MyCommit, myEmail, needsAttention, type RepoData, syncMirror } from './digest.js';
 import { FactoryError } from './errors.js';
 import { JobStore } from './jobs.js';
 import { type ChannelResult, digestNotification, type Notification } from './notify.js';
 import { digestPrompt } from './prompts.js';
-import { configDir as defaultConfigDir, type DigestSettings, digestSettings, loadRegistry, verifyCheckout, workspaceApp, workspaceDigest } from './registry.js';
+import { atTime } from './digest-schedule.js';
+import { configDir as defaultConfigDir, DIGEST_DEFAULTS, type DigestSettings, digestSettings, loadRegistry, verifyCheckout, workspaceApp, workspaceDigest } from './registry.js';
 import { type ReviewOptions, runStructuredSession, type StructuredOutcome } from './review.js';
 
 export const DIGEST_DIR = 'digest';
@@ -29,26 +30,30 @@ const DAY = 86_400_000;
 
 // ---------- The model's output ----------
 
+// Every text of the model twice: text in the settings' language, en the same in plain English.
+const bilingual = z.strictObject({ text: z.string(), en: z.string() });
+export type DigestText = z.output<typeof bilingual>;
+
 const digestOutput = z.strictObject({
   repos: z.array(z.strictObject({
     name: z.string(),
-    headline: z.string().describe('One or two plain sentences: what happened and where the work is heading.'),
-    merged: z.array(z.strictObject({ sha: z.string(), problem: z.string().describe('The problem it solves, in one plain sentence.') })),
-    branches: z.array(z.strictObject({ ref: z.string(), what: z.string().describe('What is going on there, in one plain sentence.') })),
-    impact_on_me: z.array(z.string()).describe('Per ticket of mine: what I have to do and why, in plain words.'),
+    headline: bilingual.describe('One or two plain sentences: what happened and where the work is heading.'),
+    merged: z.array(z.strictObject({ sha: z.string(), problem: bilingual.describe('The problem it solves, in one plain sentence.') })),
+    branches: z.array(z.strictObject({ ref: z.string(), what: bilingual.describe('What is going on there, in one plain sentence.') })),
+    impact_on_me: z.array(bilingual).describe('Per ticket of mine: what I have to do and why, in plain words.'),
   })),
   cross_repo: z.array(z.strictObject({
     ticket: z.string(),
-    by_workspace: z.record(z.string(), z.string()),
-    for_me: z.string(),
+    by_workspace: z.record(z.string(), bilingual),
+    for_me: bilingual,
   })).max(6),
   dailies: z.array(z.strictObject({
     app: z.string(),
     workspaces: z.array(z.string()),
-    yesterday: z.array(z.string()),
-    problems: z.array(z.string()),
-    plan: z.array(z.string()),
-    next: z.array(z.string()),
+    yesterday: z.array(bilingual),
+    problems: z.array(bilingual),
+    plan: z.array(bilingual),
+    next: z.array(bilingual),
   })),
 });
 export type DigestOutput = z.output<typeof digestOutput>;
@@ -118,6 +123,9 @@ export interface DigestRecord {
   // What the digest says about its data (the cap, the factory's jobs it could not read).
   notes: string[];
   counts: DigestCounts;
+  // My factory jobs running or waiting at the run (src/digest-jobs.ts inProgressOf); never sent to
+  // the model. A record written before it has none: read as [].
+  in_progress: DigestInProgress[];
 }
 
 export interface DigestSummary {
@@ -162,17 +170,17 @@ export function dailyDays(now: Date): { yesterday: Span; today: Span } {
   };
 }
 
-// The period of every digest, scheduled or manual: from `at` (local time) on the previous
-// digest day before today, to now. A digest day is any day, or a weekday with weekdays_only; so
-// Friday on a Monday, a Saturday or a Sunday. Past digests do not move it.
-export function digestPeriod(now: Date, settings: Pick<DigestSettings, 'at' | 'weekdays_only'>): Span {
+// The period of every digest, scheduled or manual: from the earliest of the times (local time) on
+// the previous digest day before today, to now; so every run of a day covers the same start. A
+// digest day is any day, or a weekday with weekdays_only; so Friday on a Monday, a Saturday or a
+// Sunday. Past digests do not move it.
+export function digestPeriod(now: Date, settings: Pick<DigestSettings, 'times' | 'weekdays_only'>): Span {
   let day = localDay(now, -1);
   while (settings.weekdays_only && isWeekend(day)) {
     day = localDay(day, -1);
   }
-  const [hours, minutes] = settings.at.split(':').map(Number) as [number, number];
-  const from = new Date(day.getFullYear(), day.getMonth(), day.getDate(), hours, minutes);
-  return { from: from.toISOString(), to: now.toISOString() };
+  const earliest = [...settings.times].sort()[0] ?? DIGEST_DEFAULTS.times[0]!;
+  return { from: atTime(day, earliest).toISOString(), to: now.toISOString() };
 }
 
 // The id's stamp: YYYYMMDDTHHMMSSZ of a time in UTC.
@@ -220,7 +228,9 @@ export class DigestStore {
       return undefined;
     }
     try {
-      return JSON.parse(await readFile(this.path(id), 'utf8')) as DigestRecord;
+      const record = JSON.parse(await readFile(this.path(id), 'utf8')) as DigestRecord;
+      // A record written before in_progress has none.
+      return { ...record, in_progress: record.in_progress ?? [] };
     } catch { // missing or not JSON: no record
       return undefined;
     }
@@ -353,7 +363,7 @@ export class Digests {
     return (await this.list()).digests[0];
   }
 
-  // Whether a scheduled digest started at or after since (the scheduler: today's local midnight).
+  // Whether a scheduled digest started at or after since (the scheduler: its due slot).
   async scheduledSince(since: Date): Promise<boolean> {
     return (await this.store.list()).some((summary) => summary.trigger === 'scheduled' && Date.parse(summary.started_at) >= since.getTime());
   }
@@ -449,8 +459,10 @@ export class Digests {
 
     const notes: string[] = [];
     let jobs: DailyJobs = { done: [], current: [] };
+    let inProgress: DigestInProgress[] = [];
     try {
       jobs = await jobsOf(this.#jobs, workspaces.filter((workspace) => workspace.my_work).map((workspace) => workspace.name), days);
+      inProgress = await inProgressOf(this.#jobs, jobs.current, workspaces);
     } catch (failure) {
       notes.push(`The factory's jobs could not be read: ${failure instanceof Error ? failure.message : String(failure)}`);
     }
@@ -486,6 +498,7 @@ export class Digests {
     const record = await this.store.write({
       trigger, started_at: started.toISOString(), ended_at: this.#now().toISOString(), period, daily_days: days,
       model: settings.model, language: settings.language, workspaces, daily_sources: dailySources, output, cost_usd: cost, error, notes, counts: digestCounts(workspaces),
+      in_progress: inProgress,
     }, `${stamp(started)}-${trigger}`);
     if (trigger === 'scheduled' && this.#notify !== undefined) {
       try {

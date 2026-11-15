@@ -159,15 +159,25 @@ test('setup (SF-103): the payload\'s settings and saveDigestSettings: validated,
   await newRepo(env, 'setup-digest-repo', false);
   const jobs = new JobStore(env.state);
   const setup = new Setup({ configDir: env.config, jobs, exclusive: (work) => work(NO_RETIREMENT), handoffDefault: 'off' });
-  assert.deepEqual(await setup.workspaceSettings(), { handoff_default: 'off', digest: { at: '08:00', weekdays_only: true, language: 'English' } });
+  assert.deepEqual(await setup.workspaceSettings(), { handoff_default: 'off', digest: { times: ['08:00'], weekdays_only: true, language: 'English' } });
   const registry = await loadRegistry(env.config);
-  await saveRegistry({ ...registry, digest: { model: 'opus' } }, env.config);
-  assert.deepEqual(await setup.saveDigestSettings({ at: '07:30', weekdays_only: false, language: ' Deutsch ' }), { at: '07:30', weekdays_only: false, language: 'Deutsch' });
-  assert.deepEqual((await loadRegistry(env.config)).digest, { model: 'opus', at: '07:30', weekdays_only: false, language: 'Deutsch' });
-  for (const bad of [{ at: '7:30', language: 'English' }, { at: '24:00', language: 'English' }, { at: '08:00', language: ' ' }, { at: '08:00', language: 'x'.repeat(41) }]) {
-    await refused(setup.saveDigestSettings({ ...bad, weekdays_only: true }), 'invalid_digest_settings');
+  // A stored `at`: replaced by times when a save writes times.
+  await saveRegistry({ ...registry, digest: { model: 'opus', at: '06:45' } }, env.config);
+  assert.deepEqual((await setup.workspaceSettings()).digest, { times: ['06:45'], weekdays_only: true, language: 'English' });
+  // A body without times keeps the stored at.
+  assert.deepEqual(await setup.saveDigestSettings({ language: ' Deutsch ' }), { times: ['06:45'], weekdays_only: true, language: 'Deutsch' });
+  assert.deepEqual((await loadRegistry(env.config)).digest, { model: 'opus', at: '06:45', language: 'Deutsch' });
+  assert.deepEqual(await setup.saveDigestSettings({ times: ['12:00', '07:30'], weekdays_only: false, language: 'Deutsch' }), { times: ['07:30', '12:00'], weekdays_only: false, language: 'Deutsch' });
+  assert.deepEqual((await loadRegistry(env.config)).digest, { model: 'opus', times: ['07:30', '12:00'], weekdays_only: false, language: 'Deutsch' });
+  // Partial bodies change only their keys.
+  assert.deepEqual(await setup.saveDigestSettings({ weekdays_only: true }), { times: ['07:30', '12:00'], weekdays_only: true, language: 'Deutsch' });
+  assert.deepEqual(await setup.saveDigestSettings({ times: ['09:00'] }), { times: ['09:00'], weekdays_only: true, language: 'Deutsch' });
+  for (const bad of [{ times: [] }, { times: ['08:00', '09:00', '10:00', '11:00', '12:00'] }, { times: ['08:00', '08:00'] }, { times: ['24:00'] }, { times: ['7:30'] }, { language: ' ' }, { language: 'x'.repeat(41) }]) {
+    await refused(setup.saveDigestSettings(bad), 'invalid_digest_settings');
   }
-  assert.deepEqual((await setup.workspaceSettings()).digest, { at: '07:30', weekdays_only: false, language: 'Deutsch' });
+  await assert.rejects(setup.saveDigestSettings({ times: ['08:00', '08:00'] }), /1 to 4 times, each HH:MM from 00:00 to 23:59, no time twice\./);
+  assert.deepEqual((await setup.workspaceSettings()).digest, { times: ['09:00'], weekdays_only: true, language: 'Deutsch' });
+  assert.deepEqual((await loadRegistry(env.config)).digest, { model: 'opus', times: ['09:00'], weekdays_only: true, language: 'Deutsch' });
 });
 
 test('setup: tickets lists the Task files without a live job; createTicket writes the draft once', async () => {

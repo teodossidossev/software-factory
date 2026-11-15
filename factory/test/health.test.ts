@@ -201,7 +201,8 @@ test('queue.json\'s last_start: the scheduler writes it with the entry\'s remova
   await store.write({ ...queue, last_start: iso(NOW) });
   assert.equal((await store.read()).last_start, iso(NOW));
   assert.equal(JSON.parse(await readFile(join(state, QUEUE_FILE), 'utf8')).last_start, iso(NOW));
-  assert.equal(STATE_VERSION, 3);
+  // Written from format 3 on.
+  assert.ok(STATE_VERSION >= 3);
   // A RunQueue's start records its time, in the write that takes the entry out.
   const writes: Array<string | undefined> = [];
   const recording = new QueueStore(state, 3);
@@ -376,23 +377,31 @@ test('sandboxes in sf serve\'s monitor: an orphan found by one check is reaped b
   assert.equal((await checkSandboxes(() => unreaped.scan())).status, 'down');
 });
 
-function registry(follow: boolean, at = '08:00'): Registry {
-  return { workspaces: { app: { read_checkout: '/srv/app', ...(follow ? { digest: { track: true } } : {}) } }, digest: { at, weekdays_only: false } };
+function registry(follow: boolean, times: string[] = ['08:00']): Registry {
+  return { workspaces: { app: { read_checkout: '/srv/app', ...(follow ? { digest: { track: true } } : {}) } }, digest: { times, weekdays_only: false } };
 }
 
-test('digest: off when none is scheduled; down when missed (due, none started today, more than 30 minutes past at) or when the last scheduled one failed', async () => {
+test('digest: off when none is scheduled; down when the latest passed slot was missed (none started at or after it, more than 30 minutes past) or when the last scheduled one failed; ok names the times', async () => {
   // Local times: a Monday 10:00.
   const now = new Date(2026, 10, 9, 10, 0);
   const summary = (startedAt: Date, error: string | null = null) => ({ id: 'x', trigger: 'scheduled' as const, started_at: startedAt.toISOString(), error });
   const store = (list: Array<ReturnType<typeof summary>>) => ({ list: async () => list as never });
   assert.equal((await checkDigest(registry(false), store([]), now)).status, 'off');
   const missed = await checkDigest(registry(true), store([summary(new Date(2026, 10, 8, 8, 0))]), now);
-  assert.deepEqual(missed, { status: 'down', detail: "today's digest was due at 08:00 and did not start" });
+  assert.deepEqual(missed, { status: 'down', detail: 'the digest due at 08:00 did not start' });
   // At 10:00 the 09:30 digest is 30 minutes late, not more.
-  assert.equal((await checkDigest(registry(true, '09:30'), store([]), now)).status, 'ok');
-  assert.equal((await checkDigest(registry(true), store([summary(new Date(2026, 10, 9, 8, 0))]), now)).status, 'ok');
-  const failed = await checkDigest(registry(true), store([summary(new Date(2026, 10, 9, 8, 0), 'the model call timed out')]), now);
+  assert.deepEqual(await checkDigest(registry(true, ['09:30']), store([]), now), { status: 'ok', detail: 'scheduled at 09:30' });
+  const started = new Date(2026, 10, 9, 8, 0);
+  assert.deepEqual(await checkDigest(registry(true), store([summary(started)]), now), { status: 'ok', detail: `scheduled at 08:00; last scheduled digest ${started.toISOString()}` });
+  const failed = await checkDigest(registry(true), store([summary(started, 'the model call timed out')]), now);
   assert.deepEqual(failed, { status: 'down', detail: 'the last scheduled digest failed: the model call timed out' });
+  // Two times: the 08:00 run does not cover 09:15, 45 minutes past at 10:00.
+  const two = registry(true, ['08:00', '09:15']);
+  assert.deepEqual(await checkDigest(two, store([summary(started)]), now), { status: 'down', detail: 'the digest due at 09:15 did not start' });
+  // A run at 09:20 covers the latest slot; 08:00, missed earlier, no longer counts.
+  assert.deepEqual(await checkDigest(two, store([summary(new Date(2026, 10, 9, 9, 20))]), now), { status: 'ok', detail: `scheduled at 08:00, 09:15; last scheduled digest ${new Date(2026, 10, 9, 9, 20).toISOString()}` });
+  // Before the first time of the day nothing is due.
+  assert.equal((await checkDigest(two, store([]), new Date(2026, 10, 9, 7, 59))).status, 'ok');
 });
 
 test('guarded: a check that throws is down with its error; one that hangs is down after its timeout', async () => {

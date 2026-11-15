@@ -223,7 +223,7 @@ export class FakeSetup implements DashboardSetup {
   }
 
   async workspaceSettings(): Promise<WorkspaceSettings> {
-    return { handoff_default: 'off', digest: { at: '08:00', weekdays_only: true, language: 'English' } };
+    return { handoff_default: 'off', digest: { times: ['08:00'], weekdays_only: true, language: 'English' } };
   }
 
   // As Setup.editWorkspace, without Git: the fields replace the workspace's.

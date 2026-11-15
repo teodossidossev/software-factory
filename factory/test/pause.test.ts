@@ -140,7 +140,7 @@ test('Pause during the Claude review: the round is thrown away and recorded as i
   }
 });
 
-test('Pause during the gate kills Codex and records no verdict; Resume runs the gate again on the same iteration, not the Claude review', async () => {
+test('Pause during the joint round\'s gate kills Codex and records no verdict; Claude\'s stored verdict stays, and Resume runs the gate alone on the same iteration', async () => {
   const env = await newEnv('pause-gate', { SF_REVIEW: 'on', SF_GATE: 'codex', SF_GATE_LEVEL: 'full', SF_CODEX: fakeCodex });
   const repo = await newRepo(env, 'pause-gate-repo', false);
   await putTask(env, repo, 'P-1', 'Gate');
@@ -150,13 +150,15 @@ test('Pause during the gate kills Codex and records no verdict; Resume runs the 
   const served = await serve(env);
   try {
     await call(served, 'start', { workspace: 'app', ticket: 'P-1' });
-    await until('the gate to run', async () => exists(join(env.home, 'fake-codex.log')));
+    const jobs = new JobStore(env.state);
+    await until('the gate to run and the Claude review to end', async () => (await exists(join(env.home, 'fake-codex.log'))) && (await jobs.readReview('app', 'P-1', 1)) !== undefined);
     const paused = await runCli(env, ['pause', 'app', 'P-1']);
     assert.equal(paused.code, 0, paused.stderr);
     assert.match(paused.stdout, /^step: gate$/m);
     await nothingRuns(env, served);
-    const jobs = new JobStore(env.state);
     assert.equal(await jobs.readGate('app', 'P-1', 1), undefined);
+    const kept = await jobs.readReview('app', 'P-1', 1);
+    assert.ok(kept !== undefined && 'verdict' in kept && kept.verdict === 'clean');
     const events = await eventsOf(env, 'P-1');
     assert.deepEqual(events.filter((record) => record.type === 'interrupted').map((record) => [record.step, record.reviewer]), [['gate', 'codex']]);
     assert.equal(events.filter((record) => record.reviewer === 'codex' && (record.type === 'review' || record.type === 'review_failed')).length, 0);

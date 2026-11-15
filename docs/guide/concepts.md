@@ -23,12 +23,13 @@ says where the dashboard shows a different label.
    `APP-12-<slug>`, never in your checkout. Its first turn runs `/implement .software-factory/APP-12.md`.
    When it stops, the factory publishes an **iteration**: its Report and the Patch (the uncommitted
    difference to the base).
-6. **Two reviewers review the iteration**: first a fresh read-only Claude session (the **Claude
-   review**), then, when Claude finds it clean, the **Codex gate** (the Codex CLI on your ChatGPT
-   plan) gives the deciding verdict. A verdict with a blocker or major finding becomes a `## Fix N`
-   section appended to the Task file, and the next iteration starts by itself. Every finding gets an
-   id in the **ledger** (`R1`, `R2`, …) so it is never argued twice.
-7. **Clean**: when the deciding review has no blocker or major finding, the factory may offer you a
+6. **Two reviewers review the iteration** in the same round, at the same time (the **joint
+   round**): a fresh read-only Claude session (the **Claude review**) and the **Codex gate** (the
+   Codex CLI on your ChatGPT plan). A verdict of either with a blocker or major finding makes one
+   `## Fix N` section appended to the Task file, with the findings of both, each naming who raised
+   it, and the next iteration starts by itself. Every finding gets an id in the **ledger** (`R1`,
+   `R2`, …) so it is never argued twice.
+7. **Clean**: when both reviews have no blocker or major finding, the factory may offer you a
    **simplification pass** (only after fix rounds), then runs **MR preparation**: the Implementer
    writes the **MR text** (title and description), and the factory commits the change as one commit
    with that text as the message and rebases it onto the base branch.
@@ -44,9 +45,9 @@ At any point the job may **stop for you** (`needs_human`) with a code saying why
 limit, a failure. [When a job stops](when-a-job-stops.md) lists them all.
 
 ```
-plan ─► Task file ─► Task check ─► Start / queue ─► iteration ─► Claude review ─► Codex gate ─► Clean
-                                                       ▲               │               │          │
-                                                       └── Fix N ◄─────┴───────────────┘          ▼
+plan ─► Task file ─► Task check ─► Start / queue ─► iteration ─► Claude review + Codex gate ─► Clean
+                                                       ▲                      │                    │
+                                                       └─────── Fix N ◄───────┘                    ▼
                                                                     MR preparation ─► hand-over or push ─► merge
 ```
 
@@ -67,11 +68,12 @@ plan ─► Task file ─► Task check ─► Start / queue ─► iteration �
 | **Iteration** | Iteration N | One run of one section of the Task file: the task first, then each Fix section. It produces a Report and a Patch. |
 | **Report** | Report | The Implementer's account of an iteration: what was done, the checks run, open questions, an answer per Fix item. |
 | **Claude review** | Claude review | A fresh read-only Claude session that reviews each iteration against the Task file, the rules and the ledger. |
-| **Codex gate** | Codex gate | The deciding second review by the Codex CLI after a clean Claude review. Its **gate level** (`full`, `light`, `none`) decides how much of it an iteration gets. |
+| **Codex gate** | Codex gate | The review by the Codex CLI: in the same round as the Claude review, at the same time, or alone on a job without it. Its **gate level** (`full`, `light`, `none`) decides how much of it an iteration gets. |
+| **Joint round** | | The review of an iteration by the Claude review and the Codex gate at the same time; their findings make one Fix section, and the iteration is clean only when both verdicts are. |
 | **Fix section** | Fix N | `## Fix N`, appended by the factory from a verdict with a blocker or major item; it starts the next iteration. |
 | **Severity** | blocker, major, nit | The weight of a finding. Only blockers and majors make a fix; nits never block and go into the MR text. |
 | **Ledger** | findings, R7 | `ledger.json`: every finding that went into a Fix section, with an id and its status (open, fixed, contested, escalated, left, accepted risk, must fix). |
-| **Clean** | "Reviews are clean" | The deciding review's verdict that no further fix is needed. It starts MR preparation. |
+| **Clean** | "Reviews are clean" | The round's verdict that no further fix is needed (in a joint round, both reviews'). It starts MR preparation. |
 | **Simplification pass** | Simplification offered, Simplify or skip | After a job with fix rounds: one read-only session that names what the fixes added that the Task does not need. You choose Simplify or Skip. |
 | **MR preparation** | Now: MR writer | The Implementer writes the MR text; the factory commits (one commit) and rebases. |
 | **MR text** | Merge request | `.software-factory/<ticket>.mr.md`, then `mr.md` of the job: the title (also the commit header) and the description by the MR template. Editable on the Merge request screen before the push. |

@@ -95,12 +95,12 @@ effect and says only whether each token is set.
 
 | Key | Default | Allowed | Meaning |
 | --- | --- | --- | --- |
-| `SF_GATE` | `codex` | `codex`, `off`, empty | `codex` runs the Codex CLI after a clean Claude review, or alone on a job without the Claude review (`SF_CLAUDE_REVIEW`); `off` lets the Claude verdict decide, on every job. With `codex` and no Codex found, the gate is off and `sf serve` prints `gate: off (…); the Claude review decides`. |
+| `SF_GATE` | `codex` | `codex`, `off`, empty | `codex` runs the Codex CLI in the same round as the Claude review, at the same time, or alone on a job without the Claude review (`SF_CLAUDE_REVIEW`); `off` lets the Claude verdict decide, on every job. With `codex` and no Codex found, the gate is off and `sf serve` prints `gate: off (…); the Claude review decides`. |
 | `SF_CODEX` | `codex` on `PATH` | absolute path | The Codex executable. A relative path is refused (`invalid_config`); a path that is not an executable file turns the gate off (`PATH` is then not searched). |
-| `SF_GATE_MAX_ROUNDS` | `5` | positive integer | Fix verdicts of the gate per job after a clean Claude review; the next one stops the job (`gate_rounds`). On a job without the Claude review, `SF_MAX_ITERATIONS` limits the rounds instead. |
-| `SF_GATE_MAX_TOKENS` | `5000000` | 1 to 1000000000 | Input plus output tokens of all gate runs of a job; at the ceiling the job stops (`gate_budget`). |
+| `SF_GATE_MAX_ROUNDS` | `5` | positive integer | Fix sections the gate asked for per job on a job with the Claude review; the next gate fix stops the job (`gate_rounds`), unless the Claude review of the same round gives a fix, which then applies alone. On a job without the Claude review, `SF_MAX_ITERATIONS` limits the rounds instead. |
+| `SF_GATE_MAX_TOKENS` | `5000000` | 1 to 1000000000 | Input plus output tokens of all gate runs of a job; at the ceiling no gate starts (the Claude review runs alone) and a clean round stops the job (`gate_budget`). |
 | `SF_GATE_TIMEOUT_MS` | `900000` (15 min) | 1 to 86400000 | How long one gate run may take; then it is killed (`gate_failed`). |
-| `SF_GATE_LEVEL` | `auto` | `auto`, `full`, empty | `auto` picks `full`, `light` (one round) or `none` (documentation only) from the risk of the change; `full` runs the gate on every clean Claude verdict. |
+| `SF_GATE_LEVEL` | `auto` | `auto`, `full`, empty | `auto` picks `full`, `light` (one round) or `none` (documentation only) from the risk of the change; `full` runs the gate in every round. |
 | `SF_GATE_FULL_PATHS` | empty | comma-separated globs | Changed paths that always make the gate level `full`, for example `src/billing/**,migrations/**`. |
 
 ### Models

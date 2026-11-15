@@ -1,7 +1,7 @@
 // End-to-end tests of the review setting (SF-131) with the real sf serve, the fake Claude (its
 // --json-schema runs are the Claude reviews) and the fake Codex: with SF_CLAUDE_REVIEW=ticket a
 // ticket without review: is reviewed by the gate alone (fix, fix again, clean, MR, no review.json);
-// review: claude runs Claude, then the gate; review: codex under always runs the gate alone; with
+// review: claude runs Claude and the gate in a joint round; review: codex under always runs the gate alone; with
 // the gate off Claude reviews; a runner killed while the gate runs resumes the gate; Accept over
 // review_churn and gate_failed without a Claude review lists what went unapplied in the MR text;
 // the gate prompt says it is the only reviewer.
@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { gatePrompt, ONLY_REVIEWER_LINE } from '../src/gate.js';
+import { gatePrompt, JOINT_REVIEWER_LINE, ONLY_REVIEWER_LINE } from '../src/gate.js';
 import { JobStore } from '../src/jobs.js';
 import { loadHandbook } from '../src/server.js';
 import { writeTask } from '../src/task-file.js';
@@ -93,7 +93,7 @@ function alive(pid: number): boolean {
   }
 }
 
-test('the gate prompt (SF-131): without a Claude review the gate is the only reviewer; with one, the second and deciding', async () => {
+test('the gate prompt (SF-131): without a Claude review the gate is the only reviewer; with one, one of the joint round\'s two independent reviewers', async () => {
   const input = {
     ticket: 'T-1', iteration: 2, report: 'r', patch: Buffer.from(''), patchTruncated: false, files: [], handbook: (await loadHandbook()).text, task: 't', ledger: [], rules: '', userMessages: [], baseCommit: 'abc',
   };
@@ -101,9 +101,10 @@ test('the gate prompt (SF-131): without a Claude review the gate is the only rev
   assert.equal(ONLY_REVIEWER_LINE, 'You are the only reviewer of this iteration, and your verdict decides.');
   assert.ok(only.startsWith(`Code review of iteration 2 of ticket T-1. ${ONLY_REVIEWER_LINE} You review; you change nothing.`), only.split('\n')[0]);
   assert.doesNotMatch(only, /a Claude review found this iteration clean/);
-  const second = gatePrompt(input);
-  assert.match(second.split('\n')[0]!, /You are the second and deciding reviewer: a Claude review found this iteration clean, and your verdict decides\./);
-  assert.doesNotMatch(second, /only reviewer/);
+  const joint = gatePrompt(input);
+  assert.equal(JOINT_REVIEWER_LINE, "You are one of two independent reviewers of this iteration; either's blocker or major item makes a fix.");
+  assert.equal(joint.split('\n')[0], `Code review of iteration 2 of ticket T-1. ${JOINT_REVIEWER_LINE} You review; you change nothing.`);
+  assert.doesNotMatch(joint, /only reviewer|a Claude review found this iteration clean/);
 });
 
 test('SF_CLAUDE_REVIEW=ticket, no review: key: the gate alone reviews (fix, then clean), the job reaches MR preparation and ready without any review.json; claude_review false with its review_setup event; sf check says off with the gate', async () => {
@@ -135,8 +136,10 @@ test('SF_CLAUDE_REVIEW=ticket, no review: key: the gate alone reviews (fix, then
       [1, 'full', true, ['no Claude review']], [2, 'full', true, ['no Claude review']],
     ]);
     assert.deepEqual(events.filter((record) => record.type === 'review').map((record) => [record.iteration, record.reviewer, record.verdict]), [[1, 'codex', 'fix'], [2, 'codex', 'clean']]);
-    // The gate's Fix section, then MR preparation.
-    assert.match(await readFile(join(repo, '.software-factory', 'S-1.md'), 'utf8'), /## Fix 1\n\nReview by Codex: The greeting is wrong\./);
+    // The gate's Fix section as before the joint round (one lead line, no tag), then MR preparation.
+    const fixed = await readFile(join(repo, '.software-factory', 'S-1.md'), 'utf8');
+    assert.match(fixed, /## Fix 1\n\nReview by Codex: The greeting is wrong\.\n\n1\. \[R1, major\] `README\.md`: [^\n]*\.\n?$/);
+    assert.doesNotMatch(fixed, /Review by Claude|raised by/);
     assert.deepEqual((await fakeLog(env)).map((entry) => entry.prompt.split('\n')[0]), [
       '/implement .software-factory/S-1.md', '/implement .software-factory/S-1.md Fix 1', 'MR preparation for S-1 on branch S-1-greet-the-reader. The user approved the reviewed change.',
     ]);
@@ -148,7 +151,7 @@ test('SF_CLAUDE_REVIEW=ticket, no review: key: the gate alone reviews (fix, then
   }
 });
 
-test('review: claude under ticket runs the Claude review, then the gate; review: codex under always runs the gate alone', async () => {
+test('review: claude under ticket runs the Claude review and the gate in one round; review: codex under always runs the gate alone', async () => {
   const env = await newEnv('setting-by-ticket', settingEnv());
   const repo = await newRepo(env, 'setting-by-ticket-repo', false);
   await putTask(env, repo, 'S-2', 'Claude asked for', 'claude');
@@ -167,8 +170,10 @@ test('review: claude under ticket runs the Claude review, then the gate; review:
     assert.equal(await claudeReviewRuns(env), 1);
     assert.deepEqual(await reviewFiles(env, 'S-2'), ['001']);
     assert.equal((await new JobStore(env.state).read('app', 'S-2'))!.claude_review, true);
-    assert.deepEqual((await eventsOf(env, 'S-2')).filter((record) => record.type === 'review').map((record) => record.reviewer), ['claude', 'codex']);
+    // A joint round: both reviewed the iteration, in whichever order they ended.
+    assert.deepEqual((await eventsOf(env, 'S-2')).filter((record) => record.type === 'review').map((record) => record.reviewer).sort(), ['claude', 'codex']);
     assert.ok(!(await codexLog(env))[0]!.prompt.includes(ONLY_REVIEWER_LINE));
+    assert.ok((await codexLog(env))[0]!.prompt.startsWith(`Code review of iteration 1 of ticket S-2. ${JOINT_REVIEWER_LINE}`));
   } finally {
     await stop(served);
   }

@@ -208,9 +208,17 @@ test('board jobs (SF-077): now is the Implementer\'s last step from the tail of 
   await withDashboard('dash-board-now', fakeActions(), async (dashboard, store) => {
     const rows = async (): Promise<Record<string, any>> =>
       Object.fromEntries((JSON.parse((await fetchRaw(new URL('api/jobs', dashboard.url))).body).jobs as Array<Record<string, any>>).map((row) => [row.ticket, row]));
-    // awaiting_review without a Claude verdict: the Claude review; once it is clean, the gate.
+    // awaiting_review without a Claude verdict: the Claude review; once its verdict is stored, clean
+    // or fix, the gate of the joint round.
     assert.deepEqual((await rows())['T-1'].now, { who: 'Claude review', what: 'reviewing iteration 1', ts: '2026-11-01T10:05:00.000Z' });
     assert.equal((await rows())['T-0'].now, null);
+    await store.jobs.writeReview('app', 'T-1', 1, { reviewer: 'claude', error: 'It failed.' });
+    assert.deepEqual((await rows())['T-1'].now, { who: 'Claude review', what: 'reviewing iteration 1', ts: '2026-11-01T10:05:00.000Z' });
+    await store.jobs.writeReview('app', 'T-1', 1, {
+      reviewer: 'claude', verdict: 'fix', summary: 'Broken.', items: [{ path: 'a.ts', problem: 'Broken.', expected: 'Fixed.', severity: 'major' }], accepted_sensitive: [], cost_usd: 0.25,
+      started_at: '2026-11-01T10:05:01.000Z', ended_at: '2026-11-01T10:05:30.000Z',
+    });
+    assert.deepEqual((await rows())['T-1'].now, { who: 'Codex gate', what: 'reviewing iteration 1', ts: '2026-11-01T10:05:30.000Z' });
     await store.jobs.writeReview('app', 'T-1', 1, {
       reviewer: 'claude', verdict: 'clean', summary: 'Fine.', items: [], accepted_sensitive: [], cost_usd: 0.25,
       started_at: '2026-11-01T10:05:01.000Z', ended_at: '2026-11-01T10:06:00.000Z',

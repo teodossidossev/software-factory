@@ -6,7 +6,8 @@
 // prints JSONL events (a reasoning item, a command started and completed, lines that are not JSON objects,
 // an agent message, optionally one above the 16 KiB bound of SF-045) ending in turn.completed with
 // a usage, or simulates a failure: an exit code, no output, an invalid output, an error event, a
-// delay (for timeouts and aborts). Each --image file (SF-065) is logged by its path and the sha256
+// delay (for timeouts and aborts). A run can write a file as it starts and wait for one the test
+// creates (startFile, waitFile). Each --image file (SF-065) is logged by its path and the sha256
 // of its bytes when the run starts ("missing" when it cannot be read).
 import { createHash } from 'node:crypto';
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -25,6 +26,10 @@ interface Run {
   error?: string;
   // Waits this long before answering.
   delayMs?: number;
+  // A file under HOME written as the run starts, and one the run waits for (after delayMs) before it
+  // answers: the test sees the run started and lets it end once what it waits on happened.
+  startFile?: string;
+  waitFile?: string;
   // Prints an agent message of this many bytes before the last one (to be cut at its bound).
   bigMessageBytes?: number;
   // Leaks (SF-045): says the values of OPENAI_FAKE_SECRET and OPENAI_FAKE_PIN (SF-125: the gate gets
@@ -81,8 +86,18 @@ process.stdin.on('end', () => {
     }
   });
   appendFileSync(join(home, 'fake-codex.log'), `${JSON.stringify({ argv, cwd: process.cwd(), prompt, env: Object.keys(process.env).sort(), pid: process.pid, images })}\n`);
-  setTimeout(answer, run.delayMs ?? 0);
+  if (run.startFile !== undefined) {
+    writeFileSync(join(home, run.startFile), String(process.pid));
+  }
+  setTimeout(() => void released().then(answer), run.delayMs ?? 0);
 });
+
+// Resolves once the run's waitFile exists (at once without one).
+async function released(): Promise<void> {
+  while (run.waitFile !== undefined && !existsSync(join(home, run.waitFile))) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
 
 function answer(): void {
   event({ type: 'thread.started', thread_id: `fake-${count}` });

@@ -1,5 +1,5 @@
-// The gate: the second, deciding review of an iteration a Claude review found clean, run by
-// the Codex CLI (`codex exec`) on the user's ChatGPT plan. Codex reads the worktree itself in its
+// The gate: the Codex review of an iteration, in the same round as the Claude review on a job with
+// it (src/round.ts) or alone on a job without it, run by the Codex CLI (`codex exec`) on the user's ChatGPT plan. Codex reads the worktree itself in its
 // read-only sandbox; the factory gives it the Claude review's material in the prompt, the strict
 // form of its output schema, and reads back the verdict, the token usage and the errors. Knows
 // nothing about job states; the Execution applies the verdict.
@@ -62,13 +62,14 @@ export interface GateInput extends ReviewInput {
   onlyReviewer?: boolean;
 }
 
-// The gate's role in the prompt: the only reviewer of a job without the Claude review, else
-// the second after a clean Claude review.
+// The gate's role in the prompt: the only reviewer of a job without the Claude review, else one of
+// the joint round's two reviewers (src/round.ts), at the same time as the Claude review.
 export const ONLY_REVIEWER_LINE = 'You are the only reviewer of this iteration, and your verdict decides.';
+export const JOINT_REVIEWER_LINE = "You are one of two independent reviewers of this iteration; either's blocker or major item makes a fix.";
 
 // The prompt of the gate: the Claude review's prompt, adapted to Codex in a read-only worktree.
 export function gatePrompt(input: GateInput): string {
-  const role = input.onlyReviewer === true ? ONLY_REVIEWER_LINE : 'You are the second and deciding reviewer: a Claude review found this iteration clean, and your verdict decides.';
+  const role = input.onlyReviewer === true ? ONLY_REVIEWER_LINE : JOINT_REVIEWER_LINE;
   return [
     `Code review of iteration ${input.iteration} of ticket ${input.ticket}. ${role} You review; you change nothing.`,
     `The current directory is the job's worktree: it holds the change of this iteration, not committed, against the base commit ${input.baseCommit}.`,

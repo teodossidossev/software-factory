@@ -55,11 +55,13 @@ const entrySchema = z.strictObject({
 export const ledgerSchema = z.array(entrySchema);
 export type LedgerEntry = z.output<typeof entrySchema>;
 
-// An item of a Fix section: its ledger id, the item, and the user's note for a fix the user decided.
+// An item of a Fix section: its ledger id, the item, the user's note for a fix the user decided,
+// and in a joint round's Fix who raised it (src/round.ts: "Claude", "Codex", "Claude and Codex").
 export interface FixItem {
   id: string;
   item: ReviewItem;
   userNote?: string;
+  by?: string;
 }
 
 // The problem of the factory's item for an undeclared sensitive path a reviewer did not accept
@@ -71,22 +73,23 @@ export const SCOPE_PROBLEM = "Outside the Task's scope.";
 export const FACTORY_PROBLEMS: readonly string[] = [SENSITIVE_PROBLEM, SCOPE_PROBLEM];
 const isFactory = (entry: { problem: string }): boolean => FACTORY_PROBLEMS.includes(entry.problem);
 // The key of a factory item or entry: its path and problem.
-const factoryKey = (entry: { path: string; problem: string }): string => `${entry.problem}\n${entry.path}`;
+export const factoryKey = (entry: { path: string; problem: string }): string => `${entry.problem}\n${entry.path}`;
 
 const oneLine = (text: string): string => text.replace(/\s+/g, ' ').trim();
 const blocks = (entry: { severity: Severity }): boolean => entry.severity !== 'nit';
-const SEVERITY_RANK: Record<Severity, number> = { nit: 0, major: 1, blocker: 2 };
+export const SEVERITY_RANK: Record<Severity, number> = { nit: 0, major: 1, blocker: 2 };
 
 // An entry as a review item: its path, problem, expected and severity.
 export function entryItem(entry: LedgerEntry): ReviewItem {
   return { path: entry.path, problem: entry.problem, expected: entry.expected, severity: entry.severity };
 }
 
-// One Fix item on one line: `[R7, major] \`path\`: problem Expected: expected`, and for a fix the
-// user decided, "The user decided: fix." with the note.
-export function fixItemLine({ id, item, userNote }: FixItem): string {
+// One Fix item on one line: `[R7, major] \`path\`: problem Expected: expected`, for a fix the
+// user decided "The user decided: fix." with the note, and in a joint round "(raised by <by>)".
+export function fixItemLine({ id, item, userNote, by }: FixItem): string {
   const user = userNote === undefined ? '' : ` The user decided: fix.${oneLine(userNote) !== '' ? ` ${oneLine(userNote)}` : ''}`;
-  return `[${id}, ${item.severity}] \`${oneLine(item.path)}\`: ${oneLine(item.problem)} Expected: ${oneLine(item.expected)}${user}`;
+  const raised = by === undefined ? '' : ` (raised by ${by})`;
+  return `[${id}, ${item.severity}] \`${oneLine(item.path)}\`: ${oneLine(item.problem)} Expected: ${oneLine(item.expected)}${user}${raised}`;
 }
 
 // The number of the next id: one above the highest in the ledger.
@@ -280,9 +283,11 @@ export interface VerdictInput {
   reviewer: string;
   // The reviewed iteration; a fix is Fix <iteration>.
   iteration: number;
-  // Whether this reviewer decides the round (the gate, or the Claude review the gate does not
-  // follow): only its clean verdict settles the open entries of earlier rounds. Absent: false.
+  // Whether this verdict decides the round (a reviewer alone, or both of a joint round when both are
+  // clean): only then does a clean one settle the open entries of earlier rounds. Absent: false.
   decides?: boolean;
+  // A joint round's (src/round.ts) factory items (factoryKey) the other reviewer raises: kept open, not carried.
+  keep?: ReadonlySet<string>;
 }
 
 const reviewerName = (reviewer: string): string => (reviewer === 'codex' ? 'Codex' : reviewer === 'claude' ? 'Claude' : reviewer);
@@ -441,8 +446,9 @@ export function applyVerdict(input: VerdictInput): Applied {
   // 5. Otherwise the verdict applies, with the ledger's open blocking entries and the user's fixes. An
   // open entry of the factory's whose path is no longer raised (with the same problem) is fixed.
   const raised = new Set(input.extra.map(factoryKey));
+  const kept = (entry: LedgerEntry): boolean => isFactory(entry) && input.keep !== undefined && input.keep.has(factoryKey(entry));
   for (const entry of ledger) {
-    if (isFactory(entry) && entry.status === 'open' && !raised.has(factoryKey(entry)) && !carried.has(entry.id)) {
+    if (isFactory(entry) && entry.status === 'open' && !raised.has(factoryKey(entry)) && !carried.has(entry.id) && !kept(entry)) {
       Object.assign(entry, { status: 'fixed', response: 'The reviewer accepted the path, or the change no longer has it.' });
     }
   }
@@ -467,7 +473,7 @@ export function applyVerdict(input: VerdictInput): Applied {
       }
     }
   }
-  const pending = pendingEntries(ledger, input.iteration).filter((entry) => !carried.has(entry.id));
+  const pending = pendingEntries(ledger, input.iteration).filter((entry) => !carried.has(entry.id) && !kept(entry));
   if (blocking.length === 0 && pending.filter((entry) => entry.status === 'user_fix' || blocks(entry)).length === 0) {
     return { kind: 'clean', ledger, dropped };
   }

@@ -13,7 +13,8 @@ the dashboard (port 8788) and the run queue, and each job runs in a process of i
 ## Quick start
 
 Requires Linux, Node.js 24 or later, Git, Claude Code logged in (with an `implement` skill), and,
-for the deciding review, the Codex CLI logged in with your ChatGPT account. The full list:
+for the Codex gate (the review beside the Claude review, in the same round), the Codex CLI logged
+in with your ChatGPT account. The full list:
 [Install](docs/guide/install.md#prerequisites).
 
 1. **Get it and build it**:

@@ -63,7 +63,7 @@ export function mayTouch(fields: Map<string, string>): string[] {
   return pathList(fields, 'may_touch');
 }
 
-// The reviewer a Task asks for: `review: claude` (the Claude review, then the gate) or
+// The reviewer a Task asks for: `review: claude` (the Claude review and the gate in one round) or
 // `review: codex` (the gate alone).
 export type TaskReview = 'claude' | 'codex';
 

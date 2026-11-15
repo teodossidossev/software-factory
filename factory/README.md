@@ -395,7 +395,7 @@ started by the run queue as before.
 | `SF_COORDINATOR_WORKSPACE` | `software-factory` | The workspace whose checkout is the coordinator's, the Claude Code session whose skills the Skills page's Coordinator column and `sf skills set coordinator` switch through its `.claude/settings.local.json` (section The agents' skills). Not registered: no column, `no_coordinator_workspace`. Read by `sf serve` on each read and change. |
 | `SF_SKILLS_DIR` | `~/.agents/skills` | The folder of the user's installed skills the factory lists (`sf skills`) and copies into its skills snapshot, the skills some agent role chose (section The agents' skills); its lock file is `.skill-lock.json` next to it. |
 | `SF_HANDOFF` | `checkout` | The hand-over at ready for review (SF-073, section Hand-over to your checkout): `checkout` checks the job's branch out in the workspace's checkout with its changes as Local Changes; `off` leaves the job in `ready_for_human_review` with its worktree. A workspace's own `handoff` in `workspaces.json` wins over it (SF-083). Anything else refuses to start (`invalid_config`). |
-| `SF_SIMPLIFY` | on | The simplification pass (SF-055) after the deciding clean verdict of a job with at least one Fix section; `off` goes straight to MR preparation. It uses `SF_REVIEW_MODEL` and `SF_REVIEW_MAX_TURNS`. |
+| `SF_SIMPLIFY` | on | The simplification pass (SF-055) after the clean round of a job with at least one Fix section; `off` goes straight to MR preparation. It uses `SF_REVIEW_MODEL` and `SF_REVIEW_MAX_TURNS`. |
 | `SF_TASK_CHECK_MAX_TURNS` | `30` | `maxTurns` of the Task check (SF-054); its model is `SF_REVIEW_MODEL`. |
 | `SF_TASK_CHECK_AUTO` | `on` | The automatic Task check of `sf serve` (SF-086, section Task check): `on` checks a written Task file 60 s after its last change; `off` keeps the check manual (Check on the board, `sf check-task`). Empty is the default; anything else refuses to start (`invalid_config`). |
 | `SF_TASK_CHECK_PARALLEL` | `1` | The automatic Task checks that run at once over every workspace, 1 to 4 (SF-086); a manual Check counts toward it but never waits. Anything else refuses to start (`invalid_config`). |
@@ -404,14 +404,14 @@ started by the run queue as before.
 | `SF_TUNNEL` | `auto` | The ChatGPT tunnel in `sf serve` (SF-154, section sf up): `auto` starts `scripts/sf-tunnel.sh run` as its child when a tunnel profile exists and no tunnel answers on `SF_TUNNEL_HEALTH`; `off` starts none (run `npm run tunnel` in a terminal of its own). `sf up --no-tunnel` is `off`. Empty is the default; anything else refuses to start (`invalid_config`). |
 | `SF_TUNNEL_HEALTH` | `127.0.0.1:8790` | The tunnel client's admin endpoint (`host:port`) that `sf info`, the health check `tunnel` (`/readyz`, `/metrics`) and `sf serve`'s tunnel start (`/readyz`: anything answering means a tunnel already runs) ask. |
 | `SF_RULES_MAX_BYTES` | `49152` (48 KiB) | The bytes of rule file content the agents are given at most (SF-059, section Coding rules); the headings and the fixed sentence do not count. The user's rules files are taken first, and one over the budget is cut to it (SF-093). A positive integer up to 16 MiB. |
-| `SF_GATE` | `codex` | The gate after a clean Claude review (SF-039): `codex` runs the Codex CLI, `off` lets the Claude verdict decide. With `codex` and no executable found the gate is off, and `sf serve` prints one line saying so. |
+| `SF_GATE` | `codex` | The gate (SF-039), in the same round as the Claude review (the joint round, SF-214) or alone on a job without it: `codex` runs the Codex CLI, `off` lets the Claude verdict decide. With `codex` and no executable found the gate is off, and `sf serve` prints one line saying so. |
 | `SF_CODEX` | `codex` on `PATH` | Absolute path of the Codex CLI executable. Pointing at nothing turns the gate off; it is not looked for on `PATH` then. |
 | `SF_CODEX_MODEL` | unset | Model of the gate, passed as `--model`; unset uses Codex's default (the user's `~/.codex/config.toml`). |
-| `SF_GATE_MAX_ROUNDS` | `5` | Fix verdicts of the gate per job (the job's `gate_fixes`); the next one is not applied (`gate_rounds`, job `needs_human`). |
+| `SF_GATE_MAX_ROUNDS` | `5` | Fix sections the gate asked for per job with the Claude review (the job's `gate_fixes`; a joint round's Fix counts only when the gate's verdict is a fix); the next gate fix is not applied (`gate_rounds`, job `needs_human`), unless the Claude review of the same round gives a fix, whose Fix section then applies alone. |
 | `SF_GATE_MAX_TOKENS` | `5000000` | Input plus output tokens of all gate runs of a job (the job's `gate_tokens`); a gate does not start at the limit, and a run that goes over it is not applied (`gate_budget`, job `needs_human`). |
 | `SF_GATE_TIMEOUT_MS` | `900000` | How long one gate run may take; then SIGTERM, and SIGKILL 5 s later (`gate_failed`). |
 | `SF_TEST_TIMEOUT_MS` | `1800000` (30 min) | How long one run of a workspace's `test_command` may take (SF-128, section MR preparation), 1 to 14400000 (4 h), by the clock, the time the machine sleeps included (SF-152); then its process group is killed with SIGKILL and the run failed (a Tests Fix that names the timeout). |
-| `SF_GATE_LEVEL` | `auto` | The gate level of each iteration (SF-092, section Jobs): `auto` by the risk of the job's change (`full`, `light` or `none`); `full` runs the gate at every clean Claude verdict, as before SF-092. Empty is the default; anything else refuses to start (`invalid_config`). |
+| `SF_GATE_LEVEL` | `auto` | The gate level of each iteration (SF-092, section Jobs): `auto` by the risk of the job's change (`full`, `light` or `none`); `full` runs the gate in every round, as before SF-092. Empty is the default; anything else refuses to start (`invalid_config`). |
 | `SF_GATE_FULL_PATHS` | empty | Comma-separated globs (as `SF_SENSITIVE_PATHS`) whose changed paths make an iteration's gate level `full`. |
 | `SF_SMOKE_MODEL` | `haiku` | The model of `sf smoke`'s job (section Live smoke test): its `SF_MODEL` and `SF_REVIEW_MODEL` (Implementer, Claude review, Task check). |
 | `SF_SMOKE_CODEX_MODEL` | unset | The gate's model in `sf smoke`, its `SF_CODEX_MODEL`; unset uses Codex's default. |
@@ -1378,7 +1378,8 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   credential-like and `.software-factory/` paths, at most 2 MiB) and the structured file list
   (`files` in `meta.json`, SF-024: `path`, `status` added/modified/deleted, `sensitive`
   declared/undeclared/no, `additions`, `deletions`). The job goes to `awaiting_review`, and the
-  Claude review of the iteration starts (below).
+  review round of the iteration starts (below): on a job with the Claude review whose gate runs,
+  the Claude review and the gate together (the joint round, SF-214).
 - The **review setting** (SF-131): at Start the factory decides once whether the job gets the
   Claude review and stores it as `claude_review` in `job.json`, with a `review_setup` event that
   gives the reason (`claudeReviewDecision` in `src/config.ts`): with the gate off, always; else the
@@ -1565,7 +1566,8 @@ ended. A restart of `sf serve` therefore leaves a working job working.
 - `sf review <workspace> <ticket>` (SF-044), or Retry review on the dashboard, retries a failed
   review. The job goes back to `awaiting_review` with its error cleared, at the same iteration (a
   state change, no new iteration). The failed `review.json` of the last iteration is removed, and
-  the review of that iteration starts again. It is refused with `invalid_state` unless the job is
+  the review of that iteration starts again: in a joint round the Claude review alone when the
+  gate's verdict of the round is kept, and the round then applies with both. It is refused with `invalid_state` unless the job is
   `needs_human` with `review_failed`, and with `review_off` when `SF_REVIEW=off`. The worktree must
   still exist (`worktree_missing` otherwise).
 - `sf accept <workspace> <ticket>` (SF-047), or *Accept and prepare MR…* on the dashboard, lets the
@@ -1641,9 +1643,10 @@ ended. A restart of `sf serve` therefore leaves a working job working.
     reopening is
     `needs_human` `review_churn`; when every blocker and major item left names an existing entry in
     `caused_by`, it is `review_churn` as well. Otherwise the verdict applies as before (SF-051).
-  - **A clean verdict settles the round** (SF-199). The reviewer that decides the round is the gate,
-    or the Claude review when the gate does not run on the iteration (the gate off, or skipped by
-    its gate level). Its verdict, as the factory acts on it (no blocker or major item, no path it
+  - **A clean verdict settles the round** (SF-199). The round is decided by its reviewers: the
+    gate alone without the Claude review, the Claude review alone when the gate does not run on
+    the iteration (the gate off, or skipped by its gate level), and in a joint round (SF-214) both,
+    only when both verdicts are clean as `decide` reads them. The verdict, as the factory acts on it (no blocker or major item, no path it
     does not accept; nits allowed), saw the whole change: every `open` blocker or major entry of an
     earlier round (`asked` below the iteration) that the verdict does not carry again becomes
     `fixed`, with `response` "Settled by the clean <reviewer> verdict of iteration N." and
@@ -1651,8 +1654,21 @@ ended. A restart of `sf serve` therefore leaves a working job working.
     `user_fix`, `contested`, `escalated`, `left` and `accepted_risk` entries are untouched, so a fix
     the user decided still makes a Fix. The Fix round limit (`iteration_limit`) and churn
     (`review_churn`) count no settled entry; a later item may reopen it like any `fixed` entry,
-    which drops the mark. A clean Claude verdict the gate follows settles nothing: the open entries
-    make the next Fix as before.
+    which drops the mark. A clean Claude verdict beside the gate's fix in a joint round settles
+    nothing: the open entries make the next Fix as before.
+  - **The joint round's ledger** (SF-214, `src/round.ts`). The shared items are found first: a
+    gate item with the same path and problem as a Claude item (compared as `uniqueNits` does), or
+    one that matches the entry a Claude item reopens; the Claude item takes the higher of the two
+    severities and the gate's is dropped, so an item both raise is one item and one ledger entry,
+    Claude's. Then Claude's verdict reads against the ledger, then the gate's remaining items on
+    the ledger that left, so Claude's items get their ids first. A ledger stop of either stops the
+    job, Claude's first (the gate's items then get no entry); a stop from the gate's side gives way
+    to a Claude fix. A marked path one reviewer does not accept stays a major item, and its entry
+    open, though the other accepts it. The Fix section has a lead line per reviewer (`Review by
+    Claude: …`, then `Review by Codex: …`), and each item line ends with who raised it in this
+    round, `(raised by Claude)`, `(raised by Codex)` or `(raised by Claude and Codex)`, or the
+    ledger reviewer of an entry carried over; the ledger entry's text does not change. The Gate
+    yield (`sf metrics`) counts the gate's entries only, so a shared item counts for Claude.
   - `sf settle <workspace> <ticket> <id> accept|fix [note...]`, or *Accept risk* / *Must fix* on the
     dashboard (`POST api/jobs/<ws>/<ticket>/settle`), settles an `escalated` or `contested` entry
     while the job is `needs_human`: `accept` makes it `accepted_risk`, `fix` makes it `user_fix`.
@@ -1660,11 +1676,10 @@ ended. A restart of `sf serve` therefore leaves a working job working.
     stop with `escalated` or `review_disputed` has no escalated entry and no disputed contest left,
     the job goes on by itself (after `review_churn` a settlement is only recorded; `sf say` goes on).
     When the user decided a fix, a Fix section by "the user" follows with the `user_fix` entries
-    (named in its lead line) and the open blockers and majors carried along; otherwise the review
-    that stopped runs again, and brings the open entries back itself, or settles them with a clean
-    verdict that decides the round (the gate when the
-    gate stopped it, the Claude review otherwise; `review.json` or `gate.json` of the iteration is
-    removed first). Refused with `invalid_state` in another state or for another entry, with
+    (named in its lead line) and the open blockers and majors carried along; otherwise the
+    round that stopped runs again, and brings the open entries back itself, or settles them with a
+    clean round (`gate.json` of the iteration is removed first, and `review.json` too unless both
+    verdicts were kept; only the reviewer without a kept verdict runs). Refused with `invalid_state` in another state or for another entry, with
     `invalid_content` for a bad id, decision or note.
   - A stop's message (the job's error) stays within 2,000 characters. Its question with its answers
     is fixed text and always kept whole; what happened names at most ten ids (`R1, …, R10 and 50
@@ -1674,10 +1689,12 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   - At a ledger stop the user has one question with three answers: accept and prepare the MR
     (`sf accept`, when the last Claude review of the iteration is clean), continue (`sf settle` or
     `sf say`), or back to planning (`sf abort`, keeping the branch). There is no rule of two clean
-    rounds: one clean gate ends the loop, and `SF_GATE_MAX_ROUNDS` stays the cap.
-- The **gate** (SF-039, `src/gate.ts`) is the second, deciding review. With the gate on
-  (`SF_GATE=codex` and a Codex executable found), a clean Claude verdict (after its sensitive-path
-  rule) does not go to Clean: the factory runs the Codex CLI on the user's ChatGPT sign-in (it must
+    rounds: one clean round ends the loop, and `SF_GATE_MAX_ROUNDS` stays the cap.
+- The **gate** (SF-039, `src/gate.ts`) is the Codex review. With the gate on (`SF_GATE=codex` and
+  a Codex executable found), on a job with the Claude review it reviews each iteration in the same
+  round as the Claude review, at the same time (the **joint round**, SF-214, `src/round.ts`), and
+  the iteration is clean only when both verdicts are; without the Claude review it is the job's
+  only reviewer. The factory runs the Codex CLI on the user's ChatGPT sign-in (it must
   be signed in: `codex login`; no API key), without a shell: `codex exec --ephemeral --sandbox
   read-only --disable memories -c memories.use_memories=false --cd <worktree> --output-schema
   <schema file> --output-last-message <out file> --json [--model SF_CODEX_MODEL] -`, the prompt on
@@ -1721,30 +1738,50 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   `needs_human` with `gate_sandbox_unavailable` (install bubblewrap, then tell the job to go on;
   `SF_SANDBOX=off` runs the gate unwrapped, with the rest of the sandbox off too). Its prompt is the review prompt adapted: the base commit (so
   it can run `git diff <base_commit>`), the read-only commands
-  it may run, that it must not leave the worktree or read credentials, that it decides after a
-  clean Claude review, then the same rules and material as the Claude review. The schema is the
+  it may run, that it must not leave the worktree or read credentials, its role (in a joint round
+  "You are one of two independent reviewers of this iteration; either's blocker or major item
+  makes a fix.", without the Claude review that it is the only reviewer), then the same rules and
+  material as the Claude review. The schema is the
   review's in the strict form structured outputs need (every property required,
   `additionalProperties: false` at every level); the out file is validated with the same zod
   schema. The JSONL on stdout gives the usage of `turn.completed` (`input_tokens`,
   `cached_input_tokens`, `output_tokens`) and the `error` events; stderr is kept, bounded, for the
   failure message.
-- The gate runs outside the lock, like the review, and its verdict applies only while the job is
-  still `awaiting_review` at the same iteration, by the same rule as Claude's (`decide`, SF-051).
+- The round (`startReview`): the gate level is decided and recorded first; then each reviewer of
+  the round without a kept verdict of the iteration starts (a kept failure counts as none), both
+  together, as one running review whose one abort cancels both; with both verdicts kept the
+  outcome applies at once. The sessions run outside the lock. Each end writes its record and event
+  (nothing for a usage limit) and waits for the other; the outcome then applies only while the job
+  is still `awaiting_review` at the same iteration, by the same rule as Claude's (`decide`,
+  SF-051), in this order: Claude's usage limit (park at `review`), its failure or refusal
+  (`review_failed`, the refusal's code); the gate's usage limit (park at `gate`), its failure
+  (`gate_failed`, `gate_sandbox_unavailable`) or tokens over `SF_GATE_MAX_TOKENS` (`gate_budget`);
+  a ledger stop; `gate_rounds`; else one Fix section, or Clean. The other reviewer's kept verdict
+  stays: Resume, the pick-up of a runner, `sf review` and the go-on after a settlement run only the
+  reviewer without one. A Claude verdict that gives a fix wins over a gate that failed
+  (`gate_failed`, `gate_sandbox_unavailable`, `gate_budget`) or whose side would stop the job
+  (`gate_rounds`, a ledger stop from its items): Claude's Fix section is made exactly as Claude
+  alone makes it, the gate's failure is recorded as before, and the Stream says "The gate failed
+  (<code>); it runs again in the next round, with the Claude review." The stop applies only with a
+  clean Claude verdict, so `sf accept` keeps its condition.
   Clean (a `fix` with nits only too) runs the clean path with the union of both reviewers'
-  `accepted_sensitive`; an undeclared sensitive path or a path outside the Task's scope the gate
+  `accepted_sensitive`; an undeclared sensitive path or a path outside the Task's scope a reviewer
   does not accept is a major fix item.
-  A fix writes `## Fix N` (lead line `Review by Codex: <summary>`) and runs the next
-  iteration, which Claude reviews again, and the gate again after a clean verdict. The job counts
-  the gate's fixes in `gate_fixes`: at `SF_GATE_MAX_ROUNDS` the next one is not applied
-  (`needs_human`, `gate_rounds`, the message holds both reviewers' summaries). Every run adds its
-  input plus output tokens to the job's `gate_tokens`: a gate does not start once they reach
-  `SF_GATE_MAX_TOKENS`, and a run that takes them over it is recorded but not applied (both
-  `needs_human`, `gate_budget`). A non-zero exit, a timeout, a missing or invalid output or a
-  Codex `error` event is `needs_human` with `gate_failed` (the exit code or signal and the last
-  error line); nothing is retried. `sf abort` and `sf reset` kill a running gate; its outcome is
-  then never applied. `sf serve` kills a running gate when it stops.
-- The **gate level** (SF-092, `src/gate-level.ts`): at each clean Claude verdict with the gate
-  on, before the gate's budget check, the iteration gets a level from the job's whole change at
+  A fix writes one `## Fix N` (in a joint round the lead lines `Review by Claude: <summary>` and
+  `Review by Codex: <summary>`, each item naming who raised it; without the Claude review `Review
+  by Codex: <summary>` alone) and runs the next iteration, which both review again. The job counts
+  the Fix sections the gate asked for in `gate_fixes` (a joint Fix only when the gate's verdict is a
+  fix): at `SF_GATE_MAX_ROUNDS` the next one is not applied (`needs_human`, `gate_rounds`, the
+  message holds both reviewers' summaries). Every run adds its input plus output tokens to the
+  job's `gate_tokens`: a gate does not start once they reach `SF_GATE_MAX_TOKENS` (the Claude review
+  then runs alone: its fix is the next Fix section, its clean verdict stops with `gate_budget`),
+  and a run that takes them over it is recorded but not applied (`needs_human`, `gate_budget`). A
+  non-zero exit, a timeout, a missing or invalid output or a Codex `error` event is `gate_failed`
+  (the exit code or signal and the last error line); nothing is retried. `sf abort` and `sf reset`
+  kill a running round; its outcome is then never applied. `sf serve` kills a running gate when it
+  stops.
+- The **gate level** (SF-092, `src/gate-level.ts`): as each round starts with the gate on, before
+  either review and before the gate's budget check, the iteration gets a level from the job's whole change at
   that iteration (its `meta.json` `files`):
   - `full` (the gate's rounds, up to `SF_GATE_MAX_ROUNDS`) when `SF_GATE_LEVEL=full`; or a changed
     path (a rename's old path too, by `SENSITIVE_PATHS` and `SF_SENSITIVE_PATHS`) is sensitive
@@ -1761,10 +1798,11 @@ ended. A restart of `sf serve` therefore leaves a working job working.
     the root's `docs/`) and no `full` rule matches; an empty change is `light`.
   - `light` otherwise: one round. The gate runs only while the job's `gate_fixes` is 0; once it has
     asked for a fix, a later `light` iteration skips it: the Claude review checks the fixes of the
-    gate's items through the ledger, and Claude's clean verdict decides, as with `SF_GATE=off`.
-  - `none` and a skipped `light` go to the clean path as the gate-off path does (the
-    simplification pass, MR preparation, Claude's `accepted_sensitive`), and never stop on
-    `gate_budget`. The level is decided again at each clean Claude verdict: a fix that adds a
+    gate's items through the ledger, and Claude's verdict decides, as with `SF_GATE=off`.
+  - With `none` and a skipped `light` the Claude review runs alone and its clean verdict goes to
+    the clean path as the gate-off path does (the simplification pass, MR preparation, Claude's
+    `accepted_sensitive`), never stopping on `gate_budget`. The level is decided again at each
+    round, a round whose Claude review says fix included: a fix that adds a
     sensitive file makes the next gate `full`. `SF_GATE=off` decides no level.
   - The decision is recorded once per iteration in `iterations/NNN/gate-level.json` `{level,
     reasons, ran, files, lines, at}` (strictly parsed, `gate_level_invalid` otherwise; `files` and
@@ -1826,12 +1864,12 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   iteration. `meta.json` records `cost_usd` (this iteration's cost) and `cost_usd_total` (the
   SDK's cumulative total for the session). `check` also returns `review` for the last iteration:
   `{status: "running" | "done" | "failed" | "off", verdict?, summary?, gate?}` (`running` also while the
-  review is due; `failed` with the error as `summary`). After a clean Claude verdict with the gate
-  on, `gate` is the gate's status in the same form (no `off`; absent with the gate off and when the
+  review is due; `failed` with the error as `summary`). After a Claude verdict acted on as clean
+  with the gate on, `gate` is the gate's status in the same form (no `off`; absent with the gate off and when the
   iteration's gate level skipped it, SF-092).
 - The **simplification pass** (SF-055, `src/simplify.ts`): reviewers add, nobody removes, so once
-  per job, after the deciding clean verdict (the gate's, or with the gate off the Claude review's;
-  clean as the factory acts on it, SF-051) of a job with `fixes` ≥ 1 (at `SF_MAX_ITERATIONS` too),
+  per job, after the clean round (both verdicts of a joint round, else the one review's; clean as
+  the factory acts on it, SF-051) of a job with `fixes` ≥ 1 (at `SF_MAX_ITERATIONS` too),
   a fresh read-only Agent SDK
   `query()` runs like the Claude review (its tools, the isolation of SF-050, the sandbox,
   `SF_REVIEW_MODEL`, `SF_REVIEW_MAX_TURNS`; its messages go to `events.jsonl` as `review_message`
@@ -2584,9 +2622,11 @@ SF-067. To change course without abort, reset and a branch deleted by hand.
   the runner's process group, so no Claude Code and no Codex is left) and the job goes to
   `paused`. The worktree, the branch, the Implementer's `session_id`, the iterations, the ledger
   and the events stay. `job.json` records `paused`: the state it was paused in (`from`), what was
-  interrupted (`step`: `turn`, `review`, `gate`, `simplify`, or null when nothing ran, as while
-  awaiting review with `SF_REVIEW=off`) and when. A review, gate or simplification round that ran is
-  thrown away: no `review.json`, `gate.json` or `simplify.json` and no verdict event, only an
+  interrupted (`step`: `turn`, `review` while the Claude review has no kept verdict, `gate` once it
+  has one in a joint round, `simplify`, or null when nothing ran, as while awaiting review with
+  `SF_REVIEW=off`) and when. A review, gate or simplification session that ran is thrown away: no
+  `review.json`, `gate.json` or `simplify.json` and no verdict event (a verdict of the joint round
+  that already ended stays), only an
   `interrupted` event (`sf watch`: "review by claude interrupted by the pause"); an interrupted
   simplification pass does not use up its one run per job. `preparing_mr` is refused
   (`invalid_state`, with the reason: the MR text, the commit and the rebase); so is any other state.
@@ -2596,8 +2636,8 @@ SF-067. To change course without abort, reset and a branch deleted by hand.
   the job stopped. A paused turn: the job is `working` again and the same Implementer session is
   resumed with the message, or "Continue where you stopped." (a job whose first turn never reported
   a session runs `/implement` again). A paused review round: the job is `awaiting_review` again and
-  that round (the Claude review, the gate or the simplification pass) runs again on the same
-  iteration; a message is refused then (`invalid_content`: resume, then `sf say`). A paused job
+  that round runs again on the same iteration (of a joint round only the reviewer without a kept
+  verdict; or the simplification pass); a message is refused then (`invalid_content`: resume, then `sf say`). A paused job
   needs its worktree (`worktree_missing`); Resume is a start by hand, never held by the run queue's
   limit (SF-071), and a paused job does not count as running.
 - **The Task file while paused.** The factory keeps the Task file as the Implementer was last given
@@ -2651,11 +2691,12 @@ SF-072. When a session hits the plan's usage limit ("You've hit your 5-hour limi
   MR preparation (`preparing_mr`) is not parked: it stops in `needs_human` as before, and so do the
   Task checks (their stored error names the limit). A round the job had moved on from is recorded
   as before, `ignored`.
-- **Park**: the job goes to `waiting_limit`. Nothing of the round is recorded (no `review.json`,
-  `gate.json` or `simplify.json`, no `review_failed` or `simplify` event, and a parked gate run's
-  tokens are not added to `gate_tokens`); an `interrupted` event is,
-  as for a pause, so the round runs again on Resume (an interrupted simplification pass does not use
-  up its one run). `job.json` keeps `paused` (`from` `working` for a turn, `awaiting_review` for a
+- **Park**: the job goes to `waiting_limit`; in a joint round once the other reviewer ended too,
+  whose verdict stays, so Resume runs only the reviewer that hit the limit. Nothing of the
+  reviewer that hit it is recorded (no `review.json`, `gate.json` or `simplify.json`, no
+  `review_failed` or `simplify` event, and a parked gate run's tokens are not added to
+  `gate_tokens`); an `interrupted` event is, as for a pause, so the round runs again on Resume (an
+  interrupted simplification pass does not use up its one run). `job.json` keeps `paused` (`from` `working` for a turn, `awaiting_review` for a
   round; `step`, `at`) and gets `limit: {provider, resets_at}`, with `resets_at` the parsed reset or
   `paused.at` + 30 minutes. A parked job holds its slot: `waiting_limit` counts as running
   (`RUNNING_STATES`), though no session runs. `sf serve`'s recovery leaves it alone.
@@ -2687,7 +2728,7 @@ SF-072. When a session hits the plan's usage limit ("You've hit your 5-hour limi
 
 ## MR preparation
 
-MR preparation runs on the deciding clean verdict (the clean path, from `awaiting_review`, or as
+MR preparation runs on the clean round (the clean path, from `awaiting_review`, or as
 the retry from `needs_human` after a failed preparation, `mr_attempts > 0`, or `sf retry` after a transient stop, below); never while a turn runs.
 It ends with the branch holding exactly one commit: handed over to the user's checkout
 (`handed_over`, section Hand-over to your checkout) or, with hand-over off (the workspace's
@@ -2939,7 +2980,7 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    Fix with `sf say` (its iteration is reviewed again, and a clean verdict prepares again) or by
    hand in the worktree followed by an `sf say`.
 
-   **Retry** (SF-087): a transient stop after the deciding clean verdict and before the branch is
+   **Retry** (SF-087): a transient stop after the clean round and before the branch is
    prepared needs no new review. `sf retry <workspace> <ticket>`, or Retry on the dashboard, runs
    MR preparation again from step 1 (the fetch, `preparing_mr` with `mr_attempts + 1`, the MR text
    turn, the commit and the rebase), with no fix turn, no Claude review, no gate and no
@@ -3930,7 +3971,8 @@ without one). A card never grows wider than its column: long text wraps or is cu
 and its full text as the title. A **running** card (`starting`,
 `working`, `awaiting_review`, `preparing_mr`) says who acts now and what: "Now: Implementer" with
 its last tool call (`Read factory/src/jobs.ts`) or the first line of its last text, "Now: Claude
-review" or "Now: Codex gate" reviewing iteration N, "Now: MR writer" writing the MR text, and the
+review" or, once the Claude verdict of the joint round is stored, "Now: Codex gate" reviewing
+iteration N, "Now: MR writer" writing the MR text, and the
 iteration with the Implementer's tool calls. While a card runs and the page is visible, the page
 reads `api/jobs` again every 15 s so this line and the time move; nothing else is polled, and the
 board is drawn again every minute for the other cards' times. A **Your turn** card carries the one
@@ -4857,7 +4899,8 @@ start; the period is the chosen number of days ending today. The sections, in or
   iterations whose `gate.json` is a verdict ended in the period and whose Claude review had no
   blocker or major; caught when the gate had one; with how many of those findings were fixed (by
   their ledger entry). *Claude found a new blocker or major right after a clean Codex gate*: the
-  gate runs only after a clean Claude review, so it is the next iteration instead: an iteration
+  rule of the time the gate ran only after a clean Claude review, kept for the joint round (where
+  both review the same iteration): the next iteration instead, an iteration
   whose gate had no blocker or major, followed by a Claude review in the period with a blocker or
   major not caused by a fix (`caused_by` empty). Each lists its caught iterations, newest first.
 - **Claude review on/off** (SF-132), the experiment of SF-131: one line per arm, `on` and `off`

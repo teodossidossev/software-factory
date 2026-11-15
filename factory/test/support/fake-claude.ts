@@ -52,6 +52,8 @@ interface Turn {
   // A file under HOME the turn waits for (after delayMs) before it runs (SF-105): the test creates it
   // once what it waits on happened, so the order does not hang on a fixed delay under load.
   waitFile?: string;
+  // A file under HOME the run writes as its prompt arrives, before any waitFile: the test sees the run started.
+  startFile?: string;
   permissionMode?: string;
   // The init message's slash commands; default ['implement'], the factory's own skill as the wrapper gives it.
   slashCommands?: string[];
@@ -413,6 +415,9 @@ lines.on('line', (line) => {
         return { type: String(part.type) };
       })
       : undefined;
+    if (turn.startFile !== undefined) {
+      writeFileSync(join(home, turn.startFile), String(process.pid));
+    }
     setTimeout(() => void released().then(() => run(prompt, blocks)), turn.delayMs ?? 0);
   }
 });

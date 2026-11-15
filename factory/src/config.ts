@@ -61,7 +61,7 @@ export interface Config {
   taskCheckParallel: number;
   // The bytes of rule file content given to the agents at most (SF_RULES_MAX_BYTES).
   rulesMaxBytes: number;
-  // The Codex gate after a clean Claude review: the executable, or why the gate is off.
+  // The Codex gate, beside the Claude review in the same round: the executable, or why the gate is off.
   gate: Gate;
   // The model of the gate (SF_CODEX_MODEL, passed as --model); undefined uses Codex's default.
   codexModel: string | undefined;

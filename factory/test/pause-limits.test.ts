@@ -153,6 +153,9 @@ test('Usage limit in the gate (SF-072): Codex\'s limit parks the job (provider c
     assert.ok(delay > 2000 && delay < 4000, String(delay));
     const jobs = new JobStore(env.state);
     assert.equal(await jobs.readGate('app', 'L-1', 1), undefined);
+    // The joint round's other verdict stays: Claude's review is kept, and does not run again.
+    const kept = await jobs.readReview('app', 'L-1', 1);
+    assert.ok(kept !== undefined && 'verdict' in kept && kept.verdict === 'clean');
     const events = await eventsOf(env, 'L-1');
     assert.deepEqual(events.filter((record) => record.type === 'interrupted').map((record) => [record.step, record.reviewer]), [['gate', 'codex']]);
     assert.equal(events.filter((record) => record.reviewer === 'codex' && record.type === 'review_failed').length, 0);
@@ -164,6 +167,37 @@ test('Usage limit in the gate (SF-072): Codex\'s limit parks the job (provider c
     assert.ok(gate !== undefined && 'verdict' in gate && gate.verdict === 'clean');
     // Only the run that gave the verdict counts.
     assert.equal((await jobs.read('app', 'L-1'))!.gate_tokens, 1100);
+  } finally {
+    await stop(served);
+  }
+});
+
+test('Usage limit in the joint round\'s Claude review: parked at review once the gate ended, its gate.json kept; Resume runs the Claude review alone, then the round applies', async () => {
+  const env = await newEnv('limit-joint-review', { SF_REVIEW: 'on', SF_GATE: 'codex', SF_GATE_LEVEL: 'full', SF_CODEX: fakeCodex });
+  const repo = await newRepo(env, 'limit-joint-review-repo', false);
+  await putTask(env, repo, 'L-3', 'Joint');
+  await script(env, [{ write: { 'a.txt': 'a\n' } }, { write: { '.software-factory/L-3.mr.md': mrText('feat(L-3): Joint') }, text: 'prepared' }]);
+  // The review ends at the limit only once the gate has its verdict.
+  await reviewScript(env, [{ waitFile: 'release-review', ...LIMIT_ERROR }, { output: CLEAN }]);
+  await codexScript(env, [{ output: GATE_CLEAN }]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'L-3' });
+    const jobs = new JobStore(env.state);
+    await until('the gate verdict', async () => (await jobs.readGate('app', 'L-3', 1)) !== undefined);
+    // The gate ended first: the round waits for the review.
+    assert.equal((await jobs.read('app', 'L-3'))!.state, 'awaiting_review');
+    await writeFile(join(env.home, 'release-review'), '');
+    const job = await waitParked(env, 'L-3');
+    assert.deepEqual([job.paused?.step, job.limit?.provider], ['review', 'claude']);
+    assert.equal(await jobs.readReview('app', 'L-3', 1), undefined);
+    const gate = await jobs.readGate('app', 'L-3', 1);
+    assert.ok(gate !== undefined && 'verdict' in gate && gate.verdict === 'clean');
+    const resumed = await runCli(env, ['resume', 'app', 'L-3']);
+    assert.equal(resumed.code, 0, resumed.stderr);
+    assert.match(resumed.stdout, /^step: review$/m);
+    await waitFor(served, 'L-3', 'ready_for_human_review', 1);
+    assert.deepEqual([(await codexLog(env)).length, await count(env, 'fake-review')], [1, 2]);
   } finally {
     await stop(served);
   }

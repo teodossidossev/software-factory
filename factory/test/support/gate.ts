@@ -14,7 +14,14 @@ export const GATE_FIX = {
   accepted_sensitive: [],
 };
 export const GATE_CLEAN = { verdict: 'clean', summary: 'Codex found it right.', items: [], accepted_sensitive: [] };
-export const FIX_SECTION = '## Fix 1\n\nReview by Codex: The greeting is wrong.\n\n1. [R1, major] `README.md`: It greets the world. Expected: It greets the reader.\n';
+// The joint round's Fix section of a clean Claude verdict (the fake's default) and GATE_FIX.
+export const FIX_SECTION = '## Fix 1\n\nReview by Claude: Looks right.\nReview by Codex: The greeting is wrong.\n\n1. [R1, major] `README.md`: It greets the world. Expected: It greets the reader. (raised by Codex)\n';
+// The review events as rows, sorted by iteration, then Claude's before the gate's: in a joint round
+// the two end in either order.
+export function byRound<T extends unknown[]>(rows: T[]): T[] {
+  const rank = (row: T): string => `${String(row[0]).padStart(4, '0')} ${row[1] === 'claude' ? 0 : 1}`;
+  return [...rows].sort((a, b) => rank(a).localeCompare(rank(b)));
+}
 
 export function mrText(header: string): string {
   return [

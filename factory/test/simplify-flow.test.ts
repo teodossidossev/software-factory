@@ -190,13 +190,14 @@ test('gate on, Skip: the pass runs after the clean gate; sf accept prepares the 
   await script(env, turns('S-6'));
   // R1 is a major here: a suggestion that names it stays (only a fixed blocker is untouchable).
   await reviewScript(env, [{ output: { ...FIX, items: [{ ...ITEM, severity: 'major' }] } }, { output: CLEAN }, { output: { summary: 'One guard too many.', suggestions: [SUGGESTION] } }]);
-  await codexScript(env, [{ output: CLEAN }]);
+  await codexScript(env, [{ output: CLEAN }, { output: CLEAN }]);
   const served = await serve(env);
   try {
     await call(served, 'start', { workspace: 'app', ticket: 'S-6' });
     const offered = await waitFor(served, 'S-6', 'needs_human', 2);
     assert.equal(offered.error.code, 'simplify_offered');
-    assert.equal((await codexLog(env)).length, 1);
+    // The gate reviewed both iterations, each in a joint round with the Claude review.
+    assert.equal((await codexLog(env)).length, 2);
     assert.equal((await reviewLog(env)).length, 3);
 
     const skipped = await runCli(env, ['accept', 'app', 'S-6']);

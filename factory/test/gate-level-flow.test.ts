@@ -137,7 +137,7 @@ test('full by SF_GATE_FULL_PATHS: the gate runs again after its fix, as before S
   }
 });
 
-test('none: a change that became docs only skips the gate at gate_tokens = SF_GATE_MAX_TOKENS, no gate_budget; a Claude fix verdict decides no level', async () => {
+test('none: a change that became docs only skips the gate at gate_tokens = SF_GATE_MAX_TOKENS, no gate_budget; only the Claude review runs; a level is recorded where Claude says fix', async () => {
   const env = await newEnv('level-none', levelEnv({ SF_GATE_MAX_TOKENS: '1100' }));
   const repo = await newRepo(env, 'level-none-repo', false);
   await putTask(env, repo, 'GN-1', 'Greet the reader');
@@ -157,13 +157,15 @@ test('none: a change that became docs only skips the gate at gate_tokens = SF_GA
     assert.equal(await codexRuns(env), 1);
     const job = (await new JobStore(env.state).read('app', 'GN-1'))!;
     assert.deepEqual([job.gate_fixes, job.gate_tokens], [1, 1100]);
-    // Iteration 2 had a Claude fix: no gate decision there.
-    assert.deepEqual(await levelEvents(env, 'GN-1'), [[1, 'light', true, ['light: 2 files, 3 lines']], [3, 'none', false, ['docs only']]]);
+    // The level is decided as each round starts, before either review: iteration 2, where Claude
+    // said fix, has one too, and its round was the Claude review alone.
+    assert.deepEqual(await levelEvents(env, 'GN-1'), [[1, 'light', true, ['light: 2 files, 3 lines']], [2, 'none', false, ['docs only']], [3, 'none', false, ['docs only']]]);
     assert.deepEqual(await levelRecords(env, 'GN-1', 3), [
       { level: 'light', reasons: ['light: 2 files, 3 lines'], ran: true, files: 2, lines: 3, at: 'string' },
-      null,
+      { level: 'none', reasons: ['docs only'], ran: false, files: 1, lines: 2, at: 'string' },
       { level: 'none', reasons: ['docs only'], ran: false, files: 1, lines: 2, at: 'string' },
     ]);
+    assert.equal((await reviewLog(env)).length, 3);
   } finally {
     await stop(served);
   }
@@ -232,7 +234,7 @@ test('a skipped gate during the simplification pass: check shows no gate running
     const record = await jobs.readSimplify('app', 'GS-1', 2);
     assert.ok(record !== undefined && 'suggestions' in record, JSON.stringify(record));
     assert.equal(await codexRuns(env), 0);
-    assert.deepEqual(await levelEvents(env, 'GS-1'), [[2, 'none', false, ['docs only']]]);
+    assert.deepEqual(await levelEvents(env, 'GS-1'), [[1, 'none', false, ['docs only']], [2, 'none', false, ['docs only']]]);
   } finally {
     await stop(served);
   }
@@ -260,7 +262,7 @@ test('a skipped gate and a usage limit in the simplification pass: parked at sim
     await waitFor(served, 'GS-2', 'ready_for_human_review', 2);
     assert.equal((await reviewLog(env)).length, 4);
     assert.equal(await codexRuns(env), 0);
-    assert.deepEqual(await levelEvents(env, 'GS-2'), [[2, 'none', false, ['docs only']]]);
+    assert.deepEqual(await levelEvents(env, 'GS-2'), [[1, 'none', false, ['docs only']], [2, 'none', false, ['docs only']]]);
   } finally {
     await stop(served);
   }
@@ -289,7 +291,7 @@ test('redacted (SF-125): a gate finding holding an environment value is stored i
     assert.deepEqual(gate.items.map((item) => [item.path, item.problem, item.severity]), [['src/app.ts', 'It logs [redacted].', 'major']]);
     assert.ok(!(await readFile(join(jobs.iterationDir('app', 'GR-1', 1), 'gate.json'), 'utf8')).includes(secret));
     const task = await readFile(join(repo, '.software-factory', 'GR-1.md'), 'utf8');
-    assert.ok(task.includes('## Fix 1\n\nReview by Codex: It logs [redacted].\n\n1. [R1, major] `src/app.ts`: It logs [redacted]. Expected: It exports 2.'), task);
+    assert.ok(task.includes('## Fix 1\n\nReview by Claude: Looks right.\nReview by Codex: It logs [redacted].\n\n1. [R1, major] `src/app.ts`: It logs [redacted]. Expected: It exports 2. (raised by Codex)'), task);
     assert.ok((await fakeLog(env)).every((entry) => !entry.prompt.includes(secret)));
   } finally {
     await stop(served);

@@ -1416,7 +1416,13 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   (`git diff <base commit>` plus untracked files in the worktree, without ignored,
   credential-like and `.software-factory/` paths, at most 2 MiB) and the structured file list
   (`files` in `meta.json`, SF-024: `path`, `status` added/modified/deleted, `sensitive`
-  declared/undeclared/no, `additions`, `deletions`). The job goes to `awaiting_review`, and the
+  declared/undeclared/no, `additions`, `deletions`). `meta.json` also records `commit_tree`, the
+  tree the factory's commit would have, built as the guard's change check builds it
+  (`worktreeTree` in `src/guard.ts`: `git read-tree <base commit>`, `git add --all` of the commit
+  paths and `git write-tree`, in a temporary index), so the worktree's index is not touched; the
+  new objects go into the checkout's object store, referenced by nothing until a commit. MR
+  preparation commits only that tree (section MR preparation, step 3). The job goes to
+  `awaiting_review`, and the
   review round of the iteration starts (below): on a job with the Claude review whose gate runs,
   the Claude review and the gate together (the joint round, SF-214).
 - The **review setting** (SF-131): at Start the factory decides once whether the job gets the
@@ -2866,7 +2872,9 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
      factory does not let a test run change .git, .claude, .mcp.json or .codex"; the Tests Fix
      section adds "It failed because <reason>." to how the command ended, and the `### Checks` line
      and the `tests_failed` message show the reason instead of the exit. Writing `dist/`, caches or
-     coverage changes nothing of it. Nothing is put back. When one of the four is a link (to a
+     coverage changes nothing of it. A run that writes a file the commit would take (not ignored,
+     outside `.software-factory/`) is not refused here either: step 3 finds it, and the change
+     goes back to review. Nothing is put back. When one of the four is a link (to a
      file or a folder, or leading nowhere), the run does not start: it is `failed` with `reason`
      "the test run did not start: <the path> is a link" (no exit code, no output), and the
      Tests Fix turn gets it as any failure. An aborted run is compared too: nothing else of it
@@ -2948,7 +2956,25 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
      credential-like, `.software-factory/` paths and sandbox placeholders), minus submodules (a
      directory whose index entry has mode 160000). The Git rules forbid changing a submodule
      pointer; the Patch already reports one.
-   - `git add --all -- <paths>`, 200 paths per call. An empty index diff is `mr_empty`.
+   - `git add --all -- <paths>`, 200 paths per call.
+   - The reviewed tree: the index's tree (`git write-tree`) must be the `commit_tree` of the job's
+     last iteration (its `meta.json`; section Jobs), the iteration every way into MR preparation
+     starts from: the clean path, `mark_clean`, Accept and Skip (`sf accept`), Retry (`sf retry`)
+     and a runner that picks a clean verdict up. When it is not (the test run, the MR text turn or
+     a hand edit changed a file of the change since that iteration was published), nothing is
+     committed: the factory lists the paths that differ (`git diff-index --cached --name-only
+     <commit_tree>`), unstages the change (`git reset -q --mixed <base_commit>`, the working tree
+     untouched), writes the event `{type: "unreviewed_change", paths, more}` (the first 50 paths,
+     `null` when they cannot be listed, and how many more), whose line reads `nothing committed:
+     src/extra.ts changed since iteration 1 was reviewed; back to review`, and publishes the
+     worktree as it is as the next iteration against the same `base_commit`: the MR text turn's
+     report plus `## MR preparation` ("Nothing was committed: the worktree no longer matches
+     iteration 1, the iteration that was reviewed. Changed since then: src/extra.ts. This
+     iteration is the worktree as it is now."). The job goes back to `awaiting_review` (action
+     `mr_turn_end`), as after a conflict turn: no stop, and the next Clean prepares again.
+     `.software-factory/` (the MR text, the steps checklist) is in neither tree. An iteration
+     published before the factory recorded `commit_tree` is committed without the comparison.
+   - An empty index diff is `mr_empty`.
    - `git commit -q --cleanup=verbatim -F <file>`: the commit message is the whole MR text, the
      factory's subsections included, normalised by `mrMessage` (`src/mr.ts`): CRLF becomes LF,
      every line loses its trailing whitespace, the title is the first line and the body the rest

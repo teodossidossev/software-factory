@@ -183,6 +183,12 @@ function recordLines(record: Record<string, unknown>): string[] {
     const moved = [typeof record.branch === 'string' ? `branch ${record.branch}` : '', typeof record.base === 'string' ? `base ${record.base}` : ''].filter((part) => part !== '');
     return [`${prefix} ${line}${moved.length > 0 ? ` (${moved.join(', ')})` : ''}`];
   }
+  // MR preparation committed nothing: the worktree changed since the reviewed iteration.
+  if (record.type === 'unreviewed_change') {
+    const more = typeof record.more === 'number' && record.more > 0 ? ` and ${record.more} more` : '';
+    const what = Array.isArray(record.paths) ? `${record.paths.map(String).join(', ')}${more}` : 'the worktree';
+    return [`${prefix} nothing committed: ${oneLine(what)} changed since iteration ${String(record.iteration)} was reviewed; back to review`];
+  }
   if (record.type === 'merge_request') {
     const verb = { created: 'opened', reused: 'already open, reused', merged: 'merged', updated: `found ${String(record.mr_state)} on the host`, found: 'found open for the branch' }[String(record.action)] ?? String(record.action);
     return [`${prefix} merge request #${String(record.number)} ${verb}: ${String(record.url)}`];

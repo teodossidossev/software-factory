@@ -332,6 +332,9 @@ export interface IterationMeta {
   duration_ms: number | null;
   // The commit the iteration's Patch is against; absent in a meta.json written without it.
   base_commit?: string;
+  // The tree the factory's commit would have when the iteration was published (worktreeTree of
+  // src/guard.ts against base_commit, in a temporary index); absent in a meta.json written without it.
+  commit_tree?: string;
 }
 
 // iterations/NNN/review.json: the Claude review of the iteration, or why it failed. review_method
@@ -497,6 +500,10 @@ export type EventRecord = { ts: string; iteration: number } & (
   | { type: 'handover_pushed'; commit: string; same_tree: boolean | null }
   // The user marked a handed-over job done: they merged its changes another way (sf handed-done --merged).
   | { type: 'handover_marked_done' }
+  // MR preparation committed nothing because the worktree no longer matched the reviewed
+  // iteration (the record's iteration): the first MAX_UNREVIEWED_PATHS paths that differ (null:
+  // not known) and how many more (0 with null).
+  | { type: 'unreviewed_change'; paths: string[] | null; more: number }
   // The factory removed the config lock Claude Code's sandbox left in the workspace checkout's Git
   // directory (src/sandbox-lock.ts): its path.
   | { type: 'sandbox_lock_removed'; path: string }

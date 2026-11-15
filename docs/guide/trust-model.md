@@ -252,7 +252,9 @@ goes too. `suggest_changes` sends nothing out; it stores a note you send or dism
 The factory itself, as you: `git fetch`, the worktrees, the commit and rebase at Clean, the push,
 the merge request on the Git host, the hand-over to your checkout, the notifications. None of these
 are open to an agent; the agent only writes files in its worktree, and the factory decides what
-to commit.
+to commit. It commits only what the reviewers saw: the tree it stages must be the one the reviewed
+iteration recorded when it was published; otherwise nothing is committed, and the worktree goes
+back to review as a new iteration.
 
 No Git call of the factory runs the repository's hooks or its fsmonitor: every one starts in one
 place (`factory/src/git.ts`) with `-c core.hooksPath=/dev/null -c core.fsmonitor=false`, and no
@@ -315,6 +317,11 @@ before the MR text, on the reviewed worktree:
 Without `bwrap` the command does not run at all (`tests_unavailable`); there is no fallback outside
 the sandbox. It runs with the runner's control group and nice value, so the service's CPU limits
 apply.
+
+A run may also write the worktree's other files: a build output, a generated source. Nothing
+refuses that here, but a file of the change a run wrote never reaches the commit unreviewed: MR
+preparation finds that the worktree no longer matches the reviewed iteration (What runs outside
+the sandbox), and the change goes back to review.
 
 ## The limits
 

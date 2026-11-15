@@ -104,8 +104,11 @@ worktree, in a sandbox without network: a failure becomes the next `## Fix N: Te
 command and the end of its output) and a new iteration, at most twice per job, and then the job
 stops for the user; a Tests Fix does not count toward the three Fix sections. Then the Implementer
 writes the merge request text, the factory adds the test result under `### Checks` of
-`## Testing`, and commits and rebases; the user approves the push on the dashboard or in the
-terminal, and may have the factory open and merge the merge request on the Git host.
+`## Testing`, and commits and rebases. It commits only the change the reviewers saw: when the
+worktree no longer matches the reviewed iteration (the test run or the MR text turn changed a file
+of the change), nothing is committed and the worktree goes back to review as a new iteration. The
+user approves the push on the dashboard or in the terminal, and may have the factory open and
+merge the merge request on the Git host.
 
 ## Tools
 
@@ -457,6 +460,9 @@ with every iteration. The Context owner does not review.
 - Commits are made only in MR preparation, which runs at Clean (the reviewers' clean verdict),
   and only by the factory. The Implementer writes the MR text; the factory makes the one commit
   from it: the title is the header, the whole MR body is the body. Iterations commit nothing.
+  The commit holds the reviewed iteration's files and nothing else: a file of the change that
+  the test run or the MR text turn changes after the review is not committed; the worktree goes
+  back to the reviewers as a new iteration.
   The user's approve pushes the prepared commit.
 - The factory always rebases onto the target branch in MR preparation, so the merge request can
   be fast-forwarded. On a conflict the Implementer resolves the listed files by editing them

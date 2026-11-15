@@ -223,7 +223,7 @@ test('the output\'s schema: every model text is {text, en}; an answer with plain
 test('the record holds the bilingual output and in_progress: my live jobs of the my_work workspaces, waiting first; none to the model', async () => {
   const fx = await setUp([ok()]);
   const jobs = new JobStore(fx.state);
-  const base = { branch: 'b', base: 'main', continues: null, base_commit: null, target_commit: null, worktree: null, prepared_commit: null, mr_attempts: 0, mr_conflict_turn: false, iteration: 2, fixes: 0, gate_fixes: 0, gate_tokens: 0, session_id: null, created_at: '2026-11-01T08:00:00.000Z', mr: null };
+  const base = { branch: 'b', base: 'main', continues: null, builds_on: null, builds_on_commit: null, base_commit: null, target_commit: null, worktree: null, prepared_commit: null, mr_attempts: 0, mr_conflict_turn: false, iteration: 2, fixes: 0, gate_fixes: 0, gate_tokens: 0, session_id: null, created_at: '2026-11-01T08:00:00.000Z', mr: null };
   await jobs.write({ ...base, workspace: 'backend', ticket: 'SHOP-21', state: 'working', updated_at: '2026-11-01T09:00:00.000Z' });
   await jobs.write({ ...base, workspace: 'frontend', ticket: 'SHOP-22', state: 'needs_human', updated_at: '2026-11-01T10:00:00.000Z', error: { code: 'gate_failed', message: 'The gate failed.' } });
   await jobs.write({ ...base, workspace: 'backend', ticket: 'SHOP-23', state: 'aborted', updated_at: '2026-11-01T11:00:00.000Z' });

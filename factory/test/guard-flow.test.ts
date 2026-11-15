@@ -496,7 +496,7 @@ test('sf guard: unpushed commits, --branch, --mr, --worktree, --history and a ra
 
   const jobs = new JobStore(env.state);
   const at = '2026-11-07T10:00:00.000Z';
-  const record = { workspace: 'app', branch: 'T-5-x', base: 'main', continues: null, base_commit: null, target_commit: null, worktree: null, prepared_commit: null, mr_attempts: 0, mr_conflict_turn: false, state: 'ready_for_human_review' as const, iteration: 1, fixes: 0, gate_fixes: 0, gate_tokens: 0, session_id: null, created_at: at, updated_at: at, mr: null };
+  const record = { workspace: 'app', branch: 'T-5-x', base: 'main', continues: null, builds_on: null, builds_on_commit: null,base_commit: null, target_commit: null, worktree: null, prepared_commit: null, mr_attempts: 0, mr_conflict_turn: false, state: 'ready_for_human_review' as const, iteration: 1, fixes: 0, gate_fixes: 0, gate_tokens: 0, session_id: null, created_at: at, updated_at: at, mr: null };
   await jobs.write({ ...record, ticket: 'T-5', branch: 'T-5-after-abc-2' });
   await jobs.writeMrText('app', 'T-5', 'feat(T-5): x\n\nproduct-frontend shares it\n');
   const mr = await guard('app', '--mr', 'T-5');

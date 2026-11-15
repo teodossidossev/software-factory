@@ -32,7 +32,7 @@ const threeDaysAgo = new Date(Date.parse(days.yesterday.from) - 2 * 86_400_000).
 
 function job(workspace: string, ticket: string, state: JobState, at: string, extra: Partial<Job> = {}): Job {
   return {
-    workspace, ticket, branch: ticket, base: 'main', continues: null, base_commit: null, target_commit: null, worktree: null, prepared_commit: null,
+    workspace, ticket, branch: ticket, base: 'main', continues: null, builds_on: null, builds_on_commit: null,base_commit: null, target_commit: null, worktree: null, prepared_commit: null,
     mr_attempts: 0, mr_conflict_turn: false, state, iteration: 1, fixes: 0, gate_fixes: 0, gate_tokens: 0, session_id: null,
     created_at: threeDaysAgo, updated_at: at, mr: null, ...extra,
   };

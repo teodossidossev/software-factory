@@ -15,7 +15,7 @@ const T0 = '2026-11-07T09:00:00.000Z';
 
 function job(state: Job['state'], extra: Partial<Job> = {}): Job {
   return {
-    workspace: 'app', ticket: 'T-1', branch: 'T-1-demo', base: 'main', continues: null, base_commit: null, target_commit: null, worktree: '/wt/T-1', prepared_commit: null,
+    workspace: 'app', ticket: 'T-1', branch: 'T-1-demo', base: 'main', continues: null, builds_on: null, builds_on_commit: null,base_commit: null, target_commit: null, worktree: '/wt/T-1', prepared_commit: null,
     mr_attempts: 0, mr_conflict_turn: false, fixes: 0, gate_fixes: 0, gate_tokens: 0, state, iteration: 2, session_id: 's1', mr: null,
     created_at: T0, updated_at: T0, ...extra,
   };
@@ -110,7 +110,7 @@ test('jobActions per row: each stop shows its row\'s actions in order, each prec
   assert.deepEqual(shown(stopped('tests_unavailable', { mr_conflict_turn: true })), [`*${send}`, abort]);
   assert.deepEqual(shown(stopped('fetch_failed')), ['*retry:Retry', abort]);
   assert.deepEqual(shown(stopped('fetch_failed', { mr_conflict_turn: true })), [`*${goOn}`, abort]);
-  for (const code of ['mr_failed', 'mr_commit_failed', 'mr_rebase_failed', 'mr_serve_restarted', 'mr_interrupted']) {
+  for (const code of ['mr_failed', 'mr_commit_failed', 'mr_rebase_failed', 'mr_serve_restarted', 'mr_interrupted', 'builds_on_not_ready']) {
     assert.deepEqual(shown(stopped(code)), ['*retry:Retry', goOn, abort], code);
     assert.deepEqual(shown(stopped(code, { mr_conflict_turn: true })), [`*${goOn}`, abort], code);
   }
@@ -214,7 +214,7 @@ test('the derived lists: settleCodes, codesWith and the Execution\'s constants a
   assert.deepEqual(codesWithAction('accept'), ['gate_rounds', 'gate_budget', 'gate_failed', 'review_churn', 'review_disputed', 'iteration_limit', 'simplify_offered', 'tests_failed', 'tests_unavailable']);
   // sf retry takes every code of a row with Retry, aliases included, and only those, in the order
   // it has always named them.
-  assert.deepEqual(MR_RETRY_CODES, ['fetch_failed', 'mr_serve_restarted', 'mr_interrupted', 'mr_commit_failed', 'mr_rebase_failed', 'mr_failed', 'guard_hit', 'guard_terms_invalid', 'guard_failed', 'tests_unavailable']);
+  assert.deepEqual(MR_RETRY_CODES, ['fetch_failed', 'mr_serve_restarted', 'mr_interrupted', 'mr_commit_failed', 'mr_rebase_failed', 'mr_failed', 'guard_hit', 'guard_terms_invalid', 'guard_failed', 'tests_unavailable', 'builds_on_not_ready']);
   assert.deepEqual([...MR_RETRY_CODES].sort(), STOP_CODES.filter((code) => STOPS[code].actions.some((candidate) => candidate.id === 'retry')).flatMap((code) => [code, ...STOPS[code].aliases]).sort());
   for (const code of MR_RETRY_CODES) {
     assert.equal(reason(stopped(code), 'retry'), '', code);

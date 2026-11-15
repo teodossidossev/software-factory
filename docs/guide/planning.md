@@ -276,14 +276,16 @@ ask you a question between Start and your own review, so leave no decision open.
   You are not there when they review; the brief is your voice. The Implementer reads it too, so
   write checks and reasons, not instructions.
 - **`lands_after:`**: the tickets this one needs merged first (`APP-11`, or `my-api/API-7` in
-  another workspace). The queue waits for them; when the ticket needs their code, set `base` to
-  their branch or wait for the merge.
+  another workspace). The queue waits for them; when the ticket needs their code, give it
+  `builds_on:` (a ticket of the same workspace) or wait for the merge.
 - **Size**: cut a solution into slices by kind of change: mechanical, preparation, change (the
   thinnest working path, then one axis of widening per slice), the switch, cleanup. A change or
   switch slice stays within about 400 changed lines, tests included, and 10 files; the other kinds
   have no limit but hold only their kind. Prefer slices that start from the base branch and can
-  merge in any order; use `base:` and `lands_after` only when a slice needs another's code or must
-  not merge first. The method is the Handbook's `## Slicing a solution`.
+  merge in any order; use `builds_on:` and `lands_after` only when a slice needs another's code or
+  must not merge first. Slices that need each other's code are built in a row, each with
+  `builds_on:` naming the one before it, and submitted one at a time, each once the one before it
+  is merged. The method is the Handbook's `## Slicing a solution`.
 - **Lean**: about 800 words for a change under 300 lines, 1,200 words up to 1,000 lines; split
   anything larger. A lean Task holds the goal and agreed basis, the decisions, the behaviour as
   outcomes, what is out of scope, the tests as cases, the acceptance, `scope:` and a Review brief.
@@ -334,6 +336,14 @@ finding of its own), then lists findings, each with a kind and a severity:
 
 and the files it expects to change. With a `scope`, an expected file outside it is a `missing`
 major finding, and a scope entry no expected file matches is an `overreach` nit.
+
+**The size of a slice.** For a Task of `kind: change` (or no `kind`) or `kind: switch`, more
+expected files than the workspace's `slice.change_max_files` in
+[`norms.json`](configuration.md#norms-normsjson) (10 by default) is an `overreach` major at "slice
+norm": cut the Task again along the next axis (the Handbook's *Slicing a solution*). When the
+Task says under a `## Why whole` heading why it is only safe whole, it is a nit instead: get
+your agreement to keep it whole. `mechanical`, `preparation` and `cleanup` Tasks have no limit.
+A `part_of`, `slice` or `kind` value that is not valid is an `unclear` nit at "front matter".
 
 **The decision documents.** What was decided about your product (its concepts, its domain rules,
 its architecture) lives in documents the coding rules do not cover: the glossary, the decision

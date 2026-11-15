@@ -92,7 +92,7 @@ export function mergeOnHost(w: World, branch: string): void {
 
 export function pushedJob(ticket: string, branch: string, commit: string, mr: Job['mr'] = null): Job {
   return {
-    workspace: 'app', ticket, branch, base: 'main', continues: null, base_commit: null, target_commit: null, worktree: null, prepared_commit: commit,
+    workspace: 'app', ticket, branch, base: 'main', continues: null, builds_on: null, builds_on_commit: null,base_commit: null, target_commit: null, worktree: null, prepared_commit: commit,
     mr_attempts: 0, mr_conflict_turn: false, fixes: 0, gate_fixes: 0, gate_tokens: 0, state: 'pushed', iteration: 1, session_id: null, mr,
     created_at: '2026-11-04T10:00:00.000Z', updated_at: '2026-11-04T10:00:00.000Z',
   };

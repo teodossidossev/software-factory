@@ -39,7 +39,7 @@ function config(env: Env): Config {
 function jobRecord(workspace: string, ticket: string, state: JobState, extra: Partial<Job> = {}): Job {
   const at = now();
   return {
-    workspace, ticket, branch: `${ticket}-branch`, base: 'main', continues: null, base_commit: null, state, worktree: null, prepared_commit: null,
+    workspace, ticket, branch: `${ticket}-branch`, base: 'main', continues: null, builds_on: null, builds_on_commit: null,base_commit: null, state, worktree: null, prepared_commit: null,
     iteration: 0, fixes: 0, gate_fixes: 0, gate_tokens: 0, session_id: null, mr: null, target_commit: null, mr_attempts: 0, mr_conflict_turn: false, created_at: at, updated_at: at, ...extra,
   };
 }
@@ -136,12 +136,15 @@ async function world(name: string, options: { web?: boolean; recheckMs?: number 
   return { env, repo, origin: join(temp, `${name}-repo-origin.git`), jobs, store, execution, setup, queue: make(), again: make };
 }
 
-async function plan(w: World, ticket: string, options: { workspace?: string; landsAfter?: string; draft?: boolean } = {}): Promise<void> {
+async function plan(w: World, ticket: string, options: { workspace?: string; landsAfter?: string; buildsOn?: string; draft?: boolean } = {}): Promise<void> {
   const name = options.workspace ?? 'app';
   const workspace = await resolveWorkspace(name, w.env.config);
   let content = task(ticket, `Job ${ticket}`);
   if (options.landsAfter !== undefined) {
     content = content.replace('base: main\n', `base: main\nlands_after: ${options.landsAfter}\n`);
+  }
+  if (options.buildsOn !== undefined) {
+    content = content.replace('base: main\n', `base: main\nbuilds_on: ${options.buildsOn}\n`);
   }
   if (options.draft === true) {
     content += '\n## Status: waiting for the Context owner\n';
@@ -187,6 +190,38 @@ test('the scheduler fills the free slots in queue order, across workspaces, and 
   assert.deepEqual(await queued(w), []);
   const view = await w.queue.view();
   assert.deepEqual([view.max_running, view.running, view.next, view.entries], [2, 2, null, []]);
+});
+
+test('SF-233: a ticket with builds_on waits, as a lands_after one, while the ticket it builds on works, and starts once that one is ready_for_human_review with a prepared commit, or merged', TIMEOUT, async () => {
+  const w = await world('queue-builds-on');
+  await plan(w, 'B-1');
+  await plan(w, 'B-2', { buildsOn: 'B-1' });
+  await plan(w, 'B-3', { buildsOn: 'B-9' });
+  await plan(w, 'B-9');
+  await w.queue.limit(5);
+  await w.jobs.write(jobRecord('app', 'B-1', 'working'));
+  // B-9's last job is pushed and its merge request merged.
+  await w.jobs.write(jobRecord('app', 'B-9', 'pushed', { prepared_commit: 'b'.repeat(40), mr: { host: 'github', number: 9, url: 'https://github.com/acme/app/pull/9', state: 'merged' } }));
+  await w.queue.hold();
+  await w.queue.add('app', 'B-2');
+  await w.queue.add('app', 'B-3');
+  const view = await w.queue.view();
+  assert.deepEqual(view.entries.map((row) => [row.ticket, row.waits_for]), [['B-2', [{ workspace: 'app', ticket: 'B-1', state: 'running' }]], ['B-3', []]]);
+  assert.deepEqual(view.next, { workspace: 'app', ticket: 'B-3' });
+  await w.queue.release();
+  await w.queue.idle();
+  // The merged one starts; B-2 waits while B-1 works.
+  assert.deepEqual(w.execution.starts, ['app/B-3']);
+  assert.deepEqual(await queued(w), ['app/B-2']);
+  // In ready_for_human_review without a prepared commit it still waits.
+  await setState(w, 'app', 'B-1', 'ready_for_human_review');
+  await settle(w.queue);
+  assert.deepEqual(await queued(w), ['app/B-2']);
+  await w.jobs.write({ ...(await w.jobs.read('app', 'B-1'))!, prepared_commit: 'a'.repeat(40) });
+  assert.deepEqual((await w.queue.view()).entries.map((row) => row.waits_for), [[]]);
+  await settle(w.queue);
+  assert.deepEqual(w.execution.starts, ['app/B-3', 'app/B-2']);
+  assert.deepEqual(await queued(w), []);
 });
 
 test('SF-086: a queued ticket starts only when its plan is ready or it is forced; the others stay in place with the reason; force survives a restart, holds for any version, ends when the entry leaves', TIMEOUT, async () => {

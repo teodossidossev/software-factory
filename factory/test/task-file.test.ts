@@ -8,7 +8,7 @@ import { after, before, test } from 'node:test';
 import { FactoryError } from '../src/errors.js';
 import { JobStore } from '../src/jobs.js';
 import type { Workspace } from '../src/registry.js';
-import { appendFix, checkNeed, checkTaskContent, landsAfter, MAX_TASK_BYTES, mayTouch, parseFrontMatter, taskReview, taskScope, taskSha256, taskSize, writeTask } from '../src/task-file.js';
+import { appendFix, checkNeed, checkTaskContent, landsAfter, MAX_TASK_BYTES, mayTouch, parseFrontMatter, taskReview, taskScope, taskSha256, taskSize, taskSlice, writeTask } from '../src/task-file.js';
 
 const VALID = '---\nticket: PROJ-1\ntitle: Export as CSV\nbase: master\n---\n\n# PROJ-1: Export as CSV\n';
 
@@ -169,6 +169,35 @@ test('taskSize (SF-219) reads size: small, medium or complex, quoted or with a c
   for (const other of ['size: Complex', 'size: large', 'size:', 'scope: [a]']) {
     assert.equal(taskSize(fields(other)), 'medium', other);
   }
+});
+
+test('taskSlice (SF-220) reads part_of, slice N/M and kind; absent keys leave kind change and no problems', () => {
+  const fields = (text: string) => parseFrontMatter(`---\nticket: T-1\ntitle: t\nbase: main\nsize: small\n${text}\n---\n`)!;
+  assert.deepEqual(taskSlice(fields('part_of: SF-210\nslice: 3/5\nkind: "switch"  # the flag')), { part_of: 'SF-210', slice: { n: 3, of: 5 }, kind: 'switch', problems: [] });
+  for (const kind of ['mechanical', 'preparation', 'change', 'switch', 'cleanup'] as const) {
+    assert.equal(taskSlice(fields(`kind: ${kind}`)).kind, kind);
+  }
+  assert.deepEqual(taskSlice(fields('scope: [a]')), { kind: 'change', problems: [] });
+  // An empty value counts as absent.
+  assert.deepEqual(taskSlice(fields('part_of:\nslice: ""\nkind:')), { kind: 'change', problems: [] });
+  assert.deepEqual(taskSlice(fields('slice: 1/1')).slice, { n: 1, of: 1 });
+  assert.deepEqual(taskSlice(fields('slice: 20/20')).slice, { n: 20, of: 20 });
+  // Any run of digits, the bounds checked on the numbers.
+  assert.deepEqual(taskSlice(fields('slice: 001/001')), { slice: { n: 1, of: 1 }, kind: 'change', problems: [] });
+  assert.deepEqual(taskSlice(fields('slice: 01/003')).slice, { n: 1, of: 3 });
+  assert.deepEqual(taskSlice(fields('slice: 2/0020')).slice, { n: 2, of: 20 });
+});
+
+test('taskSlice (SF-220) ignores a malformed slice, an unknown kind or a part_of that is no ticket name, with one problem line each', () => {
+  const fields = (text: string) => parseFrontMatter(`---\nticket: T-1\ntitle: t\nbase: main\n${text}\n---\n`)!;
+  for (const slice of ['0/3', '4/3', '1/21', '21/21', '1 / 3', '1/', '3', 'a/b', '-1/3', '1.5/3', '00/3', '1/021', `1/${'9'.repeat(400)}`]) {
+    assert.deepEqual(taskSlice(fields(`slice: ${slice}`)), { kind: 'change', problems: [`slice: "${slice}" is not valid; it is ignored.`] }, slice);
+  }
+  assert.deepEqual(taskSlice(fields('kind: refactor')), { kind: 'change', problems: ['kind: "refactor" is not valid; it is ignored.'] });
+  assert.deepEqual(taskSlice(fields('kind: Change')).problems, ['kind: "Change" is not valid; it is ignored.']);
+  assert.deepEqual(taskSlice(fields('part_of: ../x\nslice: 9/2\nkind: mechanical')), {
+    kind: 'mechanical', problems: ['part_of: "../x" is not valid; it is ignored.', 'slice: "9/2" is not valid; it is ignored.'],
+  });
 });
 
 test('landsAfter (SF-084) reads lands_after: in the list forms of may_touch; a ticket of another workspace is <workspace>/<ticket>', () => {

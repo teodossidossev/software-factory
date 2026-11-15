@@ -16,10 +16,11 @@ export const LEDGER_ACCEPT_CODES: readonly string[] = codesWith('ledger');
 // before the branch is prepared: sf retry runs MR preparation again, without a new review. Not
 // after a conflict turn (mr_conflict_turn): its resolution is code no reviewer saw. Every code of a
 // row with a Retry in src/stops.ts, aliases included: the guard's stops of MR preparation too (after
-// a "!" line in guard-terms.txt, for example), and a test command that could not run. The order is
+// a "!" line in guard-terms.txt, for example), a test command that could not run, and a part
+// whose ticket it builds on has no prepared commit (src/builds-on.ts). The order is
 // the one sf retry names them in; a code it does not name goes last.
 const RETRY_ORDER: readonly string[] = [
-  'fetch_failed', 'mr_serve_restarted', 'mr_interrupted', 'mr_commit_failed', 'mr_rebase_failed', 'mr_failed', 'guard_hit', 'guard_terms_invalid', 'guard_failed', 'tests_unavailable',
+  'fetch_failed', 'mr_serve_restarted', 'mr_interrupted', 'mr_commit_failed', 'mr_rebase_failed', 'mr_failed', 'guard_hit', 'guard_terms_invalid', 'guard_failed', 'tests_unavailable', 'builds_on_not_ready',
 ];
 const retryRank = (code: string): number => (RETRY_ORDER.includes(code) ? RETRY_ORDER.indexOf(code) : RETRY_ORDER.length);
 export const MR_RETRY_CODES: readonly string[] = storedCodesWithAction('retry').sort((a, b) => retryRank(a) - retryRank(b));

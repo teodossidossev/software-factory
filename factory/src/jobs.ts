@@ -212,6 +212,11 @@ const jobSchema = z.strictObject({
   base: z.string().min(1),
   // The source branch of the open merge request the job continues (src/continues.ts); null for most.
   continues: z.string().min(1).nullable().default(null),
+  // The ticket of the same workspace whose unmerged change the job builds on (src/builds-on.ts),
+  // and that ticket's prepared commit the job started from (null when it started from its base,
+  // the ticket being merged); null for most.
+  builds_on: z.string().min(1).nullable().default(null),
+  builds_on_commit: commit.nullable().default(null),
   // The commit the branch was created from; the Patch is the difference to it.
   base_commit: commit.nullable(),
   // The target commit of MR preparation: resolved at Clean, the commit the branch is rebased onto.

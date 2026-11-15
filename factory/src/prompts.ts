@@ -82,6 +82,9 @@ export interface MrPromptInput {
   handbook: string;
 }
 
+// The slice line of the MR text: the writer reads the keys from the Task file in its worktree.
+const MR_SLICE_RULE = 'If the Task file\'s front matter has both `part_of:` and `slice: N/M`, begin `## Special things to note` with the bullet `- Slice N of M of <part_of>.`';
+
 // The prompt of the MR text turn at Clean. FACTORY_PROMPT_RULES is not sent here: this turn writes
 // the MR text only; the Task-file rule and the Report form are restated instead.
 export function mrPrompt(input: MrPromptInput): string {
@@ -99,6 +102,7 @@ export function mrPrompt(input: MrPromptInput): string {
     `Your only task in this turn: write the MR text to ${path}. Its first line is the title, which is also the commit header by the Git rules below; then a blank line; then the body by the MR template below.`,
     `The factory commits, rebases and pushes, not you. It commits the reviewed change as one commit on this branch; the commit message is the whole MR text: the title as the header, then the body. Then it rebases that commit onto ${targetRef}.`,
     `${MR_TESTING_RULE}.`,
+    MR_SLICE_RULE,
     'Change no other file and run no Git command that changes the repository; those commands are denied.',
     `Do not edit ${TASK_DIR}/${ticket}.md; the Context owner owns it.`,
     'End your turn with a short report in this form, as your last message:',

@@ -182,5 +182,10 @@ refused), and the factory's test command passed in a sandbox without network on 
   simplification pass read `.software-factory/<ticket>.md` from the job's worktree, where the
   Implementer can write. Only a prompt rule keeps it from editing that file; the factory's own copy
   of the Task is not what they read.
+- **The factory writes into the worktree's `.software-factory/` without checking for links.** On a
+  Resume it copies the Task file to `.software-factory/<ticket>.md` in the worktree and the
+  ticket's images to `.software-factory/<ticket>/`. The Implementer can put a link at either path,
+  or at the folder, while it works; the factory, which runs as you, would then write through it to
+  a file outside the worktree.
 
 The full list of limits is in [The trust model: The limits](guide/trust-model.md#the-limits).

@@ -8,22 +8,25 @@
 // ---------- The morning digest ----------
 
 // The Digest page (#digest, #digest/<id>): the list as last read ({running, digests}, newest first),
-// the digest shown (its id; null: the newest) and its record, a read's error, the tab ('repos' or
-// 'daily'), the poll's timer while a run goes, the ids known when a run was seen starting (the new
-// one opens when it appears), Generate now's request, the Copy outcome per app, and the read under way.
+// the digest shown (its id; null: the newest) and its record, a read's error, the tab ('brief' or
+// 'repos'), the poll's timer while a run goes, the ids known when a run was seen starting (the new
+// one opens when it appears), Generate now's request, the Copy outcome per app, the read under way,
+// and the schedule line's Edit while open (the typed times, a refusal, a Save going). The Brief, the
+// languages and the schedule line are in web/digest-brief.ts.
 const DIGEST_POLL_MS = 10000;
 const dg: {
   list: DigestList | null;
   id: string | null;
   record: DigestRecord | null;
   error: string | null;
-  tab: 'repos' | 'daily';
+  tab: 'brief' | 'repos';
   poll: ReturnType<typeof setTimeout> | null;
   known: Set<string> | null;
   starting: boolean;
   copied: Map<string, { ok: boolean; text: string }>;
   load: number;
-} = { list: null, id: null, record: null, error: null, tab: 'repos', poll: null, known: null, starting: false, copied: new Map(), load: 0 };
+  edit: { text: string; error: string | null; saving: boolean } | null;
+} = { list: null, id: null, record: null, error: null, tab: 'brief', poll: null, known: null, starting: false, copied: new Map(), load: 0, edit: null };
 
 function openDigest(id: string | null): void {
   if (ui.job !== null) {
@@ -172,6 +175,10 @@ function renderDigest(): void {
     pick.addEventListener('change', () => openDigest(pick.value === newest.id ? null : pick.value));
     tools.append(pick);
   }
+  const languages = record === null ? null : dgSwitch(record);
+  if (languages !== null) {
+    tools.append(languages);
+  }
   const generate = button('btn primary', running ? 'Generating…' : 'Generate now', { dg: 'generate' });
   generate.disabled = running;
   generate.setAttribute('title', 'Make a digest now from the latest Git data; it does not replace the day\'s scheduled one');
@@ -184,6 +191,10 @@ function renderDigest(): void {
   const head = el('header', 'jhead');
   head.append(backButton, t1, tools, t2);
   const body = el('div', 'dg-body');
+  const schedule = dgSchedule();
+  if (schedule !== null) {
+    body.append(schedule);
+  }
   if (running) {
     body.append(el('p', 'notline', 'Generating a digest… This page opens it when it is ready.'));
   }
@@ -194,14 +205,15 @@ function renderDigest(): void {
     body.append(el('p', 'muted fs13', dg.error === null ? 'Loading the digests…' : ''));
   } else if (list.digests.length === 0) {
     const empty = el('div', 'card2 dg-empty');
-    empty.append(el('h3', '', 'No digest yet'), el('p', 'fs13', 'Generate now makes one from the followed workspaces. sf serve makes one every day at the time set in Workspaces → Morning digest, when a workspace is followed or has My daily on.'));
+    empty.append(el('h3', '', 'No digest yet'), el('p', 'fs13', 'Generate now makes one from the followed workspaces. sf serve makes one at each time set on this page or in Workspaces → Morning digest, when a workspace is followed or has My daily on.'));
     body.append(empty);
   } else if (record === null) {
     body.append(el('p', 'muted fs13', dg.error === null ? 'Loading the digest…' : ''));
   } else {
     const tabs = el('div', 'edtabs dg-tabs');
     tabs.setAttribute('role', 'tablist');
-    const names: ReadonlyArray<[typeof dg.tab, string]> = [['repos', 'Repositories'], ['daily', 'My daily']];
+    const lang = dgLang(record);
+    const names: ReadonlyArray<[typeof dg.tab, string]> = [['brief', dgHead(record, DG_WORDS.brief, lang)], ['repos', dgHead(record, DG_WORDS.repos, lang)]];
     for (const [tab, text] of names) {
       const node = button(dg.tab === tab ? 'on' : '', text, { dgtab: tab });
       node.setAttribute('role', 'tab');
@@ -219,21 +231,31 @@ function renderDigest(): void {
     for (const note of record.notes ?? []) {
       body.append(el('p', 'notline', note));
     }
-    body.append(...(dg.tab === 'daily' ? dgDaily(record) : dgRepos(record)));
+    body.append(...(dg.tab === 'brief' ? dgBriefTab(record) : dgRepos(record, lang)));
   }
   const scroll = page.querySelector('.form2')?.scrollTop ?? 0;
   const wrap = el('div', 'form2');
   wrap.append(body);
+  // The times typed in the schedule line keep their focus over a redraw.
+  const active = document.activeElement;
+  const typing = active !== null && active !== undefined && page.contains(active) && hasDataset(active) && active.dataset.dg === 'times';
   keepFocus(page, () => page.replaceChildren(head, wrap));
+  if (typing) {
+    page.querySelector<HTMLElement>('[data-dg="times"]')?.focus();
+  }
   wrap.scrollTop = scroll;
 }
 
-function dgList(items: readonly string[], className = 'dg-items'): HTMLElement {
+function dgList(items: readonly DigestText[], lang: DgLang): HTMLElement {
   if (items.length === 0) {
     return el('p', 'muted fs13', 'None.');
   }
-  const list = el('ul', className);
-  list.append(...items.map((item) => el('li', '', item)));
+  const list = el('ul', 'dg-items');
+  list.append(...items.map((item) => {
+    const line = el('li');
+    line.append(...dgText(item, lang));
+    return line;
+  }));
   return list;
 }
 
@@ -243,12 +265,13 @@ function dgSection(title: string, ...content: Node[]): HTMLElement {
   return section;
 }
 
-// The Repositories tab: "One ticket across the app", then a card per followed workspace.
-function dgRepos(record: DigestRecord): HTMLElement[] {
+// The Repositories tab: "One ticket across the app", then a card per followed workspace; the
+// headings and the model's texts as the switch shows them.
+function dgRepos(record: DigestRecord, lang: DgLang): HTMLElement[] {
   const nodes: HTMLElement[] = [];
   const cross = record.output?.cross_repo ?? [];
   if (cross.length > 0) {
-    nodes.push(dgCross(cross, record));
+    nodes.push(dgCross(cross, record, lang));
   }
   const followed = record.workspaces.filter((workspace) => workspace.track);
   if (followed.length === 0) {
@@ -257,15 +280,23 @@ function dgRepos(record: DigestRecord): HTMLElement[] {
     nodes.push(empty);
   }
   for (const workspace of followed) {
-    nodes.push(dgRepoCard(workspace, record.output?.repos?.find((repo) => repo.name === workspace.name) ?? null, record));
+    nodes.push(dgRepoCard(workspace, record.output?.repos?.find((repo) => repo.name === workspace.name) ?? null, record, lang));
   }
   return nodes;
 }
 
-function dgCross(rows: readonly DigestCross[], record: DigestRecord): HTMLElement {
+// A table cell with a model text as the switch shows it; "—" without one.
+function dgCell(value: DigestText | undefined, lang: DgLang, className = ''): HTMLElement {
+  const filled = value !== undefined && dgFilled(value);
+  const cell = el('td', filled ? className : 'muted');
+  cell.append(...(filled ? dgText(value, lang) : [el('span', '', '—')]));
+  return cell;
+}
+
+function dgCross(rows: readonly DigestCross[], record: DigestRecord, lang: DgLang): HTMLElement {
   const names = record.workspaces.map((workspace) => workspace.name).filter((name) => rows.some((row) => Object.hasOwn(row.by_workspace ?? {}, name)));
   const card = el('div', 'card2 dg-cross');
-  card.append(el('h3', '', 'One ticket across the app'));
+  card.append(el('h3', '', dgHead(record, DG_WORDS.cross, lang)));
   const scroller = el('div', 'dg-scroll');
   const table = el('table', 'dgx');
   const headRow = el('tr');
@@ -277,7 +308,7 @@ function dgCross(rows: readonly DigestCross[], record: DigestRecord): HTMLElemen
     const line = el('tr');
     const ticket = el('td', 'mono');
     ticket.append(el('span', 'chipx', row.ticket));
-    line.append(ticket, ...names.map((name) => el('td', '', row.by_workspace?.[name] ?? '—')), el('td', row.for_me ? 'dg-forme' : 'muted', row.for_me || '—'));
+    line.append(ticket, ...names.map((name) => dgCell(row.by_workspace?.[name], lang)), dgCell(row.for_me, lang, 'dg-forme'));
     tbody.append(line);
   }
   table.append(thead, tbody);
@@ -288,7 +319,7 @@ function dgCross(rows: readonly DigestCross[], record: DigestRecord): HTMLElemen
 
 type DigestRepo = DigestOutput['repos'][number];
 
-function dgRepoCard(workspace: DigestWorkspace, repo: DigestRepo | null, record: DigestRecord): HTMLElement {
+function dgRepoCard(workspace: DigestWorkspace, repo: DigestRepo | null, record: DigestRecord, lang: DgLang): HTMLElement {
   const card = el('article', 'card2 dg-repo');
   card.dataset.ws = workspace.name;
   const title = el('h3', 'dg-title');
@@ -314,19 +345,21 @@ function dgRepoCard(workspace: DigestWorkspace, repo: DigestRepo | null, record:
   for (const note of git.notes ?? []) {
     card.append(el('p', 'notline', note));
   }
-  if (repo?.headline) {
-    card.append(el('p', 'dg-headline', repo.headline));
+  if (repo?.headline !== undefined && dgFilled(repo.headline)) {
+    const headline = el('div', 'dg-headline');
+    headline.append(...dgText(repo.headline, lang));
+    card.append(headline);
   }
   const impact = repo?.impact_on_me ?? [];
   if (impact.length > 0) {
     const box = el('div', 'dg-impact');
-    box.append(el('h4', '', 'Effect on my work'), dgList(impact));
+    box.append(el('h4', '', dgHead(record, DG_WORDS.effect, lang)), dgList(impact, lang));
     card.append(box);
   }
   // Landed: the last 24 hours of the period shown, the earlier ones folded away. Each index of
   // entries is one of git.landed.
   const recent = Date.parse(record.period.to) - 86400000;
-  const entries = git.landed.map((entry) => dgLanded(entry, repo));
+  const entries = git.landed.map((entry) => dgLanded(entry, repo, lang));
   const shown = entries.filter((_, index) => Date.parse(git.landed[index]?.date ?? '') >= recent);
   const earlier = entries.filter((_, index) => Date.parse(git.landed[index]?.date ?? '') < recent);
   const landed: HTMLElement[] = [];
@@ -345,13 +378,13 @@ function dgRepoCard(workspace: DigestWorkspace, repo: DigestRepo | null, record:
     fold.append(el('summary', '', `Earlier in the period (${earlier.length})`), list);
     landed.push(fold);
   }
-  card.append(dgSection(`Landed on ${git.main}`, ...landed));
+  card.append(dgSection(dgHead(record, dgLandedOn(git.main), lang), ...landed));
   const branches = git.branches.filter((branch) => !branch.landed);
-  card.append(dgSection('Live branches', ...(branches.length === 0 ? [el('p', 'muted fs13', 'No live branch.')] : [dgBranches(branches, repo)])));
+  card.append(dgSection(dgHead(record, DG_WORDS.live, lang), ...(branches.length === 0 ? [el('p', 'muted fs13', 'No live branch.')] : [dgBranches(branches, repo, lang)])));
   return card;
 }
 
-function dgLanded(entry: DigestLanded, repo: DigestRepo | null): HTMLElement {
+function dgLanded(entry: DigestLanded, repo: DigestRepo | null, lang: DgLang): HTMLElement {
   const item = el('li', entry.mine ? 'dg-entry mine' : 'dg-entry');
   const meta = el('div', 'dg-meta');
   meta.append(el('span', 'mono', dgTime(entry.date).slice(5)), el('span', 'dg-who', entry.author));
@@ -362,8 +395,8 @@ function dgLanded(entry: DigestLanded, repo: DigestRepo | null): HTMLElement {
   if (entry.ticket) {
     what.append(el('span', 'chipx', entry.ticket));
   }
-  const problem = repo?.merged?.find((merged) => merged.sha === entry.sha || entry.full_sha?.startsWith(merged.sha))?.problem;
-  what.append(el('span', '', problem ?? entry.subject));
+  const problem = dgProblem(repo, entry);
+  what.append(...(problem === undefined ? [el('span', '', entry.subject)] : dgText(problem, lang)));
   item.append(meta, what);
   if (problem !== undefined) {
     item.append(el('div', 'muted fs12 dg-subject', entry.subject));
@@ -374,7 +407,7 @@ function dgLanded(entry: DigestLanded, repo: DigestRepo | null): HTMLElement {
   return item;
 }
 
-function dgBranches(branches: readonly DigestBranch[], repo: DigestRepo | null): HTMLElement {
+function dgBranches(branches: readonly DigestBranch[], repo: DigestRepo | null, lang: DgLang): HTMLElement {
   const list = el('ul', 'dg-branches');
   for (const branch of branches) {
     const item = el('li', branch.mine ? 'dg-entry mine' : 'dg-entry');
@@ -398,7 +431,9 @@ function dgBranches(branches: readonly DigestBranch[], repo: DigestRepo | null):
     }
     item.append(meta);
     const what = repo?.branches?.find((entry) => entry.ref === branch.name)?.what;
-    item.append(el('div', 'dg-what', what ?? branch.subject));
+    const line = el('div', 'dg-what');
+    line.append(...(what === undefined ? [el('span', '', branch.subject)] : dgText(what, lang)));
+    item.append(line);
     const overlap = branch.overlap ?? [];
     if (branch.mine && overlap.length > 0) {
       item.append(el('div', 'fs12 dg-overlap', `Shares with main: ${overlap.join(', ')}`));
@@ -406,73 +441,6 @@ function dgBranches(branches: readonly DigestBranch[], repo: DigestRepo | null):
     list.append(item);
   }
   return list;
-}
-
-// The daily's sections with items (no empty one, on the card or in Copy), in Bulgarian (language bulgarian, bg or
-// български, any case) or English: "Yesterday" when the span starts the day before the digest (local dates) or is unknown, else "Since <weekday>".
-function dailyParts(record: DigestRecord, daily: DigestDaily): Array<[string, readonly string[]]> {
-  const bg = ['bulgarian', 'bg', 'български'].includes(String(record.language ?? '').trim().toLowerCase());
-  const from = new Date(record.daily_days?.yesterday?.from ?? Number.NaN);
-  const start = new Date(record.started_at);
-  const before = new Date(start.getFullYear(), start.getMonth(), start.getDate() - 1);
-  const since = Number.isNaN(from.getTime() - start.getTime()) || from.toDateString() === before.toDateString() ? null : new Intl.DateTimeFormat(bg ? 'bg' : 'en', { weekday: 'long' }).format(from);
-  const titles = bg ? [since === null ? 'Вчера' : `От ${since}`, 'Проблеми', 'План', 'Днес'] : [since === null ? 'Yesterday' : `Since ${since}`, 'Problems', 'Plan', 'Today'];
-  return [daily.yesterday, daily.problems, daily.plan, daily.next].flatMap((items, index): Array<[string, readonly string[]]> => (items.length === 0 ? [] : [[titles[index]!, items]]));
-}
-
-// My daily: a card per app, its sections with items, the commits it was made from and Copy.
-function dgDaily(record: DigestRecord): HTMLElement[] {
-  const sources = record.daily_sources ?? [];
-  const dailies: DigestDaily[] = record.output?.dailies ?? sources.map((source) => ({ app: source.app, workspaces: source.workspaces, yesterday: [], problems: [], plan: [], next: [] }));
-  if (dailies.length === 0) {
-    const empty = el('div', 'card2 dg-empty');
-    empty.append(el('p', 'fs13', 'No daily in this digest: no workspace has My daily on (Workspaces → Edit), or you have no commits or open branches there in the two days.'));
-    return [empty];
-  }
-  return dailies.map((daily) => {
-    const card = el('article', 'card2 dg-daily');
-    card.dataset.app = daily.app;
-    const title = el('h3', 'dg-title');
-    title.append(el('span', 'dg-name', daily.app), ...daily.workspaces.map((name) => wsChip(name)));
-    const parts = dailyParts(record, daily);
-    card.append(title, ...parts.map(([heading, items]) => dgSection(heading, dgList(items))));
-    const commits = sources.find((source) => source.app === daily.app)?.commits ?? [];
-    const fold = el('details', 'dg-fold');
-    const list = el('ul', 'dg-commits');
-    list.append(...commits.map((commit) => {
-      const item = el('li', 'fs12');
-      item.append(el('span', 'mono', commit.sha), document.createTextNode(` ${commit.subject} `), el('span', 'muted', `${commit.workspace} · ${commit.ref} · ${dgTime(commit.date).slice(5)}`));
-      return item;
-    }));
-    fold.append(el('summary', '', `The commits it was made from (${commits.length})`), list);
-    card.append(fold);
-    const row = el('div', 'dg-copyrow');
-    const copy = button('btn small', 'Copy', { dg: 'copy' });
-    copy.addEventListener('click', () => void copyDaily(daily.app, parts));
-    row.append(copy);
-    const copied = dg.copied.get(daily.app);
-    if (copied !== undefined) {
-      row.append(el('span', copied.ok ? 'muted fs12' : 'err-text fs12', copied.text));
-    }
-    card.append(row);
-    return card;
-  });
-}
-
-// The daily as plain text: each heading as on the page ("Yesterday:", "Problems:"…), with "- " items.
-const dailyText = (parts: ReadonlyArray<[string, readonly string[]]>): string => parts.flatMap(([heading, items]) => [`${heading}:`, ...items.map((item) => `- ${item}`)]).join('\n');
-
-async function copyDaily(app: string, parts: ReadonlyArray<[string, readonly string[]]>): Promise<void> {
-  try {
-    if (typeof navigator.clipboard?.writeText !== 'function') {
-      throw new Error('the browser gives no clipboard here');
-    }
-    await navigator.clipboard.writeText(dailyText(parts));
-    dg.copied.set(app, { ok: true, text: 'Copied.' });
-  } catch (error) {
-    dg.copied.set(app, { ok: false, text: `Copy failed: ${errorMessage(error)}` });
-  }
-  renderDigest();
 }
 
 // ---------- The Stats page ----------

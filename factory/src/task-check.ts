@@ -26,6 +26,7 @@ import { inTmpRoot, TMP_REFUSAL, tmpRoots } from './host-tmp.js';
 import { Redactor } from './redact.js';
 import { runGit } from './git.js';
 import { resolveTarget } from './mr.js';
+import { norms } from './norms.js';
 import { checkPrompt } from './prompts.js';
 import type { Workspace } from './registry.js';
 import { runStructuredSession, SEVERITIES, SEVERITY_DEFINITIONS, type Severity } from './review.js';
@@ -33,6 +34,7 @@ import { collectRules } from './rules-docs.js';
 import { matchesGlob, scopeOf } from './rules.js';
 import { absoluteRule, pathDenials, prepareTaskChecksDir, TASK_CHECK_DIR_UNSAFE } from './sandbox-denials.js';
 import { roleSkillBlocks, type SkillNames } from './skills.js';
+import { sliceFindings } from './slices.js';
 import { ARCHIVE_DIR, checkNeed, isDraft, mayTouch, parseFrontMatter, readTask, TASK_DIR, taskScope, TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
 import { addDetachedWorktree, removeWorktree } from './worktree.js';
 
@@ -112,11 +114,13 @@ export function scopeFindings(task: string, files: CheckOutput['files'], given: 
 }
 
 // The output as the factory keeps it: a contradiction is always a blocker, the scope differences
-// are added, and the verdict is the rule's.
-export function settleCheck(task: string, output: CheckOutput): CheckOutput {
+// and the slice findings (src/slices.ts; maxFiles: the norm's slice.change_max_files) are added,
+// and the verdict is the rule's.
+export function settleCheck(task: string, output: CheckOutput, maxFiles?: number): CheckOutput {
   const findings = [
     ...output.findings.map((item) => (item.kind === 'contradiction' ? { ...item, severity: 'blocker' as const } : item)),
     ...scopeFindings(task, output.files, output.findings),
+    ...sliceFindings(task, output.files, maxFiles),
   ];
   return { paraphrase: output.paraphrase, findings, files: output.files, verdict: checkVerdict(findings) };
 }
@@ -668,7 +672,9 @@ export async function runTaskCheck(workspace: Workspace, ticket: string, task: s
     if (!outcome.ok) {
       return { ...base, status: 'failed', output: null, error: redactor.failure(outcome.message), cost_usd: null };
     }
-    return { ...base, status: 'checked', output: settleCheck(task, outcome.output), error: null, cost_usd: outcome.costUsd };
+    // norms never throws: a bad or missing norms.json is the defaults.
+    const maxFiles = (await norms(workspace.name, options.configDir)).norms.slice.change_max_files;
+    return { ...base, status: 'checked', output: settleCheck(task, outcome.output, maxFiles), error: null, cost_usd: outcome.costUsd };
   } finally {
     await checkout.remove();
   }

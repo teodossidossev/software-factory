@@ -14,7 +14,7 @@ import { type FakeElement, loadPage } from './support/fake-dom.js';
 import { newEnv, newRepo, putTask } from './support/harness.js';
 
 const job = (ticket: string, state: Job['state']): Job => ({
-  workspace: 'app', ticket, branch: `${ticket}-x`, base: 'main', continues: null, base_commit: null, target_commit: null, worktree: null, prepared_commit: null,
+  workspace: 'app', ticket, branch: `${ticket}-x`, base: 'main', continues: null, builds_on: null, builds_on_commit: null,base_commit: null, target_commit: null, worktree: null, prepared_commit: null,
   mr_attempts: 0, mr_conflict_turn: false, fixes: 0, gate_fixes: 0, gate_tokens: 0, state, iteration: 0, session_id: null, mr: null, created_at: '2026-11-01T10:00:00.000Z', updated_at: '2026-11-01T10:00:00.000Z',
 });
 
@@ -144,21 +144,29 @@ test('dashboard (SF-103): workspace-edit and digest-settings are POST only with 
     for (const body of bad) {
       assert.deepEqual(error(await act(base, 'api/workspaces/app/edit', body)), { status: 400, code: 'invalid_body' }, JSON.stringify(body));
     }
-    for (const body of [{}, { at: '08:00', weekdays_only: true }, { at: '08:00', weekdays_only: 'yes', language: 'English' }, { at: '08:00', weekdays_only: true, language: 'English', model: 'opus' }]) {
+    for (const body of [
+      {}, { at: '08:00' }, { at: '08:00', weekdays_only: true }, { times: ['08:00'], weekdays_only: 'yes', language: 'English' }, { times: ['08:00'], weekdays_only: true, language: 'English', model: 'opus' },
+      { times: '08:00' }, { times: [8] }, { times: null }, [],
+    ]) {
       assert.deepEqual(error(await act(base, 'api/digest-settings', body)), { status: 400, code: 'invalid_body' }, JSON.stringify(body));
     }
     assert.deepEqual(setup.calls, []);
 
     const stream = await openStream(new URL('api/stream', base));
     const first = await stream.next('workspaces');
-    assert.deepEqual([first.handoff_default, first.digest], ['checkout', { at: '08:00', weekdays_only: true, language: 'English' }]);
+    assert.deepEqual([first.handoff_default, first.digest], ['checkout', { times: ['08:00'], weekdays_only: true, language: 'English' }]);
     const edited = JSON.parse((await act(base, 'api/workspaces/app/edit', edit)).body).result;
     assert.deepEqual([edited.app, edited.description, edited.digest], ['shop', 'The backend.', { track: true, my_work: false }]);
     assert.deepEqual(setup.calls.at(-1), ['editWorkspace', 'app', edit]);
     await stream.next('workspaces');
-    const settings = { at: '07:30', weekdays_only: false, language: 'Deutsch' };
+    const settings = { times: ['07:30', '12:00'], weekdays_only: false, language: 'Deutsch' };
     assert.deepEqual(JSON.parse((await act(base, 'api/digest-settings', settings)).body).result, settings);
     assert.deepEqual(setup.calls.at(-1), ['saveDigestSettings', settings]);
+    await stream.next('workspaces');
+    // Only times: it reaches saveDigestSettings as given.
+    const times = { times: ['07:30', '12:00'] };
+    assert.deepEqual(JSON.parse((await act(base, 'api/digest-settings', times)).body).result, { times: ['07:30', '12:00'], weekdays_only: true, language: 'English' });
+    assert.deepEqual(setup.calls.at(-1), ['saveDigestSettings', times]);
     await stream.next('workspaces');
     for (const [code, status] of [['workspace_busy', 409], ['workspace_invalid', 400], ['workspace_not_found', 404]] as const) {
       setup.answer = new FactoryError(code, `The ${code} message.`);

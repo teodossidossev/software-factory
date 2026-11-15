@@ -137,6 +137,10 @@ const STOPS = {
     reason: 'Tests could not run', button: (job: JobRow) => (retryOn(job) ? 'Retry' : 'Decide'),
     sentence: (job: JobRow) => `The workspace's tests could not run${said(job)}. Fix it on this machine and Retry, or accept without tests.`,
   },
+  builds_on_not_ready: {
+    reason: 'The part it builds on is being changed', button: (job: JobRow) => (retryOn(job) ? 'Retry' : 'Tell it to go on'),
+    sentence: (job: JobRow) => `The MR preparation waits for the part this one builds on${said(job)}.`,
+  },
   max_turns: {
     reason: 'Turn limit reached', button: () => 'Tell it to go on',
     sentence: (job: JobRow) => `The Implementer used all its turns on iteration ${shownIteration(job)}. Tell it to go on.`,

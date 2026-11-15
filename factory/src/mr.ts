@@ -458,7 +458,10 @@ export async function abortRebase(cwd: string): Promise<boolean> {
 // index start at baseCommit (`reset --mixed`, which leaves the working tree alone), undoing a
 // commit already on the branch (a fix after Clean, a retry) and anything staged before, so the
 // result is always one commit. Identity and signing come from the user's Git configuration.
-export async function commitAndRebase(cwd: string, input: { baseCommit: string; targetCommit: string; mrText: string }): Promise<Prepared> {
+// onlyOwn (a job that builds on another ticket, src/builds-on.ts): only that one commit is replayed
+// onto targetCommit (`rebase --onto <targetCommit> <baseCommit>`), so the other ticket's earlier
+// prepared commit under it, which its new one does not contain, is left behind.
+export async function commitAndRebase(cwd: string, input: { baseCommit: string; targetCommit: string; mrText: string; onlyOwn?: boolean }): Promise<Prepared> {
   const { baseCommit, targetCommit, mrText } = input;
   await factoryGitOk(cwd, ['reset', '-q', '--mixed', baseCommit]);
   for (const chunk of chunks(await commitPaths(cwd, baseCommit))) {
@@ -489,7 +492,7 @@ export async function commitAndRebase(cwd: string, input: { baseCommit: string; 
   if ((await factoryGit(cwd, ['merge-base', '--is-ancestor', targetCommit, 'HEAD'])).code === 0) {
     return { kind: 'ready' };
   }
-  const rebased = await factoryGit(cwd, ['rebase', '-q', targetCommit]);
+  const rebased = await factoryGit(cwd, input.onlyOwn === true ? ['rebase', '-q', '--onto', targetCommit, baseCommit] : ['rebase', '-q', targetCommit]);
   if (rebased.code === 0) {
     return { kind: 'ready' };
   }

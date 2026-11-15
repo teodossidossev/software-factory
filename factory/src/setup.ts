@@ -16,7 +16,7 @@ import { type Job, type JobState, type JobStore, TERMINAL_STATES } from './jobs.
 import { derivedDescription } from './digest.js';
 import { mergedOnTarget } from './digest-jobs.js';
 import {
-  checkWorkspaceText, DIGEST_TIME_PATTERN, type DigestSettings, digestSettings, editedEntry, type HandoffMode, loadRegistry, MAX_LANGUAGE_CHARS, type Registry, resolveWorkspace, saveRegistry, verifyCheckout,
+  checkWorkspaceText, type DigestSettings, digestSettings, digestTimesSchema, editedEntry, type HandoffMode, loadRegistry, MAX_DIGEST_TIMES, MAX_LANGUAGE_CHARS, type Registry, resolveWorkspace, saveRegistry, verifyCheckout,
   type Workspace, workspaceApp, type WorkspaceColor, workspaceColor, workspaceDigest, type WorkspaceEdit, type WorkspaceEntry, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN,
 } from './registry.js';
 import { ARCHIVE_DIR, DRAFT_MARKER, isDraft, landsAfter, MAX_TASK_BYTES, parseFrontMatter, readTask, TASK_DIR, taskSha256, TICKET_DESCRIPTION, TICKET_PATTERN, type TicketRef, writeTask, type WriteTaskResult } from './task-file.js';
@@ -50,7 +50,7 @@ export interface WorkspaceRow {
 }
 
 // The workspaces payload's settings: the hand-over default (SF_HANDOFF) and the morning
-// digest's time, weekdays only and language (its model only in workspaces.json).
+// digest's times, weekdays only and language (its model only in workspaces.json).
 export interface WorkspaceSettings {
   handoff_default: HandoffMode;
   digest: Omit<DigestSettings, 'model'>;
@@ -185,6 +185,60 @@ export async function branchMerged(checkout: string, job: Omit<JobFacts, 'events
   } catch { // Git fails: not taken as merged
     return undefined;
   }
+}
+
+// The newest archived job of the ticket (JobStore.archive's <ticket>.<stamp> directories), or
+// undefined.
+async function lastArchivedJob(jobs: JobStore, ref: TicketRef): Promise<JobFacts | undefined> {
+  let names: string[];
+  try {
+    names = await readdir(join(jobs.root, ref.workspace));
+  } catch { // no job directory of the workspace: no archived job
+    return undefined;
+  }
+  const prefix = `${ref.ticket}.`;
+  const archived = names.filter((name) => name.startsWith(prefix) && ARCHIVED_JOB_STAMP.test(name.slice(prefix.length))).sort();
+  for (const name of archived.reverse()) {
+    try {
+      const data = JSON.parse(await readFile(join(jobs.root, ref.workspace, name, 'job.json'), 'utf8')) as Record<string, unknown>;
+      const mr = data.mr as Record<string, unknown> | null | undefined;
+      if (data.workspace === ref.workspace && data.ticket === ref.ticket && typeof data.state === 'string' && typeof data.branch === 'string' && typeof data.base === 'string') {
+        return {
+          state: data.state, branch: data.branch, base: data.base, prepared_commit: typeof data.prepared_commit === 'string' ? data.prepared_commit : null,
+          mr: mr !== null && typeof mr === 'object' && typeof mr.state === 'string' ? { state: mr.state } : null, eventsPath: jobs.eventsPath(ref.workspace, name),
+        };
+      }
+    } catch { // not a readable job record: the one before it
+    }
+  }
+  return undefined;
+}
+
+// Whether a pushed job is merged by what the factory recorded: a job with merged_on_target is
+// (written by the pass of merged jobs, from its base or its Git host, and by Merged — archive);
+// else the merge request state the factory recorded decides when there is one (merged or not:
+// open and closed are not merged); undefined without either, when Git decides.
+async function recordedMerge(job: JobFacts): Promise<boolean | undefined> {
+  if (await mergedOnTarget(job.eventsPath)) {
+    return true;
+  }
+  return job.mr === null ? undefined : job.mr.state === 'merged';
+}
+
+// Whether the ticket is merged by the dependency rule (DependencyState's merged), asked now
+// without the merge check's cache: its last job (live or archived) is pushed and merged, by what
+// the factory recorded, else by Git in checkout (branchMerged). A live job in any other state
+// is not merged; a job record that cannot be read counts as none.
+export async function ticketMerged(jobs: JobStore, ref: TicketRef, checkout: string): Promise<boolean> {
+  const current = await jobs.read(ref.workspace, ref.ticket).catch(() => undefined);
+  if (current !== undefined && !TERMINAL_STATES.includes(current.state)) {
+    return false;
+  }
+  const last: JobFacts | undefined = current !== undefined ? { ...current, eventsPath: jobs.eventsPath(ref.workspace, ref.ticket) } : await lastArchivedJob(jobs, ref);
+  if (last?.state !== 'pushed') {
+    return false;
+  }
+  return (await recordedMerge(last)) ?? (await branchMerged(checkout, last)) !== undefined;
 }
 
 async function isFile(path: string): Promise<boolean> {
@@ -378,19 +432,26 @@ export class Setup {
     });
   }
 
-  // The morning digest's settings of the Setup: the time (HH:MM), weekdays only and the
-  // language; the model stays as workspaces.json has it.
-  saveDigestSettings(input: { at: string; weekdays_only: boolean; language: string }): Promise<WorkspaceSettings['digest']> {
+  // The morning digest's settings of the Setup and the Digest page: the times (1 to 4 distinct
+  // HH:MM, written sorted, replacing a stored `at`), weekdays only and the language; only the keys
+  // given change, and the model stays as workspaces.json has it.
+  saveDigestSettings(input: { times?: string[]; weekdays_only?: boolean; language?: string }): Promise<WorkspaceSettings['digest']> {
     return this.#exclusive(async () => {
-      if (!DIGEST_TIME_PATTERN.test(input.at)) {
-        throw new FactoryError('invalid_digest_settings', 'The time must be HH:MM, from 00:00 to 23:59.');
+      if (input.times !== undefined && !digestTimesSchema.safeParse(input.times).success) {
+        throw new FactoryError('invalid_digest_settings', `1 to ${MAX_DIGEST_TIMES} times, each HH:MM from 00:00 to 23:59, no time twice.`);
       }
-      const language = input.language.trim();
-      if (language === '' || language.length > MAX_LANGUAGE_CHARS) {
+      const language = input.language?.trim();
+      if (language !== undefined && (language === '' || language.length > MAX_LANGUAGE_CHARS)) {
         throw new FactoryError('invalid_digest_settings', `The language must be 1 to ${MAX_LANGUAGE_CHARS} characters.`);
       }
       const registry: Registry = await loadRegistry(this.#configDir);
-      registry.digest = { ...registry.digest, at: input.at, weekdays_only: input.weekdays_only, language };
+      // A save that writes times removes a stored at.
+      const { at: _at, ...withoutAt } = registry.digest ?? {};
+      registry.digest = {
+        ...(input.times !== undefined ? { ...withoutAt, times: [...input.times].sort() } : registry.digest),
+        ...(input.weekdays_only !== undefined ? { weekdays_only: input.weekdays_only } : {}),
+        ...(language !== undefined ? { language } : {}),
+      };
       await saveRegistry(registry, this.#configDir);
       const { model: _model, ...digest } = digestSettings(registry);
       return digest;
@@ -544,43 +605,16 @@ export class Setup {
     return active || archived ? 'planned' : 'missing';
   }
 
-  // The newest archived job of the ticket (JobStore.archive's <ticket>.<stamp> directories), or
-  // undefined.
-  async #lastArchivedJob(ref: TicketRef): Promise<JobFacts | undefined> {
-    let names: string[];
-    try {
-      names = await readdir(join(this.#jobs.root, ref.workspace));
-    } catch { // no job directory of the workspace: no archived job
-      return undefined;
-    }
-    const prefix = `${ref.ticket}.`;
-    const archived = names.filter((name) => name.startsWith(prefix) && ARCHIVED_JOB_STAMP.test(name.slice(prefix.length))).sort();
-    for (const name of archived.reverse()) {
-      try {
-        const data = JSON.parse(await readFile(join(this.#jobs.root, ref.workspace, name, 'job.json'), 'utf8')) as Record<string, unknown>;
-        const mr = data.mr as Record<string, unknown> | null | undefined;
-        if (data.workspace === ref.workspace && data.ticket === ref.ticket && typeof data.state === 'string' && typeof data.branch === 'string' && typeof data.base === 'string') {
-          return {
-            state: data.state, branch: data.branch, base: data.base, prepared_commit: typeof data.prepared_commit === 'string' ? data.prepared_commit : null,
-            mr: mr !== null && typeof mr === 'object' && typeof mr.state === 'string' ? { state: mr.state } : null, eventsPath: this.#jobs.eventsPath(ref.workspace, name),
-          };
-        }
-      } catch { // not a readable job record: the one before it
-      }
-    }
-    return undefined;
+  #lastArchivedJob(ref: TicketRef): Promise<JobFacts | undefined> {
+    return lastArchivedJob(this.#jobs, ref);
   }
 
-  // Merged: a job with merged_on_target is (written by the pass of merged jobs, from its base or its Git
-  // host, and by Merged — archive); else the merge request
-  // state the factory recorded decides when there is one (merged or not: open and closed are not
-  // merged); only without one does Git decide, its answer kept MERGE_CHECK_TTL_MS per ticket (fresh: asked again).
+  // Merged by recordedMerge; only without a recorded answer does Git decide, its answer kept
+  // MERGE_CHECK_TTL_MS per ticket (fresh: asked again).
   async #merged(ref: TicketRef, job: JobFacts, entry: WorkspaceEntry | undefined, fresh: boolean): Promise<boolean> {
-    if (await mergedOnTarget(job.eventsPath)) {
-      return true;
-    }
-    if (job.mr !== null) {
-      return job.mr.state === 'merged';
+    const recorded = await recordedMerge(job);
+    if (recorded !== undefined) {
+      return recorded;
     }
     if (entry === undefined) {
       return false;

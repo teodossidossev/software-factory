@@ -73,7 +73,7 @@ async function digest(state: string, started: string, cost: number | null, error
   const stampText = started.replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
   const stored = await new DigestStore(state).write({
     trigger: 'scheduled', started_at: started, ended_at: started, period: { from: started, to: started }, daily_days: { yesterday: { from: started, to: started }, today: { from: started, to: started } },
-    model: 'm', language: 'en', workspaces: [], daily_sources: [], output: null, cost_usd: cost, error, notes: [], counts: { landed: 0, live_branches: 0, impact: 0 },
+    model: 'm', language: 'en', workspaces: [], daily_sources: [], output: null, cost_usd: cost, error, notes: [], counts: { landed: 0, live_branches: 0, impact: 0 }, in_progress: [],
   }, `${stampText}-scheduled`);
   return stored.id;
 }

@@ -41,7 +41,7 @@ function checkRecord(workspace: string, ticket: string, content: string, verdict
 function jobOf(workspace: string, ticket: string, state: JobState): Job {
   const at = new Date().toISOString();
   return {
-    workspace, ticket, branch: `${ticket}-x`, base: 'main', continues: null, base_commit: null, target_commit: null, worktree: null, prepared_commit: null,
+    workspace, ticket, branch: `${ticket}-x`, base: 'main', continues: null, builds_on: null, builds_on_commit: null,base_commit: null, target_commit: null, worktree: null, prepared_commit: null,
     mr_attempts: 0, mr_conflict_turn: false, fixes: 0, gate_fixes: 0, gate_tokens: 0, state, iteration: 0, session_id: null, mr: null, created_at: at, updated_at: at,
   };
 }

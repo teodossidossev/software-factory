@@ -7,6 +7,7 @@ import { type ImageRef, jobAttachment, type ResolvedImage, resolveTaskImages, wr
 import { FactoryError } from '../errors.js';
 import { runGit } from '../git.js';
 import { claudeReviewDecision } from '../config.js';
+import { buildsOnPoint, buildsOnTarget, notReadyAtStart } from '../builds-on.js';
 import { startBranch, taskContinues } from '../continues.js';
 import { checkTransition, claudeReviews, type Handover, type Job, type JobState, now, RESTARTABLE_STATES, runningJobs, TERMINAL_STATES } from '../jobs.js';
 import { resolveTarget } from '../mr.js';
@@ -19,7 +20,7 @@ import { actedVerdict } from '../review.js';
 import { Runners } from '../runner.js';
 import { jobSkills, recordSkills } from '../skills.js';
 import { withoutDropped } from '../stops.js';
-import { isDraft, parseFrontMatter, readTask, TASK_DIR, type TaskReview, taskReview, taskSha256, TICKET_DESCRIPTION, TICKET_PATTERN } from '../task-file.js';
+import { isDraft, parseFrontMatter, readTask, TASK_DIR, taskBuildsOn, type TaskReview, taskReview, taskSha256, TICKET_DESCRIPTION, TICKET_PATTERN } from '../task-file.js';
 import { addWorktree, deleteBranch, removeWorktree } from '../worktree.js';
 import type { JobStorePort, LockPort, RunnerPort, SettingsPort } from './ports.js';
 import { checkNotInCheckout } from './errors.js';
@@ -32,10 +33,30 @@ interface Claimed {
   ticket: string;
   base: string;
   continues: string | null;
+  buildsOn: BuildsOnStart;
   branch: string;
   worktree: string;
   // The images the Task file refers to, read when the start was accepted.
   images: ResolvedImage[];
+}
+
+// The ticket a job builds on (src/builds-on.ts) and the prepared commit of its job the job starts
+// from; commit null when that ticket is merged (the job starts from its base); ticket null without
+// builds_on.
+interface BuildsOnStart {
+  ticket: string | null;
+  commit: string | null;
+}
+
+// What a start reads from the Task file: the job's base, continues, builds_on and branch, its
+// review key, and the Task text they were read from.
+interface Plan {
+  base: string;
+  continues: string | null;
+  buildsOn: BuildsOnStart;
+  branch: string;
+  content: string;
+  review: TaskReview | undefined;
 }
 
 // The files sf restart --keep-files keeps: their paths relative to the worktree, saved
@@ -265,15 +286,27 @@ export class StartPart {
     return this.#launch(claimed, { queued });
   }
 
-  // The base, continues and branch of a job from the Task file (readTask validates it, continues
-  // too: invalid_content), which must not be a draft, and the Task text they were read from.
-  async #plan(workspace: Workspace, ticket: string): Promise<{ base: string; continues: string | null; branch: string; content: string; review: TaskReview | undefined }> {
+  // The plan of a job from the Task file (readTask validates it, continues and builds_on too:
+  // invalid_content), which must not be a draft. A job that builds on a ticket not merged starts from
+  // its job's prepared commit; refused (builds_on_not_ready) when it has none to build on.
+  async #plan(workspace: Workspace, ticket: string): Promise<Plan> {
     const content = await readTask(workspace, ticket);
     if (isDraft(content)) {
       throw new FactoryError('task_draft', `${TASK_DIR}/${ticket}.md is still the skeleton: the Context owner writes the Task with write_task first, then the user starts the job.`);
     }
     const fields = parseFrontMatter(content)!;
-    return { base: fields.get('base')!, continues: taskContinues(fields), branch: branchName(ticket, fields.get('title')!), content, review: taskReview(fields) };
+    const buildsOn = taskBuildsOn(fields);
+    let commit: string | null = null;
+    if (buildsOn !== null) {
+      const point = await buildsOnPoint(this.#store.jobs, workspace.name, workspace.workCheckout, buildsOn);
+      if (point === undefined) {
+        throw notReadyAtStart(ticket, buildsOn);
+      }
+      commit = point === 'merged' ? null : point.commit;
+    }
+    return {
+      base: fields.get('base')!, continues: taskContinues(fields), buildsOn: { ticket: buildsOn, commit }, branch: branchName(ticket, fields.get('title')!), content, review: taskReview(fields),
+    };
   }
 
   // The run queue's limit: the running jobs of every workspace (RUNNING_STATES), the
@@ -308,13 +341,13 @@ export class StartPart {
   }
 
   // Writes the record of a new job in starting (the ticket's directory must be free); under the lock. Decided here, once: the job's Claude review (claude_review, its review_setup event) and its skills (synced, its skills event).
-  async #claim(workspace: Workspace, ticket: string, plan: { base: string; continues: string | null; branch: string; review: TaskReview | undefined }, images: ResolvedImage[]): Promise<Claimed> {
-    const { base, continues, branch } = plan;
+  async #claim(workspace: Workspace, ticket: string, plan: Plan, images: ResolvedImage[]): Promise<Claimed> {
+    const { base, continues, buildsOn, branch } = plan;
     const created = now();
     const worktree = this.#peers.handover.worktreePath(workspace.name, ticket);
     const setup = claudeReviewDecision(this.#settings.config, plan.review);
     const job: Job = {
-      workspace: workspace.name, ticket, branch, base, continues, base_commit: null, state: 'starting', worktree, prepared_commit: null,
+      workspace: workspace.name, ticket, branch, base, continues, builds_on: buildsOn.ticket, builds_on_commit: buildsOn.commit, base_commit: null, state: 'starting', worktree, prepared_commit: null,
       iteration: 0, fixes: 0, gate_fixes: 0, gate_tokens: 0, session_id: null, mr: null, target_commit: null, mr_attempts: 0, mr_conflict_turn: false, created_at: created, updated_at: created, claude_review: setup.claude_review,
     };
     checkTransition(null, 'starting', 'create');
@@ -322,7 +355,7 @@ export class StartPart {
     await this.#store.jobs.appendEvent(workspace.name, ticket, { ts: created, iteration: 0, state: { from: null, to: 'starting' } });
     await this.#store.jobs.appendEvent(workspace.name, ticket, { ts: created, iteration: 0, type: 'review_setup', ...setup });
     await recordSkills(this.#settings.config.stateDir, (record) => this.#store.jobs.appendEvent(workspace.name, ticket, { ts: created, iteration: 0, ...record }), { job: `${workspace.name}/${ticket}`, log: join(this.#store.jobs.dir(workspace.name, ticket), 'runner.log') });
-    return { workspace, ticket, base, continues, branch, worktree, images };
+    return { workspace, ticket, base, continues, buildsOn, branch, worktree, images };
   }
 
   // The claimed job's worktree, then its first turn. kept (sf restart --keep-files): the
@@ -332,11 +365,11 @@ export class StartPart {
   // fetch of the start branch that fails (fetch_failed, before any branch or worktree exists)
   // removes the record claimed, so no job is left and the queue tries again (src/queue.ts).
   async #launch(claimed: Claimed, { kept, queued = false }: { kept?: Kept; queued?: boolean } = {}): Promise<{ branch: string; state: JobState; check_after_minutes: number; worktree: string }> {
-    const { workspace, ticket, base, continues, branch, worktree } = claimed;
+    const { workspace, ticket, base, continues, buildsOn, branch, worktree } = claimed;
     const keptNote = kept !== undefined && kept.paths.length > 0 ? ` The files kept from the previous job are in ${kept.dir}.` : '';
     let baseCommit: string;
     try {
-      baseCommit = await this.#locks.gitLocked(workspace.name, () => this.#createWorktree(workspace.workCheckout, base, continues, branch, worktree));
+      baseCommit = await this.#locks.gitLocked(workspace.name, () => this.#createWorktree(workspace.workCheckout, base, continues, buildsOn.commit, branch, worktree));
     } catch (error) {
       const failure = error instanceof FactoryError ? error : new FactoryError('start_failed', 'Git failed while creating the worktree.');
       await this.#locks.locked(async () => {
@@ -406,8 +439,10 @@ export class StartPart {
   }
 
   // Checks the names, fetches the start branch (continues, else the base) when origin exists,
-  // creates the branch and its worktree from it and returns the base commit.
-  async #createWorktree(checkout: string, base: string, continues: string | null, branch: string, path: string): Promise<string> {
+  // creates the branch and its worktree from it and returns the base commit. With buildsOnCommit
+  // (the prepared commit of the ticket the job builds on) the branch is created at that commit of
+  // the checkout instead, and nothing is fetched.
+  async #createWorktree(checkout: string, base: string, continues: string | null, buildsOnCommit: string | null, branch: string, path: string): Promise<string> {
     const valid = async (name: string): Promise<boolean> => !name.startsWith('-') && (await runGit(checkout, ['check-ref-format', '--branch', name])).code === 0;
     if (!(await valid(base))) {
       throw new FactoryError('base_not_found', `The base "${base}" is not a valid branch name.`);
@@ -415,7 +450,7 @@ export class StartPart {
     if (!(await valid(branch))) {
       throw new FactoryError('invalid_ticket', `"${branch}" is not a valid branch name.`);
     }
-    const { ref, commit } = await resolveTarget(checkout, await startBranch(checkout, base, continues));
+    const { ref, commit } = buildsOnCommit !== null ? await buildsOnTarget(checkout, { ref: buildsOnCommit, commit: buildsOnCommit }) : await resolveTarget(checkout, await startBranch(checkout, base, continues));
     if ((await runGit(checkout, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`])).code === 0) {
       throw new FactoryError('branch_exists', `The branch ${branch} already exists in the checkout.`);
     }

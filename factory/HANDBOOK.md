@@ -172,15 +172,23 @@ Rules:
   under about 50 lines joins its neighbour.
 - Tests go with the code they test, never in a slice of their own (step 2's pinning test is the
   exception).
-- Prefer slices that start from the base branch and can merge in any order. Set `base:` to the
-  previous slice's branch only when a slice needs its code, and `lands_after` only when it must
-  not merge first.
+- Prefer slices that start from the base branch and can merge in any order. Give a slice
+  `builds_on:` the previous slice's ticket only when it needs that slice's code, and `lands_after`
+  only when it must not merge first.
 - One huge slice left over means the switch is still all or nothing: go back to step 3 and build
   beside the old.
 - When a solution cannot be cut this way (a change that is only safe whole), say why in the Task
-  and get the user's agreement.
+  under `## Why whole` and get the user's agreement.
 - Each Task says in its first lines which slice it is, "Slice 2 of 5 (change): ...", and lists
   its siblings with one line each, so the reviewer of one slice sees the whole cut.
+
+Parts that depend on each other are built in a row with `builds_on` and submitted one at a time,
+each after the one before it is merged (the user's decision of 2026-11-14). Part 2 names part 1
+in `builds_on:`, part 3 names part 2, and every part keeps the branch its merge request targets
+as `base:`. The factory builds each part on the change of the part before it as that part's job
+left it, locally, with nothing pushed, so each part's Patch and reviews show its own change
+alone; it refuses to push a part before the part it builds on is merged, so a reviewer never sees
+a merge request whose base is not merged yet.
 
 ## Task file format
 
@@ -188,14 +196,18 @@ Rules:
 ---
 ticket: PROJ-123
 title: Short title of the subtask
-base: master          # branch to start from; a feature branch if this depends on unmerged work
+base: master          # branch to start from and the merge request's target; for a part that needs unmerged work, see builds_on
 continues: PROJ-100-csv   # optional: the branch of an open merge request this ticket adds to; base stays its target
+builds_on: PROJ-122   # optional: the ticket of this workspace whose unmerged change this part builds on; base stays the merge request's target
 may_touch: [package.json, .github/**]   # optional: sensitive paths or globs this ticket is expected to change
 scope: [src/export/**, test/export.test.ts, README.md]   # optional: every file this ticket is expected to create, modify or delete
 lands_after: [PROJ-120, web/WEB-7]   # optional: the tickets this one waits for; another workspace's as <workspace>/<ticket>
 check: required       # optional: required (always a Task check) or skip (never); without it only a Task that is not small is checked
 review: claude        # optional: claude (the Claude review, then the Codex gate) or codex (the gate alone); without it the user's SF_CLAUDE_REVIEW decides
 size: medium          # optional: small, medium or complex, your estimate; picks the job's lead-time target (any other value or none: medium)
+part_of: PROJ-100     # optional: the task this slice belongs to (a ticket name)
+slice: 2/5            # optional: this slice's number and the count, 1 <= N <= M <= 20
+kind: change          # optional: mechanical, preparation, change, switch or cleanup (Slicing a solution); none: change
 ---
 
 # PROJ-123: Short title
@@ -245,11 +257,28 @@ counts: the run queue then waits for it to be `ready`.
 keeps its title and description. `base:` stays the merge request's target. Refused when it equals
 `base`, is `main` or `master`, or is not a valid branch name.
 
+`builds_on:` names one ticket of the same workspace, not merged yet, whose change this part
+builds on (`## Slicing a solution`). While that ticket is not merged, the job starts from the
+commit that ticket's job prepared, once it is ready for review, handed over or pushed, and MR
+preparation moves this part onto that ticket's latest prepared commit; Approve is refused until
+that ticket is merged. Once it is merged, the job starts from `base` as any job. A queued
+ticket waits for it ("Waits for" on its card); a start by hand before that ticket has a prepared
+commit is refused. Refused when it names the ticket itself, is not a ticket key, or comes with
+`continues:`. `lands_after:` keeps its own meaning beside it.
+
 `review:` says who reviews the ticket's iterations. `review: claude` adds the Claude review before
 the Codex gate: give it to risky tickets (authentication, the sandbox, the state format, and
 product tickets the user names). `review: codex` has the gate alone even when the user set
 `SF_CLAUDE_REVIEW=always`. Without the key the user's setting decides (by default the gate alone).
 Any other value is ignored. It is read once, at Start.
+
+`part_of:`, `slice:` and `kind:` say which slice of a task the Task is (`## Slicing a solution`);
+with both `part_of` and `slice`, the merge request's `## Special things to note` begins "Slice N
+of M of <part_of>." A value that is not valid is ignored, and the Task check lists it as a nit.
+When the Task check expects more files than the workspace's norm of a change slice (10 by
+default, `slice.change_max_files` of `norms.json`) for a Task of kind `change` (or none) or
+`switch`, it adds an `overreach` major at "slice norm": cut the Task again. A Task that says
+under a `## Why whole` heading why it is only safe whole gets a nit instead.
 
 Coding rules reach the Implementer, the reviewers and the Task check without you: `AGENTS.md` and
 the Markdown files it links to, and the user's own rules files; reference them by path, never copy them into the Task.

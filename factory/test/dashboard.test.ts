@@ -90,7 +90,7 @@ test('dashboard: token, static files with the security headers, 404 and 405 with
     // board's Coordinator card, coordinator.js, right after board.js; SF-209: the merge request
     // row, mr-row.js, right before review-page.js; SF-211: point mode, pins.js, right before main.js;
     // SF-226: the home and the two main views, home.js, right after routing.js).
-    assert.deepEqual([...DASHBOARD_SCRIPTS], ['core.js', 'job-screens.js', 'job-page.js', 'header.js', 'board.js', 'coordinator.js', 'routing.js', 'home.js', 'ticket-page.js', 'reports.js', 'mr-row.js', 'review-page.js', 'setup.js', 'skills.js', 'health.js', 'pins.js', 'main.js']);
+    assert.deepEqual([...DASHBOARD_SCRIPTS], ['core.js', 'job-screens.js', 'job-page.js', 'header.js', 'board.js', 'coordinator.js', 'routing.js', 'home.js', 'ticket-page.js', 'reports.js', 'mr-row.js', 'review-page.js', 'digest-brief.js', 'setup.js', 'skills.js', 'health.js', 'pins.js', 'main.js']);
     // SF-136: every script of DASHBOARD_SCRIPTS is served as JavaScript, each with its own text (its
     // header names it); SF-137: none is longer than 2,500 lines.
     for (const file of DASHBOARD_SCRIPTS) {
@@ -1241,7 +1241,7 @@ test('dashboard (SF-079): the changes route lists the iterations and the files o
   await mkdir(state, { recursive: true });
   const jobs = new JobStore(state);
   const job: Job = {
-    workspace: 'web', ticket: 'W-1', branch: 'W-1-demo', base: 'main', continues: null, base_commit: base, target_commit: null,
+    workspace: 'web', ticket: 'W-1', branch: 'W-1-demo', base: 'main', continues: null, builds_on: null, builds_on_commit: null,base_commit: base, target_commit: null,
     worktree: null, prepared_commit: null, mr_attempts: 0, mr_conflict_turn: false, fixes: 1, gate_fixes: 0, gate_tokens: 0, state: 'awaiting_review', iteration: 2, session_id: 's1', mr: null,
     created_at: '2026-11-01T10:00:00.000Z', updated_at: '2026-11-01T10:05:00.000Z',
   };

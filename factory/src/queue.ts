@@ -15,6 +15,8 @@
 // With planCheck the scheduler starts a queued ticket only when the Task check of its current
 // Task file is ready or not needed, or its entry is forced (Start anyway);
 // otherwise the entry stays in place and its row says why.
+// A queued ticket with builds_on (src/builds-on.ts) also waits for the ticket it builds on: until
+// that ticket's job has a prepared commit to build on, or the ticket is merged.
 // A start that cannot fetch its base (fetch_failed: the network is gone) leaves no job (the start
 // removes the record it made) and puts its entry back in its place with retry_at and retries: the
 // entry is passed over until retry_at (5 minutes after the first failure, then 10, then every 15,
@@ -24,14 +26,16 @@ import { mkdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import * as z from 'zod/v4';
 import { writeFileAtomic } from './atomic.js';
+import { buildsOnCommit } from './builds-on.js';
 import { taskStartBranch } from './continues.js';
 import { FactoryError } from './errors.js';
 import type { Execution } from './execution.js';
 import { type Job, type JobStore, now, runningJobs, TERMINAL_STATES } from './jobs.js';
-import { limitResetNotification, type Notification, type NotifyModeOf, withNotifyMode } from './notify.js';
-import { type NotifyMode, resolveWorkspace, type Workspace, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN, workspaceNotifyMode } from './registry.js';
+import { limitResetNotification, type Notification, type NotifyModeOf } from './notify.js';
+import { fetchRetryNotification, RETRY_CODE, retryDelayMs, retryPending } from './queue-retry.js';
+import { resolveWorkspace, type Workspace, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN, workspaceNotifyMode } from './registry.js';
 import type { DependencyRow, Setup } from './setup.js';
-import { isDraft, landsAfter, parseFrontMatter, readTask, TASK_DIR, TICKET_DESCRIPTION, TICKET_PATTERN, type TicketRef } from './task-file.js';
+import { isDraft, landsAfter, parseFrontMatter, readTask, TASK_DIR, taskBuildsOn, TICKET_DESCRIPTION, TICKET_PATTERN, type TicketRef } from './task-file.js';
 
 export const QUEUE_FILE = 'queue.json';
 export const MIN_RUNNING = 1;
@@ -49,24 +53,6 @@ export const DEFAULT_ON_LIMIT: OnLimitRule = 'resume-then-queue';
 // The hold by hand that resume-only and wait leave after a reset.
 export const LIMIT_RESET_HOLD_REASON = 'usage limit reset; release the queue to go on';
 
-// The start error the queue tries again instead of failing: the base could not be fetched.
-export const RETRY_CODE = 'fetch_failed';
-// The wait before the next try of a start that could not fetch: 5 minutes after the first failure,
-// then 10, then 15 after every later one.
-const RETRY_MINUTES = [5, 10, 15] as const;
-
-// The wait in ms after the retries-th failed fetch (1-based).
-export function retryDelayMs(retries: number): number {
-  return RETRY_MINUTES[Math.min(Math.max(retries, 1), RETRY_MINUTES.length) - 1]! * 60_000;
-}
-
-// The one notification of a queued start that could not fetch, at its first failure, as the
-// workspace's notify setting has it (brief: ntfy gets "<workspace> · fetch_failed"; off: none).
-export function fetchRetryNotification(workspace: string, ticket: string, base: string, mode: NotifyMode): Notification | undefined {
-  const full: Notification = { title: `${ticket}: start failed`, body: `${ticket} could not fetch ${base}; the queue tries again`, priority: 'default', tags: 'warning' };
-  return withNotifyMode(full, mode, `${workspace} · ${RETRY_CODE}`);
-}
-
 const timestamp = z.iso.datetime();
 const workspaceName = z.string().regex(WORKSPACE_NAME_PATTERN);
 const ticketKey = z.string().regex(TICKET_PATTERN);
@@ -79,7 +65,7 @@ const queueSchema = z.strictObject({
   on_limit: z.enum(ON_LIMIT_RULES).default(DEFAULT_ON_LIMIT),
   // force: Start anyway, whatever the plan check says; until the entry leaves the queue.
   // retry_at, retries: a start that could not fetch (RETRY_CODE) is tried again at retry_at, the
-  // failures so far in retries; both absent before the first. State format 4 (src/state-version.ts).
+  // failures so far in retries; both absent before the first. State format 5 (src/state-version.ts).
   entries: z.array(z.strictObject({
     workspace: workspaceName, ticket: ticketKey, queued_at: timestamp, force: z.literal(true).optional(),
     retry_at: timestamp.optional(), retries: z.number().int().min(1).optional(),
@@ -176,10 +162,11 @@ export function planReason(plan: PlanCheck): string | null {
 }
 
 // A queued ticket as the queue shows it: its 1-based position, the tickets it lands after that are
-// not merged yet (with their dependency states), whether it is forced, why its plan holds it (null
-// when the plan is ready, the entry forced, or the queue has no plan check) and, after a start that
-// could not fetch, its next try while it is ahead (passed over until at; null otherwise: once due,
-// the entry waits as any other).
+// not merged yet and the ticket it builds on while it cannot build on it yet (with their dependency
+// states, each ticket once), whether it is forced, why its plan holds it (null when the plan is
+// ready, the entry forced, or the queue has no plan check) and, after a start that could not fetch,
+// its next try while it is ahead (passed over until at; null otherwise: once due, the entry waits
+// as any other).
 export interface QueueRow {
   workspace: string;
   ticket: string;
@@ -241,11 +228,12 @@ type QueueExecution = Pick<Execution, 'start' | 'fetchBase' | 'limitReset'>;
 type QueueSetup = Pick<Setup, 'dependencyStates' | 'lastJobBase'>;
 type QueueJobs = Pick<JobStore, 'list' | 'read'>;
 
-// What a pass knows of a queued ticket's Task file: the tickets it lands after and the branch its
-// start fetches (continues, else base; '' when unknown), or gone (no Task file, or its workspace is
-// not registered any more: the entry is dropped). A Task file that cannot be read otherwise waits
-// for nothing: its start says why it cannot start.
-type TaskInfo = { refs: TicketRef[]; base: string } | 'gone';
+// What a pass knows of a queued ticket's Task file: the tickets it lands after, the one it builds
+// on (null without builds_on) and the branch its start fetches (continues, else base; '' when
+// unknown), or gone (no Task file, or its workspace is not registered any more: the entry is
+// dropped). A Task file that cannot be read otherwise waits for nothing: its start says why it
+// cannot start.
+type TaskInfo = { refs: TicketRef[]; buildsOn: TicketRef | null; base: string } | 'gone';
 
 // The scheduler and the changes of the queue (see the top of this file).
 export class RunQueue {
@@ -494,12 +482,12 @@ export class RunQueue {
     let next: TicketRef | null = null;
     for (const [index, entry] of queue.entries.entries()) {
       const info = await this.#taskInfo(entry);
-      const waits = info === 'gone' ? [] : (await this.#setup.dependencyStates(info.refs, { fresh: false })).filter((row) => row.state !== 'merged');
+      const waits = info === 'gone' ? [] : await this.#waits(info);
       const hold = info === 'gone' ? null : await this.#planHold(entry);
-      if (next === null && info !== 'gone' && waits.length === 0 && hold === null && !this.#retryPending(entry)) {
+      if (next === null && info !== 'gone' && waits.length === 0 && hold === null && !retryPending(entry, this.#clock())) {
         next = { workspace: entry.workspace, ticket: entry.ticket };
       }
-      const retry: QueueRow['retry'] = this.#retryPending(entry) ? { code: RETRY_CODE, at: entry.retry_at!, retries: entry.retries ?? 1 } : null;
+      const retry: QueueRow['retry'] = retryPending(entry, this.#clock()) ? { code: RETRY_CODE, at: entry.retry_at!, retries: entry.retries ?? 1 } : null;
       entries.push({ workspace: entry.workspace, ticket: entry.ticket, position: index + 1, queued_at: entry.queued_at, waits_for: waits, force: entry.force === true, plan_reason: hold, retry });
     }
     return { max_running: queue.max_running, running, held: queue.held, hold_reason: queue.hold_reason, on_limit: queue.on_limit, limit_hold: limitHold, entries, errors: queue.errors, next };
@@ -510,21 +498,35 @@ export class RunQueue {
       .then((workspace) => readTask(workspace, entry.ticket))
       .then((content): TaskInfo => {
         const fields = parseFrontMatter(content)!;
-        return { refs: landsAfter(fields, entry.workspace), base: taskStartBranch(fields) };
+        const buildsOn = taskBuildsOn(fields);
+        return { refs: landsAfter(fields, entry.workspace), buildsOn: buildsOn === null ? null : { workspace: entry.workspace, ticket: buildsOn }, base: taskStartBranch(fields) };
       })
-      .catch((error: unknown): TaskInfo => (error instanceof FactoryError && ['task_not_found', 'workspace_not_found'].includes(error.code) ? 'gone' : { refs: [], base: '' }));
+      .catch((error: unknown): TaskInfo => (error instanceof FactoryError && ['task_not_found', 'workspace_not_found'].includes(error.code) ? 'gone' : { refs: [], buildsOn: null, base: '' }));
   }
 
-  // Whether the entry waits for the next try of a start that could not fetch (retry_at ahead).
-  #retryPending(entry: QueueEntry): boolean {
-    return entry.retry_at !== undefined && Date.parse(entry.retry_at) > this.#clock();
+  // What a queued ticket waits for, as last known (the merged check's cache applies): the tickets
+  // it lands after that are not merged, then the ticket it builds on unless it can build on it
+  // (#canBuildOn) or it is merged, unless already listed.
+  async #waits(info: Exclude<TaskInfo, 'gone'>): Promise<DependencyRow[]> {
+    const waits = (await this.#setup.dependencyStates(info.refs, { fresh: false })).filter((row) => row.state !== 'merged');
+    const ref = info.buildsOn;
+    if (ref === null || (await this.#canBuildOn(ref)) || waits.some((row) => sameTicket(row, ref))) {
+      return waits;
+    }
+    return [...waits, ...(await this.#setup.dependencyStates([ref], { fresh: false })).filter((row) => row.state !== 'merged')];
+  }
+
+  // Whether the job of the ticket a queued ticket builds on has a prepared commit to build on.
+  async #canBuildOn(ref: TicketRef): Promise<boolean> {
+    return buildsOnCommit(await this.#jobs.read(ref.workspace, ref.ticket).catch(() => undefined)) !== null;
   }
 
   // One pass: first the parked jobs whose usage limit reset (#resets) and the reset timer;
   // then, unless held by hand or by a parked job, the entries whose Task file is gone or whose ticket
   // has a live job leave the queue (and so do the start errors of those tickets); then, while fewer
   // jobs run than max_running, the first entry whose plan does not hold it (ready or forced)
-  // and whose dependencies are all merged leaves queue.json and starts. An entry held by its plan
+  // and whose dependencies are all merged (the ticket it builds on merged, or with a prepared commit
+  // to build on) leaves queue.json and starts. An entry held by its plan
   // stays in place; the end of a Task check asks for a pass. An entry whose next try is ahead
   // (retry_at) is passed over; a start that fails with RETRY_CODE puts its entry back in its place
   // with the next try, and the reset timer is armed again for it.
@@ -587,10 +589,10 @@ export class RunQueue {
       waiting = false;
       for (const entry of queue.entries) {
         const info = infos.get(`${entry.workspace}/${entry.ticket}`);
-        if (info === undefined || info === 'gone' || heldNow.has(entry) || this.#retryPending(entry) || (await this.#planHold(entry)) !== null) {
+        if (info === undefined || info === 'gone' || heldNow.has(entry) || retryPending(entry, this.#clock()) || (await this.#planHold(entry)) !== null) {
           continue;
         }
-        if (await this.#merged(info.refs, fetched)) {
+        if ((await this.#merged(info.refs, fetched)) && (info.buildsOn === null || (await this.#canBuildOn(info.buildsOn)) || (await this.#merged([info.buildsOn], fetched)))) {
           chosen = entry;
           break;
         }

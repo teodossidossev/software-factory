@@ -115,6 +115,13 @@ refused), and the factory's test command passed in a sandbox without network on 
   skips a change to a build file, a build wrapper, IDE or agent settings or Git hooks
   (`handoff_sensitive`), and one whose files cannot be listed; it waits until you have read it
   and press *Hand over to my checkout*.
+- **A part built on another part is never pushed before it.** A Task can name `builds_on:` a
+  ticket of the same workspace whose change is not merged yet. Its job then starts from the commit
+  that ticket's job prepared, taken from the workspace's checkout: nothing is fetched or pushed for
+  it. The Patch and both reviews show this part's own change alone, so each part is reviewed once,
+  in its own job. Approve (the push) is refused until the ticket it builds on is merged, and MR
+  preparation replays the part onto that ticket's latest prepared commit, so a branch whose base is
+  not merged never reaches the Git host.
 - **The GitLab token goes only to gitlab.com or the host of `SF_GITLAB_URL`.** A workspace on any
   other host that is not GitHub has its merge request actions off, and the hourly logins check
   leaves it out.

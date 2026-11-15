@@ -10,13 +10,13 @@ import { existsSync } from 'node:fs';
 import { open, readdir, stat, statfs } from 'node:fs/promises';
 import { dirname, join, relative } from 'node:path';
 import { DigestStore } from './digest-run.js';
-import { digestFollowed, digestTime, dueByClock } from './digest-schedule.js';
+import { digestFollowed, dueSlot } from './digest-schedule.js';
 import { type ForgeChoice, withoutHostTokens } from './forge.js';
 import { type Job, type JobStore, runningJobs, statesWith } from './jobs.js';
 import { localTime } from './local-time.js';
 import { healthNotification, type Notification } from './notify.js';
 import type { QueueView } from './queue.js';
-import { loadRegistry, type Registry } from './registry.js';
+import { digestSettings, loadRegistry, type Registry } from './registry.js';
 import { mcpUrl, type ProbeOutcome } from './server.js';
 import { durationText } from './test-command.js';
 
@@ -84,7 +84,7 @@ export const QUEUE_STUCK_MS = 10 * 60_000;
 // disk: down below either bound.
 export const DISK_MIN_FREE_RATIO = 0.1;
 export const DISK_MIN_FREE_BYTES = 5 * 1024 ** 3;
-// digest: missed this long after `at`.
+// digest: missed this long after its due slot.
 export const DIGEST_GRACE_MS = 30 * 60_000;
 
 const ok = (detail: string): CheckOutcome => ({ status: 'ok', detail });
@@ -533,25 +533,24 @@ export async function checkSandboxes(scan: () => Promise<{ found: number; persis
 
 // ---------- digest ----------
 
-// off when no digest is scheduled. down when it was missed (due by the clock, no scheduled digest
-// started since today's start, and `at` more than 30 minutes past), or when the last scheduled
-// digest's record has an error.
+// off when no digest is scheduled. down when it was missed (a due slot, dueSlot, with no scheduled
+// digest started at or after it, more than 30 minutes past), or when the last scheduled digest's
+// record has an error. ok names the times.
 export async function checkDigest(registry: Registry, digests: Pick<DigestStore, 'list'>, now: Date): Promise<CheckOutcome> {
   if (!digestFollowed(registry)) {
     return off('no digest scheduled (no workspace follows)');
   }
   const scheduled = (await digests.list()).filter((summary) => summary.trigger === 'scheduled');
   const last = scheduled[0];
-  const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const at = digestTime(registry, now);
-  const startedToday = scheduled.some((summary) => Date.parse(summary.started_at) >= dayStart);
-  if (dueByClock(registry, now) && !startedToday && now.getTime() - at.getTime() > DIGEST_GRACE_MS) {
-    return down(`today's digest was due at ${at.toTimeString().slice(0, 5)} and did not start`);
+  const slot = dueSlot(registry, now);
+  if (slot !== null && !scheduled.some((summary) => Date.parse(summary.started_at) >= slot.getTime()) && now.getTime() - slot.getTime() > DIGEST_GRACE_MS) {
+    return down(`the digest due at ${slot.toTimeString().slice(0, 5)} did not start`);
   }
   if (last?.error !== null && last?.error !== undefined) {
     return down(`the last scheduled digest failed: ${last.error.replace(/\s+/g, ' ').slice(0, 200)}`);
   }
-  return ok(last === undefined ? `scheduled at ${at.toTimeString().slice(0, 5)}` : `last scheduled digest ${last.started_at}`);
+  const times = `scheduled at ${digestSettings(registry).times.join(', ')}`;
+  return ok(last === undefined ? times : `${times}; last scheduled digest ${last.started_at}`);
 }
 
 // ---------- the list ----------

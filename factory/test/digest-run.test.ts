@@ -1,6 +1,7 @@
 // One morning digest run (SF-103, src/digest-run.ts) with a fake model on a temporary origin and
 // read checkout: the output stored with the Git data, cost and period; an invalid output retried
-// once, then the Git data stored with the error; the period from `at` on the previous digest day,
+// once, then the Git data stored with the error; the output's {text, en} texts and the record's
+// in_progress; the period from the earliest time on the previous digest day,
 // whatever digests ran before; old digests deleted; digest_running for a second run; the notification of a
 // scheduled run (counts only); and the model call's options: no tools but the structured output, no
 // setting sources, the empty cwd. Then sf serve's timer, sf digest --now and sf digest through the
@@ -11,7 +12,8 @@ import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
-import { dailiesOf, dailyDays, digestPeriod, DIGEST_SCHEMA, type DigestModel, type DigestOutput, Digests, digestSessionOptions, stamp } from '../src/digest-run.js';
+import { dailiesOf, dailyDays, digestOutput, digestPeriod, DIGEST_SCHEMA, type DigestModel, type DigestOutput, Digests, digestSessionOptions, stamp } from '../src/digest-run.js';
+import { JobStore } from '../src/jobs.js';
 import type { Notification } from '../src/notify.js';
 import { DIGEST_DEFAULTS, type DigestSettings, saveRegistry } from '../src/registry.js';
 import { readOnlySessionOptions } from '../src/review.js';
@@ -66,10 +68,12 @@ after(async () => {
   await rm(temp, { recursive: true, force: true });
 });
 
+// A model text in the settings' language (Deutsch here) and in English.
+const t = (text: string, en: string) => ({ text, en });
 const OUTPUT: DigestOutput = {
-  repos: [{ name: 'backend', headline: 'The orders landed.', merged: [{ sha: 'abc', problem: 'The shop lists its orders.' }], branches: [], impact_on_me: ['SHOP-8 shares orders.ts.'] }],
-  cross_repo: [{ ticket: 'SHOP-7', by_workspace: { backend: 'The list.', frontend: 'Nothing yet.' }, for_me: '' }],
-  dailies: [{ app: 'shop', workspaces: ['backend', 'frontend'], yesterday: ['Worked on SHOP-8.'], problems: [], plan: [], next: ['Rebase SHOP-8.'] }],
+  repos: [{ name: 'backend', headline: t('Die Bestellungen sind da.', 'The orders landed.'), merged: [{ sha: 'abc', problem: t('Der Shop listet seine Bestellungen.', 'The shop lists its orders.') }], branches: [], impact_on_me: [t('SHOP-8 teilt orders.ts.', 'SHOP-8 shares orders.ts.')] }],
+  cross_repo: [{ ticket: 'SHOP-7', by_workspace: { backend: t('Die Liste.', 'The list.'), frontend: t('Noch nichts.', 'Nothing yet.') }, for_me: t('', '') }],
+  dailies: [{ app: 'shop', workspaces: ['backend', 'frontend'], yesterday: [t('An SHOP-8 gearbeitet.', 'Worked on SHOP-8.')], problems: [], plan: [], next: [t('SHOP-8 aktualisieren.', 'Update SHOP-8.')] }],
 };
 
 interface Setup {
@@ -151,7 +155,7 @@ test('a manual digest: the output stored with the Git data, the cost and the per
   // A guess in the digest's language, never the English word; no English word in any script.
   assert.doesNotMatch(call!.prompt, /Mark a guess with "likely"/);
   assert.match(call!.prompt, /Mark a guess with the word for "likely" in Deutsch\./);
-  assert.match(call!.prompt, /Ticket keys and people's names stay as they are\. Unless Deutsch is English, no English word in any script \(a transliteration counts as English\), except ticket keys, people's names and product names\./);
+  assert.match(call!.prompt, /Ticket keys and people's names stay as they are\. Unless Deutsch is English, no English word in any script in a text \(a transliteration counts as English\), except ticket keys, people's names and product names\./);
   assert.match(call!.prompt, /a transliteration counts as English/);
   assert.doesNotMatch(call!.prompt, /In repos and cross_repo, identifiers/);
   // The Repositories tab is plain too: the page shows the SHAs and branch names beside the
@@ -202,6 +206,43 @@ test('an invalid output is retried once; a second failure stores the Git data wi
   assert.equal(second.record.cost_usd, null);
 });
 
+test('the output\'s schema: every model text is {text, en}; an answer with plain strings is refused (the SDK\'s failed outcome, retried as above)', () => {
+  assert.equal(digestOutput.safeParse(OUTPUT).success, true);
+  const plain = {
+    repos: [{ name: 'backend', headline: 'The orders landed.', merged: [{ sha: 'abc', problem: 'The shop lists its orders.' }], branches: [], impact_on_me: ['SHOP-8 shares orders.ts.'] }],
+    cross_repo: [], dailies: [{ app: 'shop', workspaces: ['backend'], yesterday: ['Worked on SHOP-8.'], problems: [], plan: [], next: [] }],
+  };
+  assert.equal(digestOutput.safeParse(plain).success, false);
+  // One plain string anywhere is enough.
+  assert.equal(digestOutput.safeParse({ ...OUTPUT, dailies: [{ ...OUTPUT.dailies[0]!, plan: ['Plain.'] }] }).success, false);
+  assert.equal(digestOutput.safeParse({ ...OUTPUT, cross_repo: [{ ...OUTPUT.cross_repo[0]!, by_workspace: { backend: 'Plain.' } }] }).success, false);
+  // The JSON schema the model gets asks for both keys.
+  assert.match(JSON.stringify(DIGEST_SCHEMA), /"required":\["text","en"\]/);
+});
+
+test('the record holds the bilingual output and in_progress: my live jobs of the my_work workspaces, waiting first; none to the model', async () => {
+  const fx = await setUp([ok()]);
+  const jobs = new JobStore(fx.state);
+  const base = { branch: 'b', base: 'main', continues: null, builds_on: null, builds_on_commit: null, base_commit: null, target_commit: null, worktree: null, prepared_commit: null, mr_attempts: 0, mr_conflict_turn: false, iteration: 2, fixes: 0, gate_fixes: 0, gate_tokens: 0, session_id: null, created_at: '2026-11-01T08:00:00.000Z', mr: null };
+  await jobs.write({ ...base, workspace: 'backend', ticket: 'SHOP-21', state: 'working', updated_at: '2026-11-01T09:00:00.000Z' });
+  await jobs.write({ ...base, workspace: 'frontend', ticket: 'SHOP-22', state: 'needs_human', updated_at: '2026-11-01T10:00:00.000Z', error: { code: 'gate_failed', message: 'The gate failed.' } });
+  await jobs.write({ ...base, workspace: 'backend', ticket: 'SHOP-23', state: 'aborted', updated_at: '2026-11-01T11:00:00.000Z' });
+  await jobs.write({ ...base, workspace: 'other', ticket: 'SHOP-24', state: 'working', updated_at: '2026-11-01T11:00:00.000Z' });
+  await jobs.writeTaskCopy('backend', 'SHOP-21', Buffer.from('---\nticket: SHOP-21\ntitle: The order export\n---\n'));
+  const { record } = await fx.digests.run('manual');
+  assert.deepEqual(record.output, OUTPUT);
+  assert.deepEqual(record.in_progress, [
+    { workspace: 'frontend', app: 'shop', ticket: 'SHOP-22', title: 'SHOP-22', state: 'needs_human', stop_code: 'gate_failed', iteration: 2, since: '2026-11-01T10:00:00.000Z' },
+    { workspace: 'backend', app: 'shop', ticket: 'SHOP-21', title: 'The order export', state: 'working', stop_code: null, iteration: 2, since: '2026-11-01T09:00:00.000Z' },
+  ]);
+  assert.doesNotMatch(fx.calls[0]!.prompt, /in_progress|The order export/);
+  assert.match(fx.calls[0]!.prompt, /"en"/);
+  // A record written before in_progress reads with none.
+  const { in_progress: _none, ...old } = record;
+  await writeFile(fx.digests.store.path('20261101T060000Z-manual'), JSON.stringify({ ...old, id: '20261101T060000Z-manual' }));
+  assert.deepEqual((await fx.digests.read('20261101T060000Z-manual'))!.in_progress, []);
+});
+
 test('a scheduled run notifies with counts only; a manual one does not', async () => {
   // Near the commits, which are an hour old.
   const start = new Date(Math.floor(Date.now() / 1000) * 1000);
@@ -221,10 +262,10 @@ test('a scheduled run notifies with counts only; a manual one does not', async (
 });
 
 test('the period on a Monday is Friday 07:00 to the run, whatever scheduled digest ran before: none, Friday 16:40 or Monday 07:00 itself', async () => {
-  // 2026-11-09 is a Monday; `at` 07:00 on weekdays only.
+  // 2026-11-09 is a Monday; one time, 07:00, on weekdays only.
   const local = (day: number, hours: number, minutes = 0): Date => new Date(2026, 10, day, hours, minutes);
   const friday = local(6, 7).toISOString();
-  const fx = await setUp([ok(), ok(), ok()], local(9, 6, 30), { at: '07:00', weekdays_only: true });
+  const fx = await setUp([ok(), ok(), ok()], local(9, 6, 30), { times: ['07:00'], weekdays_only: true });
   const none = await fx.digests.run('manual');
   assert.deepEqual(none.record.period, { from: friday, to: local(9, 6, 30).toISOString() });
   // Friday's scheduled digest ran late, at 16:40.
@@ -337,9 +378,9 @@ test('the daily\'s days: yesterday from the last working day to today (Friday an
 test('sf serve starts the timer; sf digest --now and sf digest through the socket; digest_running through the socket', async () => {
   const env = await newEnv('digest-cli');
   const repo = await newRepo(env, 'digest-cli-repo', true);
-  // Due at once: 00:00 every day, the workspace followed.
+  // Due at once: 00:00 every day (a workspaces.json of before `times`, with `at`), the workspace followed.
   await saveRegistry({ workspaces: { app: { read_checkout: repo, digest: { track: true, my_work: true } } }, digest: { at: '00:00', weekdays_only: false, model: 'fake-digest' } }, env.config);
-  const output = { repos: [{ name: 'app', headline: 'Nothing landed.', merged: [], branches: [], impact_on_me: [] }], cross_repo: [], dailies: [] };
+  const output = { repos: [{ name: 'app', headline: { text: 'Nothing landed.', en: 'Nothing landed.' }, merged: [], branches: [], impact_on_me: [] }], cross_repo: [], dailies: [] };
   await reviewScript(env, [{ output, delayMs: 3000, costTotal: 0.31 }, { output, costTotal: 0.27 }]);
   const before = (await stat(join(repo, '.git', 'index'))).mtimeMs;
   const served = await serve(env);

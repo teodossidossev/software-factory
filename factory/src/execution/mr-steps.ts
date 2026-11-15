@@ -5,6 +5,7 @@ import { createReadStream } from 'node:fs';
 import { type FileHandle, realpath } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { resolve as resolvePath } from 'node:path';
+import { buildsOnPoint, buildsOnTarget, notMerged, notReadyAtPreparation } from '../builds-on.js';
 import { DEFAULT_TEST_TIMEOUT_MS, envFilePath, handoffOffNotice } from '../config.js';
 import { FactoryError } from '../errors.js';
 import { type Forge, type ForgeKind, forgeFor } from '../forge.js';
@@ -21,6 +22,7 @@ import { buildPatch, notificationLine, type Patch } from '../patch.js';
 import { conflictPrompt, mrPrompt } from '../prompts.js';
 import { COMMIT_TYPES, DENIED_TOOLS, MANUAL_CLAIM, MAX_HEADER_CHARS, MR_REQUIRED_HEADINGS } from '../rules.js';
 import { configDir, type Workspace } from '../registry.js';
+import { ticketMerged } from '../setup.js';
 import { actedVerdict, type ReviewItem, uniqueNits } from '../review.js';
 import { endSession, type IdleOutcome, type ImplementerSession } from '../session.js';
 import { pathDenials } from '../sandbox-denials.js';
@@ -264,7 +266,7 @@ export class MrPart {
         }
       }
       const targetCommit = job.target_commit!;
-      const prepared = await this.#locks.gitLocked(job.workspace, () => commitAndRebase(cwd, { baseCommit: job.base_commit!, targetCommit, mrText: mrText.text }));
+      const prepared = await this.#locks.gitLocked(job.workspace, () => commitAndRebase(cwd, { baseCommit: job.base_commit!, targetCommit, mrText: mrText.text, onlyOwn: job.builds_on !== null }));
       if (prepared.kind === 'failed') {
         await needsHuman(prepared.failure.code, prepared.failure.message);
         return;
@@ -540,7 +542,7 @@ export class MrPart {
       await abortRebase(cwd);
       // No turn while the user's checkout holds the branch.
       await checkBranchFree(workspace.workCheckout, cwd, job.branch, ticket);
-      return resolveTarget(workspace.workCheckout, targetBranch(job));
+      return this.#target(job, workspace.workCheckout);
     });
     await onAccepted?.();
     const attempts = job.mr_attempts;
@@ -559,6 +561,23 @@ export class MrPart {
     }
     this.#mrTextTurn(next, workspace, turn);
     return { state: next.state, iteration: next.iteration, branch: next.branch };
+  }
+
+  // The target of MR preparation, under the workspace's Git lock: for a job that builds on a ticket
+  // not merged yet, that ticket's current prepared commit (builds_on_not_ready when it has none: it
+  // is being changed); otherwise targetBranch on origin.
+  async #target(job: Job, checkout: string): Promise<{ ref: string; commit: string }> {
+    const buildsOn = job.builds_on;
+    if (buildsOn !== null) {
+      const point = await buildsOnPoint(this.#store.jobs, job.workspace, checkout, buildsOn);
+      if (point === undefined) {
+        throw notReadyAtPreparation(job.ticket, buildsOn);
+      }
+      if (point !== 'merged') {
+        return buildsOnTarget(checkout, point);
+      }
+    }
+    return resolveTarget(checkout, targetBranch(job));
   }
 
   // The MR text turn of MR preparation, in the job's session. Only under the lock.
@@ -782,13 +801,24 @@ export class MrPart {
     }
   }
 
+  // Refuses (builds_on_not_merged) the push of a job that builds on a ticket not merged yet
+  // (src/builds-on.ts), by the dependency rule asked in checkout.
+  async #checkBuildsOnMerged(job: Job, checkout: string): Promise<void> {
+    const buildsOn = job.builds_on;
+    if (buildsOn !== null && !(await ticketMerged(this.#store.jobs, { workspace: job.workspace, ticket: buildsOn }, checkout))) {
+      throw notMerged(job.ticket, buildsOn);
+    }
+  }
+
   // The push of approve. With open (sf mr create from ready_for_human_review), the merge request
   // is opened after the push and before the job moves to pushed, so the one notification carries
   // its link; a merge request that fails to open leaves the job pushed, with the failure in the
-  // outcome. Only under the lock.
+  // outcome. A job that builds on a ticket not merged yet is refused (builds_on_not_merged): nothing
+  // of it is pushed before that ticket is merged. Only under the lock.
   async #approve(job: Job, workspace: Workspace, asIs: boolean, open?: { forge: Forge; content: MrContent }): Promise<MrOutcome> {
     const { workspace: workspaceName, ticket } = job;
     const checkout = workspace.workCheckout;
+    await this.#checkBuildsOnMerged(job, checkout);
     const tipResult = await runGit(checkout, ['rev-parse', '--verify', '--quiet', `refs/heads/${job.branch}`]);
     const tip = tipResult.stdout.toString('utf8').trim();
     if (tipResult.code !== 0 || tip === '') {
@@ -935,6 +965,9 @@ export class MrPart {
         throw new FactoryError('invalid_state', `The merge request #${job.mr.number} of ${workspaceName}/${ticket} is already merged.`);
       }
       const workspace = await this.#settings.resolve(workspaceName);
+      if (combined) {
+        await this.#checkBuildsOnMerged(job, workspace.workCheckout);
+      }
       const forge = await this.#forge(job, workspace);
       const content = await this.mrContent(job);
       if (combined) {

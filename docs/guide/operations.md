@@ -188,12 +188,19 @@ Secrets and environment values are redacted in the logged reviewer and gate mess
 
 ## The morning digest
 
-Once a day after `digest.at` (`workspaces.json`, default 08:00, weekdays only by default), `sf
-serve` makes the morning digest of the workspaces that are followed (`digest.track`) or have My
-daily on (`digest.my_work`). The dashboard's **Digest** (in the header) shows it; **Generate now**
+After each of `digest.times` (`workspaces.json`, 1 to 4 times a day, default 08:00, weekdays only by
+default; an older file's `digest.at` counts as one time), `sf serve` makes the morning digest of the
+workspaces that are followed (`digest.track`) or have My daily on (`digest.my_work`); each run covers
+the period from the earliest time of the previous digest day, so a later run refreshes the whole
+brief. Each time runs at most once a day: a machine that slept through several runs once on
+waking, for the latest. The dashboard's **Digest** (in the header) shows it, its schedule ("Updates
+at 08:30 · 10:45 (weekdays)", with **Edit** for the times) and two tabs: **Brief** (yesterday, in
+progress now, today, merged by colleagues, waiting on me; **Copy for the stand-up** per app) and
+**Repositories**. A digest in another language than English carries every text in English too: the
+switch "<language> · English · Both" chooses what the page shows and copies. **Generate now**
 makes one at once, and so does `sf digest --now` (it prints the record's path and the cost); `sf
-digest` prints the latest one's period and counts. A scheduled digest sends one notification with
-counts only.
+digest` prints the latest one's period and counts. Each scheduled digest sends one notification
+with counts only.
 
 What it reads: for each such workspace, a bare mirror of its own under
 `<state dir>/digest/mirrors/`, cloned once from the origin URL of your checkout (with your
@@ -219,7 +226,8 @@ call that fails twice leaves a digest with the Git data and the error. The recor
 delete `digest/mirrors/` to make the mirrors be cloned again.
 
 Cost: one model session per digest, about $0.30 with Sonnet for three repositories (the prototype's
-measure); the page and `sf digest --now` show each digest's cost.
+measure, before the English texts, which add to it); each scheduled time is one session. The page
+and `sf digest --now` show each digest's cost.
 
 ## Cleaning old jobs and worktrees
 

@@ -124,7 +124,7 @@ test('sf retry is refused with invalid_state on review_failed, on mr_conflict, o
     const jobs = new JobStore(env.state);
     const at = new Date().toISOString();
     const record = (ticket: string, extra: Partial<Job>): Job => ({
-      workspace: 'app', ticket, branch: `${ticket}-x`, base: 'main', continues: null, base_commit: null, target_commit: null, worktree: join(temp, 'retry-refused-wt'), prepared_commit: null,
+      workspace: 'app', ticket, branch: `${ticket}-x`, base: 'main', continues: null, builds_on: null, builds_on_commit: null,base_commit: null, target_commit: null, worktree: join(temp, 'retry-refused-wt'), prepared_commit: null,
       mr_attempts: 1, mr_conflict_turn: false, state: 'needs_human', iteration: 1, fixes: 0, gate_fixes: 0, gate_tokens: 0, session_id: null, mr: null, created_at: at, updated_at: at, ...extra,
     });
     const cases: Array<[string, Partial<Job>, RegExp]> = [
@@ -142,7 +142,7 @@ test('sf retry is refused with invalid_state on review_failed, on mr_conflict, o
     }
     const cli = await retry(env, 'R-1');
     assert.equal(cli.code, 1);
-    assert.match(cli.stderr, /^sf: sf retry needs needs_human after a transient MR preparation failure \(fetch_failed, mr_serve_restarted, mr_interrupted, mr_commit_failed, mr_rebase_failed, mr_failed, guard_hit, guard_terms_invalid, guard_failed, tests_unavailable\) or a failed push \(mr_push_failed\); the job is needs_human \(review_failed\)\.$/m);
+    assert.match(cli.stderr, /^sf: sf retry needs needs_human after a transient MR preparation failure \(fetch_failed, mr_serve_restarted, mr_interrupted, mr_commit_failed, mr_rebase_failed, mr_failed, guard_hit, guard_terms_invalid, guard_failed, tests_unavailable, builds_on_not_ready\) or a failed push \(mr_push_failed\); the job is needs_human \(review_failed\)\.$/m);
   } finally {
     await stop(served);
   }

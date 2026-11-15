@@ -756,6 +756,24 @@ pre.raw.doc .heading { font-weight: 700; }
 .dgx .dg-forme { font-weight: 600; }
 .dg-copyrow { display: flex; gap: 10px; align-items: center; }
 .dg-empty p { margin: 0; }
+/* The Brief: one line per item, the English text in a muted line below it in Both. */
+.dg-sched { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.dg-times { font: 13px var(--mono); height: 28px; border-radius: var(--radius-sm); border: 1px solid var(--border-strong); background: var(--panel); color: var(--fg); padding: 0 8px; width: 220px; max-width: 100%; }
+.dg-lang { display: inline-flex; gap: 2px; }
+.dg-lang .on { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+.dg-brief { display: grid; gap: 12px; }
+.dg-brief .dg-sec h4 { font-size: 13px; color: var(--fg); }
+.dg-group { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 6px 0 2px; font-size: 12.5px; }
+.dg-group .dg-name { font-weight: 600; }
+.dg-lines { list-style: none; margin: 0; padding: 0; display: grid; gap: 3px; font-size: 13px; }
+.dg-line { display: flex; flex-wrap: wrap; gap: 0 6px; align-items: baseline; min-width: 0; }
+.dg-line .dg-tx { min-width: 0; overflow-wrap: anywhere; }
+.dg-line .dg-at { margin-left: auto; white-space: nowrap; }
+.dg-line .dg-code { font-size: 12px; color: var(--warn); }
+.dg-line .dg-ticket { font-size: 12px; }
+.dg-en { flex-basis: 100%; }
+.dg-app { display: grid; gap: 4px; border-top: 1px solid var(--border); padding-top: 8px; }
+.dg-app .dg-name { font-weight: 600; font-size: 13px; }
 #drawer .ws-app { margin-left: 8px; font-weight: 400; }
 #drawer .ws-description { font-size: 13px; overflow-wrap: anywhere; }
 #drawer input[type="time"] { min-height: var(--control); padding: 6px 10px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--panel); color: inherit; font: inherit; width: 9em; }

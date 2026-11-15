@@ -82,6 +82,9 @@ export interface MrPromptInput {
   handbook: string;
 }
 
+// The slice line of the MR text: the writer reads the keys from the Task file in its worktree.
+const MR_SLICE_RULE = 'If the Task file\'s front matter has both `part_of:` and `slice: N/M`, begin `## Special things to note` with the bullet `- Slice N of M of <part_of>.`';
+
 // The prompt of the MR text turn at Clean. FACTORY_PROMPT_RULES is not sent here: this turn writes
 // the MR text only; the Task-file rule and the Report form are restated instead.
 export function mrPrompt(input: MrPromptInput): string {
@@ -99,6 +102,7 @@ export function mrPrompt(input: MrPromptInput): string {
     `Your only task in this turn: write the MR text to ${path}. Its first line is the title, which is also the commit header by the Git rules below; then a blank line; then the body by the MR template below.`,
     `The factory commits, rebases and pushes, not you. It commits the reviewed change as one commit on this branch; the commit message is the whole MR text: the title as the header, then the body. Then it rebases that commit onto ${targetRef}.`,
     `${MR_TESTING_RULE}.`,
+    MR_SLICE_RULE,
     'Change no other file and run no Git command that changes the repository; those commands are denied.',
     `Do not edit ${TASK_DIR}/${ticket}.md; the Context owner owns it.`,
     'End your turn with a short report in this form, as your last message:',
@@ -219,12 +223,13 @@ export function digestPrompt(today: string, language: string, data: unknown): st
     '',
     'Rules:',
     `- Facts only from the data. Mark a guess with the word for "likely" in ${language}. Problems and plans are suggestions, never facts.`,
-    `- Short, plain sentences in ${language}, one fact per sentence. Ticket keys and people's names stay as they are. Unless ${language} is English, no English word in any script (a transliteration counts as English), except ticket keys, people's names and product names.`,
+    `- Short, plain sentences in ${language}, one fact per sentence. Ticket keys and people's names stay as they are. Unless ${language} is English, no English word in any script in a text (a transliteration counts as English), except ticket keys, people's names and product names.`,
+    `- Every text of the output is an object {"text", "en"}: text in ${language} under these rules; en the same content in plain English, with ticket keys, people's names and product names unchanged and the same rules on SHAs, branch names and Git words. When ${language} is English, en repeats text. The rule on English words applies to text only.`,
     '- In headline, problem, what, impact_on_me, by_workspace and for_me: no commit SHAs, no branch names, no counts of commits ahead or behind, and a file path only when the reader must open that file; the page shows the SHAs and branch names beside them. Name a piece of work by its ticket key and a topic of two to five words. Say what changed for the product\'s users or for the team, and what I have to do, in plain words.',
     '- When a workspace\'s description and its Git data disagree, the data wins.',
     '- "I", "me" and "mine" are the user: the entries with mine: true.',
     '- repos: one per workspace with followed: true, in the order of the data, with its name. headline: one or two plain sentences: what happened and where the work is heading. merged: one per landed entry, sha: its sha exactly as given, problem: the problem it solves, in one plain sentence. branches: one per live branch that has not landed, ref: its name exactly as given, what: what is going on there, in one plain sentence. impact_on_me: per affected ticket of mine, what I have to do and why, e.g. "ABC-124 (the read-only superclasses) needs the latest changes; the translations changed on both sides, so expect a conflict there" (from overlap and hit_by: the same files changed by what landed; from behind: my work needs the latest changes; the same ticket in another workspace of the same app). One item per ticket, never one per file or commit. A branch of mine that likely landed already is one item: "likely done; the branch can go". [] when there are none.',
-    '- cross_repo: only between workspaces of the same app (see apps), at most 6, the most relevant for me first. ticket: one ticket key, or two keys of one feature joined by " + ". by_workspace: one short sentence per workspace of the app, keyed by its name. for_me: what it means for me, "" when nothing. [] when no ticket spans two workspaces of one app.',
+    '- cross_repo: only between workspaces of the same app (see apps), at most 6, the most relevant for me first. ticket: one ticket key, or two keys of one feature joined by " + ". by_workspace: one short sentence per workspace of the app, keyed by its name. for_me: what it means for me, with text and en both "" when nothing. [] when no ticket spans two workspaces of one app.',
     '- dailies: one per entry of daily (an app where I have commits, the factory\'s jobs or live branches), with its app and workspaces as given. A daily is what I say at the team\'s stand-up, to colleagues and a product owner who do not read Git.',
     '- In a daily, name a piece of work by its ticket key exactly as in the data and a topic of two to five words, e.g. "ABC-123 (the property counts in the class view)"; work without a ticket key by its topic only. A daily never holds commit SHAs, branch names, file paths, counts of commits ahead or behind, or the words commit, push, rebase, merge, branch, master or main in any spelling.',
     '- yesterday: what I did yesterday (the commits dated in daily_days.yesterday and the jobs in daily[].jobs whose `at` is in it (the factory\'s work for me counts as mine), each ticket once): each item is "<key> (<topic>): <what was done, one plain sentence of what changed for the product\'s users or the team>". At most 5 items; when more tickets were done, group related ones into one item by theme, with their keys.',

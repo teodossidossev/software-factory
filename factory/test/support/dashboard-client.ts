@@ -254,7 +254,7 @@ export function fakeActions(answer: unknown = { state: 'pushed', branch: 'T-1-de
 
 export type SetupCall = ['saveTask', string, string, string, string] | ['addWorkspace', string, string] | ['addWorkspace', string, string, AddWorkspaceOptions] | ['removeWorkspace', string] | ['createTicket', TicketInput]
   // The Workspaces dialog's Edit and the Morning digest section (SF-103).
-  | ['editWorkspace', string, Omit<WorkspaceEdit, 'read_checkout'> & { path: string }] | ['saveDigestSettings', { at: string; weekdays_only: boolean; language: string }]
+  | ['editWorkspace', string, Omit<WorkspaceEdit, 'read_checkout'> & { path: string }] | ['saveDigestSettings', { times?: string[]; weekdays_only?: boolean; language?: string }]
   | ['archiveTicket', string, string] | ['restoreTicket', string, string] | ['deleteTicket', string, string] | ['setTicketOwner', string, string, TicketOwner]
   // A ticket's planning chat link (SF-208).
   | ['setPlanningChat', string, string, string | null]
@@ -299,7 +299,7 @@ export function fakeSetup(workspaces: WorkspaceRow[] = [], tickets: TicketRow[] 
     reads: [],
     mtime: '2026-11-05T09:00:00.000Z',
     calls: [],
-    settings: { handoff_default: 'checkout', digest: { at: '08:00', weekdays_only: true, language: 'English' } },
+    settings: { handoff_default: 'checkout', digest: { times: ['08:00'], weekdays_only: true, language: 'English' } },
     answer: undefined,
     images: new Map(),
     chats: new Map(),
@@ -369,7 +369,8 @@ export function fakeSetup(workspaces: WorkspaceRow[] = [], tickets: TicketRow[] 
     ),
     editWorkspace: (name, edit) => reply(['editWorkspace', name, edit], { ...workspaceRow(name, edit.path), description: edit.description === '' ? null : edit.description, app: edit.app === '' ? name : edit.app, digest: edit.digest }),
     workspaceSettings: async () => fake.settings,
-    saveDigestSettings: (input) => reply(['saveDigestSettings', input], { ...input }),
+    // As Setup.saveDigestSettings: the stub's settings with the keys given over them.
+    saveDigestSettings: (input) => reply(['saveDigestSettings', input], { ...fake.settings.digest, ...input }),
     removeWorkspace: (name) => reply(['removeWorkspace', name], { removed: name }),
     createTicket: (input) => reply(['createTicket', input], { workspace: input.workspace, ticket: input.ticket, path: `.software-factory/${input.ticket}.md`, base: 'main' }),
   };

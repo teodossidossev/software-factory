@@ -335,6 +335,14 @@ finding of its own), then lists findings, each with a kind and a severity:
 and the files it expects to change. With a `scope`, an expected file outside it is a `missing`
 major finding, and a scope entry no expected file matches is an `overreach` nit.
 
+**The size of a slice.** For a Task of `kind: change` (or no `kind`) or `kind: switch`, more
+expected files than the workspace's `slice.change_max_files` in
+[`norms.json`](configuration.md#norms-normsjson) (10 by default) is an `overreach` major at "slice
+norm": cut the Task again along the next axis (the Handbook's *Slicing a solution*). When the
+Task says under a `## Why whole` heading why it is only safe whole, it is a nit instead: get
+your agreement to keep it whole. `mechanical`, `preparation` and `cleanup` Tasks have no limit.
+A `part_of`, `slice` or `kind` value that is not valid is an `unclear` nit at "front matter".
+
 **The decision documents.** What was decided about your product (its concepts, its domain rules,
 its architecture) lives in documents the coding rules do not cover: the glossary, the decision
 records (ADRs), the terminology and architecture pages. Which files those are is the

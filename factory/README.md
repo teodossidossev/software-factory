@@ -431,6 +431,10 @@ started by the run queue as before.
 The socket path `${SF_STATE_DIR}/sf.sock` must fit a Unix socket address (107 bytes on Linux);
 a longer one is refused at start with `socket_path_too_long`.
 
+Every factory process gives each outbound connect attempt 2.5 s instead of Node's 250 ms before
+it tries a name's next address (SF-231, `src/net-defaults.ts`): on a slow network with an
+unrouted IPv6 address the 250 ms cut IPv4 off and ntfy and Git host calls failed with `ETIMEDOUT`.
+
 The execution variables are read once when `sf serve` starts. `sf status` and `sf watch` read
 `SF_STATE_DIR` themselves; `sf start`, `sf queue`, `sf say`, `sf review`, `sf retry`, `sf accept`, `sf simplify`, `sf settle`, `sf approve`, `sf mr`, `sf abort` and `sf reset` use it to find the socket; `sf notify-test` reads the notification variables itself; `sf smoke` reads `SF_SMOKE_MODEL` and `SF_SMOKE_CODEX_MODEL` itself and gives its own children their settings (section Live smoke test).
 
@@ -3604,8 +3608,11 @@ the iteration on one line. Once the factory opens
 or merges a merge request (SF-048), the title is `<ticket>: merge request #<n> opened` (or `merged`)
 and the body has its link. A failure never changes
 the job; it is appended to `events.jsonl` as `{type: "notify_failed", channel, message}` and shown
-by `sf watch`. `sf notify-test` sends one test notification on both channels and prints what each
-did.
+by `sf watch`. An ntfy POST that gets no HTTP response (a network error or its timeout) is sent once
+more after 3 s (SF-231), and its result says `after a retry`; an HTTP error status is not retried.
+`sf notify-test` sends one test notification on both channels, that of a job that waits for you
+(`SF-TEST: needs_human`, `high`, so it shows what an important notification does on the phone),
+and prints what each did.
 
 An automatic Task check (SF-086, section Task check) that ends `not_ready` or `failed` is notified on
 the same channels with the same settings: "<ticket>: plan not ready" with "N blocker, M major ·

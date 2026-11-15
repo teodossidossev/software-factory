@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process';
 import { constants } from 'node:fs';
 import { access } from 'node:fs/promises';
 import { delimiter, join } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { pushedBranch } from './continues.js';
 import { withoutHostTokens } from './forge.js';
 import type { Job, JobState, JobStore } from './jobs.js';
@@ -17,6 +18,8 @@ import { turnLimitLine } from './turn-limit.js';
 
 const DESKTOP_TIMEOUT_MS = 5_000;
 const NTFY_TIMEOUT_MS = 10_000;
+// The wait before the one retry of an ntfy send that got no HTTP response.
+export const NTFY_RETRY_MS = 3_000;
 export const NOTIFIED_STATES = statesWith('notified');
 // The name of a usage limit's provider in a notification.
 const PROVIDER_NAMES = { claude: 'Claude', codex: 'Codex' } as const;
@@ -27,6 +30,8 @@ export interface NotifyConfig {
   iterations: boolean;
   ntfyUrl: string | undefined;
   ntfyToken: string | undefined;
+  // The wait before ntfy's retry; NTFY_RETRY_MS when not given (tests pass a short one).
+  ntfyRetryMs?: number;
 }
 
 export interface Notification {
@@ -151,6 +156,17 @@ export function jobNotification(job: Job, extra: string[] = []): Notification {
   };
 }
 
+// The notification of `sf notify-test`: that of a test job that waits for the user (needs_human),
+// with its title, tags and high priority, so the test shows what an important notification does
+// on the phone and the watch.
+export function testNotification(at: string): Notification {
+  const job: Job = {
+    workspace: 'test', ticket: 'SF-TEST', branch: 'SF-TEST-notification', base: 'main', continues: null, base_commit: null, worktree: null, prepared_commit: null,
+    target_commit: null, mr_attempts: 0, mr_conflict_turn: false, fixes: 0, gate_fixes: 0, gate_tokens: 0, state: 'needs_human', iteration: 0, session_id: null, mr: null, created_at: at, updated_at: at,
+  };
+  return jobNotification(job, ['A test notification from sf notify-test']);
+}
+
 // The one notification of the run queue at a usage limit's reset: the parked jobs it
 // resumed, or (rule wait) those that wait for the user.
 export function limitResetNotification(resumed: number, waiting: number): Notification {
@@ -253,30 +269,48 @@ async function desktop(notification: Notification, config: NotifyConfig): Promis
   });
 }
 
-async function ntfy(notification: Notification, config: NotifyConfig): Promise<ChannelResult> {
-  if (config.ntfyUrl === undefined) {
-    return { channel: 'ntfy', status: 'skipped', message: 'SF_NTFY_URL is not set' };
-  }
+// One POST to ntfy, with its own timeout: the HTTP status, or the network error's one-line message.
+async function ntfyPost(notification: Notification, url: string, token: string | undefined): Promise<{ ok: boolean; status: number } | { error: string }> {
   try {
-    const response = await fetch(config.ntfyUrl, {
+    const response = await fetch(url, {
       method: 'POST',
       body: notification.ntfyBody ?? notification.body,
       headers: {
         Title: notification.title,
         Priority: notification.priority,
         Tags: notification.tags,
-        ...(config.ntfyToken !== undefined ? { Authorization: `Bearer ${config.ntfyToken}` } : {}),
+        ...(token !== undefined ? { Authorization: `Bearer ${token}` } : {}),
       },
       signal: AbortSignal.timeout(NTFY_TIMEOUT_MS),
     });
-    await response.body?.cancel();
-    return response.ok
-      ? { channel: 'ntfy', status: 'sent', message: `HTTP ${response.status}` }
-      : { channel: 'ntfy', status: 'failed', message: `HTTP ${response.status}` };
+    // The answer is in; a body that will not cancel does not make it a network error.
+    await response.body?.cancel().catch(() => undefined);
+    return { ok: response.ok, status: response.status };
   } catch (error) {
     const cause = (error as { cause?: { code?: string } }).cause?.code;
-    return { channel: 'ntfy', status: 'failed', message: `${(error as Error).message}${cause !== undefined ? ` (${cause})` : ''}` };
+    return { error: `${(error as Error).message}${cause !== undefined ? ` (${cause})` : ''}`.replace(/\s+/g, ' ').trim() };
   }
+}
+
+// A send that got no HTTP response (a network error or a timeout) is tried once more after
+// NTFY_RETRY_MS; an HTTP error status is not. The message names the retry.
+async function ntfy(notification: Notification, config: NotifyConfig): Promise<ChannelResult> {
+  if (config.ntfyUrl === undefined) {
+    return { channel: 'ntfy', status: 'skipped', message: 'SF_NTFY_URL is not set' };
+  }
+  let attempt = await ntfyPost(notification, config.ntfyUrl, config.ntfyToken);
+  const retried = 'error' in attempt;
+  if (retried) {
+    await sleep(config.ntfyRetryMs ?? NTFY_RETRY_MS);
+    attempt = await ntfyPost(notification, config.ntfyUrl, config.ntfyToken);
+  }
+  if ('error' in attempt) {
+    return { channel: 'ntfy', status: 'failed', message: `${attempt.error} (after a retry)` };
+  }
+  if (!attempt.ok) {
+    return { channel: 'ntfy', status: 'failed', message: `HTTP ${attempt.status}${retried ? ' (after a retry)' : ''}` };
+  }
+  return { channel: 'ntfy', status: 'sent', message: `HTTP ${attempt.status}${retried ? ', after a retry' : ''}` };
 }
 
 export async function sendNotification(notification: Notification, config: NotifyConfig): Promise<ChannelResult[]> {

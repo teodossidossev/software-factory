@@ -7,10 +7,10 @@ import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
-import type { Job, JobMr, JobState } from '../src/jobs.js';
+import { type Job, type JobMr, type JobState, statesWith } from '../src/jobs.js';
 import {
-  briefJobBody, type ChannelResult, digestNotification, healthNotification, jobNotification, limitResetNotification, type Notification, type NotifyConfig, NOTIFIED_STATES,
-  sendNotification, stateNotifier, taskCheckNotification,
+  briefJobBody, type ChannelResult, digestNotification, healthNotification, jobNotification, jobPriority, limitResetNotification, type Notification, type NotifyConfig, NOTIFIED_STATES,
+  NTFY_RETRY_MS, sendNotification, stateNotifier, taskCheckNotification, testNotification,
 } from '../src/notify.js';
 import { type NotifyMode, saveRegistry, workspaceNotifyMode } from '../src/registry.js';
 import type { CheckRecord } from '../src/task-check.js';
@@ -168,4 +168,55 @@ test('with a workspace off in the registry: its jobs send nothing, another works
     ['Factory health: MCP is down', 'refused'],
     ['Morning digest ready', 'Morning digest ready: 2 landed, 1 of mine need attention'],
   ]);
+});
+
+test('sf notify-test sends a waiting state\'s notification: its title names the state, at the waiting states\' priority (high)', () => {
+  const tested = testNotification(CREATED);
+  for (const state of statesWith('waiting')) {
+    assert.equal(tested.priority, jobPriority(state), state);
+  }
+  assert.equal(tested.priority, 'high');
+  assert.equal(statesWith('waiting').includes('needs_human'), true);
+  assert.deepEqual([tested.title, tested.tags, tested.body], ['SF-TEST: needs_human', 'warning', 'branch: SF-TEST-notification\nA test notification from sf notify-test']);
+});
+
+// An ntfy server that answers its requests in turn: 'drop' closes the connection with no HTTP
+// response (a network error for fetch), a number is that HTTP status. The result and the request count.
+async function ntfyWith(answers: Array<'drop' | number>): Promise<{ result: ChannelResult; requests: number }> {
+  let requests = 0;
+  const server = createServer((req, res) => {
+    const answer = answers[requests++] ?? 200;
+    req.resume();
+    if (answer === 'drop') {
+      req.socket.destroy();
+    } else {
+      res.writeHead(answer).end('{}');
+    }
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/sf-notify`;
+    const results = await sendNotification(digestNotification({ landed: 1, impact: 0 }), { ...CONFIG, desktop: false, ntfyUrl: url, ntfyRetryMs: 10 });
+    return { result: results.find((result) => result.channel === 'ntfy')!, requests };
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}
+
+test('ntfy: a send with no HTTP response is tried once more and the result names the retry; an HTTP error is not retried', async () => {
+  assert.equal(NTFY_RETRY_MS, 3000);
+  const recovered = await ntfyWith(['drop', 200]);
+  assert.deepEqual([recovered.result.status, recovered.result.message, recovered.requests], ['sent', 'HTTP 200, after a retry', 2]);
+  const lost = await ntfyWith(['drop', 'drop', 200]);
+  assert.deepEqual([lost.result.status, lost.requests], ['failed', 2]);
+  assert.match(lost.result.message, /^fetch failed.* \(after a retry\)$/);
+  assert.equal(lost.result.message.includes('\n'), false);
+  const refused = await ntfyWith([500, 200]);
+  assert.deepEqual([refused.result.status, refused.result.message, refused.requests], ['failed', 'HTTP 500', 1]);
+  // A retry answered with an HTTP error: that second failure's message, then the retry.
+  const refusedLater = await ntfyWith(['drop', 500, 200]);
+  assert.deepEqual([refusedLater.result.status, refusedLater.result.message, refusedLater.requests], ['failed', 'HTTP 500 (after a retry)', 2]);
+  const first = await ntfyWith([200]);
+  assert.deepEqual([first.result.status, first.result.message, first.requests], ['sent', 'HTTP 200', 1]);
 });

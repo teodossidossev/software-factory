@@ -13,6 +13,7 @@ import { DigestStore } from './digest-run.js';
 import { digestFollowed, dueSlot } from './digest-schedule.js';
 import { type ForgeChoice, withoutHostTokens } from './forge.js';
 import { type Job, type JobStore, runningJobs, statesWith } from './jobs.js';
+import { localTime } from './local-time.js';
 import { healthNotification, type Notification } from './notify.js';
 import type { QueueView } from './queue.js';
 import { digestSettings, loadRegistry, type Registry } from './registry.js';
@@ -314,6 +315,9 @@ export interface QueueFacts {
 
 // Why a queued ticket waits, as its row says it.
 function waitReason(row: QueueView['entries'][number]): string {
+  if (row.retry !== null) {
+    return `start failed (${row.retry.code}); next try ${localTime(row.retry.at)?.slice(11, 16) ?? row.retry.at}`;
+  }
   if (row.plan_reason !== null) {
     return row.plan_reason;
   }
@@ -324,7 +328,9 @@ function waitReason(row: QueueView['entries'][number]): string {
 }
 
 // down when the queue is not held, not empty, nothing runs, and nothing started for 10 minutes
-// (since the last start, or since the oldest entry was queued when that is later).
+// (since the last start, or since the oldest entry was queued when that is later). An entry whose
+// start could not fetch and whose next try is ahead (its row's retry) waits, it is not stuck: it
+// counts for neither, and a queue of such entries only is ok.
 export function checkQueue(facts: QueueFacts, nowMs: number): CheckOutcome {
   const { view } = facts;
   if (view.entries.length === 0) {
@@ -336,9 +342,14 @@ export function checkQueue(facts: QueueFacts, nowMs: number): CheckOutcome {
   if (view.running > 0) {
     return ok(`${view.entries.length} queued, ${view.running} running`);
   }
-  const queuedSince = Math.min(...view.entries.map((entry) => Date.parse(entry.queued_at)));
+  const waiting = view.entries.filter((entry) => entry.retry === null);
+  if (waiting.length === 0) {
+    const first = view.entries[0]!;
+    return ok(`${view.entries.length} queued, each waiting for a next try; the head ${first.workspace}/${first.ticket}: ${waitReason(first)}`);
+  }
+  const queuedSince = Math.min(...waiting.map((entry) => Date.parse(entry.queued_at)));
   const since = Math.max(queuedSince, ...[facts.lastStart, facts.newestJob].filter((mark): mark is string => mark !== undefined).map(Date.parse));
-  const head = view.entries[0]!;
+  const head = waiting[0]!;
   if (nowMs - since > QUEUE_STUCK_MS) {
     return down(`nothing started for ${durationText(nowMs - since)} and nothing runs; the head ${head.workspace}/${head.ticket} waits: ${waitReason(head)}`);
   }

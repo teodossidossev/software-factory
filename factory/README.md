@@ -789,7 +789,7 @@ a new `sf serve` and an old runner.
 ## State format version
 
 The state directory holds `state-version` (SF-101, `src/state-version.ts`), a whole number: the
-format of the state files the factory last wrote. This release writes `4`. `sf serve` and every
+format of the state files the factory last wrote. This release writes `5`. `sf serve` and every
 runner (`sf run`) read it at start: a missing file gets the current version; an equal one goes on;
 a lower one runs the migrations from it to the current one in order (`MIGRATIONS`; none exist
 yet), then writes the new number; a higher one refuses to start with `state_too_new` ("the state
@@ -808,7 +808,9 @@ failed. An older factory then refuses the new state instead of misreading it. Ve
 `queue.json` may hold `last_start`; its migration from 2 changes nothing. Version 4 (SF-210): a
 digest record (`digest/<id>.json`) holds every model text as `{text, en}` and may hold
 `in_progress`, which an older factory's Digest page reads wrongly; its migration from 3 changes
-nothing, since the page still reads a record of plain strings without `in_progress`.
+nothing, since the page still reads a record of plain strings without `in_progress`. Version 5
+(SF-236): a `queue.json` entry may hold `retry_at` and `retries`; its migration from 4 changes
+nothing.
 
 A new file or event that no older factory reads, and that changes the meaning of nothing it does
 read, is not a change of the format. So SF-128 kept `STATE_VERSION` at 1: its `tests-<N>.json`
@@ -3568,7 +3570,7 @@ each runs within 20 s (its requests and commands within 3 s and 10 s), and one t
 | `tunnel` | ChatGPT tunnel | the tunnel client's admin endpoint (`SF_TUNNEL_HEALTH`, default `127.0.0.1:8790`) does not answer `/readyz` with 200, **or** its `/metrics` value `commands_poll_last_successful_timestamp_seconds` is more than 120 s old or missing: a client can be ready on its own side while its connection to OpenAI is dead; the detail gives the age of the last poll | no tunnel profile (`${TUNNEL_CLIENT_PROFILE_DIR:-${XDG_CONFIG_HOME:-~/.config}/tunnel-client}/software-factory.yaml`, as `scripts/sf-tunnel.sh` resolves it) |
 | `tunnel-cli` | Tunnel's sf build | the `sf` that `scripts/sf-tunnel.sh` runs (this package's `bin/sf`) is not built from its sources: a `src/**/*.ts` is newer than `dist/src/cli.js`, or it is missing ("run npm run build in <dir>") | the script is not there |
 | `jobs` | Jobs | a job's test run has run longer than `SF_TEST_TIMEOUT_MS` plus 5 minutes (from its `tests_started` without a `tests` event), or a job in `working`, `awaiting_review` or `preparing_mr` has no live runner a minute after its last state change; each is named | — |
-| `queue` | Run queue | the queue is not held (by hand or by a usage limit), not empty, nothing runs, and nothing started for 10 minutes (since `queue.json`'s `last_start`, the newest job's creation or the oldest entry's `queued_at`, the latest of them); the detail names the head and why it waits ("plan not ready: …", the tickets it waits for) | — |
+| `queue` | Run queue | the queue is not held (by hand or by a usage limit), not empty, nothing runs, and nothing started for 10 minutes (since `queue.json`'s `last_start`, the newest job's creation or the oldest entry's `queued_at`, the latest of them); the detail names the head and why it waits ("plan not ready: …", the tickets it waits for); an entry waiting for the next try of a start that could not fetch (SF-236) is not stuck: it counts for neither, and a queue of such entries only is ok ("start failed (fetch_failed); next try HH:MM") | — |
 | `remote` | Remote dashboard | the remote listener does not answer on its port, or `tailscale serve status` does not proxy to `127.0.0.1:<port>` | no remote origins (`SF_DASHBOARD_REMOTE_ORIGINS`) |
 | `logins` | Logins | the Claude CLI (`claude auth status`: `SF_CLAUDE`, else the Agent SDK's own binary) or, with the gate on, the Codex CLI (`codex login status`) is not logged in, or a Git host refuses the token a registered workspace's origin uses (one `GET /user` on GitHub, `GET /api/v4/user` on GitLab; the answer's body is never read); the detail names which and what to run | nothing to log in to |
 | `disk` | Disk space | the file system of the state directory or of the worktree root has less than 10 % or less than 5 GB free | — |
@@ -3667,6 +3669,11 @@ default`, `Tags: warning`. A failed channel is logged on `sf serve`'s stderr; no
 ready, cancelled or manual check is not notified, nor a failed one that a retry of the queue's
 re-checks follows, nor a re-check after a moved base that ends `not_ready` again.
 
+A queued start that could not fetch its base (SF-236, section Run queue) is notified once, at its
+first failure: "<ticket>: start failed" with "<ticket> could not fetch <base>; the queue tries
+again"; `Priority: default`, `Tags: warning`. Its workspace's `notify` setting applies (below; the
+brief body is "<workspace> · fetch_failed").
+
 A workspace's `notify` setting (SF-215; `sf workspace notify <name> full|brief|off`, the field
 `notify` of its registry entry) decides how much the notifications of its jobs and Task checks tell.
 `full` (the default) is all of the above. `brief` keeps the ntfy title, priority and tags, and the
@@ -3715,8 +3722,10 @@ SF-071. The planned tickets of every workspace form one **run queue**: an order 
 a limit `max_running` of the jobs that run at once (1-20, every workspace together; default
 `SF_MAX_JOBS`, 3), and `sf serve` starting the next queued ticket by itself when a slot is free.
 It lives in `<state dir>/queue.json` (written atomically): `{"version": 1, "max_running": N,
-"held": false, "hold_reason": null, "on_limit": "resume-then-queue", "entries": [{workspace, ticket, queued_at, force?}], "errors":
-[{workspace, ticket, code, message, at}], "last_start"?}`; `last_start` (SF-153, state format 3) is when the scheduler
+"held": false, "hold_reason": null, "on_limit": "resume-then-queue", "entries": [{workspace, ticket, queued_at, force?, retry_at?, retries?}], "errors":
+[{workspace, ticket, code, message, at}], "last_start"?}`; `retry_at` and `retries` (SF-236, state format 5) are
+the next try of an entry whose start could not fetch and its failures so far (below, A start that
+cannot fetch); `last_start` (SF-153, state format 3) is when the scheduler
 last started a queued ticket, written with the entry's removal before each start (the health check
 `queue` reads it); absent before the first start. A missing file is an empty queue; an invalid one stops
 `sf serve` at its start (`queue_invalid`), as an invalid registry does.
@@ -3743,9 +3752,24 @@ last started a queued ticket, written with the entry's removal before each start
   is refused (`job_exists`), so the queue never starts a ticket twice, across concurrent events and
   restarts alike; `sf serve` stopping between the two leaves the ticket out of the queue without a
   job. A start refused with `job_limit` (a start by hand took the slot) puts the entry back where it
-  was and ends the pass; any other refusal (`task_draft`, `invalid_content`, `branch_exists`, …)
-  leaves the ticket out of the queue with `{code, message, at}` in `errors`, shown on its card as
-  "Start failed: <message>"; adding it again clears it.
+  was and ends the pass; `fetch_failed` is tried again (below); any other refusal (`task_draft`,
+  `invalid_content`, `base_not_found`, `branch_exists`, …) leaves the ticket out of the queue with
+  `{code, message, at}` in `errors`, shown on its card as "Start failed: <message>"; adding it
+  again clears it.
+- **A start that cannot fetch** (SF-236): when the queue's own start fails with `fetch_failed`
+  (`git fetch origin <base>` failed or timed out: the network is gone), the start removes the job
+  record it made (nothing else exists yet: no branch, no worktree; a start by hand still fails its
+  job), and the entry goes back to its place in the queue with `retry_at` and `retries`. The next
+  try is 5 minutes after the first failure, then 10 minutes, then every 15 minutes, without end:
+  Remove from queue (`sf queue remove`) stops it; an entry added again starts afresh. While
+  `retry_at` is ahead the entry is passed over and the next one may start, as an entry waiting for
+  a dependency is. The timer of the usage limit's reset (Usage limit) also wakes at the earliest
+  `retry_at`; no other timer is added. While `retry_at` is ahead, `sf queue list`, the queued card
+  and the health check `queue` say "start failed (fetch_failed); next try HH:MM" (local time); once
+  it has passed the entry waits for a slot as any other. One notification goes at the first failure
+  only: "<ticket> could not fetch <base>; the queue tries again". A later try that fails with
+  another error (`base_not_found`, …) fails as above. A job that stops half-way because of the
+  network is not covered.
 - **`lands_after`** (SF-084's Task file key, `<ticket>` or `<workspace>/<ticket>`): an entry starts
   only when every ticket it names is `merged` by SF-084's rule (section Dashboard, Dependencies);
   `pushed`, `running`, `planned` and `missing` keep it in place and the next entry is tried. That
@@ -3786,7 +3810,8 @@ last started a queued ticket, written with the entry's removal before each start
   holds the queue whatever the hold by hand, SF-072), `sf queue on-limit <rule>` (section Usage
   limit), `sf queue force <ws> <ticket>`; `sf queue list` prints the limit, the running count, the
   hold, the limit hold and the rule, the next ticket to start, the entries with what each waits for
-  and why its plan holds it (or "forced (Start anyway)"), and the starts that failed. They go to `sf serve` over its socket, as `sf start` does. The board
+  and why its plan holds it (or "forced (Start anyway)") or when it is tried again ("start failed
+  (fetch_failed); next try HH:MM"), and the starts that failed. They go to `sf serve` over its socket, as `sf start` does. The board
   posts the same changes (`api/queue/*`, section Dashboard) and the Context owner has `queue_list`
   and `queue_add` (below); neither removes nor moves.
 - **MCP tools** for the Context owner: `queue_list({})` returns `{max_running, running, held,
@@ -4475,7 +4500,7 @@ POST (anything else `405` with `Allow: GET, POST`):
 | `api/digests/<id>` | the stored record `digest/<id>.json` (SF-103); an unknown id or any query is an empty 404 |
 | `api/pins` | the dashboard's pins (section Pins), `pins.json` read as `sf pins` reads it: `{pins: [{id, route, selector, text, rect: {x, y, w, h, vw, vh}, note, at, resolved}]}`, every stored pin in id order, open and resolved; any query is an empty 404; `409 pins_unreadable` for a file that is not JSON or not this shape |
 | `api/coordinator` | the coordinator's state, `coordinator.json` read as `sf coordinator` reads it (section Coordinator card): `{version, status: {text, at} \| null, questions: [{id, text, at}], link, next_question}`; any query is an empty 404; written only by `sf coordinator` |
-| `api/tickets` | `{tickets: [{workspace, ticket, title, base, draft, request, job, lands_after, attachments, conversation: {message, url}, queue_position, queue_error, queue_reason, queue_force}], archived: [{workspace, ticket, title}], job_lands_after: [{workspace, ticket, lands_after}], queue: {max_running, running, held, hold_reason, next, on_limit, limit_hold}}`: the Task files without a live job; `queue_position` its 1-based place in the run queue or `null`, `queue_error` the queue's failed start `{code, message}` or `null`, `queue_reason` why its plan holds it in the queue ("plan not ready: N blocker, M major", "plan check failed", "plan being checked", "plan not checked") or `null`, `queue_force` whether Start anyway was given (SF-086), `queue` the run queue (`next`: `{workspace, ticket}` of the first entry that waits for nothing and whose plan does not hold it, or `null`; `on_limit` the rule at a usage limit's reset and `limit_hold` `{parked, resets_at}` while a job is parked, else `null`, SF-072; the whole `queue` is `null` without a run queue) (SF-071, section Run queue); `lands_after` the tickets its Task file waits for, `[{workspace, ticket, state}]` with `state` `merged`, `pushed`, `running`, `planned` or `missing` (SF-084, section Dashboard), and `job_lands_after` the same for the Task files with a live job; `attachments` its images `[{name, bytes, type}]` (SF-064, section Ticket images); `draft` is true for a skeleton; `request` the user's words of New ticket or `null`; `job` is the last job's state or `null`; `url` is `https://chatgpt.com/?q=<message URL-encoded>`, or `null` when too long |
+| `api/tickets` | `{tickets: [{workspace, ticket, title, base, draft, request, job, lands_after, attachments, conversation: {message, url}, queue_position, queue_error, queue_reason, queue_force, queue_retry}], archived: [{workspace, ticket, title}], job_lands_after: [{workspace, ticket, lands_after}], queue: {max_running, running, held, hold_reason, next, on_limit, limit_hold}}`: the Task files without a live job; `queue_position` its 1-based place in the run queue or `null`, `queue_error` the queue's failed start `{code, message}` or `null`, `queue_reason` why its plan holds it in the queue ("plan not ready: N blocker, M major", "plan check failed", "plan being checked", "plan not checked") or `null`, `queue_force` whether Start anyway was given (SF-086), `queue_retry` the next try of a queued start that could not fetch `{code: "fetch_failed", at, retries}` or `null` (SF-236), `queue` the run queue (`next`: `{workspace, ticket}` of the first entry that waits for nothing and whose plan does not hold it, or `null`; `on_limit` the rule at a usage limit's reset and `limit_hold` `{parked, resets_at}` while a job is parked, else `null`, SF-072; the whole `queue` is `null` without a run queue) (SF-071, section Run queue); `lands_after` the tickets its Task file waits for, `[{workspace, ticket, state}]` with `state` `merged`, `pushed`, `running`, `planned` or `missing` (SF-084, section Dashboard), and `job_lands_after` the same for the Task files with a live job; `attachments` its images `[{name, bytes, type}]` (SF-064, section Ticket images); `draft` is true for a skeleton; `request` the user's words of New ticket or `null`; `job` is the last job's state or `null`; `url` is `https://chatgpt.com/?q=<message URL-encoded>`, or `null` when too long |
 | `api/jobs/<ws>/<ticket>/iterations/<n>/report` | the Report, `text/markdown` |
 | `api/jobs/<ws>/<ticket>/iterations/<n>/patch` | the Patch, `text/x-diff` |
 | `api/jobs/<ws>/<ticket>/mr` | the MR text, `text/markdown`; 404 until there is one |

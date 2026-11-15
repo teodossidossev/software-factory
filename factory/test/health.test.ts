@@ -17,6 +17,7 @@ import {
   HEALTH_CHECKS, type HealthCheck, healthExitCode, healthLines, HealthMonitor, type HealthStatus, metricValue, NOTIFY_AFTER_MS, type QueueFacts, runChecks,
 } from '../src/health.js';
 import type { Job } from '../src/jobs.js';
+import { localTime } from '../src/local-time.js';
 import type { Notification } from '../src/notify.js';
 import { QUEUE_FILE, QueueStore, RunQueue } from '../src/queue.js';
 import { STATE_VERSION } from '../src/state-version.js';
@@ -169,7 +170,7 @@ test('jobs: ok when every running job has its runner; down naming a job whose te
 
 function queueFacts(extra: Partial<QueueFacts['view']> = {}, lastStart?: number): QueueFacts {
   const entries = [{
-    workspace: 'app', ticket: 'T-9', position: 1, queued_at: iso(NOW - 3 * 60 * MIN), waits_for: [], force: false, plan_reason: 'plan not ready: 1 blocker, 0 major',
+    workspace: 'app', ticket: 'T-9', position: 1, queued_at: iso(NOW - 3 * 60 * MIN), waits_for: [], force: false, plan_reason: 'plan not ready: 1 blocker, 0 major', retry: null,
   }];
   return { view: { held: false, limit_hold: null, running: 0, entries, ...extra }, lastStart: lastStart === undefined ? undefined : iso(lastStart), newestJob: undefined };
 }
@@ -191,6 +192,20 @@ test('queue: down when not held, not empty, nothing runs and nothing started for
   const waiting = queueFacts();
   waiting.view.entries[0] = { ...waiting.view.entries[0]!, plan_reason: null, waits_for: [{ workspace: 'app', ticket: 'T-8', state: 'pushed' } as never] };
   assert.match(checkQueue(waiting, NOW).detail, /waits: waits for T-8 \(pushed\)/);
+});
+
+test('queue (SF-236): an entry waiting for the next try of a start that could not fetch is not stuck; the other entries are judged without it', () => {
+  const retry = { code: 'fetch_failed' as const, at: iso(NOW + MIN), retries: 3 };
+  const hhmm = localTime(iso(NOW + MIN))!.slice(11, 16);
+  // The only entry waits for its next try; the last try was 14 minutes ago: ok, saying why it waits.
+  const only = queueFacts({}, NOW - 14 * MIN);
+  only.view.entries[0] = { ...only.view.entries[0]!, plan_reason: null, retry };
+  assert.deepEqual(checkQueue(only, NOW), { status: 'ok', detail: `1 queued, each waiting for a next try; the head app/T-9: start failed (fetch_failed); next try ${hhmm}` });
+  // Behind it, an entry that nothing holds yet that did not start for 14 minutes: down, naming that one.
+  const both = queueFacts({}, NOW - 14 * MIN);
+  both.view.entries = [{ ...both.view.entries[0]!, retry }, { ...both.view.entries[0]!, ticket: 'T-10', position: 2, plan_reason: null }];
+  const stuck = checkQueue(both, NOW);
+  assert.deepEqual([stuck.status, stuck.detail], ['down', 'nothing started for 14 min and nothing runs; the head app/T-10 waits: nothing holds it, yet it did not start']);
 });
 
 test('queue.json\'s last_start: the scheduler writes it with the entry\'s removal before each start (state format 3); absent before the first', async () => {

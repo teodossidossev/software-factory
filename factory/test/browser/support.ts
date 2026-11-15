@@ -421,7 +421,7 @@ export class FakeQueue implements DashboardQueue {
       if (next === null && waits.length === 0) {
         next = { workspace: entry.workspace, ticket: entry.ticket };
       }
-      entries.push({ ...entry, position: index + 1, waits_for: waits, force: false, plan_reason: null });
+      entries.push({ ...entry, position: index + 1, waits_for: waits, force: false, plan_reason: null, retry: null });
     }
     return {
       max_running: this.maxRunning, running: runningJobs(jobs).length, held: false, hold_reason: null, on_limit: 'resume-then-queue' as const,

@@ -17,16 +17,23 @@
 // otherwise the entry stays in place and its row says why.
 // A queued ticket with builds_on (src/builds-on.ts) also waits for the ticket it builds on: until
 // that ticket's job has a prepared commit to build on, or the ticket is merged.
+// A start that cannot fetch its base (fetch_failed: the network is gone) leaves no job (the start
+// removes the record it made) and puts its entry back in its place with retry_at and retries: the
+// entry is passed over until retry_at (5 minutes after the first failure, then 10, then every 15,
+// without end: removing the entry stops it), and the reset timer also wakes at the earliest
+// retry_at. One notification at the first failure. Every other start error fails as before.
 import { mkdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import * as z from 'zod/v4';
 import { writeFileAtomic } from './atomic.js';
 import { buildsOnCommit } from './builds-on.js';
+import { taskStartBranch } from './continues.js';
 import { FactoryError } from './errors.js';
 import type { Execution } from './execution.js';
 import { type Job, type JobStore, now, runningJobs, TERMINAL_STATES } from './jobs.js';
-import { limitResetNotification, type Notification } from './notify.js';
-import { resolveWorkspace, type Workspace, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN } from './registry.js';
+import { limitResetNotification, type Notification, type NotifyModeOf } from './notify.js';
+import { fetchRetryNotification, RETRY_CODE, retryDelayMs, retryPending } from './queue-retry.js';
+import { resolveWorkspace, type Workspace, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN, workspaceNotifyMode } from './registry.js';
 import type { DependencyRow, Setup } from './setup.js';
 import { isDraft, landsAfter, parseFrontMatter, readTask, TASK_DIR, taskBuildsOn, TICKET_DESCRIPTION, TICKET_PATTERN, type TicketRef } from './task-file.js';
 
@@ -57,7 +64,12 @@ const queueSchema = z.strictObject({
   // The rule at a usage limit's reset; absent in a queue.json written without it: the default.
   on_limit: z.enum(ON_LIMIT_RULES).default(DEFAULT_ON_LIMIT),
   // force: Start anyway, whatever the plan check says; until the entry leaves the queue.
-  entries: z.array(z.strictObject({ workspace: workspaceName, ticket: ticketKey, queued_at: timestamp, force: z.literal(true).optional() })),
+  // retry_at, retries: a start that could not fetch (RETRY_CODE) is tried again at retry_at, the
+  // failures so far in retries; both absent before the first. State format 5 (src/state-version.ts).
+  entries: z.array(z.strictObject({
+    workspace: workspaceName, ticket: ticketKey, queued_at: timestamp, force: z.literal(true).optional(),
+    retry_at: timestamp.optional(), retries: z.number().int().min(1).optional(),
+  })),
   // The scheduler's start that failed, per ticket (out of the queue): shown on its card.
   errors: z.array(z.strictObject({ workspace: workspaceName, ticket: ticketKey, code: z.string(), message: z.string(), at: timestamp })),
   // When the scheduler last started a queued ticket (the health check queue reads it);
@@ -151,8 +163,10 @@ export function planReason(plan: PlanCheck): string | null {
 
 // A queued ticket as the queue shows it: its 1-based position, the tickets it lands after that are
 // not merged yet and the ticket it builds on while it cannot build on it yet (with their dependency
-// states, each ticket once), whether it is forced and why its plan holds it (null
-// when the plan is ready, the entry forced, or the queue has no plan check).
+// states, each ticket once), whether it is forced, why its plan holds it (null when the plan is
+// ready, the entry forced, or the queue has no plan check) and, after a start that could not fetch,
+// its next try while it is ahead (passed over until at; null otherwise: once due, the entry waits
+// as any other).
 export interface QueueRow {
   workspace: string;
   ticket: string;
@@ -161,6 +175,7 @@ export interface QueueRow {
   waits_for: DependencyRow[];
   force: boolean;
   plan_reason: string | null;
+  retry: { code: typeof RETRY_CODE; at: string; retries: number } | null;
 }
 
 export interface QueueView {
@@ -176,7 +191,8 @@ export interface QueueView {
   limit_hold: { parked: number; resets_at: string | null } | null;
   entries: QueueRow[];
   errors: QueueError[];
-  // The first entry that waits for nothing and whose plan does not hold it, or null.
+  // The first entry that waits for nothing, whose plan does not hold it and whose next try (if
+  // any) is due, or null.
   next: TicketRef | null;
 }
 
@@ -188,10 +204,15 @@ export interface RunQueueOptions {
   resolve?: (name: string) => Promise<Workspace>;
   // DEPENDENCY_RECHECK_MS by default (tests).
   recheckMs?: number;
-  // The clock of the reset timer; Date.now by default (tests).
+  // The clock of the reset timer and of the next try of a start that could not fetch; Date.now by
+  // default (tests).
   clock?: () => number;
-  // Sends the one notification of a reset (sf serve: sendNotification); never throws.
+  // Sends the one notification of a reset and the one of a start that could not fetch (sf serve:
+  // sendNotification); never throws.
   notify?: (notification: Notification) => Promise<unknown>;
+  // A workspace's notify setting, for the notification of a start that could not fetch;
+  // workspaceNotifyMode by default.
+  notifyMode?: NotifyModeOf;
   // The Task check of a queued ticket; without it every plan counts as ready.
   planCheck?: (workspace: string, ticket: string) => Promise<PlanCheck>;
   // Called after a ticket was added (the dashboard, the CLI and MCP alike; sf serve: the automatic
@@ -207,11 +228,12 @@ type QueueExecution = Pick<Execution, 'start' | 'fetchBase' | 'limitReset'>;
 type QueueSetup = Pick<Setup, 'dependencyStates' | 'lastJobBase'>;
 type QueueJobs = Pick<JobStore, 'list' | 'read'>;
 
-// What a pass knows of a queued ticket's Task file: the tickets it lands after and the one it
-// builds on (null without builds_on), or gone (no Task file, or its workspace is not registered any
-// more: the entry is dropped). A Task file that cannot be read otherwise waits for nothing: its
-// start says why it cannot start.
-type TaskInfo = { refs: TicketRef[]; buildsOn: TicketRef | null } | 'gone';
+// What a pass knows of a queued ticket's Task file: the tickets it lands after, the one it builds
+// on (null without builds_on) and the branch its start fetches (continues, else base; '' when
+// unknown), or gone (no Task file, or its workspace is not registered any more: the entry is
+// dropped). A Task file that cannot be read otherwise waits for nothing: its start says why it
+// cannot start.
+type TaskInfo = { refs: TicketRef[]; buildsOn: TicketRef | null; base: string } | 'gone';
 
 // The scheduler and the changes of the queue (see the top of this file).
 export class RunQueue {
@@ -224,6 +246,7 @@ export class RunQueue {
   readonly #recheckMs: number;
   readonly #clock: () => number;
   readonly #notify: (notification: Notification) => Promise<unknown>;
+  readonly #notifyMode: NotifyModeOf;
   readonly #planCheck: ((workspace: string, ticket: string) => Promise<PlanCheck>) | undefined;
   readonly #onAdded: (workspace: string, ticket: string) => void;
   readonly #updating: () => boolean;
@@ -234,7 +257,8 @@ export class RunQueue {
   // The last work of each ticket under withTicket, by "<workspace>/<ticket>".
   readonly #ticketLocks = new Map<string, Promise<void>>();
   #timer: NodeJS.Timeout | undefined;
-  // The usage limit's reset timer: at the earliest reset of the parked jobs.
+  // The reset timer: at the earliest reset of the parked jobs or the earliest next try of an entry
+  // whose start could not fetch, whichever comes first.
   #resetTimer: NodeJS.Timeout | undefined;
   #closed = false;
 
@@ -248,6 +272,7 @@ export class RunQueue {
     this.#recheckMs = options.recheckMs ?? DEPENDENCY_RECHECK_MS;
     this.#clock = options.clock ?? Date.now;
     this.#notify = options.notify ?? (() => Promise.resolve());
+    this.#notifyMode = options.notifyMode ?? ((name) => workspaceNotifyMode(name));
     this.#planCheck = options.planCheck;
     this.#onAdded = options.onAdded ?? (() => {});
     this.#updating = options.updating ?? (() => false);
@@ -459,10 +484,11 @@ export class RunQueue {
       const info = await this.#taskInfo(entry);
       const waits = info === 'gone' ? [] : await this.#waits(info);
       const hold = info === 'gone' ? null : await this.#planHold(entry);
-      if (next === null && info !== 'gone' && waits.length === 0 && hold === null) {
+      if (next === null && info !== 'gone' && waits.length === 0 && hold === null && !retryPending(entry, this.#clock())) {
         next = { workspace: entry.workspace, ticket: entry.ticket };
       }
-      entries.push({ workspace: entry.workspace, ticket: entry.ticket, position: index + 1, queued_at: entry.queued_at, waits_for: waits, force: entry.force === true, plan_reason: hold });
+      const retry: QueueRow['retry'] = retryPending(entry, this.#clock()) ? { code: RETRY_CODE, at: entry.retry_at!, retries: entry.retries ?? 1 } : null;
+      entries.push({ workspace: entry.workspace, ticket: entry.ticket, position: index + 1, queued_at: entry.queued_at, waits_for: waits, force: entry.force === true, plan_reason: hold, retry });
     }
     return { max_running: queue.max_running, running, held: queue.held, hold_reason: queue.hold_reason, on_limit: queue.on_limit, limit_hold: limitHold, entries, errors: queue.errors, next };
   }
@@ -473,9 +499,9 @@ export class RunQueue {
       .then((content): TaskInfo => {
         const fields = parseFrontMatter(content)!;
         const buildsOn = taskBuildsOn(fields);
-        return { refs: landsAfter(fields, entry.workspace), buildsOn: buildsOn === null ? null : { workspace: entry.workspace, ticket: buildsOn } };
+        return { refs: landsAfter(fields, entry.workspace), buildsOn: buildsOn === null ? null : { workspace: entry.workspace, ticket: buildsOn }, base: taskStartBranch(fields) };
       })
-      .catch((error: unknown): TaskInfo => (error instanceof FactoryError && ['task_not_found', 'workspace_not_found'].includes(error.code) ? 'gone' : { refs: [], buildsOn: null }));
+      .catch((error: unknown): TaskInfo => (error instanceof FactoryError && ['task_not_found', 'workspace_not_found'].includes(error.code) ? 'gone' : { refs: [], buildsOn: null, base: '' }));
   }
 
   // What a queued ticket waits for, as last known (the merged check's cache applies): the tickets
@@ -501,7 +527,9 @@ export class RunQueue {
   // jobs run than max_running, the first entry whose plan does not hold it (ready or forced)
   // and whose dependencies are all merged (the ticket it builds on merged, or with a prepared commit
   // to build on) leaves queue.json and starts. An entry held by its plan
-  // stays in place; the end of a Task check asks for a pass.
+  // stays in place; the end of a Task check asks for a pass. An entry whose next try is ahead
+  // (retry_at) is passed over; a start that fails with RETRY_CODE puts its entry back in its place
+  // with the next try, and the reset timer is armed again for it.
   async #pass(): Promise<void> {
     clearTimeout(this.#timer);
     this.#timer = undefined;
@@ -554,12 +582,14 @@ export class RunQueue {
     // The entries whose plan held them at the last look, under the ticket's lock: not tried again
     // in this pass.
     const heldNow = new Set<QueueEntry>();
+    // A start in this pass could not fetch: the timer is armed again for its next try.
+    let retried = false;
     while (running < queue.max_running && !this.#closed) {
       let chosen: QueueEntry | undefined;
       waiting = false;
       for (const entry of queue.entries) {
         const info = infos.get(`${entry.workspace}/${entry.ticket}`);
-        if (info === undefined || info === 'gone' || heldNow.has(entry) || (await this.#planHold(entry)) !== null) {
+        if (info === undefined || info === 'gone' || heldNow.has(entry) || retryPending(entry, this.#clock()) || (await this.#planHold(entry)) !== null) {
           continue;
         }
         if ((await this.#merged(info.refs, fetched)) && (info.buildsOn === null || (await this.#canBuildOn(info.buildsOn)) || (await this.#merged([info.buildsOn], fetched)))) {
@@ -603,6 +633,23 @@ export class RunQueue {
             // Started by hand since the pass read the jobs: out of the queue without an error.
             return 'next';
           }
+          if (error instanceof FactoryError && error.code === RETRY_CODE) {
+            // The base could not be fetched (the start left no job): the entry goes back where it
+            // was, with its next try; the user is told at the first failure only.
+            const retries = (entry.retries ?? 0) + 1;
+            queue.entries.splice(index, 0, { ...entry, retry_at: new Date(this.#clock() + retryDelayMs(retries)).toISOString(), retries });
+            await this.#store.write(queue);
+            retried = true;
+            if (retries === 1) {
+              const info = infos.get(`${entry.workspace}/${entry.ticket}`);
+              const base = info === undefined || info === 'gone' || info.base === '' ? 'its base' : info.base;
+              const note = fetchRetryNotification(entry.workspace, entry.ticket, base, await this.#notifyMode(entry.workspace));
+              if (note !== undefined) {
+                await this.#notify(note).catch((failure: unknown) => console.error(failure));
+              }
+            }
+            return 'next';
+          }
           const failure = error instanceof FactoryError ? error : new FactoryError('start_failed', 'The start failed inside the factory.');
           if (!(error instanceof FactoryError)) {
             console.error(error);
@@ -625,6 +672,9 @@ export class RunQueue {
     if (waiting && running < queue.max_running && !this.#closed) {
       this.#timer = setTimeout(() => void this.schedule(), this.#recheckMs);
       this.#timer.unref();
+    }
+    if (retried) {
+      await this.#armResetTimer();
     }
     if (changed) {
       this.#onChange();
@@ -669,15 +719,37 @@ export class RunQueue {
     if (resumed + waiting > 0) {
       await this.#notify(limitResetNotification(resumed, waiting)).catch((error: unknown) => console.error(error));
     }
-    const next = timedJobs(await this.#jobs.list()).map((job) => Date.parse(job.limit!.resets_at)).sort((a, b) => a - b)[0];
-    if (next !== undefined && !this.#closed) {
-      // A job still due was not handled (its step failed inside the factory): tried again a minute
-      // later, not at once. setTimeout's bound is about 24.8 days; a later reset is looked at again then.
-      const wait = next <= this.#clock() ? LIMIT_RECHECK_MS : next - this.#clock();
-      this.#resetTimer = setTimeout(() => void this.schedule(), Math.min(wait, 2 ** 31 - 1));
-      this.#resetTimer.unref();
-    }
+    await this.#armResetTimer();
     return resumed + waiting > 0;
+  }
+
+  // Arms the reset timer at the earliest reset still ahead of the parked jobs or the earliest
+  // retry_at still ahead of the queue's entries, whichever comes first; none without either.
+  // A retry_at that passed needs no timer: the entry starts at the next pass with a free slot.
+  async #armResetTimer(): Promise<void> {
+    clearTimeout(this.#resetTimer);
+    this.#resetTimer = undefined;
+    if (this.#closed) {
+      return;
+    }
+    const nowMs = this.#clock();
+    const reset = timedJobs(await this.#jobs.list()).map((job) => Date.parse(job.limit!.resets_at)).sort((a, b) => a - b)[0];
+    const retry = (await this.#store.read()).entries.map((entry) => (entry.retry_at === undefined ? Number.NaN : Date.parse(entry.retry_at))).filter((at) => at > nowMs).sort((a, b) => a - b)[0];
+    const waits: number[] = [];
+    if (reset !== undefined) {
+      // A job still due was not handled (its step failed inside the factory): tried again a minute
+      // later, not at once.
+      waits.push(reset <= nowMs ? LIMIT_RECHECK_MS : reset - nowMs);
+    }
+    if (retry !== undefined) {
+      waits.push(retry - nowMs);
+    }
+    if (waits.length === 0 || this.#closed) {
+      return;
+    }
+    // setTimeout's bound is about 24.8 days; a later reset is looked at again then.
+    this.#resetTimer = setTimeout(() => void this.schedule(), Math.min(...waits, 2 ** 31 - 1));
+    this.#resetTimer.unref();
   }
 
   // Whether every ticket of refs is merged. When one is not, its workspace's base

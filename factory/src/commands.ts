@@ -468,7 +468,9 @@ function queueLines(view: QueueView): string[] {
   for (const entry of view.entries) {
     const waits = entry.waits_for.map((dep) => `${ref(dep)} (${dep.state})`).join(', ');
     const plan = entry.force ? '  forced (Start anyway)' : entry.plan_reason !== null ? `  ${entry.plan_reason}` : '';
-    lines.push(`  ${entry.position}. ${ref(entry)}${waits !== '' ? `  waits for ${waits}` : ''}${plan}`);
+    // The next try of a start that could not fetch, HH:MM of the local time.
+    const retry = entry.retry !== null ? `  start failed (${entry.retry.code}); next try ${localTime(entry.retry.at)?.slice(11, 16) ?? entry.retry.at}` : '';
+    lines.push(`  ${entry.position}. ${ref(entry)}${waits !== '' ? `  waits for ${waits}` : ''}${retry}${plan}`);
   }
   if (view.errors.length > 0) {
     lines.push('start failed:');

@@ -76,7 +76,8 @@ consumers, its walk through the code, its files and the decisions still open. Th
   grilling round.
 
 **Write.** By [ANATOMY.md](ANATOMY.md), only when the trace is back and its decisions are settled.
-Then `write_task`.
+When the base moved since the trace, fetch it and re-read every `path:line` the draft cites: the
+check reads the base as it is now. Then `write_task`.
 
 **Green.** `write_task` schedules the check; wait for it with `task_check`. For each blocker and
 major:

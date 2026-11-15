@@ -50,6 +50,8 @@ the slice says:
 - **The mechanism holds in this framework.** Style scope and cascade order after a move; what
   arrives later (labels, rows, async answers) and what the screen shows until then; focus and ARIA
   wired to elements that exist.
+- **The inputs are the ones the slice passes.** A helper the slice calls may also read the
+  process's environment, home directory or clock: name what it reads, so a test can control it.
 - **Failures go where the slice says.** Each call on the path that can throw or reject: what its
   error does there, above all inside a function that must never throw.
 - **The decision documents agree.** Quote the paragraph the slice keeps, and the one it must

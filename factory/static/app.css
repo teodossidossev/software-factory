@@ -494,6 +494,33 @@ button.tag:hover { border-color: var(--accent); }
 .card .act { flex-wrap: wrap; align-items: center; }
 .jhead .t1 .tag { font-weight: 400; }
 
+/* The home (web/home.ts), beside the board under the same top bar: one column, at most 960 px and
+   centred, with the board's side padding; Needs you's heading as a column's, its list and empty line
+   as a column's, its cards the board's .card with how long each waits at the right of the first line
+   and the job page's sentence in its kind's colour; the Coordinator card under it without the
+   margins it has above the columns. From 1100 px (the top bar's one row) two columns, at most
+   1440 px: Needs you and the Coordinator card side by side in the first row. */
+#home { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; align-items: start; max-width: 960px; margin-inline: auto; padding-block: 16px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+#home .hm-needs { min-width: 0; }
+#home .hm-needs h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 8px; display: flex; gap: 6px; align-items: baseline; }
+#home .hm-needs h2 .n { font-variant-numeric: tabular-nums; }
+#home .hm-sub { color: var(--muted); font-weight: 400; text-transform: none; letter-spacing: normal; }
+#home .hm-list { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
+#home .hm-list > li { min-width: 0; }
+#home .hm-list .empty { color: var(--muted); font-size: 13px; padding: 8px 0; }
+#home .hm-age { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+#home .hm-say { font-size: 13px; color: var(--fg); overflow-wrap: anywhere; }
+#home .hm-say.ask { color: var(--s-human); }
+#home .hm-say.err { color: var(--del); }
+#home .hm-say.ready { color: var(--s-ready); }
+#home .coord { margin: 0; }
+@media (min-width: 1100px) {
+  #home { max-width: 1440px; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); }
+  #home .hm-needs { grid-column: 1; grid-row: 1; }
+  #home .coord { grid-column: 2; grid-row: 1; }
+}
+
 /* Workspaces and dependencies on the board, and the cards that fit their column (the
    prototype's .card with min-width: 0, a key that never wraps, the workspace chip and the check note
    truncated with the full text as their title, the note under the title when the first line has no

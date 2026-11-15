@@ -14,6 +14,7 @@
   <script src="board.js" defer></script>
   <script src="coordinator.js" defer></script>
   <script src="routing.js" defer></script>
+  <script src="home.js" defer></script>
   <script src="ticket-page.js" defer></script>
   <script src="reports.js" defer></script>
   <script src="mr-row.js" defer></script>
@@ -28,13 +29,14 @@
   <div id="board">
     <!-- A card's Copy the message for the planner, where the clipboard cannot be written: the text to select. -->
     <textarea id="card-copy-text" class="copy-fallback" rows="1" readonly aria-label="The message for the planner" hidden></textarea>
-    <!-- The board's top bar (web/header.ts): one row from 1100 px, a second row with the page and
-         workspace selects below; the factory pill's popover holds the checks (web/health.ts), the run
-         limit and the reset rule. -->
+    <!-- The top bar of the two main views, the home (#home) and the board (#cols) (web/header.ts):
+         one row from 1100 px, a second row with the page and workspace selects below; the factory
+         pill's popover holds the checks (web/health.ts), the run limit and the reset rule. -->
     <header class="topbar">
       <h1 class="brand"><img src="favicon.svg" alt="" width="20" height="20"><span class="bname">Software Factory</span></h1>
       <button id="waits" type="button" class="needs" hidden></button>
       <nav class="tabs" aria-label="Pages">
+        <button id="open-home" type="button" class="tab">Home</button>
         <button id="open-board" type="button" class="tab" aria-current="page">Board</button>
         <button id="open-digest" type="button" class="tab">Digest</button>
         <button id="open-stats" type="button" class="tab">Stats</button>
@@ -46,6 +48,7 @@
       <span class="hgap"></span>
       <span class="hbreak"></span>
       <select id="page-select" class="hselect" aria-label="Page">
+        <option value="home">Home</option>
         <option value="board">Board</option>
         <option value="digest">Digest</option>
         <option value="stats">Stats</option>
@@ -75,7 +78,15 @@
       <button id="open-new-ticket" type="button" class="btn primary">New ticket</button>
     </header>
     <p id="board-hint" class="bhint" hidden></p>
-    <!-- The Coordinator card (coordinator.js): read-only, filled from api/coordinator -->
+    <!-- The home (home.js): what needs you, oldest first; the Coordinator card moves under it while the home is shown. -->
+    <div id="home" hidden>
+      <section id="home-needs" class="hm-needs" aria-labelledby="home-needs-title">
+        <h2 id="home-needs-title">Needs you <span class="n" id="home-needs-count"></span> <span class="hm-sub">oldest first</span></h2>
+        <ul id="home-needs-list" class="hm-list"></ul>
+      </section>
+    </div>
+    <!-- The Coordinator card (coordinator.js): read-only, filled from api/coordinator; one card, here
+         above the columns on the board and moved under Needs you on the home (home.js placeCoordinator). -->
     <section id="coord" class="coord" aria-label="Coordinator" hidden></section>
     <div class="cols" id="cols">
       <section class="col queue" aria-labelledby="col-queue-title"><h2 id="col-queue-title"><button type="button" class="colfold" data-colfold="queue" aria-expanded="true" aria-controls="qlist">Queue <span class="n" id="count-queue"></span></button></h2><ul id="qlist"></ul></section>

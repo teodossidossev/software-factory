@@ -3831,8 +3831,9 @@ steps:
 the same markup and keys). The top bar (`web/header.ts`, SF-160) is one 48 px row from 1100 px:
 the favicon and "Software Factory"; "N waits for you" as a button (hidden at 0; N counts every
 workspace, with "(hidden)" while the workspace filter hides some of them; a click lifts that filter
-and scrolls Your turn into view; the page title is `(N) Software Factory` while the board shows N
-there); the page tabs *Board* (current), *Digest*, *Stats*, *Archived (n)* and *Workspaces*; the
+and scrolls Your turn into view, or Needs you on the home; the page title is `(N) Software Factory`
+while the board shows N there); the page tabs *Home* (the home, section Home, SF-226), *Board*
+(the tab of the main view shown is current), *Digest*, *Stats*, *Archived (n)* and *Workspaces*; the
 workspace filter, a select of *All workspaces (n)* and each workspace's full name with its count of
 jobs (one workspace keeps its cards and counts); the factory pill (section Health checks: the
 health dot, its words and "R/L running", R the queue's running count and L its limit, or "R
@@ -4037,14 +4038,16 @@ entries with *Accept risk* / *Must fix* are the detail's `settle_ids`: the escal
 ones (those `sf settle` takes) at a stop whose row has a settlement (`escalated`,
 `review_disputed`, `review_churn`).
 
-**Full pages.** One view shows at a time: the board, a job's page or a planned ticket's page; the
+**Full pages.** One view shows at a time: a main view under the top bar, the home (`#home`,
+section Home) or the board (`#board`, also the empty hash), a job's page or a planned ticket's page; the
 URL hash says which, and the browser's Back and Forward move between them: `#<workspace>/<ticket>`
 is the job's page on its Stream (today's job links keep working), `#<workspace>/<ticket>/changes`
 and `/mr` the same page on its Changes or Merge request screen, and `#<workspace>/<ticket>/ticket`
 the planned ticket's page (SF-081, below). A hash for a job or
 ticket the board does not have shows the board. A click on a job card opens its page (below); the
 stream follows that job. A job that leaves the board (its ticket archived or deleted) goes back to
-the board. **Keys** on the board: `j` and `k` move between the cards, Enter opens the focused card;
+the board. **Keys** on the board: `j` and `k` move between the cards, Enter opens the focused card
+(on the home the same between its cards; Escape there goes nowhere);
 on a job's page `s`, `c` and `m` switch to the Stream, Changes and Merge request, and on the Stream
 `j` and `k` select an entry, `G` the last one and Enter opens or closes the selected one;
 Ctrl+Enter in the message box sends it; Escape closes an open confirmation, then goes back one
@@ -4374,11 +4377,13 @@ naming the type, when a type of `web/types.d.ts` has neither.
 - `core.js`: constants, state, the DOM, format and HTTP helpers.
 - `job-screens.js`: what the job page reads, Task check, Changes, Merge request, Stream.
 - `job-page.js`: the job page's header, composer, hand-over panel, job actions.
-- `header.js`: the board's top bar: what waits for you, the pages, the workspace filter, the
-  pill's running count, the run limit and the reset rule.
+- `header.js`: the top bar of the home and the board: what waits for you, the pages, the workspace
+  filter, the pill's running count, the run limit and the reset rule.
 - `board.js`: board, cards, workspaces and dependencies, queue, toast.
-- `coordinator.js`: the board's Coordinator card (section Coordinator card), read-only.
+- `coordinator.js`: the Coordinator card (section Coordinator card), read-only.
 - `routing.js`: the view shown, routing, the delegated click, input, change and key handlers.
+- `home.js`: the two main views (`showMain`, `back`) and the home (section Home): Needs you and the
+  Coordinator card's place.
 - `ticket-page.js`: Markdown preview, the planned ticket page, a ticket's images.
 - `reports.js`: the morning digest and the Stats page.
 - `mr-row.js`: `mrRow`, one compact row of an open merge request (its pipeline, readiness, rebase
@@ -4886,8 +4891,9 @@ choice is one for all workspaces, and every skill may be switched off.
 ### Coordinator card
 
 The coordinator (the user's Claude Code session in the factory's checkout, `docs/runbooks/coordinator.md`)
-works out of the dashboard's sight; its chat stays on claude.ai. A compact card **Coordinator** on the
-board, above the columns (`#coord`, `web/coordinator.ts`), shows what it does now, the questions that
+works out of the dashboard's sight; its chat stays on claude.ai. A compact card **Coordinator**,
+above the columns on the board and under Needs you on the home (`#coord`, `web/coordinator.ts`: one
+card, moved to the main view shown by `placeCoordinator` of `web/home.ts`, SF-226), shows what it does now, the questions that
 wait for the user's answer, and one click to the chat. The card is read-only: nothing on the
 dashboard writes the state, answers go to the chat.
 
@@ -4975,6 +4981,43 @@ screenshot. Nothing leaves the machine.
   `  note: <note>`, with `\n` and `\t` as spaces (`No open pins.` without); `sf pins resolve <id>`
   prints `Resolved pin <id>.`; `sf pins clear` prints `Removed N pins.` The three answer while
   `sf update` drains or builds; they touch no job.
+
+### Home
+
+The home (SF-226, `web/home.ts`) puts what the user must do on top: what needs them, then the
+coordinator. It is a view beside the board, under the same top bar; the board stays the first
+screen (the empty hash).
+
+- **Two main views.** `#board` holds the top bar, the hint, the Coordinator card, the home (`#home`)
+  and the columns (`#cols`); the home shows `#home` and hides `#cols`, the board the opposite.
+  `showMain` shows one (it leaves a job page and closes the drawer, hides the other pages, draws,
+  and focuses the card that opened the page left); `back()` shows the board, as every Back did
+  before, and `openHome()` the home.
+- **Addresses.** `#home` is the home and `#board` the board. The board, the first view, is written
+  as the empty hash; an empty or unknown hash shows it.
+- **The tabs.** *Home* comes before *Board* in the top bar and in the page select below 1100 px;
+  the tab of the view shown is current, and the select shows it after any choice. "N waits for
+  you" scrolls Needs you into view on the home, Your turn on the board.
+- **The Coordinator card** is one element, moved by `placeCoordinator` to the view shown: right
+  after Needs you on the home, right before the columns on the board. Moving it reads nothing:
+  `api/coordinator` is still read once per `coordinator` event.
+- **Needs you**, oldest first: the jobs of Your turn (`needs_human`, `ready_for_human_review`,
+  `handed_over`, `paused`) of the workspaces the filter shows, by the time of their last state
+  change, the earliest first (a tie by key), with their count; none: "Nothing waits for you.".
+  A card is the board's card (the workspace's stripe, a click opens the job's Stream) with the key,
+  the workspace chip, a stop's code, how long it waits ("30 min ago", "Waiting since <time>" as its
+  title), the title, the job page's sentence with a full stop (the colour of its kind: an error,
+  a question, ready, or none for a paused job), the note of a refused hand-over or of a changed
+  Task file, and Your turn's buttons and last outcome. The buttons are the board's, through the
+  page's one delegated click listener; the home decides no rule of a stop and reads nothing from
+  the server: the board's drawing draws it, so it follows the stream, the 15 s refresh and the
+  one-minute tick, and a focused card keeps the focus.
+- **Keys.** `j` and `k` move between the home's cards and Enter opens the focused one; Escape on
+  the home goes nowhere. Alt+Up and Alt+Down stay the board's.
+- **Layout.** One column, at most 960 px, centred, with the board's side padding. From 1100 px two
+  columns (3 : 2, at most 1440 px): Needs you and the Coordinator card side by side in the first
+  row, so both things that wait for the user are on top on a desktop; a phone keeps one column in
+  the user's order.
 
 ### Phone and tablet
 

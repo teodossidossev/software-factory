@@ -172,5 +172,15 @@ refused), and the factory's test command passed in a sandbox without network on 
   read (`/etc`, `/opt`).
 - **A phone that is lost unlocked** opens the dashboard. The dangerous actions still need the
   ticket typed. Keep the QR code with the token private.
+- **The commit is not compared with what the reviewers saw.** They review each iteration's Patch.
+  After the last clean review, the workspace's test command runs in the worktree, then the
+  Implementer writes the MR text in a turn of its own, and the factory commits the worktree as it
+  is. A source file the test run wrote, or one the MR text turn changed, reaches the merge request
+  unreviewed: the test run is checked for changes to `.git` and the agent configuration only, and
+  the MR text turn is kept to the MR text by its prompt alone.
+- **The reviewers read the Task file in the worktree.** The Claude review, the Codex gate and the
+  simplification pass read `.software-factory/<ticket>.md` from the job's worktree, where the
+  Implementer can write. Only a prompt rule keeps it from editing that file; the factory's own copy
+  of the Task is not what they read.
 
 The full list of limits is in [The trust model: The limits](guide/trust-model.md#the-limits).

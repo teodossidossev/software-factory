@@ -1,14 +1,14 @@
-// The Task check: before Start, a fresh, read-only Agent SDK query() reads the Task file
-// and the repository only, and says whether an Implementer could build it without a design
-// decision of its own. It runs in a temporary detached worktree of the work checkout at the Task's
-// base (the code the Implementer starts from), which has no .software-factory folder, and a
+// The Task check: before Start, a fresh, read-only Agent SDK query() reads the Task file, the
+// Task files it builds on (builds_on, src/builds-on.ts) and the repository only, and says whether an
+// Implementer could build it without a design decision of its own. It runs in a temporary detached
+// worktree of the work checkout at the Task's base, which has no .software-factory folder, and a
 // PreToolUse hook refuses every Read, Grep or Glob that reaches outside that worktree and every other
 // tool but the SDK's StructuredOutput. Its prompt holds the repository's and the user's
 // coding rules read at the checkout's commit (src/rules-docs.ts), the list of the workspace's
-// decision documents in that checkout (src/decisions.ts; prompt: src/prompts.ts) and the Task file, and
-// nothing of the Context owner's conversation, the jobs or the ledger; its output is a paraphrase first, then
-// findings, the files it expects to change and a verdict. A check is stored by the sha256 of the Task file it read, under the state
-// directory, never in the work checkout. It only advises: nothing here starts, refuses or changes
+// decision documents in that checkout (src/decisions.ts; prompt: src/prompts.ts), the Task files it builds on
+// that are not merged and the Task file, and nothing of the Context owner's conversation, the jobs or the ledger; its output is a paraphrase first, then
+// findings, the files it expects to change and a verdict. A check is stored by the sha256 that folds the Task file's images and
+// chain in (taskCheckSha256), under the state directory, never in the work checkout. It only advises: nothing here starts, refuses or changes
 // a job.
 import { createHash, randomUUID } from 'node:crypto';
 import { renameSync, rmSync } from 'node:fs';
@@ -17,6 +17,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { HookCallback, SandboxSettings, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import * as z from 'zod/v4';
 import { writeFileAtomic } from './atomic.js';
+import { type BuildsOnRecord, buildsOnChain, chainLines, checkChain } from './builds-on.js';
 import { attachmentReferences, imageHashes, type ImageRef, type ResolvedImage, resolveImages, writeImages } from './attachments.js';
 import type { Config } from './config.js';
 import { taskStartBranch } from './continues.js';
@@ -128,14 +129,15 @@ export function settleCheck(task: string, output: CheckOutput, maxFiles?: number
 // The sha256 of a Task file's text (UTF-8), as write_task reports it.
 export const taskSha256 = (task: string): string => createHash('sha256').update(task, 'utf8').digest('hex');
 // The sha256 a check of a Task file is stored and found by: taskSha256 of the text when
-// it refers to no image; otherwise the sha256 of the text, a newline and the sorted
+// it refers to no image and builds on nothing; otherwise the sha256 of the text, a newline and the sorted
 // "<name>:<sha256>" lines of its referenced images ("<name>:missing" for one that cannot be read),
-// so a changed image makes the check stale.
-export function taskCheckSha256(task: string, images: ReadonlyArray<{ name: string; sha256: string }>): string {
-  if (images.length === 0) {
+// then the lines of its builds_on chain in order (chainLines), so a changed image or a changed Task
+// file in the chain makes the check stale.
+export function taskCheckSha256(task: string, images: ReadonlyArray<{ name: string; sha256: string }>, chain: readonly string[] = []): string {
+  if (images.length === 0 && chain.length === 0) {
     return taskSha256(task);
   }
-  const lines = images.map((image) => `${image.name}:${image.sha256}`).sort();
+  const lines = [...images.map((image) => `${image.name}:${image.sha256}`).sort(), ...chain];
   return createHash('sha256').update(`${task}\n${lines.join('\n')}`, 'utf8').digest('hex');
 }
 
@@ -143,22 +145,27 @@ export function taskCheckSha256(task: string, images: ReadonlyArray<{ name: stri
 const imagesDir = (workspace: Workspace, ticket: string, archived = false): string =>
   join(workspace.workCheckout, TASK_DIR, ...(archived ? [ARCHIVE_DIR] : []), ticket);
 
-// taskCheckSha256 of a Task text with its referenced images as they are in the folder now.
+// taskCheckSha256 of a Task text with its referenced images as they are in the folder now and the
+// Task files of its builds_on chain as they are now.
 export async function currentCheckSha256(workspace: Workspace, ticket: string, task: string, archived = false): Promise<string> {
   const references = attachmentReferences(ticket, task);
-  return taskCheckSha256(task, references.length === 0 ? [] : await imageHashes(imagesDir(workspace, ticket, archived), references));
+  const images = references.length === 0 ? [] : await imageHashes(imagesDir(workspace, ticket, archived), references);
+  return taskCheckSha256(task, images, chainLines(await buildsOnChain(workspace, ticket, task)));
 }
 
 // The name of a check's file: the first 16 hex of the Task file's sha256.
 export const checkId = (sha256: string): string => sha256.slice(0, 16);
 
-// A stored check: the output (null when the check failed) or its redacted error, the base commit
+// A stored check, by the sha256 that folds the Task file's images and builds_on chain in: the output
+// (null when the check failed) or its redacted error, the base commit
 // it read (null when it failed before), the model, the estimated cost and the times. ok checks
 // have a verdict (its session's skills: SkillNames, the task_check role's); a failed one never counts as ready.
+// builds_on: how the session's prompt used each Task file of the chain, when the Task has one.
 export interface CheckRecord extends SkillNames {
   workspace: string;
   ticket: string;
   sha256: string;
+  builds_on?: BuildsOnRecord[];
   commit: string | null;
   status: 'checked' | 'failed';
   output: CheckOutput | null;
@@ -596,6 +603,8 @@ async function checkCheckout(checkout: string, task: string): Promise<{ root: st
 // error redacted like a failed review's. The worktree is removed afterwards.
 export async function runTaskCheck(workspace: Workspace, ticket: string, task: string, options: CheckOptions): Promise<CheckRecord> {
   const startedAt = new Date().toISOString();
+  // The chain of Tasks it builds on, read once from the Task files (never throws).
+  const chain = await buildsOnChain(workspace, ticket, task);
   // The referenced images, read by the factory from the work checkout's folder: the
   // session may not read .software-factory/. One that cannot be used fails the check; no session runs.
   const references = attachmentReferences(ticket, task);
@@ -605,11 +614,11 @@ export async function runTaskCheck(workspace: Workspace, ticket: string, task: s
   } catch (error) {
     const message = error instanceof FactoryError ? error.message : 'The Task file\'s images could not be read.';
     return {
-      workspace: workspace.name, ticket, sha256: await currentCheckSha256(workspace, ticket, task), commit: null, status: 'failed', output: null,
+      workspace: workspace.name, ticket, sha256: taskCheckSha256(task, await imageHashes(imagesDir(workspace, ticket), references), chainLines(chain)), commit: null, status: 'failed', output: null,
       error: message, model: options.model ?? null, cost_usd: null, started_at: startedAt, ended_at: new Date().toISOString(),
     };
   }
-  const record = { workspace: workspace.name, ticket, sha256: taskCheckSha256(task, images) };
+  const record = { workspace: workspace.name, ticket, sha256: taskCheckSha256(task, images, chainLines(chain)) };
   let checkout: Awaited<ReturnType<typeof checkCheckout>>;
   try {
     checkout = await checkCheckout(workspace.workCheckout, task);
@@ -635,6 +644,12 @@ export async function runTaskCheck(workspace: Workspace, ticket: string, task: s
     const failed = (error: string): CheckRecord => ({
       ...record, commit: checkout.commit, status: 'failed', output: null, error, model: options.model ?? null, cost_usd: null, started_at: startedAt, ended_at: new Date().toISOString(),
     });
+    // The Task files of the chain not merged yet, for the prompt; a chain that cannot be used fails
+    // the check before any session (its message holds ticket keys only).
+    const sent = await checkChain(options.stateDir, workspace, ticket, chain);
+    if ('error' in sent) {
+      return failed(sent.error);
+    }
     let rules: string;
     try {
       rules = (await collectRules(workspace.workCheckout, checkout.commit, { workspace: workspace.name, skip: workspace.rulesSkip ?? [], configDir: options.configDir, maxBytes: options.rulesMaxBytes })).block;
@@ -650,7 +665,7 @@ export async function runTaskCheck(workspace: Workspace, ticket: string, task: s
     let outcome: Awaited<ReturnType<typeof runStructuredSession<CheckOutput>>>;
     const skills = await roleSkillBlocks(options.stateDir, 'task_check');
     try {
-      outcome = await runStructuredSession(checkPrompt(ticket, task, rules, skills.text, await workspaceDecisionDocs(workspace.name, cwd, options.configDir)), {
+      outcome = await runStructuredSession(checkPrompt(ticket, task, rules, skills.text, await workspaceDecisionDocs(workspace.name, cwd, options.configDir), sent.chain), {
         cwd, claudePath: options.claudePath, sandbox: options.sandbox, model: options.model, maxTurns: options.maxTurns,
         pathDenials: async (sessionTmp) => ({ ...(await pathDenials({ session: 'task_check', workspace: workspace.name, checkout: workspace.workCheckout, sessionTmp,
           checkFolder: dirname(cwd), stateDir: options.stateDir, worktreeRoot: options.worktreeRoot, configDir: options.configDir })), hooks: undefined }),
@@ -668,7 +683,7 @@ export async function runTaskCheck(workspace: Workspace, ticket: string, task: s
       // Only the path denials throw (runStructuredSession).
       return failed(redactor.failure(`The check could not build its path denials: ${error instanceof Error ? error.message : String(error)}`.slice(0, 1000)));
     }
-    const base = { ...record, ...skills.names, commit: checkout.commit, model: outcome.model ?? options.model ?? null, started_at: startedAt, ended_at: outcome.endedAt };
+    const base = { ...record, ...(sent.record.length > 0 ? { builds_on: sent.record } : {}), ...skills.names, commit: checkout.commit, model: outcome.model ?? options.model ?? null, started_at: startedAt, ended_at: outcome.endedAt };
     if (!outcome.ok) {
       return { ...base, status: 'failed', output: null, error: redactor.failure(outcome.message), cost_usd: null };
     }
@@ -880,13 +895,16 @@ const indent = (text: string, prefix: string): string[] => text.trimEnd().split(
 // A check as sf check-task prints it: the paraphrase first, the findings by severity, the files and
 // the verdict; a failed check with its error.
 export function checkLines(record: CheckRecord): string[] {
-  const head = `Task check of ${record.workspace}/${record.ticket} (${TASK_DIR}/${record.ticket}.md, sha256 ${checkId(record.sha256)}), model ${record.model ?? 'default'}`;
+  const head = [
+    `Task check of ${record.workspace}/${record.ticket} (${TASK_DIR}/${record.ticket}.md, sha256 ${checkId(record.sha256)}), model ${record.model ?? 'default'}`,
+    ...(record.builds_on === undefined ? [] : [`Builds on: ${record.builds_on.map((item) => `${item.ticket} (${item.how === 'left_out' ? 'left out' : item.how})`).join(', ')}`]),
+  ];
   if (record.status === 'failed' || record.output === null) {
-    return [head, `Check failed: ${record.error ?? 'unknown error'}`, 'Verdict: failed (a failed check never counts as ready)'];
+    return [...head, `Check failed: ${record.error ?? 'unknown error'}`, 'Verdict: failed (a failed check never counts as ready)'];
   }
   const { output } = record;
   const counts = severityCounts(output);
-  const lines = [head, '', 'Paraphrase:', ...indent(output.paraphrase, '  '), '', 'Findings:'];
+  const lines = [...head, '', 'Paraphrase:', ...indent(output.paraphrase, '  '), '', 'Findings:'];
   for (const severity of SEVERITIES) {
     const items = output.findings.filter((item) => item.severity === severity);
     lines.push(`  ${severity} (${items.length})${items.length === 0 ? ': none' : ':'}`);

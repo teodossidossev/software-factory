@@ -595,7 +595,7 @@ function createMcpServer(
     {
       title: 'Read the Task check',
       description:
-        `Returns the last Task check of the current Task file .software-factory/<ticket>.md: a read-only Claude session that read only the Task file and the repository (the factory runs it ` +
+        `Returns the last Task check of the current Task file .software-factory/<ticket>.md: a read-only Claude session that read only the Task file, the Task files it builds on and the repository (the factory runs it ` +
         `automatically after write_task, or the user presses Check). running: a check of the ticket runs now; pending: an automatic check of it is scheduled and has not started; call again until ` +
         `both are false. paraphrase is the checker's reading of the Task; findings are decision, contradiction, missing, overreach or unclear, each blocker, major or nit; files are the files it ` +
         `expects to change; verdict is ready (no blocker or major), not_ready, failed (error says why; never ready), or none when the current Task file has no check (a check of an earlier version ` +

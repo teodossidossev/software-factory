@@ -47,9 +47,9 @@ Implementer, which the user sends or dismisses on the dashboard; nothing runs un
    check 60 s after your last `write_task` without anyone asking (its answer says
    `check: "scheduled"`; `"off"` when the user turned the automatic check off: then ask them to
    press Check). Wait for it: call `task_check` until
-   `running` and `pending` are both false. A fresh reader that sees only the Task file and the
-   repository paraphrases it and lists findings: a wrong paraphrase, a `decision` left to the
-   Implementer, a `contradiction` with the code or with a decision document (always a blocker), a
+   `running` and `pending` are both false. A fresh reader that sees only the Task file, the Task
+   files it builds on (`builds_on`) and the repository paraphrases it and lists findings: a wrong
+   paraphrase, a `decision` left to the Implementer, a `contradiction` with the code or with a decision document (always a blocker), a
    `missing` file, test or criterion, an `overreach`. Fix every blocker and major finding in the Task file, or ask the
    user about the decisions only they can make, then write it again with `write_task`: the next
    check starts by itself. Tell the user when the verdict is ready. After two automatic rounds
@@ -118,7 +118,7 @@ terminal, and may have the factory open and merge the merge request on the Git h
 | `queue_add(workspace, ticket, at?)` | Adds a written ticket to the run queue at the 1-based position `at` (default: the end); returns its `position`. Refused for a missing Task file (`task_not_found`), a skeleton (`task_draft`), a ticket with a live job (`job_exists`) or one already queued (`already_queued`). The user removes and reorders. |
 | `read_job(workspace, ticket, iteration?)` | The ticket's job: `state`, `iteration`, its `stop` (`code`, `message`) while `needs_human`, and one iteration's (`shown_iteration`, default the last; 0 before the first) `report` (at most 64 KiB, `report_truncated` when cut), `review` and `gate` (`verdict`, `summary`, `items`, or the `error` of a failed run; null when none ran). Paths read `<worktree>` and `<checkout>`. Refused: no job (`job_not_found`), an iteration out of range (`invalid_iteration`). Starts nothing. |
 | `suggest_changes(workspace, ticket, note)` | While the job waits for the user (`needs_human`, `ready_for_human_review`, `handed_over`), stores one note to the Implementer, replacing any earlier one; at most 4000 characters, written as the user would. It starts nothing: the user reads it on the dashboard and sends it (as their own message; on a handed-over job, Ask for changes) or dismisses it. Refused: no job (`job_not_found`), a job that does not wait for the user (`invalid_state`), an empty note (`invalid_content`). |
-| `task_check(workspace, ticket)` | The last Task check of the current Task file: `verdict` (`ready`, `not_ready`, `failed`, or `none` when this version has no check), the checker's `paraphrase`, its `findings` (`kind`, `severity`, `where`, `problem`, `expected`) and the `files` it expects to change; `running` (a check runs now) and `pending` (an automatic check is scheduled). The factory runs it automatically after `write_task`, or the user presses Check; call again until `running` and `pending` are false. This tool only reads it. |
+| `task_check(workspace, ticket)` | The last Task check of the current Task file: `verdict` (`ready`, `not_ready`, `failed`, or `none` when this version has no check), and `none` again once a Task file it builds on changed, the checker's `paraphrase`, its `findings` (`kind`, `severity`, `where`, `problem`, `expected`) and the `files` it expects to change; `running` (a check runs now) and `pending` (an automatic check is scheduled). The factory runs it automatically after `write_task`, or the user presses Check; call again until `running` and `pending` are false. This tool only reads it. |
 
 ## Connecting a planner
 
@@ -266,7 +266,10 @@ preparation moves this part onto that ticket's latest prepared commit; Approve i
 that ticket is merged. Once it is merged, the job starts from `base` as any job. A queued
 ticket waits for it ("Waits for" on its card); a start by hand before that ticket has a prepared
 commit is refused. Refused when it names the ticket itself, is not a ticket key, or comes with
-`continues:`. `lands_after:` keeps its own meaning beside it.
+`continues:`. `lands_after:` keeps its own meaning beside it. The Task check of this part reads
+the Task files of the tickets it builds on, up the chain, and counts what they introduce as the
+code this part starts from: name what this part relies on as those Tasks name it. A change to one
+of those Task files makes this part's check out of date.
 
 `review:` says who reviews the ticket's iterations. `review: claude` adds the Claude review beside
 the Codex gate, in the same round: give it to risky tickets (authentication, the sandbox, the state format, and

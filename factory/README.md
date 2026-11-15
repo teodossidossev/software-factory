@@ -1343,6 +1343,23 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   never pushed. MR preparation rebases onto the latest `origin/<continues>`, Approve pushes the
   prepared commit onto `refs/heads/<continues>` (section MR preparation) and the merge request of
   `<continues>` into `base` is reused.
+- **Building on another part** (`src/builds-on.ts`). A part of a split ticket may name
+  `builds_on: <ticket>` in its front matter: a ticket of the same workspace whose change this part
+  builds on and which is not merged yet; `base` stays the branch the merge request will target.
+  `write_task` and `start` refuse it (`invalid_content`) when it names the ticket itself
+  (`builds_on must name another ticket.`), is not a ticket name (`builds_on must be a ticket key:
+  <the ticket rule>.`) or comes with `continues` (`builds_on and continues cannot be used
+  together.`); `lands_after` keeps its meaning beside it. While that ticket is not merged (the
+  dependency rule's `merged`, section Dashboard, Dependencies, asked in the work checkout), the job
+  starts from the prepared commit of that ticket's job, which must be in `ready_for_human_review`,
+  `handed_over` or `pushed`: the branch is created at that commit in the workspace's checkout,
+  nothing is fetched or pushed for it, and it is the job's `base_commit`, so the Patch and every
+  review show this part's change alone. Without such a commit a start (by hand, Restart or the run
+  queue's) is refused with `builds_on_not_ready` (409): "<ticket> builds on X, which has no prepared
+  commit yet: start it once X is ready, or queue it.". Once that ticket is merged the job starts
+  from `origin/<base>` as any job. The job records `builds_on` and `builds_on_commit` (the commit
+  it started from; `null` when it started from its base); both are `null` on every other job, and
+  a record written without them reads them as `null`. MR preparation and Approve treat it as section MR preparation says.
 - When the session is idle (its last queued turn ended), the factory publishes an iteration: the
   Report (the last assistant text, plus `## Changed files` and `## Denied actions`), the Patch
   (`git diff <base commit>` plus untracked files in the worktree, without ignored,
@@ -2654,7 +2671,11 @@ It ends with the branch holding exactly one commit: handed over to the user's ch
 (`handed_over`, section Hand-over to your checkout) or, with hand-over off (the workspace's
 `handoff`, else `SF_HANDOFF`) or when the hand-over was refused, in `ready_for_human_review`.
 The worktree stays until the hand-over or the push (SF-073).
-`sf approve` then pushes that commit and nothing else.
+`sf approve` then pushes that commit and nothing else. For a job with `builds_on` (section Jobs)
+whose ticket is not merged yet, `sf approve` and `sf mr create` (and their buttons) are refused
+with `builds_on_not_merged` (409): "<ticket> builds on X, which is not merged yet: submit X
+first.", so nothing of a part is pushed before the part it builds on is merged; the hand-over to
+the checkout is not affected, and a push the user makes from there is theirs.
 The Implementer only writes the MR text. The factory commits and rebases itself, outside the
 sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's placeholders.
 
@@ -2673,8 +2694,12 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    used (`guard_terms_invalid`) or a failed scan (`guard_failed`) stops it the same way.
 1. Target: `git fetch origin <base>` (60 s) when `origin` exists, target `origin/<base>`, else the
    local `<base>`; for a job with `continues` (section Jobs) the same with `<continues>` instead of
-   `<base>`. Its commit is stored as `target_commit`. A rebase left in progress by a restart
-   of `sf serve` is aborted first.
+   `<base>`. For a job with `builds_on` (section Jobs) whose ticket is not merged, the target is
+   that ticket's job's current prepared commit, with no fetch; when that job has none (in a state
+   other than `ready_for_human_review`, `handed_over` or `pushed`: the user asked for changes on
+   it), MR preparation stops with `builds_on_not_ready` ("<ticket> builds on X, which is being
+   changed: Retry once X is ready again."), which `sf retry` takes. Its commit is stored as
+   `target_commit`. A rebase left in progress by a restart of `sf serve` is aborted first.
 2. State `preparing_mr`, `mr_attempts + 1`; with a `test_command` in the workspace's entry of
    `workspaces.json`, the **test step** comes first (SF-128, below), and then the **MR text turn**:
    one turn in the same session
@@ -2828,7 +2853,9 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
      the lines that start with `#`, the MR text's headings. The forge's merge request uses the
      same `mrMessage` title and body. The identity and the signing configuration are the user's
      Git configuration.
-   - `git rebase -q <target commit>`, unless the target is already an ancestor of `HEAD`.
+   - `git rebase -q <target commit>`, unless the target is already an ancestor of `HEAD`. For a
+     job with `builds_on`, `git rebase -q --onto <target commit> <base commit>`: only the job's own
+     commit is replayed, since the other ticket's new prepared commit does not contain its old one.
 4. A rebase that stops on conflicts (unmerged paths in `git diff --name-only --diff-filter=U`)
    stays in progress, the job stays `preparing_mr`, and the factory sends one **conflict turn**
    (`conflictPrompt`, the same deny list). It lists the files and asks the Implementer to resolve
@@ -2898,7 +2925,8 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    `mr_serve_restarted`, `mr_interrupted` (paused as MR preparation began), `mr_commit_failed`,
    `mr_rebase_failed`, `mr_failed`, or a stop of the guard (`guard_hit`, `guard_terms_invalid`,
    `guard_failed`, SF-122: after a `!` line in `guard-terms.txt`, for example; the change check runs
-   first), or `tests_unavailable` (SF-128: the test step runs again) (`MR_RETRY_CODES` in
+   first), or `tests_unavailable` (SF-128: the test step runs again), or `builds_on_not_ready`
+   (step 1: the ticket the job builds on has a prepared commit again) (`MR_RETRY_CODES` in
    `src/execution/shared.ts`, derived from the stop table of `src/stops.ts`), with the worktree,
    no `prepared_commit` and a clean Claude review of the last iteration; anything else is
    `invalid_state` naming the state and code. The accepted sensitive paths are the clean path's:
@@ -3701,6 +3729,11 @@ last started a queued ticket, written with the entry's removal before each start
   --no-recurse-submodules origin <base>` in the workspace's checkout under its Git lock, once per
   workspace and base in a pass) and asks again past the 30 s cache (`Setup.dependencyStates(refs,
   {fresh: true})`); a failed fetch leaves the state as it was.
+- **`builds_on`** (section Jobs, Building on another part): an entry also waits for the ticket it
+  builds on until that ticket's job has a prepared commit and is in `ready_for_human_review`,
+  `handed_over` or `pushed`, or the ticket is `merged` (by the rule and the fetch of `lands_after`).
+  Until then that ticket is listed in the entry's `waits_for` with its dependency state, as a
+  `lands_after` one is (once, when it is in both).
 - **The plan must be ready** (SF-086): the scheduler starts a queued ticket only when the Task
   check of its current Task file is `ready` (section Task check), or its entry has `force: true`.
   A Task that needs no check (SF-130, section Task check, Where it pays) and has no check of its
@@ -3733,7 +3766,8 @@ last started a queued ticket, written with the entry's removal before each start
   and `queue_add` (below); neither removes nor moves.
 - **MCP tools** for the Context owner: `queue_list({})` returns `{max_running, running, held,
   entries: [{workspace, ticket, position, queued_at, waits_for}]}` (`waits_for`: the `lands_after`
-  tickets not merged yet, `[{workspace, ticket, state}]`); `queue_add({workspace, ticket, at?})`
+  tickets not merged yet, and the `builds_on` ticket until the entry can build on it,
+  `[{workspace, ticket, state}]`); `queue_add({workspace, ticket, at?})`
   returns `{position}`, with the refusals of `sf queue add`.
 
 ## Dashboard

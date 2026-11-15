@@ -1240,7 +1240,7 @@ test('dashboard (SF-079): the changes route lists the iterations and the files o
   await mkdir(state, { recursive: true });
   const jobs = new JobStore(state);
   const job: Job = {
-    workspace: 'web', ticket: 'W-1', branch: 'W-1-demo', base: 'main', continues: null, base_commit: base, target_commit: null,
+    workspace: 'web', ticket: 'W-1', branch: 'W-1-demo', base: 'main', continues: null, builds_on: null, builds_on_commit: null,base_commit: base, target_commit: null,
     worktree: null, prepared_commit: null, mr_attempts: 0, mr_conflict_turn: false, fixes: 1, gate_fixes: 0, gate_tokens: 0, state: 'awaiting_review', iteration: 2, session_id: 's1', mr: null,
     created_at: '2026-11-01T10:00:00.000Z', updated_at: '2026-11-01T10:05:00.000Z',
   };

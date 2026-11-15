@@ -116,6 +116,26 @@ export function landsAfter(fields: Map<string, string>, workspace: string): Tick
   return refs;
 }
 
+// The ticket of the same workspace whose unmerged change this Task's change builds on:
+// `builds_on:` in the front matter (src/builds-on.ts); null without the field.
+export function taskBuildsOn(fields: Map<string, string>): string | null {
+  return fields.get('builds_on') ?? null;
+}
+
+// The write-time check of a Task's builds_on (invalid_content): another ticket, a valid ticket
+// name, and not together with continues.
+function validBuildsOn(name: string, ticket: string, fields: Map<string, string>): void {
+  if (name === ticket) {
+    throw new FactoryError('invalid_content', 'builds_on must name another ticket.');
+  }
+  if (!TICKET_PATTERN.test(name)) {
+    throw new FactoryError('invalid_content', `builds_on must be a ticket key: ${TICKET_DESCRIPTION}.`);
+  }
+  if (fields.has('continues')) {
+    throw new FactoryError('invalid_content', 'builds_on and continues cannot be used together.');
+  }
+}
+
 // The limits of a Task that starts without a plan check.
 export const CHECK_NEED_MAX_SCOPE = 10;
 export const CHECK_NEED_MAX_WORDS = 1200;
@@ -188,6 +208,10 @@ export function checkTaskContent(ticket: string, content: string): Buffer {
   const continues = fields.get('continues');
   if (continues !== undefined) {
     validContinues(continues, fields.get('base')!);
+  }
+  const buildsOn = taskBuildsOn(fields);
+  if (buildsOn !== null) {
+    validBuildsOn(buildsOn, ticket, fields);
   }
   return buffer;
 }

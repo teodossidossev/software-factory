@@ -15,17 +15,20 @@
 // With planCheck the scheduler starts a queued ticket only when the Task check of its current
 // Task file is ready or not needed, or its entry is forced (Start anyway);
 // otherwise the entry stays in place and its row says why.
+// A queued ticket with builds_on (src/builds-on.ts) also waits for the ticket it builds on: until
+// that ticket's job has a prepared commit to build on, or the ticket is merged.
 import { mkdir, readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import * as z from 'zod/v4';
 import { writeFileAtomic } from './atomic.js';
+import { buildsOnCommit } from './builds-on.js';
 import { FactoryError } from './errors.js';
 import type { Execution } from './execution.js';
 import { type Job, type JobStore, now, runningJobs, TERMINAL_STATES } from './jobs.js';
 import { limitResetNotification, type Notification } from './notify.js';
 import { resolveWorkspace, type Workspace, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN } from './registry.js';
 import type { DependencyRow, Setup } from './setup.js';
-import { isDraft, landsAfter, parseFrontMatter, readTask, TASK_DIR, TICKET_DESCRIPTION, TICKET_PATTERN, type TicketRef } from './task-file.js';
+import { isDraft, landsAfter, parseFrontMatter, readTask, TASK_DIR, taskBuildsOn, TICKET_DESCRIPTION, TICKET_PATTERN, type TicketRef } from './task-file.js';
 
 export const QUEUE_FILE = 'queue.json';
 export const MIN_RUNNING = 1;
@@ -147,7 +150,8 @@ export function planReason(plan: PlanCheck): string | null {
 }
 
 // A queued ticket as the queue shows it: its 1-based position, the tickets it lands after that are
-// not merged yet (with their dependency states), whether it is forced and why its plan holds it (null
+// not merged yet and the ticket it builds on while it cannot build on it yet (with their dependency
+// states, each ticket once), whether it is forced and why its plan holds it (null
 // when the plan is ready, the entry forced, or the queue has no plan check).
 export interface QueueRow {
   workspace: string;
@@ -203,10 +207,11 @@ type QueueExecution = Pick<Execution, 'start' | 'fetchBase' | 'limitReset'>;
 type QueueSetup = Pick<Setup, 'dependencyStates' | 'lastJobBase'>;
 type QueueJobs = Pick<JobStore, 'list' | 'read'>;
 
-// What a pass knows of a queued ticket's Task file: the tickets it lands after, or gone (no Task
-// file, or its workspace is not registered any more: the entry is dropped). A Task file that cannot
-// be read otherwise waits for nothing: its start says why it cannot start.
-type TaskInfo = { refs: TicketRef[] } | 'gone';
+// What a pass knows of a queued ticket's Task file: the tickets it lands after and the one it
+// builds on (null without builds_on), or gone (no Task file, or its workspace is not registered any
+// more: the entry is dropped). A Task file that cannot be read otherwise waits for nothing: its
+// start says why it cannot start.
+type TaskInfo = { refs: TicketRef[]; buildsOn: TicketRef | null } | 'gone';
 
 // The scheduler and the changes of the queue (see the top of this file).
 export class RunQueue {
@@ -452,7 +457,7 @@ export class RunQueue {
     let next: TicketRef | null = null;
     for (const [index, entry] of queue.entries.entries()) {
       const info = await this.#taskInfo(entry);
-      const waits = info === 'gone' ? [] : (await this.#setup.dependencyStates(info.refs, { fresh: false })).filter((row) => row.state !== 'merged');
+      const waits = info === 'gone' ? [] : await this.#waits(info);
       const hold = info === 'gone' ? null : await this.#planHold(entry);
       if (next === null && info !== 'gone' && waits.length === 0 && hold === null) {
         next = { workspace: entry.workspace, ticket: entry.ticket };
@@ -465,15 +470,37 @@ export class RunQueue {
   #taskInfo(entry: TicketRef): Promise<TaskInfo> {
     return this.#resolve(entry.workspace)
       .then((workspace) => readTask(workspace, entry.ticket))
-      .then((content): TaskInfo => ({ refs: landsAfter(parseFrontMatter(content)!, entry.workspace) }))
-      .catch((error: unknown): TaskInfo => (error instanceof FactoryError && ['task_not_found', 'workspace_not_found'].includes(error.code) ? 'gone' : { refs: [] }));
+      .then((content): TaskInfo => {
+        const fields = parseFrontMatter(content)!;
+        const buildsOn = taskBuildsOn(fields);
+        return { refs: landsAfter(fields, entry.workspace), buildsOn: buildsOn === null ? null : { workspace: entry.workspace, ticket: buildsOn } };
+      })
+      .catch((error: unknown): TaskInfo => (error instanceof FactoryError && ['task_not_found', 'workspace_not_found'].includes(error.code) ? 'gone' : { refs: [], buildsOn: null }));
+  }
+
+  // What a queued ticket waits for, as last known (the merged check's cache applies): the tickets
+  // it lands after that are not merged, then the ticket it builds on unless it can build on it
+  // (#canBuildOn) or it is merged, unless already listed.
+  async #waits(info: Exclude<TaskInfo, 'gone'>): Promise<DependencyRow[]> {
+    const waits = (await this.#setup.dependencyStates(info.refs, { fresh: false })).filter((row) => row.state !== 'merged');
+    const ref = info.buildsOn;
+    if (ref === null || (await this.#canBuildOn(ref)) || waits.some((row) => sameTicket(row, ref))) {
+      return waits;
+    }
+    return [...waits, ...(await this.#setup.dependencyStates([ref], { fresh: false })).filter((row) => row.state !== 'merged')];
+  }
+
+  // Whether the job of the ticket a queued ticket builds on has a prepared commit to build on.
+  async #canBuildOn(ref: TicketRef): Promise<boolean> {
+    return buildsOnCommit(await this.#jobs.read(ref.workspace, ref.ticket).catch(() => undefined)) !== null;
   }
 
   // One pass: first the parked jobs whose usage limit reset (#resets) and the reset timer;
   // then, unless held by hand or by a parked job, the entries whose Task file is gone or whose ticket
   // has a live job leave the queue (and so do the start errors of those tickets); then, while fewer
   // jobs run than max_running, the first entry whose plan does not hold it (ready or forced)
-  // and whose dependencies are all merged leaves queue.json and starts. An entry held by its plan
+  // and whose dependencies are all merged (the ticket it builds on merged, or with a prepared commit
+  // to build on) leaves queue.json and starts. An entry held by its plan
   // stays in place; the end of a Task check asks for a pass.
   async #pass(): Promise<void> {
     clearTimeout(this.#timer);
@@ -535,7 +562,7 @@ export class RunQueue {
         if (info === undefined || info === 'gone' || heldNow.has(entry) || (await this.#planHold(entry)) !== null) {
           continue;
         }
-        if (await this.#merged(info.refs, fetched)) {
+        if ((await this.#merged(info.refs, fetched)) && (info.buildsOn === null || (await this.#canBuildOn(info.buildsOn)) || (await this.#merged([info.buildsOn], fetched)))) {
           chosen = entry;
           break;
         }

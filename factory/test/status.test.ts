@@ -14,7 +14,7 @@ process.env.TZ = 'Europe/Sofia';
 
 const CREATED = '2026-11-01T10:00:00.000Z';
 const base: Job = {
-  workspace: 'app', ticket: 'T-1', branch: 'T-1-demo', base: 'main', continues: null, base_commit: null, target_commit: null, worktree: null, prepared_commit: null,
+  workspace: 'app', ticket: 'T-1', branch: 'T-1-demo', base: 'main', continues: null, builds_on: null, builds_on_commit: null,base_commit: null, target_commit: null, worktree: null, prepared_commit: null,
   mr_attempts: 0, mr_conflict_turn: false, fixes: 0, gate_fixes: 0, gate_tokens: 0, state: 'awaiting_review', iteration: 0, session_id: null, mr: null, created_at: CREATED, updated_at: CREATED,
 };
 

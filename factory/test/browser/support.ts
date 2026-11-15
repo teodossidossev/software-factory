@@ -618,7 +618,7 @@ const stateRecord = (from: JobState | null, to: JobState, ts: string, error?: { 
 
 async function writeState(state: string, jobs: JobStore, { base, patch, files }: Shared): Promise<void> {
   const job = (ticket: string, jobState: JobState, iteration: number, minutes: number, extra: Partial<Job> = {}): Job => ({
-    workspace: WS, ticket, branch: `${ticket}-work`, base: 'main', continues: null, base_commit: base, target_commit: null, worktree: null, prepared_commit: null,
+    workspace: WS, ticket, branch: `${ticket}-work`, base: 'main', continues: null, builds_on: null, builds_on_commit: null,base_commit: base, target_commit: null, worktree: null, prepared_commit: null,
     mr_attempts: 0, mr_conflict_turn: false, fixes: 0, gate_fixes: 0, gate_tokens: 0, state: jobState, iteration, session_id: `session-${ticket}`, mr: null,
     created_at: at(minutes), updated_at: at(minutes + 5), ...extra,
   });

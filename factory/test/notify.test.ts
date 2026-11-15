@@ -23,7 +23,7 @@ const MR: JobMr = { host: 'github', number: 7, url: 'https://git.example.org/acm
 
 function job(state: JobState, extra: Partial<Job> = {}): Job {
   return {
-    workspace: 'app', ticket: 'T-1', branch: BRANCH, base: 'main', continues: null, base_commit: null, worktree: null, prepared_commit: null, target_commit: null,
+    workspace: 'app', ticket: 'T-1', branch: BRANCH, base: 'main', continues: null, builds_on: null, builds_on_commit: null,base_commit: null, worktree: null, prepared_commit: null, target_commit: null,
     mr_attempts: 0, mr_conflict_turn: false, fixes: 0, gate_fixes: 0, gate_tokens: 0, state, iteration: 2, session_id: null, mr: null, created_at: CREATED, updated_at: CREATED,
     ...extra,
   };

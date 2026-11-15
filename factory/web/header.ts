@@ -1,7 +1,8 @@
 // header.js, the dashboard's fourth script (DASHBOARD_SCRIPTS in src/dashboard.ts), built from
-// web/header.ts into dist/web/: the board's top bar. One row from 1100 px: the name, "N waits for
-// you", the page tabs, the workspace select, the factory pill and New ticket; below 1100 px a second
-// row holds a page select and the workspace select (app.css). The pill's dot, words and popover
+// web/header.ts into dist/web/: the top bar of the two main views, the home and the board
+// (home.js). One row from 1100 px: the name, "N waits for you", the page tabs (Home and Board
+// marked while their view is shown), the workspace select, the factory pill and New ticket; below
+// 1100 px a second row holds a page select and the workspace select (app.css). The pill's dot, words and popover
 // with the checks are health.js's; this file gives the pill its running count and fills the
 // popover's run queue part (the run limit's stepper, the queue's status and the rule at a usage
 // limit's reset), which shows only when the tickets payload carries the queue. A classic script,
@@ -16,6 +17,8 @@ const LIMIT_MAX = 20;
 
 // The pages of the page select (below 1100 px) and what each opens: the same as the tabs.
 const PAGE_OPEN: Readonly<Record<string, () => void>> = {
+  home: () => openHome(),
+  board: () => showMain('board'),
   digest: () => openDigest(null),
   stats: () => openStats(),
   'merge-requests': () => openMergeRequests(),
@@ -43,7 +46,7 @@ function renderWaits(): void {
   const hidden = waiting.filter((job) => !visible(job.workspace)).length;
   const words = [document.createTextNode(`${n} wait${n === 1 ? 's' : ''} for you`)];
   node.replaceChildren(...words, ...(hidden > 0 ? [el('span', 'hid', ' (hidden)')] : []));
-  node.title = hidden > 0 ? `${hidden} of them in a workspace the filter hides: a click shows every workspace` : 'Show Your turn';
+  node.title = hidden > 0 ? `${hidden} of them in a workspace the filter hides: a click shows every workspace` : 'Show what waits for you';
 }
 
 // The workspace filter: a select with every workspace, its full name and its count of jobs.
@@ -63,10 +66,24 @@ function renderFilter(): void {
   node.value = state.filter;
 }
 
-// The top bar: the waits, the filter, Archived's count, the pill's running count and the run queue.
+// The main view shown, as the tabs and the page select name it: the home while it is shown, else
+// the board.
+const mainShown = (): MainView => (ui.screen === 'home' ? 'home' : 'board');
+
+// The top bar: the waits, the filter, the main view's tab and page, Archived's count, the pill's
+// running count and the run queue.
 function renderHeader(): void {
   renderWaits();
   renderFilter();
+  const view = mainShown();
+  for (const [id, tab] of [['open-home', 'home'], ['open-board', 'board']] as const) {
+    if (tab === view) {
+      byId(id).setAttribute('aria-current', 'page');
+    } else {
+      byId(id).removeAttribute('aria-current');
+    }
+  }
+  byIdAs('page-select', 'select').value = view;
   const archived = `(${state.archived.length})`;
   byId('archived-count').textContent = archived;
   byId('page-archived').textContent = `Archived ${archived}`;
@@ -75,13 +92,14 @@ function renderHeader(): void {
   renderRunQueue();
 }
 
-// "N waits for you"'s click: a filter that hides some of them goes, and Your turn scrolls into view.
+// "N waits for you"'s click: a filter that hides some of them goes, and Needs you (the home) or
+// Your turn (the board) scrolls into view.
 function showYourTurn(): void {
   if (waitingJobs().some((job) => !visible(job.workspace))) {
     state.filter = '';
     renderBoard();
   }
-  document.querySelector<HTMLElement>('#cols .col.you')?.scrollIntoView({ block: 'nearest' });
+  document.querySelector<HTMLElement>(ui.screen === 'home' ? '#home-needs' : '#cols .col.you')?.scrollIntoView({ block: 'nearest' });
 }
 
 // The popover's run queue: Run up to N jobs at once with its stepper, and the status line (the
@@ -145,16 +163,19 @@ function initHeader(): void {
   byId('waits').addEventListener('click', showYourTurn);
   byId('open-merge-requests').addEventListener('click', openMergeRequests);
   byId('open-skills').addEventListener('click', openSkills);
-  // The page select opens what the tabs open, then shows the board again (the bar is the board's).
+  byId('open-home').addEventListener('click', openHome);
+  byId('open-board').addEventListener('click', () => showMain('board'));
+  // The page select opens what the tabs open, then shows the main view shown (the bar is the main
+  // views').
   const pages = byIdAs('page-select', 'select');
-  pages.value = 'board';
+  pages.value = mainShown();
   pages.addEventListener('change', () => {
     const open = PAGE_OPEN[pages.value];
-    pages.value = 'board';
     // A page opened here comes without a hashchange: the Merge requests page hides first (it shows
     // itself again when it is the one chosen).
     byId('merge-requests').hidden = true;
     open?.();
+    pages.value = mainShown();
   });
   const filter = byIdAs('workspace-filter', 'select');
   filter.addEventListener('change', () => {

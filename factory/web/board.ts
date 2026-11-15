@@ -475,10 +475,11 @@ function dependencyLines(key: string, graph: DependencyGraph, className: 'div' |
 const cardOf = (key: string): HTMLElement | null => [...document.querySelectorAll<HTMLElement>('#cols .card')].find((card) => card.dataset.key === key) ?? null;
 
 // A chip's click: the board with that ticket's card scrolled to and focused; a filter or Done's
-// limit that hides it is lifted; a ticket without a card says so.
+// limit that hides it is lifted; a ticket without a card says so. It shows the board as the Board
+// tab does, whatever Back's view.
 function showCard(key: string): void {
   if (ui.screen !== 'board') {
-    back();
+    showMain('board');
   }
   let card = cardOf(key);
   if (card === null && (state.filter !== '' || !state.doneAll)) {
@@ -1062,7 +1063,8 @@ function setCardMenu(key: string | null): void {
 
 const visible = (workspace: string): boolean => state.filter === '' || workspace === state.filter;
 
-// The board (the prototype's renderBoard): the top bar (header.js) and the five columns. The focus
+// The board (the prototype's renderBoard): the top bar (header.js), the five columns, the
+// Coordinator card (coordinator.js) and the home (home.js), whichever main view is shown. The focus
 // stays on the card it was on.
 function renderBoard(): void {
   renderHeader();
@@ -1116,6 +1118,7 @@ function renderBoard(): void {
   byId('board-hint').textContent = hint;
   byId('board-hint').hidden = hint === '';
   renderCoordinator();
+  renderHome();
   if (focused !== null) {
     document.querySelector<HTMLElement>(`#cols .card${focused}`)?.focus();
   }

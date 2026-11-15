@@ -15,11 +15,17 @@ const isDisabled = (node: HTMLElement): boolean => 'disabled' in node && node.di
 type Field = HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
 const isField = (node: Element | null): node is Field => isTag(node, 'input') || isTag(node, 'textarea') || isTag(node, 'select');
 
-// ---------- The job page and the routing (the prototype's go, back, openTicket, route, setHash) ----------
+// ---------- The job page and the routing (the prototype's go, openTicket, route, setHash) ----------
 
-// The view shown: 'board', a job's 'stream', 'changes' or 'mr' (ui.job is its key "<ws>/<ticket>"),
-// or a planned ticket's page 'ticket' (ui.ticket); ui.opener is the key of the card that opened
-// it; pending: the hash names a job or ticket not loaded yet. On the Stream: sel, the selected
+// The two main views under the top bar (home.js showMain): the home and the board. FIRST_VIEW is
+// the view of an empty hash.
+type MainView = 'home' | 'board';
+const FIRST_VIEW: MainView = 'board';
+
+// The view shown: a main view, 'home' or 'board', a job's 'stream', 'changes' or 'mr' (ui.job is
+// its key "<ws>/<ticket>"), or a planned ticket's page 'ticket' (ui.ticket); ui.opener is the key
+// of the card that opened it, focused again by the main view back() shows (home.js);
+// pending: the hash names a job or ticket not loaded yet. On the Stream: sel, the selected
 // entry (j, k, G), and open, the toggles open.
 // related: the card whose dependencies and dependents the board shows, or null. On
 // Changes, cx as the prototype's: the view ('all' or an iteration), the selected file, the
@@ -52,14 +58,15 @@ interface UiState {
   };
 }
 const ui: UiState = {
-  screen: 'board', job: null, ticket: null, opener: null, pending: false, sel: -1, open: new Set(), related: null,
+  screen: FIRST_VIEW, job: null, ticket: null, opener: null, pending: false, sel: -1, open: new Set(), related: null,
   cx: { view: 'all', sel: null, cursor: null, rows: [], q: '', flat: false, collapsed: new Set(), mode: 'side', collapse: true, unfolded: new Set(), check: null, tree: true },
 };
 
-// The URL hash of the view: #<ws>/<ticket> (the Stream), #<ws>/<ticket>/changes, /mr, /ticket;
-// a new one is a new history entry, so Back and Forward move between them.
+// The URL hash of the view: none for FIRST_VIEW, #home or #board for the other main view,
+// #<ws>/<ticket> (the Stream), #<ws>/<ticket>/changes, /mr, /ticket; a new one is a new history
+// entry, so Back and Forward move between them.
 function setHash(): void {
-  const h = ui.screen === 'board' ? '' : ['stats', 'merge-requests', 'skills'].includes(ui.screen) ? ui.screen : ui.screen === 'digest' ? (dg.id === null ? 'digest' : `digest/${dg.id}`) : ui.screen === 'ticket' ? `${ui.ticket}/ticket` : ui.screen === 'stream' ? ui.job : `${ui.job}/${ui.screen}`;
+  const h = ui.screen === FIRST_VIEW ? '' : ['home', 'board', 'stats', 'merge-requests', 'skills'].includes(ui.screen) ? ui.screen : ui.screen === 'digest' ? (dg.id === null ? 'digest' : `digest/${dg.id}`) : ui.screen === 'ticket' ? `${ui.ticket}/ticket` : ui.screen === 'stream' ? ui.job : `${ui.job}/${ui.screen}`;
   if (decodeURIComponent(location.hash.slice(1)) !== h) {
     history.pushState(null, '', `#${h}`);
   }
@@ -91,7 +98,7 @@ function go(key: string, screen = 'stream', focus: 'composer' | 'stop' | undefin
   }
   if (screen === 'mr' && state.detail !== null && keyOf(state.detail.job) === key && state.detail.mr !== true) {
     toast({ level: 'info', text: 'No MR text yet: written at Clean' });
-    if (ui.job === key && ui.screen !== 'board') {
+    if (ui.job === key && ui.screen !== 'board' && ui.screen !== 'home') {
       return;
     }
     screen = 'stream';
@@ -160,34 +167,20 @@ function applyWantedFocus(): void {
   }
 }
 
-// Back to the board, the focus on the card that opened the page.
-function back(): void {
-  if (ui.job !== null) {
-    leaveJob();
-  }
-  if (state.drawer !== null) {
-    hideDrawer();
-  }
-  ui.screen = 'board';
-  ui.job = null;
-  ui.ticket = null;
-  byId('job').hidden = true;
-  byId('ticket').hidden = true;
-  leavePages();
-  byId('board').hidden = false;
-  renderBoard();
-  setHash();
-  if (ui.opener !== null) {
-    document.querySelector<HTMLElement>(`#cols .card[data-open="${ui.opener}"], #cols .card[data-ticket="${ui.opener}"]`)?.focus();
-  }
-}
-
-// The view of the URL hash (on load and on every hashchange). A hash of a job or ticket the board
-// does not have shows the board; it is tried again when the jobs and tickets first arrive.
+// The view of the URL hash (on load and on every hashchange): #home and #board their main view; a
+// hash of a job or ticket the board does not have, or an unknown one, shows FIRST_VIEW; a job or
+// ticket is tried again when the jobs and tickets first arrive.
 function route(): void {
   const hash = decodeURIComponent(location.hash.slice(1));
   // The Merge requests page hides on any other hash (the other pages' openers do not know it).
   byId('merge-requests').hidden = hash !== 'merge-requests';
+  if (hash === 'home' || hash === 'board') {
+    ui.pending = false;
+    if (ui.screen !== hash) {
+      showMain(hash);
+    }
+    return;
+  }
   // The morning digest: #digest, the newest, or #digest/<id>.
   const digest = /^digest(?:\/([0-9A-Za-z-]+))?$/.exec(hash);
   if (digest !== null) {
@@ -207,8 +200,8 @@ function route(): void {
   const match = /^([^/]+\/[^/]+?)(?:\/(changes|mr|ticket))?$/.exec(hash);
   if (match === null) {
     ui.pending = false;
-    if (ui.screen !== 'board') {
-      back();
+    if (ui.screen !== FIRST_VIEW) {
+      showMain(FIRST_VIEW);
     }
     return;
   }
@@ -231,13 +224,14 @@ function route(): void {
     return;
   }
   ui.pending = state.tickets === null;
-  if (ui.screen !== 'board') {
-    back();
+  if (ui.screen !== FIRST_VIEW) {
+    showMain(FIRST_VIEW);
   }
 }
 
-// The jobs changed (the stream, a read): the board and the open job's header, its composer and its
-// stop; a job page whose job left the board (its ticket archived or deleted) goes back to the board.
+// The jobs changed (the stream, a read): the main views and the open job's header, its composer
+// and its stop; a job page whose job left the board (its ticket archived or deleted) goes back to
+// the main view back() shows (home.js).
 function renderJobs(): void {
   goToStarted();
   if (ui.job !== null && jobByKey(ui.job) === null) {
@@ -513,11 +507,12 @@ function onChange(event: Event): void {
   }
 }
 
-// The delegated keys, after point mode's (pins.js pinKey): j and k move between the board's cards, Enter opens the focused one. On a
+// The delegated keys, after point mode's (pins.js pinKey): on a main view j and k move between its
+// cards (the home's, or the board's unfolded columns'), Enter opens the focused one. On a
 // job page: Escape closes an open confirmation, then goes back one level (a screen of the job to
-// its Stream, the Stream to the board); c, m and s switch the screens; on the Stream j and k select
+// its Stream, the Stream to the main view back() shows, home.js); c, m and s switch the screens; on the Stream j and k select
 // an entry, G the last, Enter toggles the selected one; Ctrl+Enter in the message box sends.
-// Escape closes the toast first. Alt+Up and Alt+Down move a queued card with the run queue. On
+// Escape closes the toast first. Alt+Up and Alt+Down move a queued card with the run queue (the board). On
 // Changes: / the filter (Arrow Down or Enter in it goes to the tree), the tree's keys
 // (treeKey), F7 / Shift+F7 and n / p the next and previous file, Arrow Left and Right on the
 // divider its width.
@@ -569,7 +564,7 @@ function onKey(event: KeyboardEvent): void {
     if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && target.id === 'msg') {
       event.preventDefault();
       act('say');
-    } else if (event.key === 'Escape' && ui.screen !== 'board') {
+    } else if (event.key === 'Escape' && ui.screen !== 'board' && ui.screen !== 'home') {
       target.blur();
     } else if (target.id === 'cxq' && (event.key === 'ArrowDown' || event.key === 'Enter')) {
       event.preventDefault();
@@ -606,7 +601,7 @@ function onKey(event: KeyboardEvent): void {
   if (event.altKey || event.ctrlKey || event.metaKey) {
     return;
   }
-  if (ui.screen === 'board' && event.key === 'Escape' && (state.openMenu !== null || ui.related !== null)) {
+  if ((ui.screen === 'board' || ui.screen === 'home') && event.key === 'Escape' && (state.openMenu !== null || ui.related !== null)) {
     // Escape closes a card's ⋯ menu (the focus back on its toggle), else clears the highlight.
     event.preventDefault();
     const menu = state.openMenu;
@@ -618,9 +613,10 @@ function onKey(event: KeyboardEvent): void {
     }
     return;
   }
-  if (ui.screen === 'board') {
-    // A folded column's cards are passed over.
-    const cards = [...document.querySelectorAll<HTMLElement>('#cols .col:not(.folded) .card')];
+  if (ui.screen === 'board' || ui.screen === 'home') {
+    // The home's cards; on the board a folded column's cards are passed over. Escape on a main
+    // view goes nowhere.
+    const cards = [...document.querySelectorAll<HTMLElement>(ui.screen === 'home' ? '#home .card' : '#cols .col:not(.folded) .card')];
     const at = cards.findIndex((card) => card === document.activeElement);
     if (event.key === 'j' || event.key === 'k') {
       event.preventDefault();

@@ -1,11 +1,11 @@
 // The run queue: one order of the planned tickets of every workspace, a limit of jobs that
 // run at once (max_running) and the scheduler of sf serve that starts the next queued ticket by
-// itself when a slot is free. QueueStore reads and writes <state>/queue.json; RunQueue changes it
-// and runs the passes, all one at a time on one promise chain. A ticket leaves queue.json before
-// its start, and Execution.start refuses a second job of a ticket (job_exists) under its lock: the
-// scheduler never starts a ticket twice, across concurrent events and restarts alike. The limit
-// gates only the starts the queue makes itself (Execution.start with queued); a start by hand
-// always goes, and its job counts as running here too.
+// itself when a slot is free. QueueStore (src/queue-store.ts) reads and writes <state>/queue.json;
+// RunQueue changes it and runs the passes, all one at a time on one promise chain. A ticket leaves
+// queue.json before its start, and Execution.start refuses a second job of a ticket (job_exists)
+// under its lock: the scheduler never starts a ticket twice, across concurrent events and restarts
+// alike. The limit gates only the starts the queue makes itself (Execution.start with queued); a
+// start by hand always goes, and its job counts as running here too.
 // A job parked on a usage limit (waiting_limit) holds its slot and holds the queue: while any
 // job is parked the scheduler starts nothing (the limit hold, computed, never stored; releasing the
 // hold by hand does not end it). One timer at the earliest reset of the parked jobs applies the rule
@@ -22,65 +22,33 @@
 // entry is passed over until retry_at (5 minutes after the first failure, then 10, then every 15,
 // without end: removing the entry stops it), and the reset timer also wakes at the earliest
 // retry_at. One notification at the first failure. Every other start error fails as before.
-import { mkdir, readFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
-import * as z from 'zod/v4';
-import { writeFileAtomic } from './atomic.js';
+// With auto_queue, a ticket whose plan is ready joins by itself (addByItself, src/queue-by-itself.ts).
+import { dirname } from 'node:path';
 import { buildsOnCommit } from './builds-on.js';
 import { taskStartBranch } from './continues.js';
 import { FactoryError } from './errors.js';
 import type { Execution } from './execution.js';
 import { type Job, type JobStore, now, runningJobs, TERMINAL_STATES } from './jobs.js';
 import { limitResetNotification, type Notification, type NotifyModeOf } from './notify.js';
+import { type ByItself, lookByItself, RemovedStore, sameTicket } from './queue-by-itself.js';
 import { fetchRetryNotification, RETRY_CODE, retryDelayMs, retryPending } from './queue-retry.js';
+import { MAX_RUNNING, MIN_RUNNING, ON_LIMIT_RULES, type OnLimitRule, type QueueEntry, type QueueError, type QueueFile, type QueueStore } from './queue-store.js';
 import { resolveWorkspace, type Workspace, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN, workspaceNotifyMode } from './registry.js';
 import type { DependencyRow, Setup } from './setup.js';
+import { taskSha256 } from './task-check.js';
 import { isDraft, landsAfter, parseFrontMatter, readTask, TASK_DIR, taskBuildsOn, TICKET_DESCRIPTION, TICKET_PATTERN, type TicketRef } from './task-file.js';
+import type { TicketHistory } from './ticket-history.js';
 
-export const QUEUE_FILE = 'queue.json';
-export const MIN_RUNNING = 1;
-export const MAX_RUNNING = 20;
+// queue.json's format and store live in src/queue-store.ts; re-exported for the queue's users.
+export { DEFAULT_ON_LIMIT, MAX_RUNNING, MIN_RUNNING, ON_LIMIT_RULES, type OnLimitRule, QUEUE_FILE, type QueueEntry, type QueueError, type QueueFile, QueueStore } from './queue-store.js';
 // How often a pass runs again while a queued ticket waits for a dependency and a slot is free, to
 // see merges done on the Git host.
 export const DEPENDENCY_RECHECK_MS = 5 * 60_000;
 // How soon a parked job whose reset passed and whose step failed inside the factory is tried again.
 export const LIMIT_RECHECK_MS = 60_000;
 
-// What the queue does when a usage limit resets.
-export const ON_LIMIT_RULES = ['resume-then-queue', 'resume-only', 'wait'] as const;
-export type OnLimitRule = (typeof ON_LIMIT_RULES)[number];
-export const DEFAULT_ON_LIMIT: OnLimitRule = 'resume-then-queue';
 // The hold by hand that resume-only and wait leave after a reset.
 export const LIMIT_RESET_HOLD_REASON = 'usage limit reset; release the queue to go on';
-
-const timestamp = z.iso.datetime();
-const workspaceName = z.string().regex(WORKSPACE_NAME_PATTERN);
-const ticketKey = z.string().regex(TICKET_PATTERN);
-const queueSchema = z.strictObject({
-  version: z.literal(1),
-  max_running: z.number().int().min(MIN_RUNNING).max(MAX_RUNNING),
-  held: z.boolean(),
-  hold_reason: z.string().nullable(),
-  // The rule at a usage limit's reset; absent in a queue.json written without it: the default.
-  on_limit: z.enum(ON_LIMIT_RULES).default(DEFAULT_ON_LIMIT),
-  // force: Start anyway, whatever the plan check says; until the entry leaves the queue.
-  // retry_at, retries: a start that could not fetch (RETRY_CODE) is tried again at retry_at, the
-  // failures so far in retries; both absent before the first. State format 5 (src/state-version.ts).
-  entries: z.array(z.strictObject({
-    workspace: workspaceName, ticket: ticketKey, queued_at: timestamp, force: z.literal(true).optional(),
-    retry_at: timestamp.optional(), retries: z.number().int().min(1).optional(),
-  })),
-  // The scheduler's start that failed, per ticket (out of the queue): shown on its card.
-  errors: z.array(z.strictObject({ workspace: workspaceName, ticket: ticketKey, code: z.string(), message: z.string(), at: timestamp })),
-  // When the scheduler last started a queued ticket (the health check queue reads it);
-  // absent before the first start. State format 3 (src/state-version.ts).
-  last_start: timestamp.optional(),
-});
-export type QueueFile = z.infer<typeof queueSchema>;
-export type QueueEntry = QueueFile['entries'][number];
-export type QueueError = QueueFile['errors'][number];
-
-const sameTicket = (a: TicketRef, b: TicketRef): boolean => a.workspace === b.workspace && a.ticket === b.ticket;
 
 // The jobs parked on a usage limit, in park order (paused.at).
 export function parkedJobs(jobs: Job[]): Job[] {
@@ -90,48 +58,6 @@ export function parkedJobs(jobs: Job[]): Job[] {
 // The parked jobs the reset timer still waits for: those whose reset was not handled under wait.
 function timedJobs(jobs: Job[]): Job[] {
   return parkedJobs(jobs).filter((job) => job.limit !== undefined && job.limit.reset_seen !== true);
-}
-
-// <state>/queue.json. A missing file reads as an empty queue whose limit is the default
-// (SF_MAX_JOBS, within 1-20); an unreadable or invalid one is an error (queue_invalid), which
-// sf serve reports at its start.
-export class QueueStore {
-  readonly path: string;
-  readonly #defaultLimit: number;
-
-  constructor(stateDir: string, defaultLimit: number) {
-    this.path = join(stateDir, QUEUE_FILE);
-    this.#defaultLimit = Math.min(MAX_RUNNING, Math.max(MIN_RUNNING, defaultLimit));
-  }
-
-  async read(): Promise<QueueFile> {
-    let text: string;
-    try {
-      text = await readFile(this.path, 'utf8');
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        return { version: 1, max_running: this.#defaultLimit, held: false, hold_reason: null, on_limit: DEFAULT_ON_LIMIT, entries: [], errors: [] };
-      }
-      throw new FactoryError('queue_invalid', `${QUEUE_FILE} could not be read (${(error as NodeJS.ErrnoException).code ?? 'unknown error'}).`);
-    }
-    let data: unknown;
-    try {
-      data = JSON.parse(text);
-    } catch { // not JSON: reported as queue_invalid
-      throw new FactoryError('queue_invalid', `${QUEUE_FILE} is not valid JSON.`);
-    }
-    const parsed = queueSchema.safeParse(data);
-    if (!parsed.success) {
-      const issues = parsed.error.issues.map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`);
-      throw new FactoryError('queue_invalid', `${QUEUE_FILE} is invalid: ${issues.join('; ')}.`);
-    }
-    return parsed.data;
-  }
-
-  async write(queue: QueueFile): Promise<void> {
-    await mkdir(dirname(this.path), { recursive: true, mode: 0o700 });
-    await writeFileAtomic(this.path, Buffer.from(`${JSON.stringify(queue, null, 2)}\n`));
-  }
 }
 
 // The Task check of a queued ticket's current Task file: ready, not_ready, failed, checking
@@ -222,6 +148,8 @@ export interface RunQueueOptions {
   // limitReset; the reset timer is armed again as always, so a parked job stays in waiting_limit.
   // Checked at the start of a pass and again right before each start and each limitReset.
   updating?: () => boolean;
+  // The tickets' history, where addByItself records queued_by_itself; none records nothing.
+  history?: Pick<TicketHistory, 'append'>;
 }
 
 type QueueExecution = Pick<Execution, 'start' | 'fetchBase' | 'limitReset'>;
@@ -250,6 +178,9 @@ export class RunQueue {
   readonly #planCheck: ((workspace: string, ticket: string) => Promise<PlanCheck>) | undefined;
   readonly #onAdded: (workspace: string, ticket: string) => void;
   readonly #updating: () => boolean;
+  readonly #history: Pick<TicketHistory, 'append'> | undefined;
+  // The user's removals, beside queue.json.
+  readonly #removed: RemovedStore;
   // Every pass and every change, one at a time.
   #chain: Promise<unknown> = Promise.resolve();
   // A pass is queued on the chain and has not begun: a new event needs no second one.
@@ -276,6 +207,8 @@ export class RunQueue {
     this.#planCheck = options.planCheck;
     this.#onAdded = options.onAdded ?? (() => {});
     this.#updating = options.updating ?? (() => false);
+    this.#history = options.history;
+    this.#removed = new RemovedStore(dirname(store.path));
   }
 
   // Runs work after every pass and change asked for before it.
@@ -349,33 +282,74 @@ export class RunQueue {
   // Adds a planned ticket at position at (1-based; default and beyond the end: the end). Refused:
   // no Task file (task_not_found), a skeleton (task_draft), a ticket with a live job (job_exists),
   // a ticket already queued (already_queued). Clears the ticket's last start error.
+  // A removal of the ticket the user recorded before goes: adding it by hand takes the "not now" back.
   async add(workspace: string, ticket: string, at?: number): Promise<{ position: number }> {
     checkRef(workspace, ticket);
     const index = at === undefined ? undefined : checkPosition(at, 'at');
-    const added = this.#change(async (queue) => {
-      if (queue.entries.some((entry) => sameTicket(entry, { workspace, ticket }))) {
-        throw new FactoryError('already_queued', `${workspace}/${ticket} is already in the queue.`);
-      }
-      const content = await readTask(await this.#resolve(workspace), ticket);
-      if (isDraft(content)) {
-        throw new FactoryError('task_draft', `${TASK_DIR}/${ticket}.md is still the skeleton: the Context owner writes the Task with write_task first.`);
-      }
-      const job = await this.#jobs.read(workspace, ticket);
-      if (job !== undefined && !TERMINAL_STATES.includes(job.state)) {
-        throw new FactoryError('job_exists', `The job for ${workspace}/${ticket} is ${job.state}.`);
-      }
-      const position = Math.min(index ?? queue.entries.length, queue.entries.length);
-      queue.entries.splice(position, 0, { workspace, ticket, queued_at: now() });
-      queue.errors = queue.errors.filter((error) => !sameTicket(error, { workspace, ticket }));
-      return { position: position + 1 };
+    const result = await this.#change(async (queue) => {
+      await this.#admit(queue, workspace, ticket);
+      await this.#removed.forget({ workspace, ticket });
+      return { position: insert(queue, { workspace, ticket }, index ?? queue.entries.length) };
     });
-    const result = await added;
+    this.#added(workspace, ticket);
+    return result;
+  }
+
+  // In a workspace with auto_queue, a ticket whose plan is ready joins the queue by itself:
+  // checkSha256, the check sha256 of the Task file the ready check read (none: a Task that needs no
+  // check, as write_task found it). Left out with the reason (ByItself, lookByItself), never thrown.
+  // The look, the entry's write and its history entry hold the queue's chain, then the ticket's lock:
+  // a write_task or a Save lands before the look (task_changed) or after them all, where the
+  // scheduler's plan check holds the new version. So the version queued is the one found ready.
+  async addByItself(workspace: string, ticket: string, checkSha256?: string): Promise<ByItself> {
+    checkRef(workspace, ticket);
+    const ref = { workspace, ticket };
+    const result = await this.#change((queue) => this.withTicket(workspace, ticket, async (): Promise<ByItself> => {
+      const admit = async (resolved: Workspace): Promise<string> => (await this.#admit(queue, workspace, ticket, resolved)).content;
+      const looked = await lookByItself({ resolve: this.#resolve, admit, removed: this.#removed }, queue.entries, ref, checkSha256);
+      if ('reason' in looked) {
+        return { queued: false, reason: looked.reason };
+      }
+      const position = insert(queue, ref, looked.index);
+      await this.#store.write(queue);
+      // Still under the lock: a write_task or a Save after it is recorded after it, as the newest version.
+      await this.#history?.append(workspace, ticket, { kind: 'queued_by_itself', by: 'factory', sha256: looked.textSha256 }).catch((error: unknown) => console.error(error));
+      return { queued: true, position };
+    }));
+    if (result.queued) {
+      this.#added(workspace, ticket);
+      // No caller refreshes the pages after it (add's callers do): the change feed hears of it here.
+      this.#onChange();
+    }
+    return result;
+  }
+
+  // The refusals add and addByItself share: a ticket already queued (already_queued), no Task file
+  // (task_not_found), a skeleton (task_draft), a ticket with a live job (job_exists). Returns the
+  // workspace and the Task file's text.
+  async #admit(queue: QueueFile, workspace: string, ticket: string, resolved?: Workspace): Promise<{ resolved: Workspace; content: string }> {
+    if (queue.entries.some((entry) => sameTicket(entry, { workspace, ticket }))) {
+      throw new FactoryError('already_queued', `${workspace}/${ticket} is already in the queue.`);
+    }
+    const target = resolved ?? (await this.#resolve(workspace));
+    const content = await readTask(target, ticket);
+    if (isDraft(content)) {
+      throw new FactoryError('task_draft', `${TASK_DIR}/${ticket}.md is still the skeleton: the Context owner writes the Task with write_task first.`);
+    }
+    const job = await this.#jobs.read(workspace, ticket);
+    if (job !== undefined && !TERMINAL_STATES.includes(job.state)) {
+      throw new FactoryError('job_exists', `The job for ${workspace}/${ticket} is ${job.state}.`);
+    }
+    return { resolved: target, content };
+  }
+
+  // onAdded after a ticket joined; it never throws.
+  #added(workspace: string, ticket: string): void {
     try {
       this.#onAdded(workspace, ticket);
     } catch (error) {
       console.error(error);
     }
-    return result;
   }
 
   // Start anyway: the queued ticket starts whatever its plan check says, for any version
@@ -403,13 +377,26 @@ export class RunQueue {
     return planReason(plan);
   }
 
-  // Takes a queued ticket out (not_queued otherwise).
+  // Takes a queued ticket out (not_queued otherwise): the user's "not now". The removal is recorded
+  // with the sha256 of the Task file's text (none when it cannot be read), so addByItself leaves the
+  // ticket out until its Task file changes. The read of the text and the record hold the queue's chain,
+  // then the ticket's lock (as addByItself): a write_task or a Save lands before them, or after them
+  // as a changed text.
   async remove(workspace: string, ticket: string): Promise<{ removed: true }> {
     checkRef(workspace, ticket);
-    return this.#change((queue) => {
+    return this.#change((queue) => this.withTicket(workspace, ticket, async () => {
       queue.entries.splice(queuedIndex(queue, workspace, ticket), 1);
+      const content = await this.#resolve(workspace).then((resolved) => readTask(resolved, ticket)).catch((error: unknown) => {
+        if (!(error instanceof FactoryError)) {
+          console.error(error);
+        }
+        return undefined;
+      });
+      if (content !== undefined) {
+        await this.#removed.record({ workspace, ticket }, taskSha256(content));
+      }
       return { removed: true as const };
-    });
+    }));
   }
 
   // Moves a queued ticket to position to (1-based; beyond the end: the end).
@@ -806,6 +793,15 @@ function checkPosition(value: number, name: string): number {
     throw new FactoryError('invalid_position', `${name} must be a whole number from 1.`);
   }
   return value - 1;
+}
+
+// Puts the ticket in the queue at index (0-based; beyond the end: the end) and clears its last start
+// error; returns its 1-based position.
+function insert(queue: QueueFile, ref: TicketRef, index: number): number {
+  const position = Math.min(index, queue.entries.length);
+  queue.entries.splice(position, 0, { workspace: ref.workspace, ticket: ref.ticket, queued_at: now() });
+  queue.errors = queue.errors.filter((error) => !sameTicket(error, ref));
+  return position + 1;
 }
 
 // The 0-based index of a queued ticket; not_queued otherwise.

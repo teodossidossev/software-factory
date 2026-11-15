@@ -117,6 +117,21 @@ test('ticket history: "Changed outside the factory" when the file is not the ver
   assert.deepEqual(texts(await history.timeline('app', 'T-1', { sha256: sha('c'), mtime: '2026-11-05T08:30:00.000Z' })), ['Fix 1 added by the factory', 'Plan written by the Context owner', 'Created by you']);
 });
 
+test('ticket history (SF-234): queued_by_itself is the factory\'s, labelled "Queued by itself after a ready check", and with the Task text\'s sha256 it is no change outside the factory', async () => {
+  const state = join(temp, 'history-queued');
+  const history = new TicketHistory(state, clock('2026-11-01T09:00:00.000Z', '2026-11-01T10:00:00.000Z', '2026-11-01T10:05:00.000Z'));
+  await history.append('app', 'T-1', { kind: 'created', by: 'you', sha256: sha('0') });
+  await history.append('app', 'T-1', { kind: 'written', by: 'context_owner', sha256: sha('a') });
+  await history.append('app', 'T-1', { kind: 'queued_by_itself', by: 'factory', sha256: sha('a') });
+  assert.deepEqual((await history.read('app', 'T-1')).at(-1), { ts: '2026-11-01T10:05:00.000Z', kind: 'queued_by_itself', by: 'factory', sha256: sha('a') });
+  const timeline = await history.timeline('app', 'T-1', { sha256: sha('a'), mtime: '2026-11-01T10:00:00.000Z' });
+  assert.deepEqual(timeline.map((entry) => [entry.kind, entry.by, entry.text]), [
+    ['queued_by_itself', 'factory', 'Queued by itself after a ready check'],
+    ['written', 'context_owner', 'Plan written by the Context owner'],
+    ['created', 'you', 'Created by you'],
+  ]);
+});
+
 test('ticket history: a ticket older than the recording says so once, last: nothing recorded, a first write that is not its creation (written, edited, a Fix), or checks and jobs before it', async () => {
   const state = join(temp, 'history-older');
   // No history file: the checks and the jobs, and the note; no "outside" without a recorded write.

@@ -3814,6 +3814,32 @@ last started a queued ticket, written with the entry's removal before each start
   (fetch_failed); next try HH:MM"), and the starts that failed. They go to `sf serve` over its socket, as `sf start` does. The board
   posts the same changes (`api/queue/*`, section Dashboard) and the Context owner has `queue_list`
   and `queue_add` (below); neither removes nor moves.
+- **Queued by itself** (SF-234): in a workspace with `"auto_queue": true` (section Workspace
+  registry), a ticket joins the queue by itself (`RunQueue.addByItself`) when a Task check of it
+  ends `ready` (an automatic one, or the dashboard's Check; `sf check-task` runs without `sf serve`
+  and queues nothing), and when `write_task` answers `check: "not_needed"` (with
+  `SF_TASK_CHECK_AUTO=off` `write_task` answers `off` and nothing joins). It does not join when it is
+  already queued, has a live job, its Task file is a skeleton, the Task file is not the version the
+  ready check read (for `not_needed`: it now needs a check), or the user removed it since its Task
+  file last changed. The look at the Task file and the write of the entry hold the queue's lock of
+  the ticket (`RunQueue.withTicket`), as the scheduler's last look does, so a `write_task` or a Save
+  lands before the look (which sees the new version and leaves the ticket out) or after the entry
+  is written (and the scheduler's plan check then holds the new version). A removal: `sf queue remove` (and
+  the board's remove, which goes the same way) records `{workspace, ticket, sha256}` with the sha256
+  of the Task file's text in `<state dir>/queue-removed.json` (read and recorded under the same lock
+  of the ticket, so a `write_task` or a Save at that moment lands before or after, never between the
+  removal and the text it records); a ready check of that same text leaves
+  the ticket out, one of a changed text drops the record and queues it, and `sf queue add` by hand
+  drops it too. A missing or invalid `queue-removed.json` counts as empty; `queue.json` is unchanged.
+  The entry goes to the end, except a part of a ticket (`part_of: X`, `slice: N/M`, SF-220): it goes
+  right after the last queued entry of the same workspace whose Task is a part of X with a lower
+  number, else before the first one with a higher number, so the parts stand in the order of their
+  numbers whatever order their checks end in; their `lands_after` still decides when each starts.
+  The ticket's history gets `queued_by_itself` (by the factory, with the Task text's sha256: "Queued
+  by itself after a ready check"), written under the same lock of the ticket after the entry, so a
+  Task file write that follows is recorded after it and the History never reads "Changed outside the
+  factory" because of it; the board refreshes as for any queue change, and nothing is
+  notified. Without `auto_queue` nothing joins by itself.
 - **MCP tools** for the Context owner: `queue_list({})` returns `{max_running, running, held,
   entries: [{workspace, ticket, position, queued_at, waits_for}]}` (`waits_for`: the `lands_after`
   tickets not merged yet, and the `builds_on` ticket until the entry can build on it,
@@ -5631,13 +5657,16 @@ full|brief|off` sets it (`full` removes the key), `sf workspace list` shows it w
 anything else makes the file invalid) is the command the factory runs in a sandbox on the reviewed
 worktree before the job is ready (section MR preparation, the test step); without it nothing runs.
 Edit the file to set it (`sf workspace add` and the dashboard's form do not show it; the Edit keeps
-it); it is read at each preparation. The optional `rules_skip` (SF-059: a list of globs) names the
+it); it is read at each preparation. The optional `auto_queue` (SF-234: `true` or `false`, absent is
+`false`, any other value makes the file invalid) puts a ticket whose plan is ready into the run
+queue by itself (section Run queue, Queued by itself); edit the file to set it (the Edit keeps it);
+it is read each time a check ends. The optional `rules_skip` (SF-059: a list of globs) names the
 repository rule files not given to the agents (section Coding rules); edit the file to set it.
 The optional `description`, `app` and `digest: {track, my_work}`, and the top-level `digest`
 settings, are the morning digest's (SF-103, section Morning digest); the optional top-level
 `explain: {on, language, model}` is the stop explanations' (SF-106, section Stop explanations). The Workspaces drawer's Edit
 changes an existing workspace's path, description, app, hand-over, colour and digest switches (the
-name stays; `work_checkout`, `rules_skip`, `guard` and `test_command` are kept): its body has every field, `""` removes the
+name stays; `work_checkout`, `rules_skip`, `guard`, `test_command`, `notify` and `auto_queue` are kept): its body has every field, `""` removes the
 description and the app, `"default"` the handoff, `"auto"` the color; the path is checked as Add
 checks it, and a path change while the workspace has a live job is `workspace_busy`.
 

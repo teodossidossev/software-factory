@@ -86,6 +86,22 @@ test('resolveWorkspace and editedEntry (SF-122): guard: true only when the entry
   assert.deepEqual(editedEntry({ read_checkout: '/srv/a', guard: true }, edit), { read_checkout: '/srv/b', guard: true });
 });
 
+test('parseRegistry, resolveWorkspace and editedEntry (SF-234): auto_queue is true or false, any other value refused; autoQueue only when true; the Edit keeps it', async () => {
+  for (const autoQueue of [true, false]) {
+    assert.deepEqual(parseRegistry(JSON.stringify({ workspaces: { app: { read_checkout: '/srv/app', auto_queue: autoQueue } } })).workspaces.app, { read_checkout: '/srv/app', auto_queue: autoQueue });
+  }
+  for (const autoQueue of ['yes', 'true', 1, null]) {
+    invalid(JSON.stringify({ workspaces: { app: { read_checkout: '/srv/app', auto_queue: autoQueue } } }));
+  }
+  assert.throws(() => parseRegistry(JSON.stringify({ workspaces: { app: { read_checkout: '/srv/app', auto_queue: 'yes' } } })), /workspaces\.app\.auto_queue/);
+  const dir = join(temp, 'resolve-auto-queue');
+  await saveRegistry({ workspaces: { on: { read_checkout: repo, auto_queue: true }, off: { read_checkout: repo, auto_queue: false } } }, dir);
+  assert.deepEqual(await resolveWorkspace('on', dir), { name: 'on', readCheckout: repo, workCheckout: repo, autoQueue: true });
+  assert.deepEqual(await resolveWorkspace('off', dir), { name: 'off', readCheckout: repo, workCheckout: repo });
+  const edit = { read_checkout: '/srv/b', description: '', app: '', handoff: 'default', color: 'auto', digest: { track: false, my_work: false } } as const;
+  assert.deepEqual(editedEntry({ read_checkout: '/srv/a', auto_queue: true }, edit), { read_checkout: '/srv/b', auto_queue: true });
+});
+
 test('parseRegistry, resolveWorkspace and editedEntry (SF-128): test_command is 1 to 2000 characters without NUL, exposed as testCommand; the Edit keeps it', async () => {
   for (const command of ['npm test', 'x', 'c'.repeat(2000), 'cd factory && npm test\nnpm run lint']) {
     assert.deepEqual(parseRegistry(JSON.stringify({ workspaces: { app: { read_checkout: '/srv/app', test_command: command } } })).workspaces.app, { read_checkout: '/srv/app', test_command: command });

@@ -14,9 +14,11 @@ import { loadConfig } from '../src/config.js';
 import { FactoryError } from '../src/errors.js';
 import type { Job, JobState } from '../src/jobs.js';
 import { type ChannelResult, type Notification, notifyTaskCheck, taskCheckNotification } from '../src/notify.js';
-import type { NotifyMode, Workspace } from '../src/registry.js';
+import { QueueStore } from '../src/queue.js';
+import { type NotifyMode, saveRegistry, type Workspace } from '../src/registry.js';
 import { type CheckRecord, CheckStore, TaskChecks, taskSha256 } from '../src/task-check.js';
 import { AutoChecks, planCheck, type WatchFolder } from '../src/task-check-auto.js';
+import { TicketHistory } from '../src/ticket-history.js';
 import { FakeClock, FakeRunner } from './support/auto-checks.js';
 import { fetchRaw } from './support/dashboard-client.js';
 import { type Env, newEnv, newRepo, reviewLog, reviewScript, runCli, serve, stop, task, temp } from './support/harness.js';
@@ -53,6 +55,8 @@ interface Rig {
   jobs: Map<string, Job>;
   auto: AutoChecks;
   ended: CheckRecord[];
+  // What onReady heard: "<ws>/<ticket> <sha256>".
+  ready: string[];
   put(ticket: string, content?: string): Promise<string>;
 }
 
@@ -64,16 +68,17 @@ async function rig(name: string, parallel = 1): Promise<Rig> {
   const runner = new FakeRunner(join(dir, 'state'));
   const jobs = new Map<string, Job>();
   const ended: CheckRecord[] = [];
+  const ready: string[] = [];
   const workspace: Workspace = { name: 'app', readCheckout: dir, workCheckout: dir };
   const auto = new AutoChecks({
     checks: runner, jobs: { read: async (ws, ticket) => jobs.get(`${ws}/${ticket}`) }, resolve: async () => workspace, workspaces: async () => [],
-    parallel, timers: clock, onCheckEnded: (record) => ended.push(record),
+    parallel, timers: clock, onCheckEnded: (record) => ended.push(record), onReady: (ws, ticket, record) => ready.push(`${ws}/${ticket} ${record.sha256}`),
   });
   const put = async (ticket: string, content = text(ticket)): Promise<string> => {
     await writeFile(join(dir, '.software-factory', `${ticket}.md`), content);
     return content;
   };
-  return { dir, clock, runner, jobs, auto, ended, put };
+  return { dir, clock, runner, jobs, auto, ended, ready, put };
 }
 
 // Moves the clock, then lets the starts that follow settle.
@@ -297,6 +302,32 @@ test('the queue\'s trigger only for a ticket without a check of its current Task
   r.auto.trigger('app', 'E-4');
   await r.auto.idle();
   assert.deepEqual(r.ended.map((record) => record.ticket), ['E-3', 'E-2']);
+  // Neither a failed, a not ready nor a cancelled check is ready.
+  assert.deepEqual(r.ready, []);
+});
+
+test('SF-234: an automatic check that ends ready goes to onReady with its record (the run queue\'s addByItself), not to the notification; a not ready, a failed and a cancelled one do not', async () => {
+  const r = await rig('auto-ready', 3);
+  const content = await r.put('Q-1');
+  for (const ticket of ['Q-1', 'Q-2', 'Q-3', 'Q-4']) {
+    if (ticket !== 'Q-1') {
+      await r.put(ticket);
+    }
+    r.auto.trigger('app', ticket);
+  }
+  await advance(r, MINUTE);
+  assert.deepEqual(r.runner.starts, ['auto app/Q-1', 'auto app/Q-2', 'auto app/Q-3']);
+  await r.runner.end('app', 'Q-1', checkRecord('app', 'Q-1', content, 'ready'));
+  await r.runner.end('app', 'Q-2', checkRecord('app', 'Q-2', text('Q-2'), 'not_ready'));
+  await r.runner.end('app', 'Q-3', checkRecord('app', 'Q-3', text('Q-3'), 'failed'));
+  await r.auto.idle();
+  // Q-4 runs, then a new trigger cancels it: nothing stored, nothing heard.
+  await advance(r, MINUTE);
+  r.auto.trigger('app', 'Q-4');
+  await r.auto.idle();
+  assert.deepEqual(r.ready, [`app/Q-1 ${taskSha256(content)}`]);
+  assert.deepEqual(r.ended.map((record) => record.ticket).sort(), ['Q-2', 'Q-3']);
+  r.auto.close();
 });
 
 test('the notification: "plan not ready" with the counts as the board writes them, "plan check failed" with the first line of the error; none when ready; a failed channel is logged', async () => {
@@ -391,7 +422,8 @@ async function realChecks(name: string): Promise<{ checks: TaskChecks; dir: stri
       return { name: 'app', readCheckout: dir, workCheckout: dir };
     },
     claudePath: undefined, sandbox: undefined, model: undefined, maxTurns: 1, rulesMaxBytes: 49152, stateDir: join(dir, 'state'), configDir: join(dir, 'config'), worktreeRoot: join(dir, 'worktrees'),
-    onSettled: (workspace, ticket) => settled.push(`${workspace}/${ticket}`),
+    // SF-234: how it ended, for the dashboard's Check that queues by itself.
+    onSettled: (workspace, ticket, how) => settled.push(`${workspace}/${ticket} ${how.auto ? 'auto' : 'manual'} ${how.record?.status ?? 'none'}`),
   });
   return { checks, dir, release: () => open(), block, settled };
 }
@@ -419,11 +451,17 @@ test('TaskChecks.startAuto: counted while it runs, refuses a manual Check of the
   assert.equal(none, undefined);
   assert.equal((await checks.store.read('app', 'R-1', taskSha256(bad('R-1'))))?.status, 'failed');
   assert.equal(await checks.store.last('app', 'R-2'), undefined);
-  assert.deepEqual([checks.runningCount(), settled.sort()], [0, ['app/R-1', 'app/R-2']]);
+  assert.deepEqual([checks.runningCount(), settled.sort()], [0, ['app/R-1 auto failed', 'app/R-2 auto none']]);
   assert.deepEqual(heard.sort(), ['ended app/R-1', 'ended app/R-2']);
-  // A manual start is heard before it runs.
+  // A manual start is heard before it runs; onSettled hears it is not automatic, with its record.
   await checks.start('app', 'R-2').then((started) => assert.deepEqual(Object.keys(started), ['started', 'sha256']));
   assert.equal(heard.includes('manual app/R-2'), true);
+  const deadline = Date.now() + 10_000;
+  while (checks.isRunning('app', 'R-2')) {
+    assert.ok(Date.now() < deadline, 'the manual check did not end');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.equal(settled.at(-1), 'app/R-2 manual failed');
 });
 
 test('AutoChecks over TaskChecks: a manual Check cancels the pending automatic one; it is refused while the automatic one runs; the plan check of the queue', async () => {
@@ -689,5 +727,42 @@ test('sf serve (SF-130): write_task of a small Task answers not_needed with its 
     assert.equal(written.check, 'off');
   } finally {
     await stop(servedOff);
+  }
+});
+
+test('sf serve (SF-234): with auto_queue, a Task whose automatic check ends ready and a small one write_task finds needs no check join the run queue by itself, in the history; one the user removed stays out', { timeout: 60_000 }, async () => {
+  const { env, repo } = await autoEnv('auto-serve-queue');
+  await saveRegistry({ workspaces: { app: { read_checkout: repo, auto_queue: true } } }, env.config);
+  await reviewScript(env, [{ output: OUTPUT }]);
+  const served = await serve(env);
+  const store = new QueueStore(env.state, 3);
+  const queued = async (): Promise<string[]> => (await store.read()).entries.map((entry) => entry.ticket);
+  const waitQueued = async (want: string[]): Promise<void> => {
+    const deadline = Date.now() + 20_000;
+    while (JSON.stringify(await queued()) !== JSON.stringify(want)) {
+      assert.ok(Date.now() < deadline, `the queue is ${JSON.stringify(await queued())}, not ${JSON.stringify(want)}`);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  };
+  try {
+    // Held: nothing starts; the entries stay to be seen.
+    assert.equal((await runCli(env, ['queue', 'hold'])).code, 0);
+    const content = task('A-1', 'Ready by itself');
+    const written = (await served.client.callTool({ name: 'write_task', arguments: { workspace: 'app', ticket: 'A-1', content } })).structuredContent as Record<string, unknown>;
+    assert.equal(written.check, 'scheduled');
+    await waitQueued(['A-1']);
+    const history = new TicketHistory(env.state);
+    assert.deepEqual((await history.read('app', 'A-1')).map((event) => [event.kind, event.sha256]), [['written', taskSha256(content)], ['queued_by_itself', taskSha256(content)]]);
+    const small = task('N-1', 'Small').replace('base: main\n', 'base: main\nscope: [README.md]\n');
+    const smallWritten = (await served.client.callTool({ name: 'write_task', arguments: { workspace: 'app', ticket: 'N-1', content: small } })).structuredContent as Record<string, unknown>;
+    assert.equal(smallWritten.check, 'not_needed');
+    await waitQueued(['A-1', 'N-1']);
+    // The user takes N-1 out: the same text written again stays out.
+    assert.equal((await runCli(env, ['queue', 'remove', 'app', 'N-1'])).code, 0);
+    await served.client.callTool({ name: 'write_task', arguments: { workspace: 'app', ticket: 'N-1', content: small } });
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    assert.deepEqual(await queued(), ['A-1']);
+  } finally {
+    await stop(served);
   }
 });

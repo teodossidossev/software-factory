@@ -60,6 +60,8 @@ Implementer, which the user sends or dismisses on the dashboard; nothing runs un
    (the ticket's Start) or with `sf start`, or puts it in the run queue, which starts the next
    queued ticket by itself when fewer jobs run than its limit; a skeleton cannot be started or
    queued. The Implementer works in a worktree of its own; several tickets run at the same time.
+   In a workspace with `auto_queue`, a Task with a ready plan joins the run queue by itself, so
+   tell the user it is queued instead of asking them to start it.
 6. If the user comes back with a change of plan before the start, rewrite the Task file with
    `write_task`; it is refused while a job on that ticket is running.
 

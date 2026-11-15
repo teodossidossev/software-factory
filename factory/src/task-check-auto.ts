@@ -13,7 +13,8 @@
 // of its ticket runs waits for it to end. A job that starts cancels the ticket's pending and running
 // automatic checks (cancel). With the run queue's entries (queued), a sweep every sweepMs triggers
 // the re-checks of the queued tickets; a failed automatic check is notified only when no retry
-// follows, a re-check after the base moved that ends not_ready again not at all.
+// follows, a re-check after the base moved that ends not_ready again not at all. One that ends
+// ready goes to onReady (sf serve: the run queue's addByItself, for a workspace with auto_queue).
 import { type FSWatcher, watch as fsWatch } from 'node:fs';
 import { lstat } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -64,6 +65,8 @@ export interface AutoChecksOptions {
   parallel: number;
   // An automatic check that ended not_ready or failed (the notification); never one cancelled.
   onCheckEnded?: (record: CheckRecord) => void;
+  // An automatic check that ended ready (sf serve: the run queue's addByItself); never one cancelled.
+  onReady?: (workspace: string, ticket: string, record: CheckRecord) => void;
   delayMs?: number;
   rereadMs?: number;
   timers?: AutoTimers;
@@ -107,6 +110,7 @@ export class AutoChecks {
   readonly #workspaces: AutoChecksOptions['workspaces'];
   readonly #parallel: number;
   readonly #onCheckEnded: (record: CheckRecord) => void;
+  readonly #onReady: NonNullable<AutoChecksOptions['onReady']>;
   readonly #delayMs: number;
   readonly #rereadMs: number;
   readonly #timers: AutoTimers;
@@ -136,6 +140,7 @@ export class AutoChecks {
     this.#workspaces = options.workspaces;
     this.#parallel = options.parallel;
     this.#onCheckEnded = options.onCheckEnded ?? (() => {});
+    this.#onReady = options.onReady ?? (() => {});
     this.#delayMs = options.delayMs ?? AUTO_CHECK_DELAY_MS;
     this.#rereadMs = options.rereadMs ?? WATCH_REREAD_MS;
     this.#timers = options.timers ?? REAL_TIMERS;
@@ -349,7 +354,13 @@ export class AutoChecks {
           this.#rechecks?.retried(record);
         }
         // A stored record is the run's result, even when a cancel came after its commit.
-        if (record !== undefined && recordVerdict(record) !== 'ready') {
+        if (record !== undefined && recordVerdict(record) === 'ready') {
+          try {
+            this.#onReady(entry.workspace, entry.ticket, record);
+          } catch (error) {
+            console.error(error);
+          }
+        } else if (record !== undefined) {
           this.#notices = this.#notices.then(async () => {
             if (await this.#notifies(record, recheck)) {
               this.#onCheckEnded(record);

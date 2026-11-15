@@ -12,7 +12,7 @@ import { FactoryError } from './errors.js';
 
 export const STATE_VERSION_FILE = 'state-version';
 // The format this release reads and writes.
-export const STATE_VERSION = 3;
+export const STATE_VERSION = 4;
 
 // One step of the format: the state written at version from becomes the state of version from + 1.
 export interface Migration {
@@ -28,6 +28,10 @@ export const MIGRATIONS: readonly Migration[] = [
   // 2 → 3: queue.json may hold last_start, which an older factory's strict schema refuses.
   // A queue without it has had no start recorded yet, so nothing is rewritten.
   { from: 2, run: async () => undefined },
+  // 3 → 4: a queue entry may hold retry_at and retries (a start that could not fetch, tried again),
+  // which an older factory's strict schema refuses. An entry without them has never failed so,
+  // so nothing is rewritten.
+  { from: 3, run: async () => undefined },
 ];
 
 export interface StateVersionOptions {

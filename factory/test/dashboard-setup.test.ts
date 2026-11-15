@@ -51,7 +51,7 @@ test('dashboard setup: the reads, the method rules per path and the token; nothi
     const tickets = await fetchRaw(new URL('api/tickets', base));
     assert.equal(tickets.status, 200);
     const rows = JSON.parse(tickets.body).tickets;
-    assert.deepEqual(Object.keys(rows[0]).sort(), ['attachments', 'base', 'conversation', 'draft', 'job', 'lands_after', 'owner', 'planning_chat', 'queue_error', 'queue_force', 'queue_position', 'queue_reason', 'request', 'ticket', 'title', 'workspace']);
+    assert.deepEqual(Object.keys(rows[0]).sort(), ['attachments', 'base', 'conversation', 'draft', 'job', 'lands_after', 'owner', 'planning_chat', 'queue_error', 'queue_force', 'queue_position', 'queue_reason', 'queue_retry', 'request', 'ticket', 'title', 'workspace']);
     // SF-071: without a run queue, no ticket is queued and the payload's queue is null.
     assert.deepEqual([rows[0].queue_position, rows[0].queue_error, JSON.parse(tickets.body).queue], [null, null, null]);
     assert.deepEqual([rows[1].draft, rows[1].job], [false, 'pushed']);

@@ -871,6 +871,13 @@ function queueCard(row: TicketRow): HTMLLIElement {
     failed.title = row.queue_error.code;
     item.append(failed);
   }
+  // A start that could not fetch: the queue tries again at its next try (HH:MM, local time).
+  const retry = queued ? row.queue_retry : null;
+  if (retry !== null) {
+    const line = el('div', 'waits qretry', `start failed (${retry.code}); next try ${localTime(retry.at).slice(11, 16)}`);
+    line.title = `The queue tries again by itself (failure ${retry.retries}); Remove from queue stops it`;
+    item.append(line);
+  }
   const planHeld = queued && row.queue_force !== true && typeof row.queue_reason === 'string' && row.queue_reason !== '';
   if (planHeld) {
     // planHeld: a string.

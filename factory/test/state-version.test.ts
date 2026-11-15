@@ -18,10 +18,10 @@ const versionIn = async (dir: string): Promise<string> => (await readFile(join(d
 test('a missing state-version gets the current version', async () => {
   const dir = await stateDir();
   try {
-    assert.equal(STATE_VERSION, 3);
+    assert.equal(STATE_VERSION, 4);
     const result = await checkStateVersion(dir);
-    assert.deepEqual(result, { found: undefined, version: 3, migrated: [] });
-    assert.equal(await versionIn(dir), '3');
+    assert.deepEqual(result, { found: undefined, version: 4, migrated: [] });
+    assert.equal(await versionIn(dir), '4');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -78,20 +78,20 @@ test('a migration that fails leaves the number of the last step done', async () 
 test('a higher state-version is refused with state_too_new and left as it is', async () => {
   const dir = await stateDir();
   try {
-    await writeFile(join(dir, STATE_VERSION_FILE), '4\n');
+    await writeFile(join(dir, STATE_VERSION_FILE), '5\n');
     await assert.rejects(checkStateVersion(dir), (error: unknown) => {
       assert.ok(error instanceof FactoryError);
       assert.equal(error.code, 'state_too_new');
       assert.match(error.message, /the state was written by a newer factory; update the factory|written by a newer factory/);
       return true;
     });
-    assert.equal(await versionIn(dir), '4');
+    assert.equal(await versionIn(dir), '5');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
 });
 
-test('the real migrations 1 → 2 (SF-131: claude_review in job.json) and 2 → 3 (SF-153: last_start in queue.json) change nothing in the state directory', async () => {
+test('the real migrations 1 → 2 (SF-131: claude_review in job.json), 2 → 3 (SF-153: last_start in queue.json) and 3 → 4 (SF-236: retry_at and retries of a queue entry) change nothing in the state directory', async () => {
   const dir = await stateDir();
   try {
     const jobDir = join(dir, 'jobs', 'app', 'V-1');
@@ -101,9 +101,9 @@ test('the real migrations 1 → 2 (SF-131: claude_review in job.json) and 2 → 
     const queue = '{"version":1,"max_running":3,"held":false,"hold_reason":null,"entries":[],"errors":[]}\n';
     await writeFile(join(dir, 'queue.json'), queue);
     await writeFile(join(dir, STATE_VERSION_FILE), '1\n');
-    assert.deepEqual(MIGRATIONS.map((migration) => migration.from), [1, 2]);
-    assert.deepEqual(await checkStateVersion(dir), { found: 1, version: 3, migrated: [1, 2] });
-    assert.equal(await versionIn(dir), '3');
+    assert.deepEqual(MIGRATIONS.map((migration) => migration.from), [1, 2, 3]);
+    assert.deepEqual(await checkStateVersion(dir), { found: 1, version: 4, migrated: [1, 2, 3] });
+    assert.equal(await versionIn(dir), '4');
     assert.equal(await readFile(join(jobDir, 'job.json'), 'utf8'), job);
     assert.equal(await readFile(join(dir, 'queue.json'), 'utf8'), queue);
   } finally {

@@ -395,7 +395,8 @@ async function checkOf(checks: DashboardChecks, workspace: string, ticket: strin
 // and the prefilled URL), the tickets it lands after with their states, with the Task
 // checks its last check, and its place in the run queue (queue_position, 1-based or
 // null, and queue_error, the queue's failed start or null; queue_reason, why its plan holds
-// it in the queue or null, and queue_force, whether Start anyway was given); job_lands_after: the same for the
+// it in the queue or null, queue_force, whether Start anyway was given, and queue_retry, the next try
+// of a start that could not fetch or null); job_lands_after: the same for the
 // tickets with a live job, for the job page's Waits for and the board's Needed by; queue: the run
 // queue's limit, running count, hold and next ticket (null without a queue).
 export async function ticketsPayload(setup: DashboardSetup, checks: DashboardChecks | undefined, queue: DashboardQueue | undefined) {
@@ -411,6 +412,7 @@ export async function ticketsPayload(setup: DashboardSetup, checks: DashboardChe
       queue_error: failed === undefined ? null : { code: failed.code, message: failed.message },
       queue_reason: entry?.plan_reason ?? null,
       queue_force: entry?.force ?? false,
+      queue_retry: entry?.retry ?? null,
     });
   }
   return {

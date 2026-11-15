@@ -406,6 +406,8 @@ interface TicketRow extends TicketEntry {
   queue_error: { code: string; message: string } | null;
   queue_reason: string | null;
   queue_force: boolean;
+  // src/queue.ts QueueRow.retry: the next try, while ahead, of a start that could not fetch.
+  queue_retry: { code: 'fetch_failed'; at: string; retries: number } | null;
 }
 // A ticket in the run queue: its position, 1-based.
 type QueuedRow = TicketRow & { queue_position: number };

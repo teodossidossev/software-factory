@@ -615,8 +615,11 @@ test('dashboard queue (SF-071, SF-072, SF-086): the eight POST routes with stric
   const view: QueueView = {
     max_running: 2, running: 1, held: true, hold_reason: 'usage limit', on_limit: 'resume-then-queue', limit_hold: null, errors: [{ workspace: 'web', ticket: 'W-1', code: 'branch_exists', message: 'The branch exists.', at: '2026-11-05T10:00:00.000Z' }],
     entries: [
-      { workspace: 'app', ticket: 'T-5', position: 1, queued_at: '2026-11-05T09:00:00.000Z', waits_for: [], force: false, plan_reason: 'plan not ready: 1 blocker, 0 major' },
-      { workspace: 'app', ticket: 'T-6', position: 2, queued_at: '2026-11-05T09:01:00.000Z', waits_for: [], force: true, plan_reason: null },
+      {
+        workspace: 'app', ticket: 'T-5', position: 1, queued_at: '2026-11-05T09:00:00.000Z', waits_for: [], force: false, plan_reason: 'plan not ready: 1 blocker, 0 major',
+        retry: { code: 'fetch_failed', at: '2026-11-05T09:10:00.000Z', retries: 2 },
+      },
+      { workspace: 'app', ticket: 'T-6', position: 2, queued_at: '2026-11-05T09:01:00.000Z', waits_for: [], force: true, plan_reason: null, retry: null },
     ], next: { workspace: 'app', ticket: 'T-6' },
   };
   const queue = fakeQueue(view);
@@ -629,6 +632,8 @@ test('dashboard queue (SF-071, SF-072, SF-086): the eight POST routes with stric
     assert.deepEqual(payload.tickets.map((row: Record<string, unknown>) => [row.ticket, row.queue_position, row.queue_error, row.queue_reason, row.queue_force]), [
       ['T-5', 1, null, 'plan not ready: 1 blocker, 0 major', false], ['T-6', 2, null, null, true], ['W-1', null, { code: 'branch_exists', message: 'The branch exists.' }, null, false],
     ]);
+    // SF-236: the next try of a start that could not fetch.
+    assert.deepEqual(payload.tickets.map((row: Record<string, unknown>) => row.queue_retry), [{ code: 'fetch_failed', at: '2026-11-05T09:10:00.000Z', retries: 2 }, null, null]);
     // POST only; an unknown action is no route.
     for (const method of ['GET', 'PUT']) {
       const reply = await act(base, 'api/queue/add', {}, { method });

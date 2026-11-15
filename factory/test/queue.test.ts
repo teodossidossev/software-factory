@@ -8,12 +8,15 @@ import { execFileSync } from 'node:child_process';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { answerLines, COMMANDS } from '../src/commands.js';
 import type { Config } from '../src/config.js';
 import { FactoryError } from '../src/errors.js';
 import { type ExclusiveScope, Execution } from '../src/execution.js';
 import { type Job, type JobState, JobStore, LIMIT_RETRY_MS, now } from '../src/jobs.js';
+import { localTime } from '../src/local-time.js';
+import type { Notification } from '../src/notify.js';
 import { LIMIT_RESET_HOLD_REASON, type PlanCheck, QueueStore, RunQueue, type RunQueueOptions } from '../src/queue.js';
-import { resolveWorkspace, saveRegistry } from '../src/registry.js';
+import { resolveWorkspace, saveRegistry, setWorkspaceNotify, workspaceNotifyMode } from '../src/registry.js';
 import { followJobs } from '../src/runner.js';
 import { Setup } from '../src/setup.js';
 import { TaskChecks, taskSha256 } from '../src/task-check.js';
@@ -437,6 +440,201 @@ test('a failed start leaves the ticket out of the queue with its error and the p
   assert.deepEqual([file.entries, file.errors], [[], []]);
 });
 
+// The run queue of the world with a clock and the notifications it sends.
+function clockQueue(w: World, clock: { now: number }): { queue: RunQueue; notes: Notification[] } {
+  const notes: Notification[] = [];
+  const queue = new RunQueue(w.store, w.execution, w.setup, w.jobs, {
+    resolve: (workspace) => resolveWorkspace(workspace, w.env.config), clock: () => clock.now,
+    notify: async (notification) => {
+      notes.push(notification);
+    },
+    notifyMode: (workspace) => workspaceNotifyMode(workspace, w.env.config),
+  });
+  return { queue, notes };
+}
+
+const MINUTE = 60_000;
+const FETCH_FAILED = new FactoryError('fetch_failed', 'git fetch origin failed.');
+
+test('SF-236: a start that cannot fetch keeps its entry in its place with retry_at and retries, no job and no error; it is passed over until retry_at while the next one starts; the schedule is 5, 10, 15, 15 minutes; one notification', TIMEOUT, async () => {
+  const w = await world('queue-retry');
+  const clock = { now: Date.parse('2026-11-14T19:00:00.000Z') };
+  const { queue, notes } = clockQueue(w, clock);
+  try {
+    for (const ticket of ['R-1', 'R-2', 'R-3']) {
+      await plan(w, ticket);
+    }
+    await queue.limit(1);
+    await queue.hold();
+    for (const ticket of ['R-1', 'R-2', 'R-3']) {
+      await queue.add('app', ticket);
+    }
+    w.execution.refuse.set('app/R-1', FETCH_FAILED);
+    await queue.release();
+    await queue.idle();
+    // R-1 failed and stays first; R-2 started in the free slot, R-3 waits for a slot.
+    assert.deepEqual(w.execution.starts, ['app/R-1', 'app/R-2']);
+    let file = await w.store.read();
+    assert.deepEqual(file.entries.map(({ ticket, retry_at, retries }) => ({ ticket, retry_at, retries })), [
+      { ticket: 'R-1', retry_at: '2026-11-14T19:05:00.000Z', retries: 1 },
+      { ticket: 'R-3', retry_at: undefined, retries: undefined },
+    ]);
+    assert.deepEqual(file.errors, []);
+    assert.equal(await w.jobs.read('app', 'R-1'), undefined);
+    assert.deepEqual(notes.map((note) => note.body), ['R-1 could not fetch main; the queue tries again']);
+    let view = await queue.view();
+    assert.deepEqual(view.entries.map((row) => row.retry), [{ code: 'fetch_failed', at: '2026-11-14T19:05:00.000Z', retries: 1 }, null]);
+    // The next one to start passes R-1 over.
+    assert.deepEqual(view.next, { workspace: 'app', ticket: 'R-3' });
+    // sf queue list says it where the waits are.
+    const hhmm = (iso: string): string => localTime(iso)!.slice(11, 16);
+    const lines = answerLines(COMMANDS.queueList, view as unknown as Record<string, unknown>, {}).lines;
+    assert.ok(lines.includes(`  1. app/R-1  start failed (fetch_failed); next try ${hhmm('2026-11-14T19:05:00.000Z')}`), lines.join('\n'));
+    assert.ok(lines.includes('  2. app/R-3'), lines.join('\n'));
+    // Once due, while no slot is free (R-2 runs), the row names no next try in the past.
+    clock.now += 6 * MINUTE;
+    view = await queue.view();
+    assert.deepEqual(view.entries.map((row) => row.retry), [null, null]);
+    assert.ok(answerLines(COMMANDS.queueList, view as unknown as Record<string, unknown>, {}).lines.includes('  1. app/R-1'));
+    clock.now -= 6 * MINUTE;
+    // R-2 ends: a slot is free, but R-1 is not due yet: R-3 starts.
+    await setState(w, 'app', 'R-2', 'ready_for_human_review');
+    clock.now += 4 * MINUTE;
+    await settle(queue);
+    assert.deepEqual(w.execution.starts.slice(2), ['app/R-3']);
+    await setState(w, 'app', 'R-3', 'ready_for_human_review');
+    // The schedule: 5 minutes after the first failure, then 10, then 15, 15, ...; no error, one notification.
+    const tries: Array<[number, string]> = [];
+    for (const wait of [1, 10, 15, 15]) {
+      clock.now += wait * MINUTE;
+      const before = w.execution.starts.length;
+      await settle(queue);
+      assert.deepEqual(w.execution.starts.slice(before), ['app/R-1']);
+      const entry = (await w.store.read()).entries[0]!;
+      tries.push([entry.retries!, entry.retry_at!]);
+      // Not due yet: passed over.
+      clock.now += MINUTE;
+      await settle(queue);
+      assert.equal(w.execution.starts.length, before + 1);
+      clock.now -= MINUTE;
+    }
+    assert.deepEqual(tries, [
+      [2, '2026-11-14T19:15:00.000Z'], [3, '2026-11-14T19:30:00.000Z'], [4, '2026-11-14T19:45:00.000Z'], [5, '2026-11-14T20:00:00.000Z'],
+    ]);
+    assert.equal(notes.length, 1);
+    file = await w.store.read();
+    assert.deepEqual([file.entries.map((entry) => entry.ticket), file.errors], [['R-1'], []]);
+    // The network is back: at its next try R-1 starts and leaves the queue.
+    w.execution.refuse.delete('app/R-1');
+    clock.now += 15 * MINUTE;
+    await settle(queue);
+    assert.deepEqual(w.execution.starts.at(-1), 'app/R-1');
+    file = await w.store.read();
+    assert.deepEqual([file.entries, file.errors], [[], []]);
+    assert.equal((await w.jobs.read('app', 'R-1'))?.state, 'working');
+  } finally {
+    queue.close();
+  }
+});
+
+test('SF-236: removing an entry that waits for its next try stops it; an entry added again starts afresh; base_not_found and the other start errors still fail at once', TIMEOUT, async () => {
+  const w = await world('queue-retry-stop');
+  const clock = { now: Date.parse('2026-11-14T19:00:00.000Z') };
+  const { queue, notes } = clockQueue(w, clock);
+  try {
+    for (const ticket of ['S-1', 'S-2']) {
+      await plan(w, ticket);
+    }
+    await queue.limit(1);
+    w.execution.refuse.set('app/S-1', FETCH_FAILED);
+    await queue.add('app', 'S-1');
+    await queue.idle();
+    assert.equal((await w.store.read()).entries[0]?.retries, 1);
+    await queue.remove('app', 'S-1');
+    clock.now += 30 * MINUTE;
+    await settle(queue);
+    assert.deepEqual(w.execution.starts, ['app/S-1']);
+    assert.deepEqual((await w.store.read()).entries, []);
+    // Added again: a fresh entry, tried at once; its first failure notifies again.
+    await queue.add('app', 'S-1');
+    await queue.idle();
+    assert.deepEqual(w.execution.starts, ['app/S-1', 'app/S-1']);
+    assert.deepEqual((await w.store.read()).entries.map(({ ticket, retries }) => [ticket, retries]), [['S-1', 1]]);
+    assert.equal(notes.length, 2);
+    // At its next try the base is gone: base_not_found fails as before, out of the queue with its error.
+    w.execution.refuse.set('app/S-1', new FactoryError('base_not_found', 'The base "main" does not exist on origin.'));
+    clock.now += 5 * MINUTE;
+    await settle(queue);
+    let file = await w.store.read();
+    assert.deepEqual(file.entries, []);
+    assert.deepEqual(file.errors.map(({ ticket, code }) => [ticket, code]), [['S-1', 'base_not_found']]);
+    // A start error other than fetch_failed on a first try fails at once too.
+    w.execution.refuse.set('app/S-2', new FactoryError('invalid_ticket', '"S-2-x" is not a valid branch name.'));
+    await queue.add('app', 'S-2');
+    await queue.idle();
+    file = await w.store.read();
+    assert.deepEqual([file.entries, file.errors.map(({ ticket, code }) => [ticket, code])], [[], [['S-1', 'base_not_found'], ['S-2', 'invalid_ticket']]]);
+    assert.equal(notes.length, 2);
+    // The workspace's notify setting: brief sends ntfy the workspace and the code only; off sends nothing.
+    await setWorkspaceNotify('app', 'brief', w.env.config);
+    w.execution.refuse.set('app/S-2', FETCH_FAILED);
+    await queue.add('app', 'S-2');
+    await queue.idle();
+    assert.deepEqual([notes.length, notes.at(-1)?.body, notes.at(-1)?.ntfyBody], [3, 'S-2 could not fetch main; the queue tries again', 'app · fetch_failed']);
+    await queue.remove('app', 'S-2');
+    await setWorkspaceNotify('app', 'off', w.env.config);
+    await queue.add('app', 'S-2');
+    await queue.idle();
+    assert.deepEqual([notes.length, (await w.store.read()).entries[0]?.retries], [3, 1]);
+  } finally {
+    queue.close();
+  }
+});
+
+test('SF-236: the reset timer also fires at the earliest retry_at by itself, and a restarted queue keeps the next try', TIMEOUT, async () => {
+  const w = await world('queue-retry-timer');
+  await plan(w, 'T-1');
+  const queue = w.queue;
+  try {
+    // As a start that could not fetch left it: due in 300 ms (the real clock).
+    const file = await w.store.read();
+    await w.store.write({ ...file, entries: [{ workspace: 'app', ticket: 'T-1', queued_at: now(), retry_at: new Date(Date.now() + 300).toISOString(), retries: 2 }] });
+    await settle(queue);
+    assert.deepEqual(w.execution.starts, []);
+    const deadline = Date.now() + 5000;
+    while (w.execution.starts.length === 0) {
+      assert.ok(Date.now() < deadline, 'the timer did not fire');
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    await queue.idle();
+    assert.deepEqual(w.execution.starts, ['app/T-1']);
+    assert.deepEqual((await w.store.read()).entries, []);
+  } finally {
+    queue.close();
+  }
+});
+
+test('SF-236: the run queue\'s own start that cannot fetch the base leaves no job record, branch or worktree; a start by hand still fails its job', TIMEOUT, async () => {
+  const w = await world('queue-retry-record');
+  await plan(w, 'N-1');
+  const execution = new Execution(config(w.env), (workspace) => resolveWorkspace(workspace, w.env.config), undefined, undefined, { maxRunning: async () => 3 });
+  // The network is gone: origin cannot be reached.
+  await rename(w.origin, `${w.origin}.away`);
+  try {
+    // A failed job of the ticket before: the start archives it, and leaves none of its own.
+    await w.jobs.write(jobRecord('app', 'N-1', 'failed'));
+    await assert.rejects(execution.start('app', 'N-1', { queued: true }), { code: 'fetch_failed' });
+    assert.equal(await w.jobs.read('app', 'N-1'), undefined);
+    assert.equal(git(w.repo, 'branch', '--list', 'N-1*').trim(), '');
+    assert.equal(git(w.repo, 'worktree', 'list').trim().split('\n').length, 1);
+    // A start by hand: the job fails, as before.
+    await assert.rejects(execution.start('app', 'N-1'), { code: 'fetch_failed' });
+    assert.deepEqual([(await w.jobs.read('app', 'N-1'))?.state, (await w.jobs.read('app', 'N-1'))?.error?.code], ['failed', 'fetch_failed']);
+  } finally {
+    await rename(`${w.origin}.away`, w.origin);
+  }
+});
+
 test('add refuses a missing Task file, a skeleton, a live job and a ticket already queued; remove and move refuse one not queued; move reorders', TIMEOUT, async () => {
   const w = await world('queue-add');
   await w.queue.hold();
@@ -824,6 +1022,15 @@ test('an invalid queue.json is an error; a missing one is an empty queue whose l
   await writeFile(join(env.state, 'queue.json'), '{"version": 1, "max_running": 2, "held": false, "hold_reason": null, "entries": [], "errors": []}');
   assert.equal((await new QueueStore(env.state, 3).read()).on_limit, 'resume-then-queue');
   await writeFile(join(env.state, 'queue.json'), '{"version": 1, "max_running": 2, "held": false, "hold_reason": null, "on_limit": "later", "entries": [], "errors": []}');
+  await assert.rejects(new QueueStore(env.state, 3).read(), { code: 'queue_invalid' });
+  // SF-236: an entry written before state format 4 has no retry_at nor retries: it reads, without them.
+  const entry = '{"workspace": "app", "ticket": "A-1", "queued_at": "2026-11-14T18:00:00.000Z"}';
+  await writeFile(join(env.state, 'queue.json'), `{"version": 1, "max_running": 2, "held": false, "hold_reason": null, "on_limit": "wait", "entries": [${entry}], "errors": [], "last_start": "2026-11-14T18:00:00.000Z"}`);
+  assert.deepEqual((await new QueueStore(env.state, 3).read()).entries, [{ workspace: 'app', ticket: 'A-1', queued_at: '2026-11-14T18:00:00.000Z' }]);
+  const retrying = '{"workspace": "app", "ticket": "A-1", "queued_at": "2026-11-14T18:00:00.000Z", "retry_at": "2026-11-14T18:05:00.000Z", "retries": 1}';
+  await writeFile(join(env.state, 'queue.json'), `{"version": 1, "max_running": 2, "held": false, "hold_reason": null, "entries": [${retrying}], "errors": []}`);
+  assert.deepEqual((await new QueueStore(env.state, 3).read()).entries[0], { workspace: 'app', ticket: 'A-1', queued_at: '2026-11-14T18:00:00.000Z', retry_at: '2026-11-14T18:05:00.000Z', retries: 1 });
+  await writeFile(join(env.state, 'queue.json'), `{"version": 1, "max_running": 2, "held": false, "hold_reason": null, "entries": [${retrying.replace('"retries": 1', '"retries": 0')}], "errors": []}`);
   await assert.rejects(new QueueStore(env.state, 3).read(), { code: 'queue_invalid' });
 });
 

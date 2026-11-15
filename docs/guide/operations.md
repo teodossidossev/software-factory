@@ -364,6 +364,7 @@ Use `tailscale serve`, never `tailscale funnel`: Funnel puts the address on the 
 | ChatGPT shows old tools | the connector caches its tool list | *Refresh* the plugin in ChatGPT and open a new chat |
 | `branch_exists` at Start | a branch of an earlier attempt | delete it (`git branch -D APP-12-…`) or Restart the old job |
 | `worktree_exists` at Start | a leftover worktree | `sf reset my-app APP-12` |
+| the laptop lost its network: a queued ticket says "start failed (fetch_failed); next try HH:MM" and a notification said "APP-12 could not fetch main; the queue tries again" | the run queue's start could not fetch the base from `origin`; it left no job and kept the ticket in its place | nothing: the queue tries again 5 minutes after the first failure, then 10, then every 15, and starts it once the network is back; Remove from queue (`sf queue remove my-app APP-12`) stops it. A start by hand that cannot fetch still fails its job (`fetch_failed`): Start again once online |
 
 ## The tests
 

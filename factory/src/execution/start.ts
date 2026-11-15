@@ -262,7 +262,7 @@ export class StartPart {
       }
       return this.#claim(workspace, ticket, plan, images);
     });
-    return this.#launch(claimed);
+    return this.#launch(claimed, { queued });
   }
 
   // The base, continues and branch of a job from the Task file (readTask validates it, continues
@@ -328,8 +328,10 @@ export class StartPart {
   // The claimed job's worktree, then its first turn. kept (sf restart --keep-files): the
   // files of the previous job, saved in a directory of their own, are copied into the worktree
   // before the first turn, whose prompt names them; the directory goes once they are copied, and
-  // stays (named in the error) when the job could not start.
-  async #launch(claimed: Claimed, kept?: Kept): Promise<{ branch: string; state: JobState; check_after_minutes: number; worktree: string }> {
+  // stays (named in the error) when the job could not start. queued (the run queue's own start): a
+  // fetch of the start branch that fails (fetch_failed, before any branch or worktree exists)
+  // removes the record claimed, so no job is left and the queue tries again (src/queue.ts).
+  async #launch(claimed: Claimed, { kept, queued = false }: { kept?: Kept; queued?: boolean } = {}): Promise<{ branch: string; state: JobState; check_after_minutes: number; worktree: string }> {
     const { workspace, ticket, base, continues, branch, worktree } = claimed;
     const keptNote = kept !== undefined && kept.paths.length > 0 ? ` The files kept from the previous job are in ${kept.dir}.` : '';
     let baseCommit: string;
@@ -340,6 +342,11 @@ export class StartPart {
       await this.#locks.locked(async () => {
         const job = await this.#store.jobs.read(workspace.name, ticket);
         if (job !== undefined && job.state === 'starting') {
+          if (queued && failure.code === 'fetch_failed') {
+            // Nothing exists yet but the record this start claimed: it goes, as if never made.
+            await rm(this.#store.jobs.dir(workspace.name, ticket), { recursive: true, force: true });
+            return;
+          }
           // from: starting (the guard above)
           await this.#store.transition({ ...job, worktree: null }, 'failed', 'launch', { code: failure.code, message: `${failure.message}${keptNote}` });
         }
@@ -557,7 +564,7 @@ export class StartPart {
         throw error;
       }
     });
-    const started = await this.#launch(claimed, kept);
+    const started = await this.#launch(claimed, { kept });
     return { ...started, archived, branch_deleted: deleted, kept: kept?.paths ?? [] };
   }
 

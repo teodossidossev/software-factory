@@ -40,7 +40,7 @@ function detail(row: ReturnType<typeof job>) {
 
 function ticket(key: string, extra: Record<string, unknown> = {}) {
   const [workspace, name] = key.split('/') as [string, string];
-  return { workspace, ticket: name, title: `Ticket ${name}`, base: 'main', draft: false, request: null, job: null, conversation: { message: 'm', url: null }, ...extra };
+  return { workspace, ticket: name, title: `Ticket ${name}`, base: 'main', draft: false, request: null, job: null, conversation: { message: 'm', url: null }, queue_retry: null, ...extra };
 }
 
 // The colour as the server sends it (SF-084): the configured one, else the hash of the name.
@@ -1127,6 +1127,19 @@ test('board client (SF-086): a queued card held by its plan says why, with Start
   page.streams.at(-1)!.emit('tickets', { tickets: [ticket('app/T-3', { queue_position: 1, queue_error: null, queue_reason: 'plan not ready: 2 blocker, 1 major', queue_force: true })], archived: [], queue: QUEUE });
   await page.flush();
   assert.deepEqual([reason('app/T-3'), button(card(page, 'app/T-3'), 'Start anyway')], [undefined, undefined]);
+});
+
+test('board client (SF-236): a queued card whose start could not fetch says when the queue tries again (HH:MM, local time); none without a retry or out of the queue', async () => {
+  const at = '2026-11-14T19:05:00.000Z';
+  const page = await openQueue([
+    ticket('app/T-3', { queue_position: 1, queue_error: null, queue_reason: null, queue_force: false, queue_retry: { code: 'fetch_failed', at, retries: 1 } }),
+    ticket('app/T-2', { queue_position: 2, queue_error: null, queue_reason: null, queue_force: false, queue_retry: null }),
+    ticket('app/T-4', { queue_position: null, queue_error: null, queue_reason: null, queue_force: false }),
+  ]);
+  const date = new Date(at);
+  const hhmm = `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+  const retry = (key: string): string | undefined => part(card(page, key), 'qretry')?.textContent;
+  assert.deepEqual(['app/T-3', 'app/T-2', 'app/T-4'].map(retry), [`start failed (fetch_failed); next try ${hhmm}`, undefined, undefined]);
 });
 
 test('board client (SF-071): drag and drop and Alt+Up / Alt+Down post api/queue/move; a drop goes before the card it lands on', async () => {

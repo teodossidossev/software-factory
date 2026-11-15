@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { FactoryError } from '../src/errors.js';
 import {
-  configDir, digestSettings, editedEntry, explainSettings, isNotifyMode, loadRegistry, NOTIFY_MODES, parseRegistry, resolveWorkspace, saveRegistry, WORKSPACE_COLORS, workspaceApp, workspaceColor,
+  configDir, digestSettings, editedEntry, MAX_DIGEST_TIMES, explainSettings, isNotifyMode, loadRegistry, NOTIFY_MODES, parseRegistry, resolveWorkspace, saveRegistry, WORKSPACE_COLORS, workspaceApp, workspaceColor,
   workspaceDigest, workspaceNotify, workspaceNotifyMode,
 } from '../src/registry.js';
 
@@ -148,8 +148,9 @@ test('parseRegistry (SF-103): description, app and digest per workspace, the top
   });
   const registry = parseRegistry(text);
   assert.deepEqual(registry.workspaces.api, { read_checkout: '/srv/api', description: 'The shop backend.', app: 'shop', digest: { track: true, my_work: false } });
-  assert.deepEqual(digestSettings(registry), { at: '07:15', weekdays_only: false, model: 'opus', language: 'Deutsch' });
-  assert.deepEqual(digestSettings(parseRegistry('{"workspaces":{}}')), { at: '08:00', weekdays_only: true, model: 'sonnet', language: 'English' });
+  // A stored `at` (a file of before `times`) reads as one time.
+  assert.deepEqual(digestSettings(registry), { times: ['07:15'], weekdays_only: false, model: 'opus', language: 'Deutsch' });
+  assert.deepEqual(digestSettings(parseRegistry('{"workspaces":{}}')), { times: ['08:00'], weekdays_only: true, model: 'sonnet', language: 'English' });
   assert.deepEqual([workspaceApp('api', registry.workspaces.api!), workspaceApp('web', registry.workspaces.web!)], ['shop', 'web']);
   assert.deepEqual(workspaceDigest(registry.workspaces.web!), { track: false, my_work: false });
   for (const bad of [
@@ -162,6 +163,18 @@ test('parseRegistry (SF-103): description, app and digest per workspace, the top
     { workspaces: {}, extra: 1 },
   ]) {
     invalid(JSON.stringify(bad));
+  }
+});
+
+test('parseRegistry and digestSettings: digest.times, 1 to 4 distinct HH:MM, read sorted; times wins over at; a bad list is refused', () => {
+  const settings = (digest: unknown) => digestSettings(parseRegistry(JSON.stringify({ workspaces: {}, digest })));
+  assert.deepEqual(settings({ times: ['10:45', '08:30'] }), { times: ['08:30', '10:45'], weekdays_only: true, model: 'sonnet', language: 'English' });
+  assert.deepEqual(settings({ times: ['23:59', '00:00', '12:00', '06:15'] }).times, ['00:00', '06:15', '12:00', '23:59']);
+  assert.deepEqual(settings({ times: ['09:00'], at: '07:00' }).times, ['09:00']);
+  assert.deepEqual(Object.keys(settings({ at: '07:00', weekdays_only: false })).sort(), ['language', 'model', 'times', 'weekdays_only']);
+  assert.equal(MAX_DIGEST_TIMES, 4);
+  for (const times of [[], ['08:00', '09:00', '10:00', '11:00', '12:00'], ['08:00', '08:00'], ['24:00'], ['8:00'], ['08:00', 9], 'x']) {
+    invalid(JSON.stringify({ workspaces: {}, digest: { times } }));
   }
 });
 

@@ -6,7 +6,7 @@
 // over SF_HANDOFF for its jobs; its optional `color` marks its cards on the board; its optional
 // `rules_skip` names the repository rule files not given to the agents. A workspace has an optional
 // `description`, `app` (workspaces of one app share one daily) and `digest: {track, my_work}`, and
-// the registry an optional top-level `digest` (the morning digest's time, weekdays only, model and
+// the registry an optional top-level `digest` (the morning digest's times, weekdays only, model and
 // language) and `explain` (the plain explanation of each stop: on, model and language). A workspace
 // has an optional `guard` (src/guard.ts: its pushes and MR texts are checked for the names of the
 // user's other workspaces; absent: false) and an optional `test_command` (src/test-command.ts: the
@@ -92,8 +92,17 @@ export const MAX_LANGUAGE_CHARS = 40;
 // here go into the daily of its app. Absent: false.
 const workspaceDigestSchema = z.strictObject({ track: z.boolean().optional(), my_work: z.boolean().optional() });
 
+// The scheduled digest's times of day: 1 to MAX_DIGEST_TIMES distinct HH:MM, in any order
+// (digestSettings sorts them).
+export const MAX_DIGEST_TIMES = 4;
+const clockTime = z.string().regex(DIGEST_TIME_PATTERN, 'must be HH:MM (00:00 to 23:59)');
+export const digestTimesSchema = z.array(clockTime).min(1).max(MAX_DIGEST_TIMES)
+  .refine((times) => new Set(times).size === times.length, 'must not hold a time twice');
+
+// at: the single time of older files; times wins when both are there.
 const digestSettingsSchema = z.strictObject({
-  at: z.string().regex(DIGEST_TIME_PATTERN, 'must be HH:MM (00:00 to 23:59)').optional(),
+  times: digestTimesSchema.optional(),
+  at: clockTime.optional(),
   weekdays_only: z.boolean().optional(),
   model: z.string().min(1).optional(),
   language: z.string().trim().min(1).max(MAX_LANGUAGE_CHARS).optional(),
@@ -129,15 +138,23 @@ export type WorkspaceEntry = Registry['workspaces'][string];
 
 // The morning digest's settings with their defaults.
 export interface DigestSettings {
-  at: string;
+  // Sorted ascending: times[0] is the earliest.
+  times: string[];
   weekdays_only: boolean;
   model: string;
   language: string;
 }
-export const DIGEST_DEFAULTS: DigestSettings = { at: '08:00', weekdays_only: true, model: 'sonnet', language: 'English' };
+export const DIGEST_DEFAULTS: DigestSettings = { times: ['08:00'], weekdays_only: true, model: 'sonnet', language: 'English' };
 
+// The settings: times from digest.times, else [digest.at], else the default, sorted ascending.
 export function digestSettings(registry: Registry): DigestSettings {
-  return { ...DIGEST_DEFAULTS, ...registry.digest };
+  const { times, at, weekdays_only, model, language } = registry.digest ?? {};
+  return {
+    times: [...(times ?? (at !== undefined ? [at] : DIGEST_DEFAULTS.times))].sort(),
+    weekdays_only: weekdays_only ?? DIGEST_DEFAULTS.weekdays_only,
+    model: model ?? DIGEST_DEFAULTS.model,
+    language: language ?? DIGEST_DEFAULTS.language,
+  };
 }
 
 // The stop explanations' settings with their defaults.

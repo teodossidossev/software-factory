@@ -103,7 +103,7 @@ const USAGE = `Usage:
 ${usageLines().join('\n')}
   sf status [<workspace> <ticket>]                      Show one job or all jobs: state, iterations, estimated cost, elapsed time; both show the dashboard's full URL once sf serve made its token
   sf watch <workspace> <ticket> [--once]                Show the session live (Ctrl+C stops)
-  sf digest [--now]                                     The morning digest of the followed workspaces (sf serve makes one a day at digest.at in workspaces.json): without --now, the latest digest's period and counts; --now makes one at once and prints the path of its record and its cost
+  sf digest [--now]                                     The morning digest of the followed workspaces (sf serve makes one at each of digest.times in workspaces.json, up to 4 a day): without --now, the latest digest's period and counts; --now makes one at once and prints the path of its record and its cost
   sf explain <workspace> <ticket>                       The plain explanation of the job's current stop (sf serve writes one for each needs_human stop; explain in workspaces.json): the headline, the explanation, the choices and the recommendation; no sf serve needed, no model call
   sf notify-test                                        Send a test notification on every channel
   sf info                                               Version, directories, settings, whether sf serve and the tunnel run, workspaces, jobs

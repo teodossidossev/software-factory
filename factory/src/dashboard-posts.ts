@@ -51,10 +51,11 @@ const BODIES = {
       digest: z.strictObject({ track: z.boolean(), my_work: z.boolean() }),
     }),
   },
-  // The Morning digest section of the Setup.
+  // The Morning digest section of the Setup and the Digest page's schedule: the keys given change.
   'digest-settings': {
-    shape: '{"at": "HH:MM", "weekdays_only": boolean, "language": string}',
-    schema: z.strictObject({ at: z.string(), weekdays_only: z.boolean(), language: z.string() }),
+    shape: '{"times"?: ["HH:MM", ...], "weekdays_only"?: boolean, "language"?: string} with at least one key',
+    schema: z.strictObject({ times: z.array(z.string()).optional(), weekdays_only: z.boolean().optional(), language: z.string().optional() })
+      .refine((body) => Object.keys(body).length > 0),
   },
   // Generate now on the Digest page.
   'digest-run': { shape: '{}', schema: z.strictObject({}) },

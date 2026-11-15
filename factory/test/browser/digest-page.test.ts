@@ -1,8 +1,8 @@
 // The Digest page in a real browser (SF-103) over stored records: the empty state and Generate now
 // (polled until the new digest appears), the Repositories tab (one ticket across the app, a card per
 // followed workspace: the headline, the effect on my work, what landed with the earlier entries
-// folded, the live branches), the My daily tab with Copy, a digest whose model call failed, the
-// earlier digests, and phone width.
+// folded, the live branches), the Brief tab (the default: its sections in order, one line per item,
+// Copy for the stand-up), a digest whose model call failed, the earlier digests, and phone width.
 import assert from 'node:assert/strict';
 import type { DigestRecord, DigestWorkspace } from '../../src/digest-run.js';
 import type { LandedEntry, LiveBranch } from '../../src/digest.js';
@@ -50,15 +50,24 @@ function record(id: string, extra: Partial<DigestRecord> = {}): DigestRecord {
     daily_sources: [{ app: 'shop', workspaces: ['api'], commits: [{ sha: 'a1b2c3d4e5', ref: 'SHOP-8-mine', date: hoursBefore(20), subject: 'SHOP-8: My orders', why: '', stat: '', workspace: 'api' }], jobs: [], open_branches: [] }],
     output: {
       repos: [
-        { name: 'api', headline: 'The orders list landed; the work moves to payments.', merged: [{ sha: 'a1b2c3d4e5', problem: 'The shop can list its orders.' }], branches: [{ ref: 'SHOP-8-mine', what: 'My orders work, behind main.' }], impact_on_me: ['SHOP-8-mine shares src/orders.ts with a1b2c3d4e5: a rebase is due.'] },
-        { name: 'web', headline: 'The orders page follows the API.', merged: [{ sha: '0a0b0c0d0e', problem: 'The page shows the orders.' }], branches: [], impact_on_me: [] },
+        { name: 'api', headline: e('The orders list landed; the work moves to payments.'), merged: [{ sha: 'a1b2c3d4e5', problem: e('The shop can list its orders.') }], branches: [{ ref: 'SHOP-8-mine', what: e('My orders work, behind main.') }], impact_on_me: [e('SHOP-8-mine shares src/orders.ts with a1b2c3d4e5: a rebase is due.')] },
+        { name: 'web', headline: e('The orders page follows the API.'), merged: [{ sha: '0a0b0c0d0e', problem: e('The page shows the orders.') }], branches: [], impact_on_me: [] },
       ],
-      cross_repo: [{ ticket: 'SHOP-7', by_workspace: { api: 'The list endpoint landed.', web: 'The page landed.' }, for_me: 'Likely nothing to do.' }],
-      dailies: [{ app: 'shop', workspaces: ['api'], yesterday: ['Worked on the orders (SHOP-8).'], problems: ['SHOP-8-mine is 14 commits behind main.'], plan: ['Rebase SHOP-8-mine on main.'], next: ['Finish SHOP-8.'] }],
+      cross_repo: [{ ticket: 'SHOP-7', by_workspace: { api: e('The list endpoint landed.'), web: e('The page landed.') }, for_me: e('Likely nothing to do.') }],
+      dailies: [{ app: 'shop', workspaces: ['api'], yesterday: [e('Worked on the orders (SHOP-8).')], problems: [e('SHOP-8-mine is 14 commits behind main.')], plan: [e('Rebase SHOP-8-mine on main.')], next: [e('Finish SHOP-8.')] }],
     },
-    cost_usd: 0.31, error: null, notes: [], counts: { landed: 3, live_branches: 3, impact: 1 }, ...extra,
+    cost_usd: 0.31, error: null, notes: [], counts: { landed: 3, live_branches: 3, impact: 1 },
+    in_progress: [{ workspace: 'api', app: 'shop', ticket: 'SHOP-9', title: 'The payment form', state: 'needs_human', stop_code: 'gate_failed', iteration: 2, since: hoursBefore(1) }],
+    ...extra,
   };
 }
+
+// A model text of an English record: en repeats text.
+function e(text: string): { text: string; en: string } {
+  return { text, en: text };
+}
+
+const repositories = async (fx: Fixture): Promise<void> => fx.page.getByRole('tab', { name: 'Repositories' }).click();
 
 const card = (fx: Fixture, name: string) => fx.page.locator(`#digest .dg-repo[data-ws="${name}"]`);
 
@@ -77,8 +86,10 @@ browserTest('digest page: no digest yet; Generate now posts once, polls every 10
   fx.digests.records.push(record('20261106T070000Z-manual', { trigger: 'manual' }));
   fx.digests.running = false;
   await fx.page.clock.runFor(10_000);
-  await card(fx, 'api').waitFor();
+  await fx.page.locator('#digest .dg-brief').waitFor();
   assert.equal(new URL(fx.page.url()).hash, '#digest/20261106T070000Z-manual');
+  await repositories(fx);
+  await card(fx, 'api').waitFor();
   assert.deepEqual(fx.problems, []);
 });
 
@@ -86,6 +97,7 @@ browserTest('digest page: Repositories: one ticket across the app, then a card p
   fx.digests.records.push(record('20261106T070000Z-scheduled'));
   await fx.open();
   await fx.page.locator('#open-digest').click();
+  await repositories(fx);
   await card(fx, 'api').waitFor();
   assert.equal(new URL(fx.page.url()).hash, '#digest');
   assert.match(await fx.page.locator('#digest .dg-period').innerText(), /^since 2026-11-0\d \d\d:\d\d · generated 2026-11-06 \d\d:\d\d$/);
@@ -122,42 +134,70 @@ browserTest('digest page: Repositories: one ticket across the app, then a card p
   assert.deepEqual(fx.problems, []);
 });
 
-browserTest('digest page: My daily: a card per app with its four sections, the commits folded, and Copy as plain text', async (fx) => {
+browserTest('digest page: the Brief (the default tab): its sections in order of one-line items, the schedule line, the commits folded, and Copy for the stand-up as plain text', async (fx) => {
   fx.digests.records.push(record('20261106T070000Z-scheduled'));
   await fx.page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: new URL(fx.url).origin });
   await fx.open('digest');
-  await fx.page.getByRole('tab', { name: 'My daily' }).click();
-  const daily = fx.page.locator('#digest .dg-daily[data-app="shop"]');
-  await daily.waitFor();
-  assert.deepEqual(await daily.locator('.dg-sec h4').allInnerTexts(), ['Yesterday', 'Problems', 'Plan', 'Today']);
-  assert.equal(await daily.locator('summary').innerText(), 'The commits it was made from (1)');
-  await daily.getByRole('button', { name: 'Copy' }).click();
-  await daily.getByText('Copied.').waitFor();
+  const brief = fx.page.locator('#digest .dg-brief');
+  await brief.waitFor();
+  assert.deepEqual(await fx.page.locator('#digest [role="tab"]').allInnerTexts(), ['Brief', 'Repositories']);
+  assert.equal(await fx.page.locator('#digest [role="tab"][aria-selected="true"]').innerText(), 'Brief');
+  assert.equal(await fx.page.locator('#digest .dg-sched span').first().innerText(), 'Updates at 08:00 (weekdays)');
+  // An English record: no language switch.
+  assert.equal(await fx.page.locator('#digest .dg-lang').count(), 0);
+  assert.deepEqual(await brief.locator('.dg-sec > h4').allInnerTexts(), ['Yesterday', 'In progress now', 'Today', 'Merged by colleagues', 'Waiting on me']);
+  // Each item one line.
+  for (const item of await brief.locator('.dg-lines > li').all()) {
+    if (await item.isVisible()) {
+      const box = (await item.boundingBox())!;
+      assert.ok(box.height < 30, `${await item.innerText()}: ${box.height}px`);
+    }
+  }
+  assert.match(await brief.locator('.dg-sec[data-sec="progress"] li').innerText(), /^SHOP-9\s+The payment form:\s*Waits for you\s*gate_failed\s*(\d\d:\d\d|\d{4}-\d\d-\d\d)$/);
+  // Merged by colleagues: per workspace (two followed), mine left out, the older one folded.
+  const merged = brief.locator('.dg-sec[data-sec="merged"]');
+  assert.deepEqual(await merged.locator('.dg-group .dg-name').allInnerTexts(), ['api', 'web']);
+  assert.equal(await merged.locator('summary').innerText(), 'Earlier in the period (1)');
+  assert.equal(await merged.locator('li', { hasText: 'The shop can list its orders.' }).count(), 0);
+  assert.match(await merged.locator('li', { hasText: 'The page shows the orders.' }).innerText(), /^SHOP-7\s*The page shows the orders\.\s*Colleague · (\d\d:\d\d|\d{4}-\d\d-\d\d)$/);
+  const shop = fx.page.locator('#digest .dg-app[data-app="shop"]');
+  assert.equal(await shop.locator('summary').innerText(), 'The commits it was made from (1)');
+  await shop.getByRole('button', { name: 'Copy for the stand-up' }).click();
+  await shop.getByText('Copied.').waitFor();
   assert.equal(await fx.page.evaluate(() => navigator.clipboard.readText()), [
-    'Yesterday:', '- Worked on the orders (SHOP-8).', 'Problems:', '- SHOP-8-mine is 14 commits behind main.', 'Plan:', '- Rebase SHOP-8-mine on main.', 'Today:', '- Finish SHOP-8.',
+    'Yesterday:', '- Worked on the orders (SHOP-8).',
+    'In progress now:', '- SHOP-9 The payment form: Waits for you',
+    'Today:', '- Finish SHOP-8.', '- Rebase SHOP-8-mine on main.',
+    'Waiting on me:', '- SHOP-8-mine shares src/orders.ts with a1b2c3d4e5: a rebase is due.', '- SHOP-8-mine is 14 commits behind main.', '- SHOP-7: Likely nothing to do.',
   ].join('\n'));
   assert.deepEqual(fx.problems, []);
 });
 
-browserTest('digest page: a failed model call shows the Git data with a note; the empty daily; the earlier digests by date', async (fx) => {
+browserTest('digest page: a failed model call shows the Git data with a note; the Brief without the model\'s items; the earlier digests by date', async (fx) => {
   fx.digests.records.push(
     record('20261105T070000Z-scheduled', { started_at: '2026-11-05T07:00:00.000Z', ended_at: '2026-11-05T07:01:00.000Z' }),
-    record('20261106T070000Z-scheduled', { output: null, error: 'The digest ended with error_during_execution: boom', daily_sources: [], cost_usd: null }),
+    record('20261106T070000Z-scheduled', { output: null, error: 'The digest ended with error_during_execution: boom', daily_sources: [], cost_usd: null, in_progress: [] }),
   );
   await fx.open('digest');
+  await repositories(fx);
   await card(fx, 'api').waitFor();
   assert.equal(await fx.page.locator('#digest .notline.bad').innerText(), 'The model call failed (The digest ended with error_during_execution: boom); the Git data is shown without its summary.');
   assert.equal(await fx.page.locator('#digest table.dgx').count(), 0);
   assert.match(await card(fx, 'api').locator('.dg-landed li').first().innerText(), /SHOP-7: Change a1b2c3d4e5/);
   assert.equal(await fx.page.locator('#digest .dg-cost').innerText(), 'cost unknown');
-  await fx.page.getByRole('tab', { name: 'My daily' }).click();
-  await fx.page.getByText(/^No daily in this digest/).waitFor();
+  // The Brief has the colleagues' commits from the Git data only, by their subjects; no app has an item to copy.
+  await fx.page.getByRole('tab', { name: 'Brief' }).click();
+  const brief = fx.page.locator('#digest .dg-brief');
+  await brief.waitFor();
+  assert.deepEqual(await brief.locator('.dg-sec > h4').allInnerTexts(), ['Merged by colleagues']);
+  assert.match(await brief.locator('li', { hasText: 'SHOP-7: Change 0a0b0c0d0e' }).innerText(), /Colleague/);
+  assert.equal(await brief.locator('.dg-app').count(), 0);
   // The earlier digest, by date.
   const pick = fx.page.getByLabel('Earlier digests');
   assert.equal((await pick.locator('option').allInnerTexts()).length, 2);
   await pick.selectOption('20261105T070000Z-scheduled');
   await eventually(async () => new URL(fx.page.url()).hash, '#digest/20261105T070000Z-scheduled');
-  await fx.page.locator('#digest .dg-daily').first().waitFor();
+  await fx.page.locator('#digest .dg-app[data-app="shop"]').waitFor();
   // Back to the board with Escape.
   await fx.page.keyboard.press('Escape');
   await fx.page.locator('#board').waitFor();
@@ -170,10 +210,13 @@ for (const width of [360, 390, 768] as const) {
     fx.digests.records.push(record('20261106T070000Z-scheduled'));
     await fx.page.setViewportSize({ width, height: 800 });
     await fx.open('digest');
-    await card(fx, 'api').waitFor();
-    const wide = await fx.page.evaluate(() => [document.documentElement, document.querySelector('#digest .jhead')!, document.querySelector('#digest .form2')!]
+    const wide = () => fx.page.evaluate(() => [document.documentElement, document.querySelector('#digest .jhead')!, document.querySelector('#digest .form2')!]
       .filter((node) => node.scrollWidth > node.clientWidth).map((node) => `${node.tagName}.${node.className}: ${node.scrollWidth} > ${node.clientWidth}`));
-    assert.deepEqual(wide, []);
+    await fx.page.locator('#digest .dg-brief').waitFor();
+    assert.deepEqual(await wide(), []);
+    await repositories(fx);
+    await card(fx, 'api').waitFor();
+    assert.deepEqual(await wide(), []);
     assert.equal(await fx.page.getByRole('button', { name: 'Generate now' }).isVisible(), true);
   });
 }

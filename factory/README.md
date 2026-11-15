@@ -789,7 +789,7 @@ a new `sf serve` and an old runner.
 ## State format version
 
 The state directory holds `state-version` (SF-101, `src/state-version.ts`), a whole number: the
-format of the state files the factory last wrote. This release writes `3`. `sf serve` and every
+format of the state files the factory last wrote. This release writes `4`. `sf serve` and every
 runner (`sf run`) read it at start: a missing file gets the current version; an equal one goes on;
 a lower one runs the migrations from it to the current one in order (`MIGRATIONS`; none exist
 yet), then writes the new number; a higher one refuses to start with `state_too_new` ("the state
@@ -805,7 +805,10 @@ state of the previous version into the new one (`{ from: N, run(stateDir) }`), w
 step's number is written once it ran, so a failed migration starts again from the step that
 failed. An older factory then refuses the new state instead of misreading it. Version 2 (SF-131):
 `job.json` may hold `claude_review`; its migration from 1 changes nothing. Version 3 (SF-153):
-`queue.json` may hold `last_start`; its migration from 2 changes nothing.
+`queue.json` may hold `last_start`; its migration from 2 changes nothing. Version 4 (SF-210): a
+digest record (`digest/<id>.json`) holds every model text as `{text, en}` and may hold
+`in_progress`, which an older factory's Digest page reads wrongly; its migration from 3 changes
+nothing, since the page still reads a record of plain strings without `in_progress`.
 
 A new file or event that no older factory reads, and that changes the meaning of nothing it does
 read, is not a change of the format. So SF-128 kept `STATE_VERSION` at 1: its `tests-<N>.json`
@@ -3570,7 +3573,7 @@ each runs within 20 s (its requests and commands within 3 s and 10 s), and one t
 | `logins` | Logins | the Claude CLI (`claude auth status`: `SF_CLAUDE`, else the Agent SDK's own binary) or, with the gate on, the Codex CLI (`codex login status`) is not logged in, or a Git host refuses the token a registered workspace's origin uses (one `GET /user` on GitHub, `GET /api/v4/user` on GitLab; the answer's body is never read); the detail names which and what to run | nothing to log in to |
 | `disk` | Disk space | the file system of the state directory or of the worktree root has less than 10 % or less than 5 GB free | — |
 | `sandboxes` | Sandbox leftovers | a fresh orphan scan (the reaper's finder, section Jobs) finds a pid the previous scan found too, so the reaper did not end it: `sf serve` runs the reaper right before each scan, so such a pid outlived a reap; the first scan of a process is never `down` (`sf health` scans twice, 10 s apart, and reaps between them) | — |
-| `digest` | Morning digest | the scheduled digest was missed (due by the clock, no scheduled digest started since today's start, `at` more than 30 minutes past), or the last scheduled digest's record has an `error` | no workspace follows (no digest scheduled) |
+| `digest` | Morning digest | the scheduled digest was missed (a due slot, the latest of today's `times` passed on a digest day, with no scheduled digest started at or after it, more than 30 minutes past: "the digest due at HH:MM did not start"), or the last scheduled digest's record has an `error`; ok names the times ("scheduled at 08:30, 10:45", then the last scheduled digest's start) | no workspace follows (no digest scheduled) |
 
 **`sf health --notify [--force]`** is the watchdog outside `sf serve` (section Service): only the
 MCP endpoint check and the service's systemd state, one notification on each change.
@@ -4441,10 +4444,12 @@ naming the type, when a type of `web/types.d.ts` has neither.
 - `home.js`: the two main views (`showMain`, `back`) and the home (section Home): Needs you and the
   Coordinator card's place.
 - `ticket-page.js`: Markdown preview, the planned ticket page, a ticket's images.
-- `reports.js`: the morning digest and the Stats page.
+- `reports.js`: the morning digest (its page and Repositories tab) and the Stats page.
 - `mr-row.js`: `mrRow`, one compact row of an open merge request (its pipeline, readiness, rebase
   need, SonarQube's problem, its comments button); it reads no page state, so any page can draw it.
 - `review-page.js`: the Merge requests page (a job from review comments) and `leavePages`.
+- `digest-brief.js`: the Digest page's Brief tab with Copy for the stand-up, its two languages (the
+  headings, the switch, the model's `{text, en}`) and the schedule line with its Edit.
 - `setup.js`: the drawer and the setup (workspaces, new ticket, archived, ticket actions).
 - `skills.js`: the Skills page (each agent role's skills, switched by a click).
 - `health.js`: the factory pill's health dot and words and its popover with the checks.
@@ -4462,7 +4467,7 @@ POST (anything else `405` with `Allow: GET, POST`):
 |---|---|
 | `api/jobs` | `{jobs: [...]}`: workspace, ticket, branch, base, state, iteration, mr_attempts, fixes, gate_fixes, gate_tokens, updated_at, created_at, error, and for the board (SF-046) `title` (of the Task file, or `null`), `cost_usd` (the estimate of the iterations and their Claude reviews, or `null`), `review` and `gate` (the last iteration's verdicts: `clean`, `fix`, `failed` or `null`) and `review_ended_at` (the end of that clean or fix Claude review, or `null`); `mr` (the merge request on the Git host or `null`) and `mr_host` (`{host, reason}`: `github`, `gitlab` or `null`, and why the merge request actions are off or `null`); for the v3 card (SF-077) `now` (`{who, what, ts}` of a running job: the Implementer's last tool call or the first line of its last text, read from at most the last 256 KB of `events.jsonl`; the Claude review or the Codex gate reviewing iteration N; the MR writer; else `null`), `tool_calls` (the Implementer's tool calls in the job, counted incrementally: only the bytes added since the last count are read) and `stop` (for `needs_human`, `{items, saves_lines}`: the suggestions of the last simplification pass and the lines they save, the ledger entries to settle (`escalated`, `review_disputed`), the open ones (`review_churn`) or the last gate's items (`gate_rounds`, `gate_budget`), none for other codes; `null` otherwise); `progress` (`src/progress.ts`; the job detail's `job` has it too): for a running job (`starting`, `working`, `awaiting_review`, `preparing_mr`) `{steps, phase, fix_round, ready_from, ready_to}`, else `null` (`waiting_limit` and `paused` too). `steps` (`[{text, done}]`) are the checklist lines of the worktree's `.software-factory/<ticket>.steps.md`, read when the payload is built (none for a missing file, a link or a file without checklist lines; any number, each cut to 200 characters); `phase` is `code` (`starting`, `working`), `claude` (`awaiting_review` while the Claude review runs on the job and the iteration's `review.json` has no verdict yet), `codex` (else in `awaiting_review`) or `mr_text` (`preparing_mr`); `fix_round` is the job's `fixes`. The estimate reads the history of the finished jobs (pushed, aborted, failed, ready for review or handed over; current and archived) of the workspace, or of every workspace while it has fewer than 10, read again at most once an hour: per iteration the working turn (`meta.json` `ended_at − started_at`), the Claude review (`review.json` with a verdict) and the gate (`gate.json`), and the MR text (from the state change into `preparing_mr` to the next one in `events.jsonl`), each over the iterations that have it. Remaining from = (the steps left / the steps, 1 without steps, 0 outside `code`) × the working turn's p25 + the medians of the reviews still ahead (Claude's only on a job with it and until its verdict, the gate's until its verdict) + the MR text's median; to = the same with the p75, plus, while `fix_round` is 0, one fix round (the working turn's median and the medians of the job's reviews). `ready_from` and `ready_to` are now plus those (ISO strings). While the history has no working turn yet (a new installation), the estimate starts from the factory's own history when it was planned (`BASE_DURATIONS`: a working turn's p25, median and p75 10, 19 and 32 min, each review 2 min, the MR text 1 min); SF-129 (`src/stops.ts`): `stop_code`, `stop_kind` and `stop_group` (the canonical row of a `needs_human` job's stop, `null` otherwise), `actions` (`[{action, label, primary, danger}]`: the actions the job's page shows, in order) and `availability` (every action's `''` or why it is off; Accept from the real review) |
 | `api/jobs/<ws>/<ticket>` | `{job, iterations: [{number, started_at, ended_at, cost_usd, changed_files, patch_truncated, denials, files, review, gate, gate_override, simplify}], mr, gate, history: [{ts, from, to, error?} or {ts, event: "gate_overridden", code, unapplied} or {ts, event: "merge_request", action, number, url, state}], mr_title, ledger, settle_ids, confirm_actions, explanation, lead: {size, target_hours, started_at, ready_at, done_at, seconds: {working, waiting_for_user, in_user_hands, parked, total}, returns, over_target}}`; `lead` is the job's lead time from `history` and its target by the Task's `size:` (SF-219, section Lead time); `job` has the fields of an `api/jobs` row's job part, `stop_code`, `stop_kind`, `stop_group`, `actions` and `availability` included (SF-129); `settle_ids` the ids of the ledger entries the stop block offers *Accept risk* / *Must fix* for (`[]` unless the stop's row has a settlement); `confirm_actions` the actions that need the job's ticket typed again on the remote port (SF-139: `approve`, `retry`, `archive`, `mr-create`, `mr-merge`, `merged-archive`), on both ports; `mr_title` is the MR text's first line or `null`; `explanation` is the job's `explanation.json` while it is the current stop's (SF-106, section Stop explanations), else `null`; `ledger` is `ledger.json` as written (`[]` before the first Fix section, SF-052); `gate` is whether the Codex gate is on, `gate_override` the iteration's `gate-override.json` or `null`, `simplify` its `simplify.json` (SF-055) or `null` |
-| `api/workspaces` | `{workspaces: [{name, path, liveJobs, problem, handoff, color, app, description, derived_description, digest}], handoff_default, digest}`: the registry, the checkout's path, its non-terminal jobs, why the checkout cannot be used now or `null`, its own hand-over setting or `null`, and its colour on the board (SF-084: its `color`, else the one its name picks); SF-103: its app (its own, else its name), its own description or `null`, the description derived from the repository or `null`, `digest: {track, my_work}`; at the top `handoff_default` (`checkout` or `off`, from `SF_HANDOFF`) and the morning digest's `digest: {at, weekdays_only, language}` |
+| `api/workspaces` | `{workspaces: [{name, path, liveJobs, problem, handoff, color, app, description, derived_description, digest}], handoff_default, digest}`: the registry, the checkout's path, its non-terminal jobs, why the checkout cannot be used now or `null`, its own hand-over setting or `null`, and its colour on the board (SF-084: its `color`, else the one its name picks); SF-103: its app (its own, else its name), its own description or `null`, the description derived from the repository or `null`, `digest: {track, my_work}`; at the top `handoff_default` (`checkout` or `off`, from `SF_HANDOFF`) and the morning digest's `digest: {times, weekdays_only, language}` (SF-210: `times` sorted) |
 | `api/workspaces/<ws>/merge-requests` | the open merge requests of the workspace's origin on its Git host, as `sf mr list` reads them (section Reading the open merge requests and their review comments): `[{number, title, author, source, target, url, updated_at, draft}]`, newest update first, at most 50; read on the host at each request, nothing written to it; `409 mr_token_missing` or `mr_host_unsupported`, `502 mr_auth_failed`, `mr_host_error` or `mr_host_unreachable`; a name that is not a workspace's, an unknown workspace or any query is an empty 404 |
 | `api/workspaces/<ws>/merge-requests/<number>/threads` | the review threads of one merge request, as `sf mr comments` reads them: `[{id, resolved, path, line, comments: [{author, body, created_at, bot}]}]`, oldest first; `path` and `line` `null` for a general comment, `resolved` `null` where the host has no such state (GitHub); `bot` a bot's or SonarQube's comment; the refusals as above; a number that is not a whole number from 1 is an empty 404 |
 | `api/workspaces/<ws>/merge-requests/<number>/overview` | the overview of one merge request (section Reading the open merge requests and their review comments): `{number, ready, reasons, behind, pipeline: {state, text, url} \| null, sonar: {gate_failed, new_issues, url} \| null, comments: {human, bot}}`; read on the host at each request (its status and threads), nothing written to it; the refusals and empty 404s as for `.../threads` |
@@ -4535,7 +4540,7 @@ shares; the setup, Task check, task and attachment posts have their own handlers
 | `POST api/jobs/<ws>/<ticket>/mr-status` | `{}` | `Execution.mergeRequestStatus(ws, ticket)` (`sf mr status`): result `{state, branch, mr, status?: {number, url, state, draft, mergeable, reason?, checks?, merge_commit?}, found?: {count}}` (`found` and a null `mr` without `status` for a job without a record looked up by its branch, SF-200); every page gets the jobs again, and the pages that show the job its detail (a merge request merged or closed on the host shows so at once) |
 | `POST api/workspaces` | `{"name": string, "path": string, "handoff"?: "checkout" \| "off", "color"?: <palette name>, "description"?: string, "app"?: string, "digest"?: {"track": boolean, "my_work": boolean}}` | `Setup.addWorkspace`: the rules of `sf workspace add`; `color` one of `blue`, `teal`, `green`, `olive`, `orange`, `red`, `purple`, `grey` (SF-084), anything else `400 invalid_body`; `description`, `app` and `digest` (SF-103; absent: none, the name, both off); result the workspace row |
 | `POST api/workspaces/<name>/edit` | `{"path": string, "description": string, "app": string, "handoff": "default" \| "checkout" \| "off", "color": "auto" \| <palette name>, "digest": {"track": boolean, "my_work": boolean}}`, every key required | `Setup.editWorkspace` (SF-103): the fields replace the entry's (`""` removes description and app, `default` the handoff, `auto` the color; `work_checkout` and `rules_skip` stay); the path checked as Add checks it; a path change while the workspace has a live job `409 workspace_busy`; result the workspace row |
-| `POST api/digest-settings` | `{"at": "HH:MM", "weekdays_only": boolean, "language": string}` | `Setup.saveDigestSettings` (SF-103): a bad time or language `400 invalid_digest_settings`; the model stays; result the settings |
+| `POST api/digest-settings` | `{"times"?: ["HH:MM", ...], "weekdays_only"?: boolean, "language"?: string}`, at least one key | `Setup.saveDigestSettings` (SF-103, SF-210): only the keys given change; `times` 1 to 4 distinct `HH:MM`, written sorted, a stored `at` removed; bad times or a bad language `400 invalid_digest_settings` ("1 to 4 times, each HH:MM from 00:00 to 23:59, no time twice"); the model stays; result the settings `{times, weekdays_only, language}` |
 | `POST api/digests/run` | `{}` | `Digests.start('manual')` (SF-103): answers at once `{started: true}`; `409 digest_running` while a digest runs; 404 without the digest |
 | `POST api/workspaces/<name>/remove` | `{}` | `Setup.removeWorkspace`; `409 workspace_busy` while the workspace has a live job; result `{removed}` |
 | `POST api/tickets` | `{"workspace", "ticket", "title", "request", "owner"?: "chatgpt" \| "claude_code"}` | `Setup.createTicket`: the ticket skeleton through the Task file writer, the request and the Context owner (`chatgpt` when left out) kept for the conversation; result `{workspace, ticket, path, base}` |
@@ -5322,25 +5327,36 @@ API, no issue tracker.
 here go into the daily of its app; absent: both off), `app` (workspaces with the same app share one daily; absent:
 the workspace's name) and `description` (optional; absent: the first paragraph of the repository's
 `README.md`, else its root `package.json`'s `description`, at most 300 characters; the prompt says
-the Git data wins when they disagree). At the top level `digest: {"at": "08:00", "weekdays_only":
-true, "model": "sonnet", "language": "English"}` (these are the defaults). The drawer's Morning digest
-section sets the time, weekdays only and the language (`POST api/digest-settings`); the model only
-by hand.
+the Git data wins when they disagree). At the top level `digest: {"times": ["08:00"], "weekdays_only":
+true, "model": "sonnet", "language": "English"}` (these are the defaults). `times` (SF-210) holds 1
+to 4 distinct `HH:MM` (00:00 to 23:59), in any order (read sorted); `[]`, five times, a time twice or
+a bad time make the file invalid. A file of before `times` with `"at": "HH:MM"` still works: it reads
+as `times: [at]`, and a save that writes `times` removes it; with both, `times` wins. The drawer's
+Morning digest section sets the times (comma-separated), weekdays only and the language, and the
+Digest page's schedule line the times (both `POST api/digest-settings`, which changes only the keys
+it is given); the model only by hand.
 
-**Schedule**: `sf serve` checks at its start and every 60 s. It rereads `workspaces.json` and makes
-the scheduled digest when now is past today's `at` (local time; on a weekday with `weekdays_only`),
-at least one workspace has `track` or `my_work`, and no scheduled digest started today. A machine
-that slept through `at`, or an `sf serve` started later, gets it at the next check. Generate now on
-the Digest page and `sf digest --now` make one at once (`digest_running` while one goes); a manual
-run does not replace the day's scheduled one.
+**Schedule**: `sf serve` checks at its start and every 60 s, with one timer (`DigestSchedule` of
+`src/digest-schedule.ts`). It rereads `workspaces.json` and finds the due slot (`dueSlot`): on a
+digest day (any day, or a weekday with `weekdays_only`) with at least one workspace on `track` or
+`my_work`, the latest of today's times not after now (local time). It makes the scheduled digest
+when there is one, no run is going, it did not start that slot itself, and no scheduled digest
+started at or after the slot. So each time gives at most one scheduled run a day; a run still going
+at the next time delays it until the run ends; a machine that slept through several times, or an
+`sf serve` started later, gets one run at the next check, for the latest time passed; a time added
+today that has already passed runs at the next check (unless a scheduled run started after it).
+Generate now on the Digest page and `sf digest --now` make one at once (`digest_running` while one
+goes); a manual run does not count for a slot. Each scheduled run sends its notification.
 
 **The period** (`digestPeriod` in `src/digest-run.ts`, SF-155), the same for scheduled and manual
-runs: from `at` (local time) on the previous digest day before today, to this run's start. A digest
-day is any day, or a weekday with `weekdays_only`. With `at` 07:00 and `weekdays_only`, Monday's
-digest covers Friday 07:00 to Monday 07:00 whatever happened before: a Friday digest that ran late,
-or a manual run later on Monday (still from Friday 07:00); a Tuesday's from Monday 07:00; a manual
-run on a Sunday from Friday 07:00. Without `weekdays_only`, Monday's is from Sunday 07:00. Past
-digests do not move the period, and a DST change keeps `at` in local time. **The daily**: yesterday runs
+runs: from the earliest of the times (local time) on the previous digest day before today, to this
+run's start, so every run of a day covers the same start and a later run refreshes the whole brief.
+A digest day is any day, or a weekday with `weekdays_only`. With 07:00 the earliest time and
+`weekdays_only`, Monday's digests cover Friday 07:00 to the run whatever happened before: a Friday
+digest that ran late, or a manual run later on Monday (still from Friday 07:00); a Tuesday's from
+Monday 07:00; a manual run on a Sunday from Friday 07:00. Without `weekdays_only`, Monday's is from
+Sunday 07:00. Past digests do not move the period, and a DST change keeps the time in local time.
+**The daily**: yesterday runs
 from 00:00 (local time) of the last working day before today to 00:00 of today, so on a Monday it
 covers Friday and the weekend; today runs from 00:00 until the run, and no commit falls
 between the two. Dates are committer dates.
@@ -5405,31 +5421,71 @@ page shows each landed entry's SHA and each branch's name beside the model's sen
 sentences hold no commit SHAs, branch names or counts of commits ahead or behind, and a file path
 only when you must open that file; they name work by its ticket key and a short topic and say what
 changed and what you have to do. Effect on my work has one item per ticket of yours: what to do and
-why ("likely done; the branch can go" for a branch that likely landed). An invalid or failed answer is retried once; then the digest is stored with the Git data and the error, and the
-page shows the Git data with a note. About $0.30 per run with Sonnet for three repositories.
+why ("likely done; the branch can go" for a branch that likely landed). Every text is written twice
+in the one call (SF-210): `{text, en}`, `text` in the settings' language under these rules and `en`
+the same in plain English (ticket keys, names and product names unchanged; the same rules on SHAs,
+branch names and Git words); in English, `en` repeats `text`. The texts are `repos[].headline`,
+`merged[].problem`, `branches[].what`, each item of `impact_on_me`, each value of
+`cross_repo[].by_workspace`, `cross_repo[].for_me`, and each item of `dailies[].yesterday`,
+`problems`, `plan` and `next`; an answer with a plain string there is invalid. An invalid or failed
+answer is retried once; then the digest is stored with the Git data and the error, and the page
+shows the Git data with a note. About $0.30 per run with Sonnet for three repositories was measured
+before the English texts; they add to the output, so a run costs somewhat more, and each scheduled
+time is one run (four times a day, four runs).
 
 **The record**: `<state dir>/digest/<id>.json`, the id the run's start in UTC and its trigger
 (`20261106T060000Z-scheduled`; `-2`, `-3`, ... when that file exists). It holds the trigger, the times,
 the period, the daily's days, each workspace's fetch result and Git data, the dailies' material (my commits, the
-factory's jobs as `jobs`, the live branches), the model's output, the model, the cost and the errors. Records older than 60 days go at the next run.
+factory's jobs as `jobs`, the live branches), the model's output, the model, the cost and the errors,
+and `in_progress` (SF-210, `inProgressOf` of `src/digest-jobs.ts`): your factory jobs of the
+`my_work` workspaces not in a terminal state at the run, each `{workspace, app, ticket, title,
+state, stop_code, iteration, since}` (the Task copy's title, else the ticket; the stop's code while
+`needs_human`; `since` the job's `updated_at`), waiting for you first (`needs_human`,
+`ready_for_human_review`, `handed_over`), then running (`starting`, `working`, `awaiting_review`,
+`preparing_mr`), then `paused` and `waiting_limit`, each group oldest first. It is a snapshot,
+never sent to the model; a record without it reads as none. Records older than 60 days go at the next run.
 `GET api/digests` lists them (newest first, with counts from the Git data of the followed workspaces:
 landed, live branches not landed, and mine needing attention: not landed with shared files or more
 than 10 commits behind), `GET api/digests/<id>` reads one, `POST api/digests/run` (`{}`) starts a
 manual run.
 
-**The page** (`#digest`, the header's Digest): the period, the cost, Generate now (the page polls
-every 10 s while a run goes and opens the new digest) and the earlier digests. Repositories: "One
-ticket across the app", then a card per followed workspace (the headline, Effect on my work, Landed
-on main with the older entries folded, Live branches). My daily: a card per app with Yesterday,
-Problems, Plan, Today, the commits it was made from, and Copy (plain text with "- " items, the same
-headings). A section with no items is left out, on the card and in Copy (no "None."); a daily with
-every section empty shows its title, the commits and Copy. The first heading names the span: "Yesterday" when it starts the day before the digest
-(local dates), else "Since <weekday>" ("Since Friday" on a Monday). The four headings follow the
-digest's `language`: Bulgarian (`Bulgarian`, `bg` or `български`, any case) gives Вчера / От
-<weekday>, Проблеми, План, Днес; any other language gives English. The rest of the page stays in
-English. The prompt asks for the digest's language throughout: a guess is marked with its word for
-"likely", and no English word appears in any script (a transliteration counts) but ticket keys,
-people's names and product names.
+**The page** (`#digest`, the header's Digest; `web/reports.ts` the page and the Repositories tab,
+`web/digest-brief.ts` the Brief, the languages and the schedule line): the period, the cost,
+Generate now (the page polls every 10 s while a run goes and opens the new digest) and the earlier
+digests. Under the period line the schedule: "Updates at 08:30 · 10:45 (weekdays)" (or "(every
+day)") and **Edit**, which shows the times as one comma-separated field with **Save** and
+**Cancel**; Save posts `{times}`, and a refusal's message stays next to the field.
+
+Two tabs. **Brief** (the default): one line per item, in this order: Yesterday (or "Since
+<weekday>": "Yesterday" when the daily's span starts the day before the digest, local dates, else
+"Since Friday" on a Monday) from the dailies' `yesterday`; In progress now from `in_progress`,
+"<ticket> <title>: <state words>", the stop code for `needs_human`, and the time of `since` (HH:MM,
+or the date when not the digest's day); Today, the dailies' `next` then `plan`; Merged by colleagues,
+per followed workspace the landed entries not mine with the model's problem (else the subject), the
+author and the time, those older than 24 hours before the period's end folded ("Earlier in the
+period (N)"); Waiting on me, the effect on my work of each followed workspace, the dailies'
+`problems`, and each `cross_repo` row with a `for_me` as "<ticket>: <for_me>". A section with no
+items is left out; with more than one app (workspace, for Merged by colleagues) the lines are
+grouped under it. Below the sections, per app with an item: **Copy for the stand-up** and the fold
+"The commits it was made from (N)". Copy gives that app's lines of Yesterday, In progress now (without
+the time and stop code), Today and Waiting on me as plain text ("Heading:" then "- " items) in the
+language shown; in Both the local block, an empty line, then the English block. A Brief without
+any item shows "No daily in this digest". **Repositories**: "One ticket across the app", then a card
+per followed workspace (the headline, Effect on my work, Landed on main with the older entries
+folded, Live branches).
+
+**Two languages** (SF-210): for a record not in English (`english` or `en`, any case) the header has
+the switch "<language> · English · Both" (default Both, kept in the browser as `sf-digest-lang`).
+Both shows each model text and, when it differs, its English in a muted line below; the record's
+language shows `text`, English shows `en`. A record of before the switch, with plain strings, shows
+them in every mode. The headings (the tabs and sections) are in English and Bulgarian: for a
+Bulgarian record (`Bulgarian`, `bg` or `български`, any case) "<Bulgarian> · <English>" in Both, one
+of them otherwise (Обзор, Хранилища, Вчера / От <weekday>, В момента, Днес, Слято от колегите, Чака
+мен, Една задача в приложението, Ефект върху моята работа, Слято в <main>, Живи клонове); for any
+other language in English. The state words of In progress now follow the same rule ("Чака теб ·
+Waits for you"). The rest of the page stays in English. The prompt asks for the digest's language
+in `text`: a guess is marked with its word for "likely", and no English word appears in any script
+(a transliteration counts) but ticket keys, people's names and product names.
 
 **Notification**: a scheduled digest sends one, with counts only ("Morning digest ready: N landed, M
 of mine need attention"), through the configured channels; a manual run sends none. The digest's

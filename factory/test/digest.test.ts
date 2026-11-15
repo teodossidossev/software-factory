@@ -365,13 +365,13 @@ test('my commits: all of them, more than 300, from a log of over 1 MB read as a 
   assert.ok(busyCommits.every((commit) => commit.why === why(Number(commit.subject.slice(7))).slice(0, 1500)));
 });
 
-// The period (SF-155, digestPeriod in src/digest-run.ts): from `at` on the previous digest day before
-// today, local time, to the run's start. Past digests play no part (the Digests run in
-// test/digest-run.test.ts shows that with stored scheduled digests).
-test('the period: from `at` on the previous digest day (Friday on a Monday and a Sunday with weekdays_only), to the run\'s start', () => {
+// The period (SF-155, digestPeriod in src/digest-run.ts): from the earliest of the times on the
+// previous digest day before today, local time, to the run's start. Past digests play no part (the
+// Digests run in test/digest-run.test.ts shows that with stored scheduled digests).
+test('the period: from the earliest time on the previous digest day (Friday on a Monday and a Sunday with weekdays_only), to the run\'s start', () => {
   const at = (day: number, hours: number, minutes = 0): Date => new Date(2026, 10, day, hours, minutes);
-  const weekdays = { at: '07:00', weekdays_only: true };
-  const everyDay = { at: '07:00', weekdays_only: false };
+  const weekdays = { times: ['07:00'], weekdays_only: true };
+  const everyDay = { times: ['07:00'], weekdays_only: false };
   // 2026-11-09 is a Monday.
   assert.deepEqual(digestPeriod(at(9, 7, 1), weekdays), { from: at(6, 7).toISOString(), to: at(9, 7, 1).toISOString() });
   // A manual run later on Monday: still from Friday, though Monday's scheduled digest ran at 07:00.
@@ -384,16 +384,27 @@ test('the period: from `at` on the previous digest day (Friday on a Monday and a
   assert.equal(digestPeriod(at(7, 10), weekdays).from, at(6, 7).toISOString());
   // Every day a digest day: Sunday on a Monday.
   assert.equal(digestPeriod(at(9, 7, 1), everyDay).from, at(8, 7).toISOString());
-  assert.equal(digestPeriod(at(9, 7, 1), { at: '23:59', weekdays_only: false }).from, at(8, 23, 59).toISOString());
+  assert.equal(digestPeriod(at(9, 7, 1), { times: ['23:59'], weekdays_only: false }).from, at(8, 23, 59).toISOString());
   // Across a month's start.
   assert.equal(digestPeriod(new Date(2026, 5, 1, 9), weekdays).from, new Date(2026, 4, 29, 7).toISOString());
 });
 
-test('the period across a DST change keeps `at` in local time', () => {
+test('the period with several times: from the earliest of them, so every run of a day covers the same start', () => {
+  const at = (day: number, hours: number, minutes = 0): Date => new Date(2026, 10, day, hours, minutes);
+  const several = { times: ['08:30', '10:45', '16:00'], weekdays_only: true };
+  // Tuesday's runs at 08:30, 10:45 and 16:00 all start at Monday 08:30.
+  for (const now of [at(10, 8, 30), at(10, 10, 46), at(10, 16, 1)]) {
+    assert.deepEqual(digestPeriod(now, several), { from: at(9, 8, 30).toISOString(), to: now.toISOString() });
+  }
+  // An unsorted list: still the earliest.
+  assert.equal(digestPeriod(at(10, 12), { times: ['16:00', '08:30'], weekdays_only: true }).from, at(9, 8, 30).toISOString());
+});
+
+test('the period across a DST change keeps the time in local time', () => {
   const zone = process.env.TZ;
   process.env.TZ = 'Europe/Berlin';
   try {
-    const weekdays = { at: '07:00', weekdays_only: true };
+    const weekdays = { times: ['07:00'], weekdays_only: true };
     // Summer time ends on Sunday 2026-10-25: Friday 07:00 CEST is 05:00 UTC, Monday 07:01 CET 06:01 UTC.
     assert.deepEqual(digestPeriod(new Date('2026-10-26T06:01:00Z'), weekdays), { from: '2026-10-23T05:00:00.000Z', to: '2026-10-26T06:01:00.000Z' });
     // Summer time starts on Sunday 2026-03-29: Friday 07:00 CET is 06:00 UTC; without weekdays_only

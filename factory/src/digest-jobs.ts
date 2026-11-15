@@ -2,12 +2,59 @@
 // within the daily's two days (handed over to the checkout, pushed, or merged), current and
 // archived, and which open branches of mine are live. The factory's work counts as mine, though
 // I commit a hand-over later; a branch with no recent work and no job going is parked and stays out
-// of the daily.
+// of the daily. And the jobs in progress now: the current ones not in a terminal state.
 import { readFile, stat } from 'node:fs/promises';
 import type { Span } from './digest-run.js';
 import type { LiveBranch, MyCommit } from './digest.js';
-import type { Job, JobStore } from './jobs.js';
+import { type Job, type JobState, type JobStore, TERMINAL_STATES } from './jobs.js';
 import { parseFrontMatter } from './task-file.js';
+
+// One of my factory jobs running or waiting when the digest ran.
+export interface DigestInProgress {
+  workspace: string;
+  app: string;
+  ticket: string;
+  // The Task copy's title, else the ticket.
+  title: string;
+  state: JobState;
+  // The stop's code while needs_human, else null.
+  stop_code: string | null;
+  iteration: number;
+  // The job's updated_at.
+  since: string;
+}
+
+// The order of In progress now: waiting for the user, then running, then paused or parked.
+const PROGRESS_GROUPS: ReadonlyArray<readonly JobState[]> = [
+  ['needs_human', 'ready_for_human_review', 'handed_over'],
+  ['starting', 'working', 'awaiting_review', 'preparing_mr'],
+  ['paused', 'waiting_limit'],
+];
+const progressGroup = (state: JobState): number => PROGRESS_GROUPS.findIndex((group) => group.includes(state));
+
+// The title of a job in its directory (dir): its Task copy's title, else its ticket.
+async function titleOf(store: JobStore, workspace: string, dir: string, ticket: string): Promise<string> {
+  const task = await store.readTaskCopy(workspace, dir).catch(() => undefined);
+  return (task === undefined ? undefined : parseFrontMatter(task)?.get('title')) ?? ticket;
+}
+
+// The current jobs (jobsOf's current) not in a terminal state, as In progress rows: by group
+// (PROGRESS_GROUPS), within a group oldest since first. A job's app is its workspace's, else the
+// workspace's name.
+export async function inProgressOf(store: JobStore, current: Job[], workspaces: ReadonlyArray<{ name: string; app: string }>): Promise<DigestInProgress[]> {
+  const rows: DigestInProgress[] = [];
+  for (const job of current) {
+    if (TERMINAL_STATES.includes(job.state)) {
+      continue;
+    }
+    rows.push({
+      workspace: job.workspace, app: workspaces.find((workspace) => workspace.name === job.workspace)?.app ?? job.workspace,
+      ticket: job.ticket, title: await titleOf(store, job.workspace, job.ticket, job.ticket), state: job.state,
+      stop_code: job.state === 'needs_human' ? job.error?.code ?? null : null, iteration: job.iteration, since: job.updated_at,
+    });
+  }
+  return rows.sort((a, b) => progressGroup(a.state) - progressGroup(b.state) || Date.parse(a.since) - Date.parse(b.since));
+}
 
 export interface DailyJob {
   workspace: string;
@@ -117,8 +164,7 @@ export async function jobsOf(store: JobStore, workspaces: string[], days: Days):
     if (!inDays(at, days)) {
       continue;
     }
-    const task = await store.readTaskCopy(dir.workspace, dir.name).catch(() => undefined);
-    const title = (task === undefined ? undefined : parseFrontMatter(task)?.get('title')) ?? job.ticket;
+    const title = await titleOf(store, dir.workspace, dir.name, job.ticket);
     done.push({ workspace: job.workspace, ticket: job.ticket, title, state: merged ? 'merged' : job.state, at, branch: job.branch });
   }
   return { done: done.sort((a, b) => Date.parse(a.at) - Date.parse(b.at)), current };

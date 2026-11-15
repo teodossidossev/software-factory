@@ -228,6 +228,8 @@ export interface Checks {
   DigestOutput: Copy<DigestOutput, ServerDigestOutput>;
   DigestCross: Copy<DigestCross, ServerDigestOutput['cross_repo'][number]>;
   DigestDaily: Copy<DigestDaily, ServerDigestOutput['dailies'][number]>;
+  DigestText: Copy<DigestText, ServerDigestOutput['repos'][number]['headline']>;
+  DigestInProgress: Copy<DigestInProgress, ServerDigest['in_progress'][number]>;
   StatsRole: Same<StatsRole, ServerStats['roles'][number]['role']>;
   StatsCostRole: Same<StatsCostRole, keyof ServerStats['days_rows'][number]['cost']>;
   StatsFindings: Copy<StatsFindings, ServerStats['stages'][number]['findings']>;

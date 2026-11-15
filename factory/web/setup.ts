@@ -178,6 +178,8 @@ function renderWorkspaces(): void {
     }
   }
   renderDigestSettings();
+  // The Digest page's schedule line reads the same settings.
+  renderDigest();
   // The workspace choice of the form keeps its value while the options are replaced; else the one
   // the last ticket was created in (in this browser), else the board's filter, else the first.
   const select = byIdAs('ticket-workspace', 'select');
@@ -439,20 +441,22 @@ function renderDigestSettings(): void {
   if (settings === null || state.digestDirty || state.setupPending.has('digest')) {
     return;
   }
-  byIdAs('digest-at', 'input').value = settings.at;
+  byIdAs('digest-at', 'input').value = (settings.times ?? []).join(', ');
   byIdAs('digest-weekdays', 'input').checked = settings.weekdays_only === true;
   byIdAs('digest-language', 'input').value = settings.language;
 }
 
 async function submitDigestSettings(): Promise<void> {
-  const at = byIdAs('digest-at', 'input').value;
+  const times = digestTimesOf(byIdAs('digest-at', 'input').value);
   const language = byIdAs('digest-language', 'input').value.trim();
-  if (!/^\d\d:\d\d$/.test(at) || language === '') {
-    setSetupStatus('digest-status', { level: 'error', text: 'A time (HH:MM) and a language are needed.' });
+  if (times.length === 0 || times.some((time) => !/^\d\d:\d\d$/.test(time)) || language === '') {
+    setSetupStatus('digest-status', { level: 'error', text: 'At least one time (HH:MM, comma-separated) and a language are needed.' });
     return;
   }
-  const result = await setupRequest('digest', 'api/digest-settings', { at, weekdays_only: byIdAs('digest-weekdays', 'input').checked === true, language }, 'digest-status', (data) =>
-    ({ level: 'ok', text: `Saved: ${fieldOf(data, 'at')}${fieldOf(data, 'weekdays_only') ? ' on weekdays' : ' every day'}, in ${fieldOf(data, 'language')}. sf serve uses it at its next check.` }));
+  const result = await setupRequest('digest', 'api/digest-settings', { times, weekdays_only: byIdAs('digest-weekdays', 'input').checked === true, language }, 'digest-status', (data) => {
+    const saved = fieldOf(data, 'times');
+    return { level: 'ok', text: `Saved: ${Array.isArray(saved) ? saved.join(', ') : ''}${fieldOf(data, 'weekdays_only') ? ' on weekdays' : ' every day'}, in ${fieldOf(data, 'language')}. sf serve uses it at its next check.` };
+  });
   if (result !== undefined) {
     state.digestDirty = false;
   }

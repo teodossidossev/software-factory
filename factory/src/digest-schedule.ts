@@ -1,8 +1,10 @@
 // The morning digest's timer in sf serve: a check at start and every 60 s. Each check
-// rereads workspaces.json and starts the scheduled digest when now is past today's `at` (local time;
-// on a weekday when weekdays_only), at least one workspace has track or my_work on, and no scheduled
-// digest started today. A machine that slept through `at`, or an sf serve started later, is covered
-// by the same rule. A manual run does not count: the scheduled one still runs.
+// rereads workspaces.json and finds the due slot: the latest of today's `times` (local time) not
+// after now, on a digest day (any day, or a weekday when weekdays_only), with at least one
+// workspace on track or my_work. It starts the scheduled digest when there is one, no run is
+// going, this timer did not start that slot, and no scheduled digest started at or after it. A
+// machine that slept through several times, or an sf serve started later, runs once, for the
+// latest time passed. A manual run does not count: the scheduled one still runs.
 import { configDir as defaultConfigDir, digestSettings, loadRegistry, type Registry, workspaceDigest } from './registry.js';
 
 export const TICK_MS = 60_000;
@@ -21,29 +23,33 @@ export interface DigestScheduleOptions {
   intervalMs?: number;
 }
 
-const localKey = (date: Date): string => `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`;
+const pad = (value: number): string => String(value).padStart(2, '0');
+// A slot's key: its local day and HH:MM.
+const slotKey = (slot: Date): string => `${slot.getFullYear()}-${slot.getMonth() + 1}-${slot.getDate()} ${pad(slot.getHours())}:${pad(slot.getMinutes())}`;
 
 // Whether a scheduled digest is on at all: at least one workspace follows (track or my_work).
 export function digestFollowed(registry: Registry): boolean {
   return Object.values(registry.workspaces).some((entry) => workspaceDigest(entry).track || workspaceDigest(entry).my_work);
 }
 
-// Today's `at` of the scheduled digest, local time.
-export function digestTime(registry: Registry, now: Date): Date {
-  const [hours, minutes] = digestSettings(registry).at.split(':').map(Number) as [number, number];
-  return new Date(now.getFullYear(), now.getMonth(), now.getDate(), hours, minutes);
+// The time of day HH:MM on the local day of date.
+export function atTime(date: Date, time: string): Date {
+  const [hours, minutes] = time.split(':').map(Number) as [number, number];
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate(), hours, minutes);
 }
 
-// Whether the scheduled digest is due by the clock and the settings: past today's `at`, on a
-// weekday when weekdays_only, with a workspace that follows.
-export function dueByClock(registry: Registry, now: Date): boolean {
+// The scheduled digest's due slot: on a digest day (any day, or a weekday with weekdays_only)
+// with a workspace that follows, the latest of today's times that is not after now; else null.
+export function dueSlot(registry: Registry, now: Date): Date | null {
   if (!digestFollowed(registry)) {
-    return false;
+    return null;
   }
-  if (digestSettings(registry).weekdays_only && (now.getDay() === 0 || now.getDay() === 6)) {
-    return false;
+  const settings = digestSettings(registry);
+  if (settings.weekdays_only && (now.getDay() === 0 || now.getDay() === 6)) {
+    return null;
   }
-  return now.getTime() >= digestTime(registry, now).getTime();
+  const passed = settings.times.map((time) => atTime(now, time)).filter((slot) => slot.getTime() <= now.getTime());
+  return passed.at(-1) ?? null;
 }
 
 export class DigestSchedule {
@@ -53,8 +59,8 @@ export class DigestSchedule {
   readonly #intervalMs: number;
   #timer: NodeJS.Timeout | undefined;
   #ticking = false;
-  // The local day of the last scheduled start, so a run that ended without a record is not
-  // started again every minute of that day.
+  // The slot of the last scheduled start (its local day and HH:MM), so a run that ended without a
+  // record is not started again every minute until the next slot.
   #started: string | null = null;
 
   constructor(options: DigestScheduleOptions) {
@@ -73,14 +79,15 @@ export class DigestSchedule {
     try {
       const now = this.#now();
       const registry = await loadRegistry(this.#configDir);
-      if (!dueByClock(registry, now) || this.#started === localKey(now) || this.#digests.running) {
+      const slot = dueSlot(registry, now);
+      if (slot === null || this.#started === slotKey(slot) || this.#digests.running) {
         return false;
       }
-      if (await this.#digests.scheduledSince(new Date(now.getFullYear(), now.getMonth(), now.getDate()))) {
+      if (await this.#digests.scheduledSince(slot)) {
         return false;
       }
       this.#digests.start('scheduled');
-      this.#started = localKey(now);
+      this.#started = slotKey(slot);
       return true;
     } catch (error) {
       console.error(error);

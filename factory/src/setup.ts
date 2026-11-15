@@ -16,7 +16,7 @@ import { type Job, type JobState, type JobStore, TERMINAL_STATES } from './jobs.
 import { derivedDescription } from './digest.js';
 import { mergedOnTarget } from './digest-jobs.js';
 import {
-  checkWorkspaceText, DIGEST_TIME_PATTERN, type DigestSettings, digestSettings, editedEntry, type HandoffMode, loadRegistry, MAX_LANGUAGE_CHARS, type Registry, resolveWorkspace, saveRegistry, verifyCheckout,
+  checkWorkspaceText, type DigestSettings, digestSettings, digestTimesSchema, editedEntry, type HandoffMode, loadRegistry, MAX_DIGEST_TIMES, MAX_LANGUAGE_CHARS, type Registry, resolveWorkspace, saveRegistry, verifyCheckout,
   type Workspace, workspaceApp, type WorkspaceColor, workspaceColor, workspaceDigest, type WorkspaceEdit, type WorkspaceEntry, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN,
 } from './registry.js';
 import { ARCHIVE_DIR, DRAFT_MARKER, isDraft, landsAfter, MAX_TASK_BYTES, parseFrontMatter, readTask, TASK_DIR, taskSha256, TICKET_DESCRIPTION, TICKET_PATTERN, type TicketRef, writeTask, type WriteTaskResult } from './task-file.js';
@@ -50,7 +50,7 @@ export interface WorkspaceRow {
 }
 
 // The workspaces payload's settings: the hand-over default (SF_HANDOFF) and the morning
-// digest's time, weekdays only and language (its model only in workspaces.json).
+// digest's times, weekdays only and language (its model only in workspaces.json).
 export interface WorkspaceSettings {
   handoff_default: HandoffMode;
   digest: Omit<DigestSettings, 'model'>;
@@ -432,19 +432,26 @@ export class Setup {
     });
   }
 
-  // The morning digest's settings of the Setup: the time (HH:MM), weekdays only and the
-  // language; the model stays as workspaces.json has it.
-  saveDigestSettings(input: { at: string; weekdays_only: boolean; language: string }): Promise<WorkspaceSettings['digest']> {
+  // The morning digest's settings of the Setup and the Digest page: the times (1 to 4 distinct
+  // HH:MM, written sorted, replacing a stored `at`), weekdays only and the language; only the keys
+  // given change, and the model stays as workspaces.json has it.
+  saveDigestSettings(input: { times?: string[]; weekdays_only?: boolean; language?: string }): Promise<WorkspaceSettings['digest']> {
     return this.#exclusive(async () => {
-      if (!DIGEST_TIME_PATTERN.test(input.at)) {
-        throw new FactoryError('invalid_digest_settings', 'The time must be HH:MM, from 00:00 to 23:59.');
+      if (input.times !== undefined && !digestTimesSchema.safeParse(input.times).success) {
+        throw new FactoryError('invalid_digest_settings', `1 to ${MAX_DIGEST_TIMES} times, each HH:MM from 00:00 to 23:59, no time twice.`);
       }
-      const language = input.language.trim();
-      if (language === '' || language.length > MAX_LANGUAGE_CHARS) {
+      const language = input.language?.trim();
+      if (language !== undefined && (language === '' || language.length > MAX_LANGUAGE_CHARS)) {
         throw new FactoryError('invalid_digest_settings', `The language must be 1 to ${MAX_LANGUAGE_CHARS} characters.`);
       }
       const registry: Registry = await loadRegistry(this.#configDir);
-      registry.digest = { ...registry.digest, at: input.at, weekdays_only: input.weekdays_only, language };
+      // A save that writes times removes a stored at.
+      const { at: _at, ...withoutAt } = registry.digest ?? {};
+      registry.digest = {
+        ...(input.times !== undefined ? { ...withoutAt, times: [...input.times].sort() } : registry.digest),
+        ...(input.weekdays_only !== undefined ? { weekdays_only: input.weekdays_only } : {}),
+        ...(language !== undefined ? { language } : {}),
+      };
       await saveRegistry(registry, this.#configDir);
       const { model: _model, ...digest } = digestSettings(registry);
       return digest;

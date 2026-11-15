@@ -40,6 +40,53 @@ test('SF_GATE_MAX_ROUNDS=1: the second fix of the gate is not applied; needs_hum
   }
 });
 
+test('SF_GATE_MAX_ROUNDS=1 in a joint round: the gate\'s fix at the limit beside a Claude fix makes Claude\'s Fix section alone, no gate_rounds stop, gate_fixes unchanged', async () => {
+  const env = await newEnv('gate-rounds-claude', gateEnv({ SF_GATE_MAX_ROUNDS: '1' }));
+  const repo = await newRepo(env, 'gate-rounds-claude-repo', false);
+  await putTask(env, repo, 'G-13', 'Rounds');
+  await script(env, [
+    { write: { 'a.txt': '1\n' } }, { write: { 'a.txt': '2\n' }, text: '| R1 | fixed | Done. |' }, { write: { 'b.txt': '1\n' }, text: '| R2 | fixed | Done. |' },
+    { write: { '.software-factory/G-13.mr.md': mrText('feat(G-13): Rounds') }, text: 'prepared' },
+  ]);
+  const claudeFix = { verdict: 'fix', summary: 'b.txt is missing.', items: [{ path: 'b.txt', problem: 'Missing.', expected: 'A file.', severity: 'major' }], accepted_sensitive: [] };
+  await reviewScript(env, [{ output: CLAUDE_CLEAN }, { output: claudeFix }, { output: CLAUDE_CLEAN }]);
+  await codexScript(env, [{ output: GATE_FIX }, { output: { ...GATE_FIX, summary: 'Still wrong.' } }, { output: GATE_CLEAN }]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'G-13' });
+    await waitFor(served, 'G-13', 'ready_for_human_review', 3);
+    assert.ok((await taskFile(repo, 'G-13')).includes('## Fix 2\n\nReview by Claude: b.txt is missing.\n\n1. [R2, major] `b.txt`: Missing. Expected: A file.\n'));
+    const job = (await new JobStore(env.state).read('app', 'G-13'))!;
+    assert.deepEqual([job.fixes, job.gate_fixes], [2, 1]);
+    // The gate's item of iteration 2 got no ledger entry.
+    assert.deepEqual((await new JobStore(env.state).readLedger('app', 'G-13')).map((entry) => [entry.id, entry.reviewer]), [['R1', 'codex'], ['R2', 'claude']]);
+    assert.ok(!(await eventsOf(env, 'G-13')).some((record) => (record.state as { to?: string } | undefined)?.to === 'needs_human'));
+  } finally {
+    await stop(served);
+  }
+});
+
+test('SF_GATE_MAX_TOKENS in a joint round: at the limit no gate starts and the Claude review runs alone: a fix is its Fix section, a clean verdict ends in gate_budget', async () => {
+  const env = await newEnv('gate-budget-claude', gateEnv({ SF_GATE_MAX_TOKENS: '1000' }));
+  const repo = await newRepo(env, 'gate-budget-claude-repo', false);
+  await putTask(env, repo, 'B-3', 'At the limit');
+  await script(env, [{ write: { 'a.txt': '1\n' } }, { write: { 'a.txt': '2\n' }, text: '| R1 | fixed | Done. |' }, { write: { 'b.txt': '1\n' }, text: '| R2 | fixed | Done. |' }]);
+  const claudeFix = { verdict: 'fix', summary: 'b.txt is missing.', items: [{ path: 'b.txt', problem: 'Missing.', expected: 'A file.', severity: 'major' }], accepted_sensitive: [] };
+  await reviewScript(env, [{ output: CLAUDE_CLEAN }, { output: claudeFix }, { output: CLAUDE_CLEAN }]);
+  await codexScript(env, [{ output: GATE_FIX, usage: { input_tokens: 900, cached_input_tokens: 0, output_tokens: 100 } }]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'B-3' });
+    const stopped = await waitFor(served, 'B-3', 'needs_human', 3);
+    assert.equal(stopped.error.code, 'gate_budget');
+    assert.match(stopped.error.message, /used 1000 tokens, the limit of SF_GATE_MAX_TOKENS \(1000\)/);
+    assert.ok((await taskFile(repo, 'B-3')).includes('## Fix 2\n\nReview by Claude: b.txt is missing.\n\n1. [R2, major] `b.txt`: Missing. Expected: A file.\n'));
+    assert.deepEqual([(await codexLog(env)).length, (await reviewLog(env)).length], [1, 3]);
+  } finally {
+    await stop(served);
+  }
+});
+
 test('SF_GATE_MAX_TOKENS: a run that pushes the job over is not applied, and no run starts once the job is at the limit (gate_budget)', async () => {
   const env = await newEnv('gate-budget', gateEnv({ SF_GATE_MAX_TOKENS: '1000' }));
   const repo = await newRepo(env, 'gate-budget-repo', false);
@@ -117,7 +164,9 @@ test('abort during a gate run kills Codex; its outcome is never applied', async 
   const served = await serve(env);
   try {
     await call(served, 'start', { workspace: 'app', ticket: 'A-1' });
-    await until('the gate to run', async () => (await exists(join(env.home, 'fake-codex.log'))));
+    // In the joint round check shows the gate once Claude's verdict is stored.
+    await until('the gate to run and the Claude review to end', async () => (await exists(join(env.home, 'fake-codex.log')))
+      && (await new JobStore(env.state).readReview('app', 'A-1', 1)) !== undefined);
     const waiting = await call(served, 'check', { workspace: 'app', ticket: 'A-1' });
     assert.deepEqual([waiting.state, waiting.review.gate], ['awaiting_review', { status: 'running' }]);
     const [run] = await codexLog(env);

@@ -85,7 +85,8 @@ _Avoid_: screenshot file, asset, upload (for an Attachment)
 
 **Fix section**:
 A `## Fix N` section appended to the Task file after a Review, by the factory from a verdict it
-acts on as `fix`: the blocker and major items, then the Nits as optional, each with its Ledger id.
+acts on as `fix`: the blocker and major items, then the Nits as optional, each with its Ledger id
+(in a Joint round one section for both Reviews, each item naming who raised it).
 Appending one is the request for the next Iteration.
 _Avoid_: findings, review request, feedback
 
@@ -151,7 +152,7 @@ _Avoid_: snapshot, diff artifact, export
 A changed file that is unusual for a Ticket to touch: dependency manifests and lockfiles,
 environment and tool configuration, CI and container files, IDE and agent files, root dotfiles.
 Declared when the Task file's `may_touch` names it, undeclared otherwise; an undeclared one must
-be accepted by the deciding Review at Clean.
+be accepted by the Reviews of the Round at Clean (in a Joint round by both).
 _Avoid_: protected file, system file
 
 **Review**:
@@ -159,8 +160,8 @@ The check of one Iteration against its Task file, the repository standards and t
 review rules, by a fresh read-only Claude session the factory starts in the Worktree when the
 Iteration is published. It ends with a verdict, `fix` or `clean`, and items with a Severity. The
 factory acts on it as `fix` only with a blocker or major item (or an undeclared Sensitive path not
-accepted): the items become the next Fix section. Otherwise it counts as `clean`, which, with the
-Gate on, goes to the Gate. A failed Review hands the Job to the User.
+accepted): the items become the next Fix section. Otherwise it counts as `clean`. With the Gate
+on, it runs in a Joint round with the Gate. A failed Review hands the Job to the User.
 _Avoid_: code review session, audit
 
 **Severity**:
@@ -207,33 +208,48 @@ User: accept and prepare the MR, continue, or go back to planning.
 _Avoid_: loop, ping-pong
 
 **Gate**:
-The second, deciding Review of an Iteration that a Claude Review found clean, run by the Codex CLI
-on the User's ChatGPT plan in a read-only sandbox in the Worktree. Its verdict, acted on by the
-same rule as the Review's, is Clean or the next Fix section; it is limited in rounds and tokens per Job, and off when no Codex
-is found. Its Gate level decides whether it runs on an Iteration. A failed Gate hands the Job to
-the User.
+The Codex Review of an Iteration. On a Job with the Claude Review it runs in the same Round as the
+Claude Review, at the same time, and the Iteration is Clean only when both verdicts are clean. It
+runs by the Codex CLI on the User's ChatGPT plan in a read-only sandbox in the Worktree; its
+verdict is acted on by the same rule as the Review's; it is limited in rounds and tokens per Job,
+and off when no Codex is found. Its Gate level decides whether it runs on an Iteration. A failed
+Gate hands the Job to the User unless the Claude Review of the same Round gives a fix; the Gate
+then runs again in the next Round.
 _Avoid_: OpenAI reviewer, second opinion
 
 **Gate level**:
-How much of the Gate an Iteration's clean Claude Review gets, decided once per Iteration from the
-risk of the Job's whole change at that Iteration: `full` (the Gate's rounds, for a change that
-touches a Sensitive path, a `may_touch` path, a security-relevant or agents' instructions file, is
-large or cannot be known), `light` (one round: the Gate runs only until it has asked for one fix)
-or `none` (documentation only: no Gate). A Gate the level skips goes to Clean as with the Gate off.
+How much of the Gate an Iteration gets: `full`, `light` (the Gate runs only while the Job has no
+Fix from the Gate) or `none`; decided when the Round starts, before either Review. It is decided
+from the risk of the Job's whole change at that Iteration: `full` for a change that touches a
+Sensitive path, a `may_touch` path, a security-relevant or agents' instructions file, is large or
+cannot be known; `none` for documentation only. A Gate the level skips leaves the Claude Review to
+decide, as with the Gate off.
 _Avoid_: risk score, gate mode
+
+**Round**:
+The Review of one Iteration: the Claude Review, the Gate, or both in a Joint round. It ends in the
+next Fix section, a stop for the User, or Clean.
+_Avoid_: review cycle, pass
+
+**Joint round**:
+The Review of an Iteration of a Job with the Claude Review in which the Claude Review and the Gate
+run at the same time; their fix items make one Fix section.
+_Avoid_: parallel review, double review
 
 **Gate yield**:
 What the Gate's items were worth: the share of a Job's Gate items (each Ledger entry once, Nits
-included) whose entry ended `fixed`, as `sf metrics` shows it per Job and in total.
+included) whose entry ended `fixed`, as `sf metrics` shows it per Job and in total. An item both
+Reviews of a Joint round raised is one Ledger entry, the Claude Review's: the Gate yield counts
+only the items the Gate alone raised, its marginal value.
 _Avoid_: gate score, hit rate
 
 **Clean**:
-The deciding Review's (the Gate's when it runs at the Iteration's Gate level) verdict, as the factory acts on it, that the
+The Round's verdict (in a Joint round both Reviews', else the one that runs), as the factory acts on it, that the
 Patch needs no further Fix section (no blocker or major item), with every undeclared Sensitive path acknowledged. It starts MR
 preparation (after the Simplification pass, when one runs); it accepts nothing and pushes nothing.
 
 **Simplification pass**:
-One read-only Claude session per Job, after the deciding Clean verdict of a Job that had a Fix
+One read-only Claude session per Job, after the Clean Round of a Job that had a Fix
 section: it names what the review fixes added that the Task does not need, never what a fixed
 blocker finding needed. Its suggestions go to the User: Simplify (one Fix section "Simplify",
 reviewed as usual, the suggestions recorded in the Ledger as the User's choice) or Skip (MR

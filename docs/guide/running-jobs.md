@@ -57,16 +57,17 @@ when the branch exists already (`branch_exists`), a worktree of the ticket is le
 3. **Publish**: when the session is idle, the factory publishes the iteration: the Report (with the
    changed files, sensitive and out-of-scope paths first), the Patch (the uncommitted difference to
    the base, new files included), and the file list. State `awaiting_review`.
-4. **Claude review**: a fresh read-only Claude session reviews the iteration against the Task
-   file, the Review brief, the rules and the ledger, and returns `fix` or `clean` with items, each
-   `blocker`, `major` or `nit`.
-5. **Codex gate**: when the Claude review is clean, the gate level is decided from the job's whole
-   change: `full` (sensitive or `may_touch` paths, security-relevant names, agents' instruction
-   files, more than 400 changed lines or 12 files), `light` (one round), or `none` (documentation
-   only). When the level says so, the Codex CLI reviews the iteration in a read-only sandbox and
-   gives the deciding verdict.
-6. **Fix**: a verdict with a blocker or major item becomes `## Fix N` in the Task file (each item
-   with its ledger id, `1. [R7, major] …`, the nits last, as optional), and the next turn runs
+4. **Gate level**: as the round starts, before either review, the gate level is decided from the
+   job's whole change: `full` (sensitive or `may_touch` paths, security-relevant names, agents'
+   instruction files, more than 400 changed lines or 12 files), `light` (the gate runs while it has
+   asked for no fix yet), or `none` (documentation only).
+5. **The joint round**: a fresh read-only Claude session (the Claude review) and, when the level
+   says so, the Codex CLI in a read-only sandbox (the gate) review the iteration at the same time,
+   against the Task file, the Review brief, the rules and the ledger. Each returns `fix` or `clean`
+   with items, each `blocker`, `major` or `nit`; the iteration is clean only when both are.
+6. **Fix**: a verdict of either with a blocker or major item makes one `## Fix N` in the Task
+   file: a lead line per reviewer, then each item with its ledger id, `1. [R7, major] …`, and who
+   raised it (an item both raised is one item), the nits last, as optional. The next turn runs
    `/implement .software-factory/APP-12.md Fix N` in the same session. The Implementer answers each
    item in its Report as `fixed`, `contested` (with evidence), `escalated` (a question for you) or
    `left` (nits only). Back to step 3.

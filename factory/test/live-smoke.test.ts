@@ -131,8 +131,9 @@ test('a review session that fails: the Claude review step FAILs with review_fail
   assert.match(ran.rows.get('Claude review')!.detail, /^needs_human: review_failed: /);
   // Cleanup aborts the active job before its reset.
   assert.match(ran.stdout, /^Dashboard: SKIP[^\n]*\njob aborted \(sf abort smoke SMOKE-1\)\nCleanup: PASS/m);
-  assert.match(ran.stdout, /\nsmoke: FAIL \(1 of 12 steps\), cost \d+\.\d{4} USD, gate 0 tokens\n$/);
-  assert.equal((await codexLog(ran.env).catch(() => [])).length, 0);
+  // The gate reviews the iteration in the same round as the Claude review: it ran once.
+  assert.match(ran.stdout, /\nsmoke: FAIL \(1 of 12 steps\), cost \d+\.\d{4} USD, gate 1100 tokens\n$/);
+  assert.equal((await codexLog(ran.env).catch(() => [])).length, 1);
   await onlyChecksDir(ran.tmp);
   await untouched(ran);
 });

@@ -13,10 +13,11 @@ import { gateDecision } from '../gate-level.js';
 import { findBwrap, GATE_REVIEWER, type GateOutcome, gatePrompt, noTokens, redactedGateOutcome, runGate } from '../gate.js';
 import { jobUserMessages } from '../job-stream.js';
 import { claudeReviews, type FileChange, type GateOverride, type GateRecord, type IterationMeta, type Job, type JobState, now, type PauseStep, type ReviewRecord, type SimplifyRecord } from '../jobs.js';
-import { applyVerdict, entryItem, isSimplification, SIMPLIFIER, type Applied, type Decision, DECISIONS, LEDGER_ID, type LedgerEntry, FACTORY_PROBLEMS, settle, unappliedEntries, unsettled } from '../ledger.js';
+import { entryItem, isSimplification, SIMPLIFIER, type Decision, DECISIONS, LEDGER_ID, type LedgerEntry, FACTORY_PROBLEMS, settle, unappliedEntries, unsettled } from '../ledger.js';
 import { Redactor } from '../redact.js';
+import { budgetMessage, type GatePlace, gatePlace, roundOutcome, roundRuns, type SessionEnd } from '../round.js';
 import { readJobRules } from '../rules-docs.js';
-import { actedVerdict, decide, type Verdict, fixContent, oneLine, REVIEWER, type ReviewInput, type ReviewItem, type RecordedSkills, reviewerSkills, type ReviewOutcome, type ReviewOutput, reviewPrompt, runReview, type StructuredOutcome, unacceptedItems } from '../review.js';
+import { actedVerdict, decide, type Verdict, REVIEWER, type ReviewInput, type ReviewItem, type RecordedSkills, reviewerSkills, type ReviewOutcome, type ReviewOutput, reviewPrompt, runReview, type StructuredOutcome, unacceptedItems } from '../review.js';
 import { type DenialScope, gateWrapperFor, type PathDenials, pathDenials, USER_SETTINGS_WEAKEN_SANDBOX } from '../sandbox-denials.js';
 import { factoryTokens } from '../secrets.js';
 import { jobSkills } from '../skills.js';
@@ -99,26 +100,94 @@ export class ReviewsPart {
     return imageRefs(job.ticket, this.#store.jobs.attachmentsDir(job.workspace, job.ticket), job.attachments ?? [], task);
   }
 
-  // Starts the review of the job's last iteration; it runs outside the lock. A review still running
-  // for the job is cancelled. Nothing with SF_REVIEW=off. A job without the Claude review
-  // (claude_review false) gets the gate instead, which is then its review: every caller (the publish,
-  // the go-on after a settlement, the end of a conflict turn, the pick-up of a runner) goes through
-  // here. Only under the lock.
+  // Starts the review round of the job's last iteration (src/round.ts); it runs outside the lock. The
+  // gate level is decided and recorded first; then each reviewer of the round without a stored
+  // verdict starts, both together in a joint round, as one RunningReview (one AbortController
+  // cancels both); with every verdict stored the outcome applies at once. A job without the Claude
+  // review gets the gate alone, which is then its review; one whose gate runs used up
+  // SF_GATE_MAX_TOKENS gets no gate. A review still running for the job is cancelled. Nothing with
+  // SF_REVIEW=off. Every caller (the publish, the go-on after a settlement, the end of a conflict
+  // turn, the retry, the pick-up of a runner) goes through here. Only under the lock.
   async startReview(job: Job): Promise<void> {
     this.#runner.runnerJob();
-    if (!this.#settings.config.review || this.#stop.isStopping()) {
+    const { config } = this.#settings;
+    if (!config.review || this.#stop.isStopping()) {
       return;
     }
-    if (!claudeReviews(job)) {
-      await this.#gateRuns(job);
-      await this.startGate(job);
+    const { workspace, ticket, iteration } = job;
+    const review = claudeReviews(job) ? await this.#store.jobs.readReview(workspace, ticket, iteration) : undefined;
+    const gate = await this.#store.jobs.readGate(workspace, ticket, iteration);
+    const stored = { claude: review !== undefined && 'verdict' in review, gate: gate !== undefined && 'verdict' in gate };
+    const levelRuns = (!claudeReviews(job) || config.gate.on) && (await this.#gateRuns(job));
+    const place = gatePlace({ claudeReview: claudeReviews(job), levelRuns, stored: stored.gate, tokens: job.gate_tokens, maxTokens: config.gateMaxTokens });
+    if (place === 'only' && !stored.gate && job.gate_tokens >= config.gateMaxTokens) {
+      // from: awaiting_review (every caller)
+      await this.#store.transition(job, 'needs_human', 'verdict', { code: 'gate_budget', message: budgetMessage(job.gate_tokens, config.gateMaxTokens) });
       return;
     }
-    const key = `${job.workspace}/${job.ticket}`;
+    const runs = roundRuns(place, stored);
+    if (!runs.claude && !runs.gate) {
+      await this.applying(job, () => this.#applyRound(job, place, {}));
+      return;
+    }
+    const key = `${workspace}/${ticket}`;
     this.#sessions.reviews.get(key)?.controller.abort();
-    const running: RunningReview = { reviewer: REVIEWER, iteration: job.iteration, controller: new AbortController() };
+    const running: RunningReview = { reviewer: runs.claude ? REVIEWER : GATE_REVIEWER, iteration, controller: new AbortController() };
     this.#sessions.reviews.set(key, running);
-    this.#review(job, running).catch((error: unknown) => console.error(error));
+    this.#round(job, running, runs, place).catch((error: unknown) => console.error(error));
+  }
+
+  // Runs the reviewers of a round at the same time; each end keeps its record; once both ended, the
+  // round's outcome applies under the lock while the job still awaits review of the same iteration.
+  async #round(job: Job, running: RunningReview, runs: { claude: boolean; gate: boolean }, place: GatePlace): Promise<void> {
+    const [claude, gate] = await Promise.all([runs.claude ? this.#review(job, running) : undefined, runs.gate ? this.#gate(job, running) : undefined]);
+    await this.#locks.locked(async () => {
+      const key = `${job.workspace}/${job.ticket}`;
+      if (this.#sessions.reviews.get(key) !== running || running.controller.signal.aborted) {
+        return;
+      }
+      this.#sessions.reviews.delete(key);
+      const read = await this.#store.jobs.read(job.workspace, job.ticket);
+      // Another job of the ticket (after a reset), or one that moved on, is not this round's.
+      if (read !== undefined && read.created_at === job.created_at && read.state === 'awaiting_review' && read.iteration === job.iteration) {
+        await this.applying(read, () => this.#applyRound(read, place, { claude, gate }));
+      }
+    });
+  }
+
+  // The round's outcome (roundOutcome) from the reviewers' records of the iteration and how each
+  // ended in this round: a usage limit parks the job, a failure or a stop hands it to the user, a fix
+  // is the next Fix section, clean goes on to Clean with the paths the verdicts accepted. The items
+  // a verdict dropped (they reopened an accepted risk) are marked in its record. Only under the lock.
+  async #applyRound(job: Job, place: GatePlace, ends: { claude?: SessionEnd; gate?: SessionEnd }): Promise<void> {
+    const { workspace, ticket, iteration } = job;
+    const { config } = this.#settings;
+    const review = place !== 'only' ? await this.#store.jobs.readReview(workspace, ticket, iteration) : undefined;
+    const gate = place === 'only' || place === 'joint' ? await this.#store.jobs.readGate(workspace, ticket, iteration) : undefined;
+    const extra = async (record: ReviewRecord | GateRecord | undefined): Promise<ReviewItem[]> => (record !== undefined && 'verdict' in record ? this.unaccepted(job, record.accepted_sensitive) : []);
+    const outcome = roundOutcome({
+      place, ledger: await this.#store.jobs.readLedger(workspace, ticket), iteration,
+      claude: place !== 'only' ? { record: review, extra: await extra(review), ...ends.claude } : undefined,
+      gate: place === 'only' || place === 'joint' ? { record: gate, extra: await extra(gate), ...ends.gate } : undefined,
+      gateFixes: job.gate_fixes, gateTokens: job.gate_tokens, maxRounds: config.gateMaxRounds, maxTokens: config.gateMaxTokens,
+    });
+    if (review !== undefined && 'verdict' in review && (outcome.dropped.claude?.length ?? 0) > 0) {
+      await this.#store.jobs.writeReview(workspace, ticket, iteration, { ...review, dropped: outcome.dropped.claude });
+    }
+    if (gate !== undefined && 'verdict' in gate && (outcome.dropped.gate?.length ?? 0) > 0) {
+      await this.#store.jobs.writeGate(workspace, ticket, iteration, { ...gate, dropped: outcome.dropped.gate });
+    }
+    if (outcome.kind === 'park') {
+      await this.#peers.control.park(job, outcome.step, outcome.limit);
+    } else if (outcome.kind === 'fix') {
+      await this.#peers.turns.fix(job, outcome.content, { ledger: outcome.ledger, ...(outcome.gateFix ? { counts: { gate_fixes: job.gate_fixes + 1 } } : {}) });
+    } else {
+      if (outcome.ledger !== undefined) {
+        await this.#store.jobs.writeLedger(workspace, ticket, outcome.ledger);
+      }
+      // from: awaiting_review (#round, startReview)
+      await (outcome.kind === 'stop' ? this.#store.transition(job, 'needs_human', 'verdict', { code: outcome.code, message: outcome.message }) : this.afterClean(job, outcome.accepted));
+    }
   }
 
   // The user's retry of a failed review (sf review, the dashboard's Retry review): the job goes
@@ -362,8 +431,8 @@ export class ReviewsPart {
     };
   }
 
-  // Runs the review session, then applies its outcome under the lock.
-  async #review(job: Job, running: RunningReview): Promise<void> {
+  // Runs the review session, then keeps its end under the lock; how it ended, for the round.
+  async #review(job: Job, running: RunningReview): Promise<SessionEnd> {
     let outcome: ReviewOutcome;
     let method: RecordedSkills = { review_method: 'none' };
     // The code a session refused before it started stops the job with (user_settings_weaken_sandbox).
@@ -402,32 +471,21 @@ export class ReviewsPart {
     }
     const ended = outcome;
     await this.#sessions.afterSession(job);
-    await this.#locks.locked(() => this.#reviewed(job, running, ended, method, limit, stop));
+    await this.#locks.locked(() => this.#reviewed(job, running, ended, method, limit));
+    return { limit, code: stop };
   }
 
   // The end of a review. A cancelled one leaves no trace. One that hit a usage limit (limit) while
-  // the job still awaits review of the same iteration parks the job and writes nothing of
-  // the round. Otherwise review.json (with method, the review method's record) and the event are
-  // written; the verdict applies only while the job still awaits review of the same iteration.
-  // stop: the code of a session refused before it started, for the job's error instead of review_failed.
-  async #reviewed(reviewed: Job, running: RunningReview, outcome: ReviewOutcome, method: RecordedSkills, limit?: UsageLimit, stop?: string): Promise<void> {
+  // the job still awaits review of the same iteration writes nothing (the round parks the job).
+  // Otherwise review.json (with method, the review method's record) and the event are written;
+  // the round applies them.
+  async #reviewed(reviewed: Job, running: RunningReview, outcome: ReviewOutcome, method: RecordedSkills, limit?: UsageLimit): Promise<void> {
     const { workspace: name, ticket, iteration } = reviewed;
-    const key = `${name}/${ticket}`;
-    if (this.#sessions.reviews.get(key) !== running || running.controller.signal.aborted) {
+    const job = await this.#ended(reviewed, running);
+    if (job === undefined || (limit !== undefined && job.state === 'awaiting_review' && job.iteration === iteration)) {
       return;
     }
-    this.#sessions.reviews.delete(key);
-    const job = await this.#store.jobs.read(name, ticket);
-    // Another job of the ticket (after a reset) is not this review's.
-    if (job === undefined || job.created_at !== reviewed.created_at) {
-      return;
-    }
-    const current = job.state === 'awaiting_review' && job.iteration === iteration;
-    if (current && limit !== undefined) {
-      await this.#peers.control.park(job, 'review', limit);
-      return;
-    }
-    const ignored = current ? {} : { ignored: true as const };
+    const ignored = job.state === 'awaiting_review' && job.iteration === iteration ? {} : { ignored: true as const };
     const record: ReviewRecord = outcome.ok
       ? { reviewer: REVIEWER, ...outcome.output, cost_usd: outcome.costUsd, started_at: outcome.startedAt, ended_at: outcome.endedAt, ...method }
       : { reviewer: REVIEWER, error: outcome.message, ...method };
@@ -435,15 +493,16 @@ export class ReviewsPart {
     await this.#store.jobs.appendEvent(name, ticket, outcome.ok
       ? { ts: now(), iteration, type: 'review', reviewer: REVIEWER, ...(await this.#verdictOf(job, outcome.output)), items: outcome.output.items.length, ...ignored }
       : { ts: now(), iteration, type: 'review_failed', reviewer: REVIEWER, error: outcome.message, ...ignored });
-    if (!current) {
-      return;
+  }
+
+  // The job a reviewer's end belongs to: undefined when its round was cancelled, or the ticket's
+  // job is another one (after a reset).
+  async #ended(started: Job, running: RunningReview): Promise<Job | undefined> {
+    if (this.#sessions.reviews.get(`${started.workspace}/${started.ticket}`) !== running || running.controller.signal.aborted) {
+      return undefined;
     }
-    if (!outcome.ok) {
-      // from: awaiting_review (current)
-      await this.#store.transition(job, 'needs_human', 'verdict', { code: stop ?? 'review_failed', message: outcome.message });
-      return;
-    }
-    await this.applying(job, () => this.afterClaude(job, outcome.output));
+    const job = await this.#store.jobs.read(started.workspace, started.ticket);
+    return job !== undefined && job.created_at === started.created_at ? job : undefined;
   }
 
   // The undeclared sensitive paths and the paths outside the Task's scope of the job's
@@ -467,35 +526,14 @@ export class ReviewsPart {
     return effective === output.verdict ? { verdict: output.verdict } : { verdict: output.verdict, effective };
   }
 
-  // The Claude verdict as the factory acts on it (decide): fix (a blocker or major item, or
-  // an undeclared sensitive path or a path outside the Task's scope it does not accept) is the
-  // next Fix section; clean (a fix with nits only too) starts the gate, or with the gate off runs
-  // Clean. Only under the lock. The ledger applies first (#applyLedger): a dropped item never
-  // counts, a dispute or churn hands the job to the user.
-  async afterClaude(job: Job, output: ReviewOutput): Promise<void> {
-    const { summary, accepted_sensitive: accepted } = output;
-    const applied = await this.#applyLedger(job, REVIEWER, output);
-    if (applied.kind === 'stop') {
-      // from: awaiting_review (#reviewed current, #pickUp through resumable)
-      await this.#store.transition(job, 'needs_human', 'verdict', { code: applied.code, message: applied.message });
-    } else if (applied.kind === 'fix') {
-      await this.#peers.turns.fix(job, fixContent(summary, applied.items), { ledger: applied.ledger });
-    } else if (this.#settings.config.gate.on && (await this.#gateRuns(job))) {
-      await this.startGate(job, output);
-    } else {
-      // The gate off, or skipped by the iteration's gate level: the same way to Clean.
-      await this.afterClean(job, accepted);
-    }
-  }
-
   // Whether the gate runs on the job's last iteration, by its gate level
-  // (src/gate-level.ts): decided once per iteration, before the gate's budget check, so a gate that
-  // does not run never stops on gate_budget. A decision already recorded in gate-level.json (the
-  // job picked up again after a pause, a park or a restart of sf serve) is used as it is; otherwise
-  // the level is decided from the job's change at the iteration (its meta.json files) and the
-  // Task's may_touch, and recorded with its gate_level event (record false: only asked, as the
-  // ledger does before a Claude verdict applies). Only under the lock.
-  async #gateRuns(job: Job, record = true): Promise<boolean> {
+  // (src/gate-level.ts): decided once per iteration as its round starts, before either review and
+  // before the gate's budget check, so a gate that does not run never stops on gate_budget. A
+  // decision already recorded in gate-level.json (the job picked up again after a pause, a park or
+  // a restart of sf serve) is used as it is; otherwise the level is decided from the job's change at
+  // the iteration (its meta.json files) and the Task's may_touch, and recorded with its gate_level
+  // event. Only under the lock.
+  async #gateRuns(job: Job): Promise<boolean> {
     const { workspace, ticket, iteration } = job;
     const recorded = await this.#store.jobs.readGateLevel(workspace, ticket, iteration);
     if (recorded !== undefined) {
@@ -514,9 +552,6 @@ export class ReviewsPart {
       files: meta?.files, patchTruncated: meta?.patch_truncated === true, mayTouch: await this.#mayTouch(job), setting: config.gateLevel, fullPaths: config.gateFullPaths,
       sensitivePaths: config.sensitivePaths,
     }, job.gate_fixes);
-    if (!record) {
-      return decision.ran;
-    }
     const at = now();
     await this.#store.jobs.writeGateLevel(workspace, ticket, iteration, { ...decision, at });
     await this.#store.jobs.appendEvent(workspace, ticket, { ts: at, iteration, type: 'gate_level', level: decision.level, ran: decision.ran, reasons: decision.reasons });
@@ -533,30 +568,6 @@ export class ReviewsPart {
       console.error(error);
       return undefined;
     }
-  }
-
-  // The ledger applied to a reviewer's verdict on the job's last iteration (applyVerdict):
-  // the items that reopen an accepted risk are recorded as dropped in review.json or gate.json,
-  // and the ledger is written unless the verdict is a fix (fix writes it with its Fix section). The
-  // gate decides the round, the Claude review only when the gate does not run on the iteration
-  // (asked of #gateRuns without recording it). Only under the lock.
-  async #applyLedger(job: Job, reviewer: typeof REVIEWER | typeof GATE_REVIEWER, output: ReviewOutput): Promise<Applied> {
-    const { workspace, ticket, iteration } = job;
-    const decides = reviewer === GATE_REVIEWER || !(this.#settings.config.gate.on && (await this.#gateRuns(job, false)));
-    const applied = applyVerdict({
-      ledger: await this.#store.jobs.readLedger(workspace, ticket), items: output.items, extra: await this.unaccepted(job, output.accepted_sensitive), reviewer, iteration, decides,
-    });
-    if (applied.dropped.length > 0) {
-      const record = reviewer === REVIEWER ? await this.#store.jobs.readReview(workspace, ticket, iteration) : await this.#store.jobs.readGate(workspace, ticket, iteration);
-      if (record !== undefined && 'verdict' in record) {
-        const marked = { ...record, dropped: applied.dropped };
-        await (reviewer === REVIEWER ? this.#store.jobs.writeReview(workspace, ticket, iteration, marked as ReviewRecord) : this.#store.jobs.writeGate(workspace, ticket, iteration, marked as GateRecord));
-      }
-    }
-    if (applied.kind !== 'fix') {
-      await this.#store.jobs.writeLedger(workspace, ticket, applied.ledger);
-    }
-    return applied;
   }
 
   // Applies a verdict (work) to a job awaiting review; a failure to apply it hands the job to the
@@ -579,31 +590,9 @@ export class ReviewsPart {
     }
   }
 
-  // Starts the gate after a clean Claude verdict (claude) whose gate level runs it, or
-  // without one as the job's only review (claude undefined); it runs outside the lock. A job
-  // whose gate runs used up SF_GATE_MAX_TOKENS goes to the user instead. Only under the lock.
-  async startGate(job: Job, claude?: ReviewOutput): Promise<void> {
-    if (job.gate_tokens >= this.#settings.config.gateMaxTokens) {
-      // from: awaiting_review (afterClaude, and goOn after its transition)
-      await this.#store.transition(job, 'needs_human', 'verdict', {
-        code: 'gate_budget',
-        message: `The gate runs of this job used ${job.gate_tokens} tokens, the limit of SF_GATE_MAX_TOKENS (${this.#settings.config.gateMaxTokens}); the user decides how to go on.`,
-      });
-      return;
-    }
-    this.#runner.runnerJob();
-    if (this.#stop.isStopping()) {
-      return;
-    }
-    const key = `${job.workspace}/${job.ticket}`;
-    this.#sessions.reviews.get(key)?.controller.abort();
-    const running: RunningReview = { reviewer: GATE_REVIEWER, iteration: job.iteration, controller: new AbortController() };
-    this.#sessions.reviews.set(key, running);
-    this.#gate(job, running, claude).catch((error: unknown) => console.error(error));
-  }
-
-  // Runs the gate, then applies its outcome under the lock.
-  async #gate(job: Job, running: RunningReview, claude: ReviewOutput | undefined): Promise<void> {
+  // Runs the gate, then keeps its end under the lock; how it ended, for the round. Its role in the
+  // prompt: the only reviewer without the Claude review, else one of the joint round's two.
+  async #gate(job: Job, running: RunningReview): Promise<SessionEnd> {
     const { workspace: name, ticket, iteration } = job;
     const gate = this.#settings.config.gate;
     let outcome: GateOutcome;
@@ -624,7 +613,7 @@ export class ReviewsPart {
       const wrapper = this.#settings.config.sandbox === undefined ? undefined : await gateWrapperFor(await this.#denialScope(job, job.worktree), {
         worktree: job.worktree, codexPath: gate.codexPath, codexHome: process.env.CODEX_HOME || join(homedir(), '.codex'), iterationDir: dir, images, tmp: tmpdir(),
       });
-      outcome = await runGate(gatePrompt({ ...input, baseCommit: job.base_commit, onlyReviewer: claude === undefined }), {
+      outcome = await runGate(gatePrompt({ ...input, baseCommit: job.base_commit, onlyReviewer: !claudeReviews(job) }), {
         codexPath: gate.codexPath, cwd: job.worktree, dir, model: this.#settings.config.codexModel, images, wrapper, bwrapPath: findBwrap(),
         timeoutMs: this.#settings.config.gateTimeoutMs, signal: running.controller.signal,
         // The run live in events.jsonl.
@@ -638,34 +627,20 @@ export class ReviewsPart {
     const limit = outcome.ok ? undefined : usageLimit(outcome.message, new Date(), 'codex');
     const ended = redactedGateOutcome(outcome, redactor);
     await this.#sessions.afterSession(job);
-    await this.#locks.locked(() => this.#gated(job, running, claude, ended, method, limit));
+    await this.#locks.locked(() => this.#gated(job, running, ended, method, limit));
+    return { limit, code: ended.ok ? undefined : ended.code };
   }
 
   // The end of a gate run. A cancelled one leaves no trace. Otherwise its tokens count for the job,
-  // gate.json (with method: the review method's record, the skills' names) and the event (naming a skill left out) are written, and the verdict
-  // applies only while the job still awaits review of the same iteration, as the factory acts on it
-  // (decide): clean (a fix with nits only too) runs Clean with the paths both reviewers accepted, fix
-  // (a blocker or major item, or an undeclared sensitive path or a path outside the Task's scope the
-  // gate does not accept) is the next Fix section unless the gate's rounds are used up. Without a
-  // Claude review (claude undefined) the paths are the gate's alone and SF_GATE_MAX_ROUNDS does not
-  // apply: SF_MAX_ITERATIONS limits the rounds. A run that hit a usage limit (limit) while the job still awaits review of the
-  // same iteration parks the job: no gate.json, no event, no tokens charged.
-  async #gated(gated: Job, running: RunningReview, claude: ReviewOutput | undefined, outcome: GateOutcome, method: RecordedSkills, limit?: UsageLimit): Promise<void> {
+  // and gate.json (with method: the review method's record, the skills' names) and the event (naming
+  // a skill left out) are written; the round applies them. A run that hit a usage limit (limit) while
+  // the job still awaits review of the same iteration is discarded whole: no gate.json, no event, no
+  // tokens charged, so a parked and rerun round never counts toward SF_GATE_MAX_TOKENS.
+  async #gated(gated: Job, running: RunningReview, outcome: GateOutcome, method: RecordedSkills, limit?: UsageLimit): Promise<void> {
     const { workspace: name, ticket, iteration } = gated;
-    const key = `${name}/${ticket}`;
-    if (this.#sessions.reviews.get(key) !== running || running.controller.signal.aborted) {
-      return;
-    }
-    this.#sessions.reviews.delete(key);
-    const read = await this.#store.jobs.read(name, ticket);
-    if (read === undefined || read.created_at !== gated.created_at) {
-      return;
-    }
-    const current = read.state === 'awaiting_review' && read.iteration === iteration;
-    // A run that hit a usage limit is discarded whole: its tokens are not charged either,
-    // so a parked and rerun round never counts toward SF_GATE_MAX_TOKENS.
-    if (current && limit !== undefined) {
-      await this.#peers.control.park(read, 'gate', limit);
+    const read = await this.#ended(gated, running);
+    const current = read !== undefined && read.state === 'awaiting_review' && read.iteration === iteration;
+    if (read === undefined || (current && limit !== undefined)) {
       return;
     }
     let job = read;
@@ -685,46 +660,6 @@ export class ReviewsPart {
     await this.#store.jobs.appendEvent(name, ticket, outcome.ok
       ? { ts: now(), iteration, type: 'review', reviewer: GATE_REVIEWER, ...(await this.#verdictOf(job, outcome.output)), items: outcome.output.items.length, ...ignored, ...omitted }
       : { ts: now(), iteration, type: 'review_failed', reviewer: GATE_REVIEWER, error: outcome.message, ...ignored });
-    if (!current) {
-      return;
-    }
-    if (!outcome.ok) {
-      // from: awaiting_review (current)
-      await this.#store.transition(job, 'needs_human', 'verdict', { code: outcome.code ?? 'gate_failed', message: outcome.message });
-      return;
-    }
-    if (job.gate_tokens > this.#settings.config.gateMaxTokens) {
-      // from: awaiting_review (current)
-      await this.#store.transition(job, 'needs_human', 'verdict', {
-        code: 'gate_budget',
-        message: `The gate runs of this job used ${job.gate_tokens} tokens, over the limit of SF_GATE_MAX_TOKENS (${this.#settings.config.gateMaxTokens}); the gate's verdict (${outcome.output.verdict}) was not applied.`,
-      });
-      return;
-    }
-    const { summary, accepted_sensitive: accepted } = outcome.output;
-    // The ledger applies first: a dropped item never counts, a dispute or churn hands the
-    // job to the user.
-    const applied = await this.#applyLedger(job, GATE_REVIEWER, outcome.output);
-    if (applied.kind === 'stop') {
-      // from: awaiting_review (current)
-      await this.#store.transition(job, 'needs_human', 'verdict', { code: applied.code, message: applied.message });
-      return;
-    }
-    const fixing = applied.kind === 'fix';
-    if (fixing && claude !== undefined && job.gate_fixes >= this.#settings.config.gateMaxRounds) {
-      const message = `The gate asked for a fix ${job.gate_fixes + 1} times, over the limit of SF_GATE_MAX_ROUNDS (${this.#settings.config.gateMaxRounds}); the fix was not applied. Claude: ${oneLine(claude.summary)} Codex: ${oneLine(summary)}`;
-      // from: awaiting_review (current)
-      await this.#store.transition(job, 'needs_human', 'verdict', { code: 'gate_rounds', message: message.slice(0, 2000) });
-      return;
-    }
-    const decided = job;
-    await this.applying(decided, async () => {
-      if (applied.kind === 'fix') {
-        await this.#peers.turns.fix(decided, fixContent(summary, applied.items, 'Codex'), { counts: { gate_fixes: decided.gate_fixes + 1 }, ledger: applied.ledger });
-      } else {
-        await this.afterClean(decided, claude === undefined ? accepted : [...new Set([...claude.accepted_sensitive, ...accepted])]);
-      }
-    });
   }
 
   // After the deciding clean verdict: the simplification pass when it is due, else MR

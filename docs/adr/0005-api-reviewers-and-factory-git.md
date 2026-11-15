@@ -134,3 +134,18 @@ diff check existed only to verify Git work a model had done.
 - The iteration limit counts Fix sections, so a message of the user does not use it up.
 - ADR-0003 still holds for the Implementer; the reviewers are separate sessions. ADR-0004 holds
   except that MR preparation is the factory's.
+
+## Amendment 2026-11-14 (SF-214): the joint round
+
+What changes: on a job with the Claude review, both reviewers review each iteration in the same
+round, at the same time. The gate no longer waits for a clean Claude verdict. An iteration is
+Clean only when both verdicts are clean; the fix items of both make one Fix section, an item both
+raise is one item and one ledger entry, and each item names who raised it.
+
+Why: the user's decision, to cut a review cycle's wall-clock time while keeping the Claude
+review's findings (about a third of the serious findings on company code). On 2026-11-13, over
+the product workspaces' jobs, 9 of 44 Claude verdicts were `fix`, so the gate never saw those
+iterations, and after a clean one the gate said `fix` in 16 of 33: each reviewer's findings cost
+an iteration of their own.
+
+The rest of this ADR stands.

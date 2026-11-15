@@ -16,10 +16,8 @@ import { removeSandboxPlaceholders } from '../placeholders.js';
 import { factoryPrompt } from '../prompts.js';
 import { configDir, type Workspace } from '../registry.js';
 import { collectRules, writeJobRules } from '../rules-docs.js';
-import { actedVerdict } from '../review.js';
 import { Runners } from '../runner.js';
 import { jobSkills, recordSkills } from '../skills.js';
-import { withoutDropped } from '../stops.js';
 import { isDraft, parseFrontMatter, readTask, TASK_DIR, taskBuildsOn, type TaskReview, taskReview, taskSha256, TICKET_DESCRIPTION, TICKET_PATTERN } from '../task-file.js';
 import { addWorktree, deleteBranch, removeWorktree } from '../worktree.js';
 import type { JobStorePort, LockPort, RunnerPort, SettingsPort } from './ports.js';
@@ -227,35 +225,16 @@ export class StartPart {
     }
   }
 
-  // A job awaiting review that has something to resume: its last iteration has no review (with the
-  // review on), or one acted on as clean (a fix with nits only is) and no gate.json, or a clean
-  // gate.json too and a simplification pass that never applied. With the Claude review off the
-  // gate is the review: no gate.json (with the review on), or a clean one.
+  // A job awaiting review that has something to resume, with the review on: its round
+  // (src/round.ts) while a reviewer of it has no stored verdict, or with every verdict stored its
+  // outcome, which never applied (the Fix section, a stop, the pass, its record or MR preparation).
+  // Without the Claude review the gate is the round: no gate.json, or a verdict.
   async resumable(job: Job): Promise<boolean> {
-    if (job.state !== 'awaiting_review' || job.iteration === 0) {
-      return false;
-    }
-    if (!claudeReviews(job)) {
-      const gate = await this.#store.jobs.readGate(job.workspace, job.ticket, job.iteration);
-      if (gate === undefined) {
-        return this.#settings.config.review;
-      }
-      return 'verdict' in gate && actedVerdict(withoutDropped(gate)) === 'clean';
-    }
-    const review = await this.#store.jobs.readReview(job.workspace, job.ticket, job.iteration);
-    if (review === undefined) {
-      return this.#settings.config.review;
-    }
-    // Items the ledger dropped (they reopened an accepted risk) never count, as in acceptGate.
-    if (!('verdict' in review) || actedVerdict(withoutDropped(review)) !== 'clean') {
+    if (job.state !== 'awaiting_review' || job.iteration === 0 || !this.#settings.config.review) {
       return false;
     }
     const gate = await this.#store.jobs.readGate(job.workspace, job.ticket, job.iteration);
-    if (gate === undefined) {
-      return true;
-    }
-    // A clean gate whose outcome never applied (the pass, its record or MR preparation).
-    return 'verdict' in gate && actedVerdict(withoutDropped(gate)) === 'clean';
+    return claudeReviews(job) || gate === undefined || 'verdict' in gate;
   }
 
   // Creates the job record and its worktree, then runs the first iteration. The validation and

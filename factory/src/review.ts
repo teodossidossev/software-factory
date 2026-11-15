@@ -485,13 +485,25 @@ export function itemLine(item: ReviewItem): string {
 
 // The body of the Fix section the factory writes for a review: the summary as a lead line (by: who
 // reviewed), then one numbered item per blocker or major entry, then the nits, numbered on, under
-// "Nits (optional):"; each item with its ledger id.
+// "Nits (optional):"; each item with its ledger id (fixItemLine).
 export function fixContent(summary: string, items: FixItem[], by = 'Claude'): string {
+  return fixBody([{ by, summary }], items);
+}
+
+// The body of a joint round's Fix section (src/round.ts): a lead line per reviewer, Claude's then
+// the gate's, then the items as in fixContent.
+export function jointFixContent(claude: string, gate: string, items: FixItem[]): string {
+  return fixBody([{ by: 'Claude', summary: claude }, { by: 'Codex', summary: gate }], items);
+}
+
+// A Fix section's body: the lead lines, a blank line, the numbered blocker and major items, then
+// the nits under "Nits (optional):".
+function fixBody(leads: Array<{ by: string; summary: string }>, items: FixItem[]): string {
   // A fix the user decided is never optional, whatever its severity.
   const optional = items.filter((fixItem) => fixItem.item.severity === 'nit' && fixItem.userNote === undefined);
   const blockers = items.filter((fixItem) => !optional.includes(fixItem));
   return [
-    `Review by ${by}: ${oneLine(summary) || 'see the items.'}`,
+    ...leads.map(({ by, summary }) => `Review by ${by}: ${oneLine(summary) || 'see the items.'}`),
     '',
     ...blockers.map((fixItem, index) => `${index + 1}. ${fixItemLine(fixItem)}`),
     ...(optional.length > 0 ? ['', 'Nits (optional):', ...optional.map((fixItem, index) => `${blockers.length + index + 1}. ${fixItemLine(fixItem)}`)] : []),

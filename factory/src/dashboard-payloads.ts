@@ -230,9 +230,9 @@ function lastImplementerStep(lines: string[]): NowLine | null {
 }
 
 // Who acts now on a running job and what it does: the Implementer's last step, the
-// reviewer of the last iteration (Codex once Claude's review of it is clean, or from the start
-// without the Claude review), the MR writer; null for a job that is not running, or an
-// Implementer with no step in the tail yet.
+// reviewer of the last iteration (Codex once Claude's verdict of it is stored, as the gate of the
+// joint round still runs, or from the start without the Claude review), the MR writer; null for a
+// job that is not running, or an Implementer with no step in the tail yet.
 async function nowOf(jobs: JobStore, job: Job, facts: { review: Verdict; review_ended_at: string | null }): Promise<NowLine | null> {
   switch (job.state) {
     case 'starting':
@@ -242,7 +242,7 @@ async function nowOf(jobs: JobStore, job: Job, facts: { review: Verdict; review_
       if (!claudeReviews(job)) {
         return { who: 'Codex gate', what: `reviewing iteration ${job.iteration}`, ts: job.updated_at };
       }
-      return facts.review === 'clean'
+      return facts.review === 'clean' || facts.review === 'fix'
         ? { who: 'Codex gate', what: `reviewing iteration ${job.iteration}`, ts: facts.review_ended_at }
         : { who: 'Claude review', what: `reviewing iteration ${job.iteration}`, ts: job.updated_at };
     case 'preparing_mr':

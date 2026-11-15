@@ -5,11 +5,13 @@
 // review record). The builder never joins a tool and its result: the client does, by id.
 import { createReadStream } from 'node:fs';
 import { createInterface } from 'node:readline';
+import { GATE_SANDBOX_UNAVAILABLE } from './gate.js';
 import type { GateRecord, IterationMeta, JobStore, ReviewRecord, SimplifyRecord } from './jobs.js';
-import type { LedgerEntry } from './ledger.js';
+import { FACTORY_PROBLEMS, type LedgerEntry } from './ledger.js';
+import { decide, unacceptedItems } from './review.js';
 import { rolesOf } from './skill-roles.js';
 import { skillsText } from './skills.js';
-import { canonicalStop, type StopCode, type StopKind, STOPS } from './stops.js';
+import { canonicalStop, type StopCode, type StopKind, STOPS, withoutDropped } from './stops.js';
 import { CONTINUE_PROMPT } from './turn-limit.js';
 import { describeEvent, limitStateText, shortInput } from './watch.js';
 
@@ -333,6 +335,26 @@ function noteEntry(raw: string, who: Who): Draft[] {
   return [{ t: 'note', who, text: line.replace(/^\S+ \[[^\]]*\] /u, '').replace(/^(?:codex|review) \| /u, '') }];
 }
 
+// After the gate's failure in a joint round (src/round.ts) whose Claude verdict is a fix, as decide reads
+// it: the job goes on with Claude's Fix section, and the line says the gate runs again; none
+// otherwise (the failure then stops the job).
+async function gateAgainEntry(record: Record<string, unknown>, it: number, ctx: StreamContext): Promise<Draft[]> {
+  if (record.type !== 'review_failed' || record.reviewer !== 'codex' || record.ignored === true) {
+    return [];
+  }
+  const review = await ctx.review(it);
+  if (review === undefined || !('verdict' in review)) {
+    return [];
+  }
+  const byUser = (await ctx.ledger()).filter((entry) => entry.status === 'accepted_risk' && FACTORY_PROBLEMS.includes(entry.problem)).map((entry) => entry.path);
+  const unaccepted = unacceptedItems((await ctx.meta(it))?.files ?? [], [...review.accepted_sensitive, ...byUser]);
+  if (decide(withoutDropped(review), unaccepted).verdict !== 'fix') {
+    return [];
+  }
+  const code = typeof record.error === 'string' && record.error.includes(GATE_SANDBOX_UNAVAILABLE) ? GATE_SANDBOX_UNAVAILABLE : 'gate_failed';
+  return [{ t: 'note', who: 'factory', text: `The gate failed (${code}); it runs again in the next round, with the Claude review.` }];
+}
+
 async function drafts(raw: string, record: Record<string, unknown>, it: number, ctx: StreamContext): Promise<Draft[]> {
   if (typeof record.prompt === 'string') {
     return [await promptEntry(record.prompt, ctx, record.images)];
@@ -355,7 +377,7 @@ async function drafts(raw: string, record: Record<string, unknown>, it: number, 
     // The gate's skills left out of its prompt (over the size limit, or not in the snapshot), named after its verdict.
     const omitted = Array.isArray(record.skills_omitted) && record.skills_omitted.length > 0
       ? [{ t: 'note' as const, who: 'factory' as const, text: `Skills left out of the review's prompt (over 64 KiB, or not in the snapshot): ${record.skills_omitted.map(String).join(', ')}.` }] : [];
-    return record.type === 'review' && record.ignored !== true ? [await verdictEntry(record, it, ctx), ...omitted] : noteEntry(raw, reviewerWho(record.reviewer));
+    return record.type === 'review' && record.ignored !== true ? [await verdictEntry(record, it, ctx), ...omitted] : [...noteEntry(raw, reviewerWho(record.reviewer)), ...(await gateAgainEntry(record, it, ctx))];
   }
   if (record.type === 'simplify') {
     if (record.ignored === true) {

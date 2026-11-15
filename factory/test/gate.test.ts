@@ -1,7 +1,7 @@
 // End-to-end tests of the Codex gate before Clean (SF-039) with the real sf serve, the fake Claude
 // (its --json-schema runs are the Claude reviews, clean unless scripted) and the fake Codex
-// (test/support/fake-codex.ts, scripted by $HOME/fake-codex.json): a clean gate runs Clean, a fix
-// goes through Claude and the gate again, the argv, prompt and environment of the call, the round
+// (test/support/fake-codex.ts, scripted by $HOME/fake-codex.json), both in a joint round: a clean
+// round runs Clean, a fix goes through Claude and the gate again, the argv, prompt and environment of the call, the round
 // limit, the token ceiling, failures, abort and serve restart during a gate, the gate off, and the
 // strict schema.
 // The round limit, the token ceiling, failures, abort and serve restart during a gate, the gate
@@ -20,7 +20,7 @@ import { JobStore } from '../src/jobs.js';
 import { writeTask } from '../src/task-file.js';
 import { fetchRaw } from './support/dashboard-client.js';
 import { bwrapLog, call, codexLog, codexScript, fakeCodex, fakeLog, git, newEnv, newRepo, ownReviewMethod, putRules, putTask, reviewLog, reviewScript, runCli, script, serve, stop, task, waitFor } from './support/harness.js';
-import { CLAUDE_CLEAN, eventsOf, exists, FIX_SECTION, GATE_CLEAN, GATE_FIX, gateEnv, iterationDir, mrText, option, taskFile, withoutTime, worktreeOf } from './support/gate.js';
+import { byRound, CLAUDE_CLEAN, eventsOf, exists, FIX_SECTION, GATE_CLEAN, GATE_FIX, gateEnv, iterationDir, mrText, option, taskFile, withoutTime, worktreeOf } from './support/gate.js';
 
 test('the strict schema: no $schema, every object has additionalProperties false and every property required', () => {
   assert.equal('$schema' in GATE_SCHEMA, false);
@@ -133,7 +133,7 @@ test('clean: Claude, then the gate in a read-only Codex in the worktree, then Cl
     assert.ok(run!.env.includes('HOME') && run!.env.includes('PATH'));
     const job = (await new JobStore(env.state).read('app', 'G-1'))!;
     const base = git(repo, 'rev-parse', 'main').trim();
-    assert.match(run!.prompt, /^Code review of iteration 1 of ticket G-1\. You are the second and deciding reviewer/);
+    assert.match(run!.prompt, /^Code review of iteration 1 of ticket G-1\. You are one of two independent reviewers of this iteration; either's blocker or major item makes a fix\./);
     assert.ok(run!.prompt.includes(`against the base commit ${base}.`));
     assert.ok(run!.prompt.includes(`\`git diff ${base}\``));
     assert.ok(run!.prompt.includes('Do not leave the worktree. Do not read credentials: `.env*` files, keys, `~/.ssh`, `~/.config`.'));
@@ -369,7 +369,7 @@ test('after a read of ~/.codex marks the run, no free-text field of any later Co
   }
 });
 
-test('fix: the gate\'s Fix section, the next iteration, Claude again, the gate again, Clean; --model with SF_CODEX_MODEL', async () => {
+test('fix: the joint round\'s Fix section, the next iteration, Claude and the gate again, Clean; --model with SF_CODEX_MODEL', async () => {
   const env = await newEnv('gate-fix', gateEnv({ SF_CODEX_MODEL: 'fake-gpt' }));
   const repo = await newRepo(env, 'gate-fix-repo', false);
   await putTask(env, repo, 'G-2', 'Greet the reader');
@@ -406,7 +406,7 @@ test('fix: the gate\'s Fix section, the next iteration, Claude again, the gate a
     const first = await jobs.readGate('app', 'G-2', 1);
     assert.ok(first !== undefined && 'verdict' in first);
     assert.deepEqual([first.verdict, first.model, first.items], ['fix', 'fake-gpt', GATE_FIX.items.map((item) => ({ ...item, reopens: '', caused_by: '' }))]);
-    assert.deepEqual((await eventsOf(env, 'G-2')).filter((record) => record.type === 'review').map((record) => [record.iteration, record.reviewer, record.verdict, record.items]), [
+    assert.deepEqual(byRound((await eventsOf(env, 'G-2')).filter((record) => record.type === 'review').map((record) => [record.iteration, record.reviewer, record.verdict, record.items])), [
       [1, 'claude', 'clean', 0], [1, 'codex', 'fix', 1], [2, 'claude', 'clean', 0], [2, 'codex', 'clean', 0],
     ]);
     assert.match((await runCli(env, ['watch', 'app', 'G-2', '--once'])).stdout, /^\d\d:\d\d:\d\d \[1\] review by codex: fix \(1 item\)$/m);
@@ -418,7 +418,7 @@ test('fix: the gate\'s Fix section, the next iteration, Claude again, the gate a
 // SF-051: the severity of review items.
 const nit = (path: string, problem: string, expected = 'Nicer.') => ({ path, problem, expected, severity: 'nit' });
 
-test('severity: one major among nits is the gate\'s Fix section with the nits as optional; a Claude fix with nits only goes to the gate, a gate fix with nits only to MR preparation, and the nits of both reach the MR text', async () => {
+test('severity: one major among nits is the round\'s Fix section with the nits as optional; a Claude fix and a gate fix with nits only go to MR preparation, and the nits of both reach the MR text', async () => {
   const env = await newEnv('gate-nits', gateEnv());
   const repo = await newRepo(env, 'gate-nits-repo', false);
   await putTask(env, repo, 'G-10', 'Greet the reader');
@@ -441,10 +441,10 @@ test('severity: one major among nits is the gate\'s Fix section with the nits as
     await call(served, 'start', { workspace: 'app', ticket: 'G-10' });
     await waitFor(served, 'G-10', 'ready_for_human_review', 2);
     assert.equal(await taskFile(repo, 'G-10'), `${task('G-10', 'Greet the reader')}\n\n${[
-      '## Fix 1', '', 'Review by Codex: The greeting is wrong.', '',
-      '1. [R1, major] `README.md`: It greets the world. Expected: It greets the reader.', '',
+      '## Fix 1', '', 'Review by Claude: Claude found it right.', 'Review by Codex: The greeting is wrong.', '',
+      '1. [R1, major] `README.md`: It greets the world. Expected: It greets the reader. (raised by Codex)', '',
       'Nits (optional):',
-      '2. [R2, nit] `a.txt`: A narrower variant. Expected: Nicer.', '',
+      '2. [R2, nit] `a.txt`: A narrower variant. Expected: Nicer. (raised by Codex)', '',
     ].join('\n')}`);
     const jobs = new JobStore(env.state);
     const job = (await jobs.read('app', 'G-10'))!;
@@ -454,7 +454,7 @@ test('severity: one major among nits is the gate\'s Fix section with the nits as
     const gate = await jobs.readGate('app', 'G-10', 2);
     assert.ok(gate !== undefined && 'verdict' in gate);
     assert.equal(gate.verdict, 'fix');
-    assert.deepEqual((await eventsOf(env, 'G-10')).filter((record) => record.type === 'review').map((record) => [record.iteration, record.reviewer, record.verdict, record.effective]), [
+    assert.deepEqual(byRound((await eventsOf(env, 'G-10')).filter((record) => record.type === 'review').map((record) => [record.iteration, record.reviewer, record.verdict, record.effective])), [
       [1, 'claude', 'clean', undefined], [1, 'codex', 'fix', undefined], [2, 'claude', 'fix', 'clean'], [2, 'codex', 'fix', 'clean'],
     ]);
     assert.match((await runCli(env, ['watch', 'app', 'G-10', '--once'])).stdout, /^\d\d:\d\d:\d\d \[2\] review by codex: fix \(2 items\), acted on as clean$/m);
@@ -493,13 +493,13 @@ test('severity: a gate fix with nits only is still a fix when it leaves an undec
     await call(served, 'start', { workspace: 'app', ticket: 'G-11' });
     await waitFor(served, 'G-11', 'ready_for_human_review', 2);
     assert.ok((await taskFile(repo, 'G-11')).endsWith([
-      '## Fix 1', '', 'Review by Codex: Nits only.', '',
-      '1. [R1, major] `package.json`: Undeclared sensitive path. Expected: Remove it, or justify it in the Report.', '',
+      '## Fix 1', '', 'Review by Claude: package.json is needed.', 'Review by Codex: Nits only.', '',
+      '1. [R1, major] `package.json`: Undeclared sensitive path. Expected: Remove it, or justify it in the Report. (raised by Codex)', '',
       'Nits (optional):',
-      '2. [R2, nit] `package.json`: A narrower variant of the accepted risk. Expected: Nicer.', '',
+      '2. [R2, nit] `package.json`: A narrower variant of the accepted risk. Expected: Nicer. (raised by Codex)', '',
     ].join('\n')));
     assert.equal((await new JobStore(env.state).read('app', 'G-11'))!.gate_fixes, 1);
-    assert.deepEqual((await eventsOf(env, 'G-11')).filter((record) => record.type === 'review').map((record) => [record.iteration, record.reviewer, record.verdict, record.effective]), [
+    assert.deepEqual(byRound((await eventsOf(env, 'G-11')).filter((record) => record.type === 'review').map((record) => [record.iteration, record.reviewer, record.verdict, record.effective])), [
       [1, 'claude', 'clean', undefined], [1, 'codex', 'fix', undefined], [2, 'claude', 'clean', undefined], [2, 'codex', 'clean', undefined],
     ]);
   } finally {
@@ -525,13 +525,13 @@ test("scope (SF-053): a gate that does not accept a path outside the Task's scop
     await call(served, 'start', { workspace: 'app', ticket: 'G-12' });
     await waitFor(served, 'G-12', 'ready_for_human_review', 2);
     assert.ok((await taskFile(repo, 'G-12')).endsWith([
-      '## Fix 1', '', 'Review by Codex: Codex found it right.', '',
-      "1. [R1, major] `notes.txt`: Outside the Task's scope. Expected: Remove the change, or justify it in the Report.", '',
+      '## Fix 1', '', 'Review by Claude: notes.txt is cited by the README.', 'Review by Codex: Codex found it right.', '',
+      "1. [R1, major] `notes.txt`: Outside the Task's scope. Expected: Remove the change, or justify it in the Report. (raised by Codex)", '',
     ].join('\n')));
     const [first] = await codexLog(env);
     assert.ok(first!.prompt.includes("<marked_paths>\n- outside the Task's scope: notes.txt\n</marked_paths>"), first!.prompt);
     assert.equal((await new JobStore(env.state).read('app', 'G-12'))!.gate_fixes, 1);
-    assert.deepEqual((await eventsOf(env, 'G-12')).filter((record) => record.type === 'review').map((record) => [record.iteration, record.reviewer, record.verdict, record.effective]), [
+    assert.deepEqual(byRound((await eventsOf(env, 'G-12')).filter((record) => record.type === 'review').map((record) => [record.iteration, record.reviewer, record.verdict, record.effective])), [
       [1, 'claude', 'clean', undefined], [1, 'codex', 'clean', 'fix'], [2, 'claude', 'clean', undefined], [2, 'codex', 'clean', undefined],
     ]);
     assert.equal(git(repo, 'show', '--name-only', '--format=', 'G-12-greet-the-reader').trim(), 'README.md\nnotes.txt');

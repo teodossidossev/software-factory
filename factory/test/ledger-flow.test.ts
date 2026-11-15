@@ -5,7 +5,7 @@
 // (dropped), a gate that disputes a contest and Accept on review_disputed, churn by both reviewers
 // and Accept on review_churn (refused without a clean Claude review), the MR section, sf reset; a
 // clean verdict of the reviewer that decides the round settles the open entries, a clean Claude
-// verdict the gate follows does not.
+// verdict beside the gate's fix in a joint round does not.
 import assert from 'node:assert/strict';
 import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -273,7 +273,8 @@ test('churn: every blocking item caused by a fix stops the job (review_churn) fo
   ]);
   const caused = { ...FIX, items: [{ path: 'b.txt', problem: 'The fix broke b.', expected: 'b works.', severity: 'major', caused_by: 'R1' }] };
   await reviewScript(env, [{ output: FIX }, { output: caused }, { output: CLEAN }, { output: CLEAN }]);
-  await codexScript(env, [{ output: FIX }, { output: caused }]);
+  // Each round is joint: the gate is clean beside Claude's churn, and churns beside clean Claude verdicts.
+  await codexScript(env, [{ output: CLEAN }, { output: CLEAN }, { output: FIX }, { output: caused }]);
   const served = await serve(env);
   try {
     // Claude: R1, then an item its fix caused.
@@ -289,7 +290,7 @@ test('churn: every blocking item caused by a fix stops the job (review_churn) fo
     assert.equal(await exists(join(env.state, 'jobs', 'app', 'L-4', 'ledger.json')), false);
     assert.deepEqual(await jobs.readLedger('app', 'L-4'), []);
 
-    // Codex: the same after a clean Claude review; Accept prepares the MR.
+    // Codex: the same beside a clean Claude review; Accept prepares the MR.
     await call(served, 'start', { workspace: 'app', ticket: 'L-5' });
     const byCodex = await waitFor(served, 'L-5', 'needs_human', 2);
     assert.equal(byCodex.error.code, 'review_churn');
@@ -306,7 +307,7 @@ test('churn: every blocking item caused by a fix stops the job (review_churn) fo
   }
 });
 
-test('recovery: a Claude blocker that reopens an accepted risk is dropped; the runner dies before the gate has a verdict; the restarted sf serve resumes into the gate', async () => {
+test('recovery: a Claude blocker that reopens an accepted risk is dropped; the runner dies before the joint round\'s gate has a verdict; the restarted sf serve runs the gate alone', async () => {
   const env = await newEnv('ledger-resume-dropped', { SF_REVIEW: 'on', SF_GATE: 'codex', SF_GATE_LEVEL: 'full', SF_CODEX: fakeCodex });
   const repo = await newRepo(env, 'ledger-resume-dropped-repo', false);
   await putTask(env, repo, 'L-8', 'Greet the reader');
@@ -317,8 +318,8 @@ test('recovery: a Claude blocker that reopens an accepted risk is dropped; the r
   ]);
   const reopening = { ...ITEM, problem: 'The greeting is still English.', severity: 'blocker', reopens: 'R1' };
   await reviewScript(env, [{ output: FIX }, { output: { ...FIX, items: [reopening] } }]);
-  // The first gate run never ends in time: its runner is killed while it waits.
-  await codexScript(env, [{ delayMs: 30_000 }, { output: CLEAN }]);
+  // The gate of iteration 2's round never ends in time: its runner is killed while it waits.
+  await codexScript(env, [{ output: CLEAN }, { delayMs: 30_000 }, { output: CLEAN }]);
   const jobs = new JobStore(env.state);
   const lock = join(env.state, 'jobs', 'app', 'L-8', 'runner.pid');
   const until = async (what: string, condition: () => Promise<boolean>): Promise<void> => {
@@ -333,14 +334,15 @@ test('recovery: a Claude blocker that reopens an accepted risk is dropped; the r
     await call(served, 'start', { workspace: 'app', ticket: 'L-8' });
     await waitFor(served, 'L-8', 'needs_human', 2);
     assert.equal((await runCli(env, ['settle', 'app', 'L-8', 'R1', 'accept'])).code, 0);
-    await until('the gate to start', async () => (await exists(join(env.home, 'fake-codex.log'))) && (await codexLog(env)).length === 1);
+    await until('the gate to start and the review to end', async () => (await exists(join(env.home, 'fake-codex.log'))) && (await codexLog(env)).length === 2
+      && (await jobs.readReview('app', 'L-8', 2)) !== undefined);
   } finally {
     await stop(served);
   }
-  // The review is recorded with its blocker dropped; no gate verdict yet.
+  // The review is recorded; no gate verdict yet, so nothing of the round applied.
   const record = await jobs.readReview('app', 'L-8', 2);
   assert.ok(record !== undefined && 'verdict' in record);
-  assert.deepEqual([record.verdict, record.dropped?.map((item) => item.reopens)], ['fix', ['R1']]);
+  assert.deepEqual([record.verdict, record.dropped], ['fix', undefined]);
   assert.equal(await jobs.readGate('app', 'L-8', 2), undefined);
   const runner = Number((await readFile(lock, 'utf8')).trim().split(' ')[0]);
   process.kill(runner, 'SIGKILL');
@@ -354,13 +356,16 @@ test('recovery: a Claude blocker that reopens an accepted risk is dropped; the r
   });
   assert.equal((await jobs.read('app', 'L-8'))!.state, 'awaiting_review');
 
-  // The restarted sf serve resumes the job into the gate (the dropped blocker does not count) and on to Clean.
+  // The restarted sf serve runs the gate alone (the dropped blocker does not count) and on to Clean.
   served = await serve(env);
   try {
     await waitFor(served, 'L-8', 'ready_for_human_review', 2);
-    assert.equal((await codexLog(env)).length, 2);
-    // The Claude review was not run again: the stored one decides.
+    assert.equal((await codexLog(env)).length, 3);
+    // The Claude review was not run again: the stored one counts, its blocker dropped.
     assert.equal((await reviewLog(env)).length, 2);
+    const applied = await jobs.readReview('app', 'L-8', 2);
+    assert.ok(applied !== undefined && 'verdict' in applied);
+    assert.deepEqual(applied.dropped?.map((item) => item.reopens), ['R1']);
     const ready = await call(served, 'check', { workspace: 'app', ticket: 'L-8' });
     assert.deepEqual(ready.review.gate, { status: 'done', verdict: 'clean', summary: CLEAN.summary });
   } finally {
@@ -431,29 +436,34 @@ test('a clean gate verdict settles the open majors of earlier rounds: at the Fix
   }
 });
 
-test('a clean Claude verdict the gate follows settles nothing: the open entry makes the next Fix, and the gate runs only once Claude passes it', async () => {
+test('only a clean round settles: a clean Claude verdict beside the gate\'s fix leaves the open entry, which the joint Fix carries with the gate\'s item', async () => {
   const env = await newEnv('ledger-claude-clean', { SF_REVIEW: 'on', SF_GATE: 'codex', SF_GATE_LEVEL: 'full', SF_CODEX: fakeCodex });
   const repo = await newRepo(env, 'ledger-claude-clean-repo', false);
   await putTask(env, repo, 'L-11', 'Greet the reader');
   await script(env, [
     { write: { 'README.md': 'hello world\n' }, text: 'Report of iteration 1' },
     // No Fix table: R1 stays open.
-    { write: { 'a.txt': 'a\n' }, text: 'Report of iteration 2' },
-    { write: { 'README.md': 'hello reader\n' }, text: '| R1 | fixed | It greets the reader. |' },
+    { write: { 'a.txt': '\n' }, text: 'Report of iteration 2' },
+    { write: { 'README.md': 'hello reader\n', 'a.txt': 'a line\n' }, text: '| R1 | fixed | It greets the reader. |\n| R2 | fixed | It has a line. |' },
     { write: { '.software-factory/L-11.mr.md': mrText('feat(L-11): Greet the reader') }, text: 'prepared' },
   ]);
+  const empty = { path: 'a.txt', problem: 'Empty.', expected: 'A line.', severity: 'major' };
   await reviewScript(env, [{ output: FIX }, { output: CLEAN }, { output: CLEAN }]);
-  await codexScript(env, [{ output: CLEAN }]);
+  await codexScript(env, [{ output: CLEAN }, { output: { ...FIX, summary: 'a.txt is empty.', items: [empty] } }, { output: CLEAN }]);
   const served = await serve(env);
   try {
     await call(served, 'start', { workspace: 'app', ticket: 'L-11' });
     await waitFor(served, 'L-11', 'ready_for_human_review', 3);
     assert.ok((await taskFile(repo, 'L-11')).includes([
-      '## Fix 2', '', 'Review by Claude: Looks right.', '', '1. [R1, major] `README.md`: It greets the world. Expected: It greets the reader.',
+      '## Fix 2', '', 'Review by Claude: Looks right.', 'Review by Codex: a.txt is empty.', '',
+      '1. [R1, major] `README.md`: It greets the world. Expected: It greets the reader. (raised by Claude)',
+      '2. [R2, major] `a.txt`: Empty. Expected: A line. (raised by Codex)',
     ].join('\n')));
     const jobs = new JobStore(env.state);
-    assert.deepEqual((await jobs.readLedger('app', 'L-11')).map((entry) => [entry.id, entry.status, entry.fixed_by_clean, entry.response]), [['R1', 'fixed', undefined, 'It greets the reader.']]);
-    assert.equal((await codexLog(env)).length, 1);
+    assert.deepEqual((await jobs.readLedger('app', 'L-11')).map((entry) => [entry.id, entry.status, entry.fixed_by_clean, entry.response]), [
+      ['R1', 'fixed', undefined, 'It greets the reader.'], ['R2', 'fixed', undefined, 'It has a line.'],
+    ]);
+    assert.deepEqual([(await codexLog(env)).length, (await jobs.read('app', 'L-11'))!.gate_fixes], [3, 1]);
   } finally {
     await stop(served);
   }

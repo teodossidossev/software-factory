@@ -60,9 +60,10 @@ export interface Live {
   mr?: { targetRef: string; conflicts?: string[]; guardTurns?: number };
 }
 
-// A review in progress, Claude's, the gate's or the simplification pass, or the run of the
-// workspace's test command (tests), one at a time per job: the iteration it reviews and
-// what cancels it.
+// A review in progress, one at a time per job: a review round (src/round.ts: the Claude review and
+// the gate of a joint round together, reviewer then Claude's, or the one of them that runs), the
+// simplification pass, or the run of the workspace's test command (tests); the iteration it
+// reviews and what cancels it (one controller for both sessions of a round).
 export interface RunningReview {
   reviewer: typeof REVIEWER | typeof GATE_REVIEWER | typeof SIMPLIFIER | typeof TESTS_RUNNER;
   iteration: number;

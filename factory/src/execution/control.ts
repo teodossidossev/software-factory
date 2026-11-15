@@ -14,7 +14,7 @@ import { DENIED_TOOLS } from '../rules.js';
 import { factoryRoots, reapOrphanedSandboxes } from '../sandbox-reaper.js';
 import type { Workspace } from '../registry.js';
 import { readJobRules } from '../rules-docs.js';
-import { actedVerdict, REVIEWER, type ReviewOutput } from '../review.js';
+import { actedVerdict, REVIEWER } from '../review.js';
 import type { RunnerRequest } from '../runner.js';
 import { withoutDropped } from '../stops.js';
 import { readTask, TASK_DIR, taskDiff, taskSha256 } from '../task-file.js';
@@ -45,9 +45,6 @@ export interface ControlMr {
 
 export interface ControlReviews {
   acceptGateInRunner(workspaceName: string, ticket: string): Promise<{ state: JobState; iteration: number; branch: string }>;
-  afterClaude(job: Job, output: ReviewOutput): Promise<void>;
-  afterClean(job: Job, sensitive: string[]): Promise<void>;
-  applying(job: Job, work: () => Promise<void>): Promise<void>;
   applySimplify(workspaceName: string, ticket: string): Promise<{ state: JobState; iteration: number; check_after_minutes: number }>;
   checkAcceptGate(job: Job): string;
   checkRetryReview(job: Job): void;
@@ -328,9 +325,10 @@ export class ControlPart {
   }
 
   // What a job in working or awaiting_review was doing: the turn, or the review round that runs or
-  // is due on its last iteration (the Claude review, the gate after a clean one, the simplification
-  // pass once started); null when none was (awaiting review with the review off). Without the Claude
-  // review the gate is the review: due while its gate.json is missing.
+  // is due on its last iteration (review while the Claude review has no stored verdict, else gate
+  // while the gate of a joint round has none, then the simplification pass once started); null
+  // when none was (awaiting review with the review off). Without the Claude review the gate is the
+  // review: due while its gate.json is missing.
   async #interruptedStep(job: Job): Promise<PauseStep | null> {
     const { workspace, ticket, iteration } = job;
     if (job.state === 'working') {
@@ -346,15 +344,16 @@ export class ControlPart {
       }
     } else {
       const review = await this.#store.jobs.readReview(workspace, ticket, iteration);
-      if (review === undefined) {
+      // A stored failure counts as none: in a joint round the gate may still run.
+      if (review === undefined || !('verdict' in review)) {
         return this.#settings.config.review ? 'review' : null;
-      }
-      if (!('verdict' in review) || actedVerdict(withoutDropped(review)) !== 'clean') {
-        return null;
       }
       // A gate the iteration's gate level skipped counts as absent, as with the gate off.
       if (gate === undefined && this.#settings.config.gate.on && !(await gateSkipped(this.#store.jobs, job))) {
         return 'gate';
+      }
+      if (actedVerdict(withoutDropped(review)) !== 'clean') {
+        return null;
       }
     }
     if (gate !== undefined && (!('verdict' in gate) || actedVerdict(withoutDropped(gate)) !== 'clean')) {
@@ -647,10 +646,9 @@ export class ControlPart {
     }
   }
 
-  // Runner mode: what the job was doing when its last runner ended. A job awaiting review whose
-  // last iteration has no review gets one; one whose review is clean and has no gate.json gets its
-  // gate (or, with the gate off, Clean); one with a clean gate.json too gets its simplification
-  // pass, or its outcome. Without the Claude review: no gate.json gets the gate, a clean one its outcome.
+  // Runner mode: what the job was doing when its last runner ended. A job awaiting review gets the
+  // reviewers of its round without a stored verdict (src/round.ts), or, with every verdict stored,
+  // the round's outcome: the next Fix section, a stop, or its simplification pass or MR preparation.
   resume(): Promise<void> {
     const { workspace, ticket } = this.#runner.runnerJob();
     return this.#locks.locked(async () => {
@@ -661,32 +659,11 @@ export class ControlPart {
     });
   }
 
-  // The review round a job awaiting review has to run (the review, the gate, the simplification
-  // pass or its outcome), unless one runs already. Only under the lock.
+  // The review round a job awaiting review has to run or apply (startReview: only the reviewers
+  // without a stored verdict run), unless one runs already. Only under the lock.
   async #pickUp(job: Job): Promise<void> {
-    const { workspace, ticket } = job;
-    if (this.#sessions.reviews.has(`${workspace}/${ticket}`) || !(await this.#peers.start.resumable(job))) {
-      return;
-    }
-    const gate = await this.#store.jobs.readGate(workspace, ticket, job.iteration);
-    if (!claudeReviews(job)) {
-      if (gate === undefined) {
-        // startReview starts the gate.
-        await this.#peers.reviews.startReview(job);
-      } else if ('verdict' in gate) {
-        // A clean gate (resumable) whose outcome never applied.
-        await this.#peers.reviews.applying(job, () => this.#peers.reviews.afterClean(job, gate.accepted_sensitive));
-      }
-      return;
-    }
-    const review = await this.#store.jobs.readReview(workspace, ticket, job.iteration);
-    if (review === undefined) {
+    if (!this.#sessions.reviews.has(`${job.workspace}/${job.ticket}`) && (await this.#peers.start.resumable(job))) {
       await this.#peers.reviews.startReview(job);
-    } else if ('verdict' in review && gate !== undefined && 'verdict' in gate) {
-      // A clean gate whose simplification pass never applied.
-      await this.#peers.reviews.applying(job, () => this.#peers.reviews.afterClean(job, [...new Set([...review.accepted_sensitive, ...gate.accepted_sensitive])]));
-    } else if ('verdict' in review) {
-      await this.#peers.reviews.applying(job, () => this.#peers.reviews.afterClaude(job, review));
     }
   }
 

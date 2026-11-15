@@ -19,7 +19,7 @@ import { factoryPrompt, iterationCost } from '../prompts.js';
 import { DENIED_TOOLS, type Marks, marksOf } from '../rules.js';
 import type { Workspace } from '../registry.js';
 import { copyRulesRecord } from '../rules-docs.js';
-import { fixContent, type ReviewOutput } from '../review.js';
+import { fixContent } from '../review.js';
 import { pathDenials } from '../sandbox-denials.js';
 import { type IdleOutcome, ImplementerSession, type LimitAnswer, type LimitedTurn } from '../session.js';
 import { CONTINUE_PROMPT, limitDecision, worktreeChanged, type WorktreeState, worktreeState } from '../turn-limit.js';
@@ -65,7 +65,6 @@ export interface TurnsMr {
 }
 
 export interface TurnsReviews {
-  startGate(job: Job, claude?: ReviewOutput): Promise<void>;
   startReview(job: Job): Promise<void>;
 }
 
@@ -414,9 +413,9 @@ export class TurnsPart {
   }
 
   // The job a ledger stop held goes on: a Fix section when the user decided a fix (with the
-  // open blocker and major entries), otherwise the review that was stopped runs again: the gate
-  // when it stopped the job, else the Claude review; without the Claude review always the
-  // gate, which startReview starts. Only under the lock.
+  // open blocker and major entries), otherwise the round runs again (startReview): gate.json goes,
+  // and review.json too unless both verdicts were stored; only the reviewer without a stored
+  // verdict runs. Without the Claude review the gate is the round. Only under the lock.
   async goOn(job: Job, ledger: LedgerEntry[]): Promise<JobState> {
     const { workspace: workspaceName, ticket, iteration } = job;
     const fix = userFixItems(ledger, iteration);
@@ -433,17 +432,11 @@ export class TurnsPart {
     const review = claudeReviews(job) ? await this.#store.jobs.readReview(workspaceName, ticket, iteration) : undefined;
     const gate = job.error?.code === 'escalated' ? undefined : await this.#store.jobs.readGate(workspaceName, ticket, iteration);
     await this.#store.jobs.removeGate(workspaceName, ticket, iteration);
-    if (!claudeReviews(job)) {
-      // from: needs_human (checkSettle)
-      await this.#peers.reviews.startReview(await this.#store.transition(job, 'awaiting_review', 'go_on'));
-    } else if (gate !== undefined && 'verdict' in gate && review !== undefined && 'verdict' in review) {
-      // from: needs_human (checkSettle)
-      await this.#peers.reviews.startGate(await this.#store.transition(job, 'awaiting_review', 'go_on'), review);
-    } else {
+    if (claudeReviews(job) && !(gate !== undefined && 'verdict' in gate && review !== undefined && 'verdict' in review)) {
       await this.#store.jobs.removeReview(workspaceName, ticket, iteration);
-      // from: needs_human (checkSettle)
-      await this.#peers.reviews.startReview(await this.#store.transition(job, 'awaiting_review', 'go_on'));
     }
+    // from: needs_human (checkSettle)
+    await this.#peers.reviews.startReview(await this.#store.transition(job, 'awaiting_review', 'go_on'));
     return (await this.#store.job(workspaceName, ticket)).state;
   }
 

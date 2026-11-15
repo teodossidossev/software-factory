@@ -69,9 +69,9 @@ you need to resume after a context loss is `guide`, then `read_file` of the Task
 ## The cycle
 
 ```
-plan ─► write_task ─► Task check ─► user: Start ─► iteration ─► (Claude review) ─► Codex gate ─► Clean ─► user: approve/abort
-                                        ▲               │                 │
-                                        └── Fix N ◄─────┴─────────────────┘ findings
+plan ─► write_task ─► Task check ─► user: Start ─► iteration ─► Codex gate (+ Claude review) ─► Clean ─► user: approve/abort
+                                        ▲                          │
+                                        └────────── Fix N ◄────────┘ findings of either
 ```
 
 The Claude review runs only on tickets that ask for it (`review: claude`, below), unless the user
@@ -92,9 +92,11 @@ it for them (the default), sent in their prompt with any other skill chosen for 
 follow the repository's documented rules), each item's `problem` beginning with `Spec:` or
 `Standards:`, and a baseline code smell only ever a `nit`. The review rules and the Task file win
 where the method differs.
-On a ticket with the Claude review, a fresh, read-only Claude session reviews first, and the gate
-gives the deciding verdict after a `clean` one. A `fix` verdict becomes the next `## Fix N`,
-written by the factory, and the next iteration starts; the deciding `clean` verdict goes to Clean.
+On a ticket with the Claude review, a fresh, read-only Claude session reviews each iteration in
+the same round as the gate, at the same time (the joint round); the iteration is clean only when
+both verdicts are. A `fix` verdict of either becomes the next `## Fix N`, written by the factory
+(in a joint round one section, with a lead line per reviewer and each item naming who raised it),
+and the next iteration starts; a clean round goes to Clean.
 At Clean, when the workspace has a test command, the factory first runs it itself on the reviewed
 worktree, in a sandbox without network: a failure becomes the next `## Fix N: Tests` (with the
 command and the end of its output) and a new iteration, at most twice per job, and then the job
@@ -203,7 +205,7 @@ may_touch: [package.json, .github/**]   # optional: sensitive paths or globs thi
 scope: [src/export/**, test/export.test.ts, README.md]   # optional: every file this ticket is expected to create, modify or delete
 lands_after: [PROJ-120, web/WEB-7]   # optional: the tickets this one waits for; another workspace's as <workspace>/<ticket>
 check: required       # optional: required (always a Task check) or skip (never); without it only a Task that is not small is checked
-review: claude        # optional: claude (the Claude review, then the Codex gate) or codex (the gate alone); without it the user's SF_CLAUDE_REVIEW decides
+review: claude        # optional: claude (the Claude review and the Codex gate in one round) or codex (the gate alone); without it the user's SF_CLAUDE_REVIEW decides
 size: medium          # optional: small, medium or complex, your estimate; picks the job's lead-time target (any other value or none: medium)
 part_of: PROJ-100     # optional: the task this slice belongs to (a ticket name)
 slice: 2/5            # optional: this slice's number and the count, 1 <= N <= M <= 20
@@ -266,8 +268,8 @@ ticket waits for it ("Waits for" on its card); a start by hand before that ticke
 commit is refused. Refused when it names the ticket itself, is not a ticket key, or comes with
 `continues:`. `lands_after:` keeps its own meaning beside it.
 
-`review:` says who reviews the ticket's iterations. `review: claude` adds the Claude review before
-the Codex gate: give it to risky tickets (authentication, the sandbox, the state format, and
+`review:` says who reviews the ticket's iterations. `review: claude` adds the Claude review beside
+the Codex gate, in the same round: give it to risky tickets (authentication, the sandbox, the state format, and
 product tickets the user names). `review: codex` has the gate alone even when the user set
 `SF_CLAUDE_REVIEW=always`. Without the key the user's setting decides (by default the gate alone).
 Any other value is ignored. It is read once, at Start.

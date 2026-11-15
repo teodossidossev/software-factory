@@ -11,7 +11,8 @@
 // has an optional `guard` (src/guard.ts: its pushes and MR texts are checked for the names of the
 // user's other workspaces; absent: false) and an optional `test_command` (src/test-command.ts: the
 // factory runs it in a sandbox before a job is ready; absent: no run) and an optional `notify`
-// (full, brief or off: how much its notifications tell; absent: full).
+// (full, brief or off: how much its notifications tell; absent: full) and an optional `auto_queue`
+// (src/queue.ts addByItself: a Task whose plan is ready joins the run queue by itself; absent: false).
 import { mkdir, readFile, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
@@ -127,6 +128,7 @@ const registrySchema = z.strictObject({
       digest: workspaceDigestSchema.optional(),
       guard: z.boolean().optional(),
       test_command: testCommand.optional(),
+      auto_queue: z.boolean().optional(),
     }),
   ),
   digest: digestSettingsSchema.optional(),
@@ -210,7 +212,7 @@ export async function setWorkspaceNotify(name: string, notify: NotifyMode, dir =
 
 // What the Setup's Edit replaces; "" removes description and app, 'default' the handoff
 // key, 'auto' the color key, and digest with both false the digest key. work_checkout, rules_skip,
-// guard, test_command and notify stay as they are.
+// guard, test_command, notify and auto_queue stay as they are.
 export interface WorkspaceEdit {
   read_checkout: string;
   description: string;
@@ -261,6 +263,8 @@ export interface Workspace {
   guard?: boolean;
   // The workspace's test_command; absent: no test run before a job is ready.
   testCommand?: string;
+  // "auto_queue": true in workspaces.json; absent otherwise.
+  autoQueue?: boolean;
 }
 
 // The entries whose ignored work_checkout differs from the checkout, for one warning at start.
@@ -337,6 +341,7 @@ export async function resolveWorkspace(name: string, dir = configDir()): Promise
       ...(entry.rules_skip !== undefined ? { rulesSkip: entry.rules_skip } : {}),
       ...(entry.guard === true ? { guard: true } : {}),
       ...(entry.test_command !== undefined ? { testCommand: entry.test_command } : {}),
+      ...(entry.auto_queue === true ? { autoQueue: true } : {}),
     };
   } catch (error) {
     if (error instanceof FactoryError) {

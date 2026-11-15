@@ -175,7 +175,10 @@ Then, with `sf serve` running, start from the dashboard:
 5. It waits for the automatic Task check with `task_check`, fixes what it finds, and tells you the
    Task file is ready.
 6. You start the job, or let it `queue_add` the ticket. The Task check, Start and the jobs are the
-   same whoever planned the ticket.
+   same whoever planned the ticket. In a workspace with `"auto_queue": true`
+   ([Configuration](configuration.md)) a Task whose check ends ready, or that needs no check, joins
+   the run queue by itself (the parts of one ticket in the order of their numbers), and the session
+   tells you it is queued.
 
 Without the dashboard, ask a session yourself to call `guide` first and to plan ticket `APP-12` in
 workspace `my-app` with you: "Use the software-factory MCP server. Call guide, then plan APP-12 in

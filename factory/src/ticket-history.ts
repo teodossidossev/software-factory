@@ -14,8 +14,10 @@ import { WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN } from './registry.j
 import { TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
 
 // created: New ticket on the dashboard (you); written: write_task of the Context owner;
-// edited: Save on the planned ticket page (you); fix_added: a "## Fix N" of the factory.
-export const RECORDED_KINDS = ['created', 'written', 'edited', 'fix_added'] as const;
+// edited: Save on the planned ticket page (you); fix_added: a "## Fix N" of the factory;
+// queued_by_itself: the run queue took the ticket after a ready check (auto_queue; the factory),
+// with the sha256 of the Task file's text, which it does not change.
+export const RECORDED_KINDS = ['created', 'written', 'edited', 'fix_added', 'queued_by_itself'] as const;
 export type RecordedKind = (typeof RECORDED_KINDS)[number];
 export const ACTORS = ['you', 'context_owner', 'factory'] as const;
 export type Actor = (typeof ACTORS)[number];
@@ -69,6 +71,8 @@ function recordedText(event: HistoryEvent): string {
     case 'fix_added':
       // by you: the Fix of your Must fix, which the factory wrote.
       return `${event.fix !== undefined ? `Fix ${event.fix}` : 'A Fix'} added by the factory${event.by === 'you' ? ' for your Must fix' : ''}`;
+    case 'queued_by_itself':
+      return 'Queued by itself after a ready check';
   }
 }
 

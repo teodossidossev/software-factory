@@ -424,9 +424,9 @@ export type ServerAutoChecks = Pick<AutoChecks, 'trigger' | 'isPending'>;
 export const WRITE_CHECK_STATES = ['scheduled', 'off', 'already_checked', 'draft', 'not_needed'] as const;
 export const CHECK_AFTER_SECONDS = AUTO_CHECK_DELAY_MS / 1000;
 
-// The run queue the Context owner reads and adds to; it neither removes nor moves.
-// withTicket: write_task writes under the queue's lock of the ticket.
-export type ServerQueue = Pick<RunQueue, 'view' | 'add' | 'withTicket'>;
+// The run queue the Context owner reads and adds to; it neither removes nor moves. withTicket:
+// write_task writes under the queue's lock of the ticket; addByItself: a Task that needs no check.
+export type ServerQueue = Pick<RunQueue, 'view' | 'add' | 'withTicket' | 'addByItself'>;
 
 const dependencyRow = z.object({ workspace: z.string(), ticket: z.string(), state: z.enum(DEPENDENCY_STATES) });
 
@@ -454,8 +454,7 @@ function jobWorktreeRoot(): string | undefined {
 // onSuggested: called after suggest_changes stored a note, so the open pages get the job again.
 // history: the tickets' history, where write_task records "written"; none records nothing.
 // queue: the run queue; without it queue_list and queue_add answer queue_unavailable.
-// auto: the automatic Task checks; without it write_task triggers none (check: off) and
-// task_check's pending is false.
+// auto: the automatic Task checks; without it write_task triggers none (check: off), task_check's pending is false.
 function createMcpServer(
   handbook: Handbook, version: string, execution: Pick<Execution, 'jobs'>, checks: ServerChecks | undefined, history?: TicketHistory, queue?: ServerQueue, auto?: ServerAutoChecks,
   onSuggested?: (workspace: string, ticket: string) => void,
@@ -669,7 +668,7 @@ function createMcpServer(
 
   // The automatic check of a Task file write_task wrote: off without the automatic checks; else a
   // skeleton is a draft, a text with a check record is already_checked, one that needs no check
-  // (checkNeed) is not_needed with check_reason, and any other is scheduled.
+  // (checkNeed) is not_needed with check_reason and joins the run queue by itself, else scheduled.
   async function writeCheck(workspace: string, ticket: string, content: string, sha256: string): Promise<{ check: (typeof WRITE_CHECK_STATES)[number]; check_after_seconds?: number; check_reason?: string }> {
     if (auto === undefined) {
       return { check: 'off' };
@@ -682,6 +681,7 @@ function createMcpServer(
     }
     const need = checkNeed(content, workspace);
     if (!need.needed) {
+      void queue?.addByItself(workspace, ticket).catch((error: unknown) => console.error(error));
       return { check: 'not_needed', check_reason: need.reason };
     }
     auto.trigger(workspace, ticket);

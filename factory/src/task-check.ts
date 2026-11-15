@@ -734,8 +734,15 @@ export function checkSettings(config: Config, configDir: string): Omit<CheckOpti
 export interface TaskChecksOptions extends Omit<CheckOptions, 'signal' | 'onMessage'> {
   resolve: (name: string) => Promise<Workspace>;
   // Called when a check started by start() or startAuto() has been stored (or has failed to be),
-  // or was cancelled.
-  onSettled?: (workspace: string, ticket: string) => void;
+  // or was cancelled: settled.record is the stored record (undefined when none was), settled.auto
+  // whether startAuto started it.
+  onSettled?: (workspace: string, ticket: string, settled: Settled) => void;
+}
+
+// How a check of TaskChecks ended, for onSettled.
+export interface Settled {
+  record: CheckRecord | undefined;
+  auto: boolean;
 }
 
 // Who hears of the checks of TaskChecks besides onSettled (the automatic checks).
@@ -823,7 +830,7 @@ export class TaskChecks {
       task = await readTask(workspace, ticket);
       refuseDraft(ticket, task);
     } catch (error) {
-      this.#end(key, name, ticket, false);
+      this.#end(key, name, ticket, undefined);
       throw error;
     }
     const ended = runTaskCheck(workspace, ticket, task, { ...this.#options, ...(signal !== undefined ? { signal } : {}) })
@@ -839,15 +846,18 @@ export class TaskChecks {
         console.error(error);
         return undefined;
       })
-      .finally(() => this.#end(key, name, ticket, true));
+      .then((record) => {
+        this.#end(key, name, ticket, { record, auto: signal !== undefined });
+        return record;
+      });
     return { started: true, sha256: await currentCheckSha256(workspace, ticket, task), ended };
   }
 
-  // The ticket's check no longer runs: onSettled (when it ran) and the observers hear of it.
-  #end(key: string, name: string, ticket: string, ran: boolean): void {
+  // The ticket's check no longer runs: onSettled (when it ran: settled) and the observers hear of it.
+  #end(key: string, name: string, ticket: string, settled: Settled | undefined): void {
     this.#running.delete(key);
-    if (ran) {
-      this.#options.onSettled?.(name, ticket);
+    if (settled !== undefined) {
+      this.#options.onSettled?.(name, ticket, settled);
     }
     for (const observer of this.#observers) {
       observer.ended?.(name, ticket);

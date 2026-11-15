@@ -16,12 +16,14 @@ import { type Job, type JobState, JobStore, LIMIT_RETRY_MS, now } from '../src/j
 import { localTime } from '../src/local-time.js';
 import type { Notification } from '../src/notify.js';
 import { LIMIT_RESET_HOLD_REASON, type PlanCheck, QueueStore, RunQueue, type RunQueueOptions } from '../src/queue.js';
-import { resolveWorkspace, saveRegistry, setWorkspaceNotify, workspaceNotifyMode } from '../src/registry.js';
+import { QUEUE_REMOVED_FILE, RemovedStore } from '../src/queue-by-itself.js';
+import { loadRegistry, resolveWorkspace, saveRegistry, setWorkspaceNotify, workspaceNotifyMode } from '../src/registry.js';
 import { followJobs } from '../src/runner.js';
 import { Setup } from '../src/setup.js';
 import { TaskChecks, taskSha256 } from '../src/task-check.js';
 import { planCheck } from '../src/task-check-auto.js';
 import { writeTask } from '../src/task-file.js';
+import { TicketHistory } from '../src/ticket-history.js';
 import { call, type Env, FAKE, git, newEnv, newRepo, putTask, readyCheck, refused, runCli, script, serve, stop, task, temp, turnsStarted, waitFor } from './support/harness.js';
 
 const TIMEOUT = { timeout: 60_000 };
@@ -120,7 +122,7 @@ interface World {
 }
 
 // Workspace app (a checkout cloned from a bare origin) and, with web, workspace web too.
-async function world(name: string, options: { web?: boolean; recheckMs?: number } & Pick<RunQueueOptions, 'planCheck' | 'onAdded'> = {}): Promise<World> {
+async function world(name: string, options: { web?: boolean; recheckMs?: number } & Pick<RunQueueOptions, 'planCheck' | 'onAdded' | 'history'> = {}): Promise<World> {
   const env = await newEnv(name);
   const repo = await newRepo(env, `${name}-repo`, true);
   if (options.web === true) {
@@ -135,6 +137,7 @@ async function world(name: string, options: { web?: boolean; recheckMs?: number 
   const make = (): RunQueue => new RunQueue(store, execution, setup, jobs, {
     resolve, ...(options.recheckMs !== undefined ? { recheckMs: options.recheckMs } : {}),
     ...(options.planCheck !== undefined ? { planCheck: options.planCheck } : {}), ...(options.onAdded !== undefined ? { onAdded: options.onAdded } : {}),
+    ...(options.history !== undefined ? { history: options.history } : {}),
   });
   return { env, repo, origin: join(temp, `${name}-repo-origin.git`), jobs, store, execution, setup, queue: make(), again: make };
 }
@@ -1186,4 +1189,211 @@ test('SF-130: with the plan check of sf serve, a small queued ticket with no che
   await w.queue.idle();
   assert.deepEqual(w.execution.starts, ['app/S-1']);
   assert.deepEqual(await queued(w), ['app/S-2']);
+});
+
+// SF-234: workspace app gets auto_queue (web, when there, has none); the Task file of a ticket with
+// extra front matter lines, written as write_task writes it; its text.
+async function autoQueue(w: World): Promise<void> {
+  const registry = await loadRegistry(w.env.config);
+  registry.workspaces.app = { ...registry.workspaces.app!, auto_queue: true };
+  await saveRegistry(registry, w.env.config);
+}
+async function put(w: World, ticket: string, extra = ''): Promise<string> {
+  const content = task(ticket, `Job ${ticket}`).replace('base: main\n', `base: main\n${extra}`);
+  await writeTask(await resolveWorkspace('app', w.env.config), ticket, content, w.jobs);
+  return content;
+}
+
+test('SF-234: addByItself queues a ticket only in a workspace with auto_queue; never twice, nor with a live job, a skeleton or a Task changed since its check; records queued_by_itself', TIMEOUT, async () => {
+  const added: string[] = [];
+  const history = new TicketHistory(join(temp, 'queue-by-itself-history'));
+  const w = await world('queue-by-itself', { web: true, history, onAdded: (workspace, ticket) => added.push(`${workspace}/${ticket}`) });
+  await w.queue.hold();
+  const a1 = await put(w, 'A-1');
+  await plan(w, 'A-2', { draft: true });
+  const a3 = await put(w, 'A-3');
+  await w.jobs.write(jobRecord('app', 'A-3', 'working'));
+  await put(w, 'A-4');
+  await plan(w, 'W-1', { workspace: 'web' });
+  // auto_queue absent: nothing changes.
+  assert.deepEqual(await w.queue.addByItself('app', 'A-1', taskSha256(a1)), { queued: false, reason: 'auto_queue_off' });
+  await autoQueue(w);
+  assert.deepEqual(await w.queue.addByItself('web', 'W-1'), { queued: false, reason: 'auto_queue_off' });
+  assert.deepEqual(await w.queue.addByItself('app', 'A-1', taskSha256(a1)), { queued: true, position: 1 });
+  assert.deepEqual(await w.queue.addByItself('app', 'A-1', taskSha256(a1)), { queued: false, reason: 'already_queued' });
+  assert.deepEqual(await w.queue.addByItself('app', 'A-2'), { queued: false, reason: 'task_draft' });
+  assert.deepEqual(await w.queue.addByItself('app', 'A-3'), { queued: false, reason: 'job_exists' });
+  assert.deepEqual(await w.queue.addByItself('app', 'A-4', taskSha256('an older version')), { queued: false, reason: 'task_changed' });
+  assert.deepEqual(await w.queue.addByItself('app', 'A-9'), { queued: false, reason: 'task_not_found' });
+  // A job that ended does not keep it out.
+  await w.jobs.write(jobRecord('app', 'A-3', 'failed'));
+  assert.deepEqual(await w.queue.addByItself('app', 'A-3', taskSha256(a3)), { queued: true, position: 2 });
+  assert.deepEqual(await queued(w), ['app/A-1', 'app/A-3']);
+  assert.deepEqual(added, ['app/A-1', 'app/A-3']);
+  // The history: queued_by_itself by the factory with the Task text's sha256, and no change outside the factory.
+  const events = await history.read('app', 'A-1');
+  assert.deepEqual(events.map((event) => [event.kind, event.by, event.sha256]), [['queued_by_itself', 'factory', taskSha256(a1)]]);
+  const timeline = await history.timeline('app', 'A-1', { sha256: taskSha256(a1), mtime: new Date().toISOString() });
+  assert.deepEqual(timeline.filter((entry) => entry.ts !== null).map((entry) => [entry.kind, entry.text]), [['queued_by_itself', 'Queued by itself after a ready check']]);
+  // Nothing was started: the queue is held.
+  assert.deepEqual(w.execution.starts, []);
+});
+
+test('SF-234 Fix 1 R1: addByItself looks under the ticket\'s lock: a write while it waits for the lock is seen (task_changed), nothing queued; without a check sha256 a Task that needs a check is not queued', TIMEOUT, async () => {
+  const w = await world('queue-by-itself-lock');
+  await autoQueue(w);
+  await w.queue.hold();
+  const ready = await put(w, 'L-1');
+  let pending!: ReturnType<RunQueue['addByItself']>;
+  // As write_task does: the write under the ticket's lock. The ready check of the old text ends meanwhile.
+  await w.queue.withTicket('app', 'L-1', async () => {
+    pending = w.queue.addByItself('app', 'L-1', taskSha256(ready));
+    // Long enough for addByItself to look and queue, were it not waiting for the lock.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await put(w, 'L-1', 'scope: [README.md]\n');
+  });
+  assert.deepEqual(await pending, { queued: false, reason: 'task_changed' });
+  assert.deepEqual(await queued(w), []);
+  // The lock is free again: the entry of a ready version is written while addByItself holds it.
+  const now = await readFile(join(w.repo, '.software-factory', 'L-1.md'), 'utf8');
+  assert.deepEqual(await w.queue.addByItself('app', 'L-1', taskSha256(now)), { queued: true, position: 1 });
+  // write_task's not_needed: a small Task joins; one that needs a check by the time of the look does not.
+  await put(w, 'N-1', 'scope: [README.md]\n');
+  assert.deepEqual(await w.queue.addByItself('app', 'N-1'), { queued: true, position: 2 });
+  await put(w, 'N-2');
+  assert.deepEqual(await w.queue.addByItself('app', 'N-2'), { queued: false, reason: 'task_changed' });
+  assert.deepEqual(await queued(w), ['app/L-1', 'app/N-1']);
+});
+
+test('SF-234: a ticket the user removed does not join by itself again until its Task file changes; adding it by hand forgets the removal', TIMEOUT, async () => {
+  const w = await world('queue-by-itself-removed');
+  await autoQueue(w);
+  await w.queue.hold();
+  const first = await put(w, 'R-1');
+  assert.equal((await w.queue.addByItself('app', 'R-1', taskSha256(first))).queued, true);
+  await w.queue.remove('app', 'R-1');
+  const removedFile = join(w.env.state, QUEUE_REMOVED_FILE);
+  assert.deepEqual(JSON.parse(await readFile(removedFile, 'utf8')), [{ workspace: 'app', ticket: 'R-1', sha256: taskSha256(first) }]);
+  // A re-check of the same text ends ready again: still out.
+  assert.deepEqual(await w.queue.addByItself('app', 'R-1', taskSha256(first)), { queued: false, reason: 'removed_by_user' });
+  assert.deepEqual(await queued(w), []);
+  // The Task file changes: its ready check queues it, and the removal goes.
+  const second = await put(w, 'R-1', 'scope: [README.md]\n');
+  assert.deepEqual(await w.queue.addByItself('app', 'R-1', taskSha256(second)), { queued: true, position: 1 });
+  assert.deepEqual(JSON.parse(await readFile(removedFile, 'utf8')), []);
+  // Removed again, then added by hand: the removal is forgotten, so a later ready check is not refused for it.
+  await w.queue.remove('app', 'R-1');
+  await w.queue.add('app', 'R-1');
+  assert.deepEqual(JSON.parse(await readFile(removedFile, 'utf8')), []);
+  // A removal of a ticket whose Task file is gone records nothing.
+  await put(w, 'R-2');
+  await w.queue.add('app', 'R-2');
+  await rm(join(w.repo, '.software-factory', 'R-2.md'));
+  await w.queue.remove('app', 'R-2');
+  assert.deepEqual(JSON.parse(await readFile(removedFile, 'utf8')), []);
+  // An invalid file counts as empty.
+  await writeFile(removedFile, 'not json');
+  assert.deepEqual(await new RemovedStore(w.env.state).read(), []);
+});
+
+test('SF-234 Fix 4 R3: queued_by_itself is recorded under the ticket\'s lock: a Save asked for meanwhile waits, so the newest history entry is the saved Task and nothing reads as changed outside the factory', TIMEOUT, async () => {
+  const history = new TicketHistory(join(temp, 'queue-by-itself-history-lock'));
+  // The queued_by_itself append tells the test and waits for it.
+  let reached!: () => void;
+  const atAppend = new Promise<void>((resolve) => (reached = resolve));
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  const gated: Pick<TicketHistory, 'append'> = {
+    append: async (workspace, ticket, event) => {
+      if (event.kind === 'queued_by_itself') {
+        reached();
+        await gate;
+      }
+      await history.append(workspace, ticket, event);
+    },
+  };
+  const w = await world('queue-by-itself-history-lock', { history: gated });
+  await autoQueue(w);
+  await w.queue.hold();
+  const first = await put(w, 'H-1');
+  const adding = w.queue.addByItself('app', 'H-1', taskSha256(first));
+  await atAppend;
+  // The dashboard's Save: its write and its "edited" record under the ticket's lock, asked for now.
+  const second = task('H-1', 'Job H-1').replace('base: main\n', 'base: main\nscope: [README.md]\n');
+  let saved = false;
+  const saving = w.queue.withTicket('app', 'H-1', async () => {
+    await writeTask(await resolveWorkspace('app', w.env.config), 'H-1', second, w.jobs, { record: (sha256) => history.append('app', 'H-1', { kind: 'edited', by: 'you', sha256 }) });
+    saved = true;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(saved, false, 'the Save waits for the history entry');
+  release();
+  assert.deepEqual(await adding, { queued: true, position: 1 });
+  await saving;
+  const events = await history.read('app', 'H-1');
+  assert.deepEqual(events.map((event) => [event.kind, event.sha256]), [['queued_by_itself', taskSha256(first)], ['edited', taskSha256(second)]]);
+  const timeline = await history.timeline('app', 'H-1', { sha256: taskSha256(second), mtime: new Date().toISOString() });
+  assert.equal(timeline.some((entry) => entry.kind === 'changed_outside'), false);
+});
+
+test('SF-234 Fix 3 R2: remove reads the Task text and records the removal under the ticket\'s lock: a Save meanwhile waits and lands after, so the changed Task joins by itself', TIMEOUT, async () => {
+  const w = await world('queue-by-itself-remove-lock');
+  await autoQueue(w);
+  // While gated, the next resolve (remove's, after its splice) tells the test and waits for it.
+  let gated = false;
+  let reached!: () => void;
+  const atRead = new Promise<void>((resolve) => (reached = resolve));
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  const queue = new RunQueue(w.store, w.execution, w.setup, w.jobs, {
+    resolve: async (name) => {
+      if (gated) {
+        gated = false;
+        reached();
+        await gate;
+      }
+      return resolveWorkspace(name, w.env.config);
+    },
+  });
+  await queue.hold();
+  const first = await put(w, 'G-1');
+  assert.equal((await queue.addByItself('app', 'G-1', taskSha256(first))).queued, true);
+  gated = true;
+  const removing = queue.remove('app', 'G-1');
+  await atRead;
+  // The dashboard's Save: its write under the ticket's lock, asked for while remove holds it.
+  let second = '';
+  const saving = queue.withTicket('app', 'G-1', async () => {
+    second = await put(w, 'G-1', 'scope: [README.md]\n');
+  });
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.equal(second, '', 'the Save waits for the removal');
+  release();
+  await Promise.all([removing, saving]);
+  // The removal is of the text the user removed; the saved text is a change, and its ready check queues it.
+  assert.deepEqual(JSON.parse(await readFile(join(w.env.state, QUEUE_REMOVED_FILE), 'utf8')), [{ workspace: 'app', ticket: 'G-1', sha256: taskSha256(first) }]);
+  assert.notEqual(second, first);
+  assert.deepEqual(await queue.addByItself('app', 'G-1', taskSha256(second)), { queued: true, position: 1 });
+});
+
+test('SF-234: three parts of one ticket whose checks end in the order 3, 1, 2 stand in the queue as 1, 2, 3; other tickets keep their place and a plain one goes to the end', TIMEOUT, async () => {
+  const w = await world('queue-by-itself-parts');
+  await autoQueue(w);
+  await w.queue.hold();
+  const part = (n: number): string => `part_of: P-0\nslice: ${n}/3\n`;
+  await put(w, 'X-1');
+  await w.queue.add('app', 'X-1');
+  const parts = new Map<number, string>();
+  for (const n of [1, 2, 3]) {
+    parts.set(n, await put(w, `P-${n}`, part(n)));
+  }
+  // A part of another ticket, already queued, is not one of these.
+  await put(w, 'Q-1', 'part_of: Q-0\nslice: 1/2\n');
+  await w.queue.add('app', 'Q-1');
+  for (const n of [3, 1, 2]) {
+    assert.equal((await w.queue.addByItself('app', `P-${n}`, taskSha256(parts.get(n)!))).queued, true);
+  }
+  assert.deepEqual(await queued(w), ['app/X-1', 'app/Q-1', 'app/P-1', 'app/P-2', 'app/P-3']);
+  const plain = await put(w, 'Y-1');
+  assert.deepEqual(await w.queue.addByItself('app', 'Y-1', taskSha256(plain)), { queued: true, position: 6 });
 });

@@ -63,7 +63,7 @@ import {
   fetchText, forgeTargets, freeSpace, type HealthDeps, healthExitCode, healthLines, httpAnswers, type QueueFacts, runChecks, runCheckCommand,
 } from './health.js';
 import { liveOwner } from './pid-lock.js';
-import { CheckStore, checkLines, checkSettings, refuseDraft, runTaskCheck, TaskChecks } from './task-check.js';
+import { type CheckRecord, CheckStore, checkLines, checkSettings, recordVerdict, refuseDraft, runTaskCheck, TaskChecks } from './task-check.js';
 import { AutoChecks, planCheck } from './task-check-auto.js';
 import { TicketHistory } from './ticket-history.js';
 import { parseFrontMatter, readTask, TASK_DIR, TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
@@ -223,17 +223,28 @@ async function serve(options: { tunnel?: 'off' } = {}): Promise<{ dashboard: URL
     onAdded: (workspace, ticket) => void autoChecks?.triggerIfUnchecked(workspace, ticket),
     // The updating marker: no start and no limit reset while sf update drains or builds.
     updating: () => updateMarked(config.stateDir),
+    // A ticket queued by itself (auto_queue) is recorded in its history.
+    history,
   });
+  // A ready check, automatic or the dashboard's Check, puts its ticket in the queue in a workspace
+  // with auto_queue (addByItself).
+  const queueByItself = (workspace: string, ticket: string, record: CheckRecord): void => {
+    void runQueue.addByItself(workspace, ticket, record.sha256).catch((error: unknown) => console.error(error));
+  };
   // The Task checks: started from the dashboard, read by the Context owner's task_check; an ended
   // check reaches every page.
   // A check's worktree shares the checkout's Git directory: when the last check of the workspace
   // ended, the config lock its sandbox left goes unless a job runs there.
   const checks: TaskChecks = new TaskChecks({
     ...checkSettings(config, configDir()), resolve: (name) => resolveWorkspace(name),
-    onSettled: (workspace, ticket) => {
+    onSettled: (workspace, ticket, settled) => {
       dashboard?.refreshSetup();
       if (!checks.runningIn(workspace)) {
         void execution.afterTaskCheck(workspace, ticket);
+      }
+      // The dashboard's Check that ended ready queues as an automatic one does (onReady).
+      if (!settled.auto && settled.record !== undefined && recordVerdict(settled.record) === 'ready') {
+        queueByItself(workspace, ticket, settled.record);
       }
       // A queued ticket may be ready after this check.
       void runQueue.schedule();
@@ -253,6 +264,7 @@ async function serve(options: { tunnel?: 'off' } = {}): Promise<{ dashboard: URL
         dashboard?.refreshSetup();
         void notifyTaskCheck(record, notifyConfig(), workspaceNotifyMode);
       },
+      onReady: queueByItself,
       // The updating marker: a check due meanwhile is recorded for the catch-up.
       update: { updating: () => updateMarked(config.stateDir), skipped: (workspace, ticket) => recordSkippedCheck(config.stateDir, { workspace, ticket }) },
     });

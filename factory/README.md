@@ -822,7 +822,7 @@ rounds are counted from those records), and an older Stream shows the new `tests
 
 The Task check (SF-054, `src/task-check.ts`) reads a Task file before Start, the way the
 Elephant–Goldfish model reviews a plan before anyone builds it: with a reader that sees only the
-document and the code. It only advises: Start is never refused for it; the run queue starts a
+document, the Tasks it builds on and the code. It only advises: Start is never refused for it; the run queue starts a
 ticket only once it is ready, unless the user says Start anyway (section Run queue). `sf serve`
 runs it by itself after each change of a Task file (below); the user can always press Check.
 
@@ -906,7 +906,8 @@ runs it by itself after each change of a Task file (below); the user can always 
   filtered environment, `settingSources: ['project']`, no auto-memory, no instruction file above
   the checkout; `maxTurns` `SF_TASK_CHECK_MAX_TURNS` (default 30), model `SF_REVIEW_MODEL`. Its
   prompt is fixed instructions, the coding rules read at the commit of its checkout (SF-059,
-  section Coding rules) and the Task file, nothing else: not the Context owner's conversation, the
+  section Coding rules), the Task file and, for a Task with `builds_on`, the Task files it builds
+  on (below), nothing else: not the Context owner's conversation, the
   user's request, the jobs, their reviews or the ledger. When the workspace has decision documents
   (the tracked files of its checkout that the `decision_docs` globs of `norms.json` match, section
   Norms; listed as for the reviewers, section Jobs, by `src/decisions.ts`), four more instruction
@@ -917,10 +918,11 @@ runs it by itself after each change of a Task file (below); the user can always 
   something of the product no document covers (a concept's name or meaning, a rule of the domain,
   what the user sees or may do) is a `decision`; coding style is not part of this. Without
   documents the prompt is as before, byte for byte.
-- **What it can read** (the repository, nothing else):
+- **What it can read** (the repository and, for a Task with `builds_on`, the Task files it builds on):
   - It runs in its own checkout: a detached worktree of the workspace's work checkout at the Task's
     `base` (fetched from `origin` when there is one, as Start does: the code the Implementer starts
-    from), in a new directory `check-*` under `<system temp>/sf-task-checks-<uid>/` (SF-100),
+    from); a Task with `builds_on` starts from the change of the ticket it builds on instead, which
+    the check reads from that ticket's Task file (below), in a new directory `check-*` under `<system temp>/sf-task-checks-<uid>/` (SF-100),
     removed when the check ends. That parent is made by `sf serve` at its start and by a check when
     it is missing, mode 0700; an existing one must be a real directory (not a link) of the
     factory's user, a wider mode is narrowed to 0700; otherwise `sf serve` logs one warning and
@@ -950,6 +952,38 @@ runs it by itself after each change of a Task file (below); the user can always 
     the state directory (jobs, ledgers, requests, checks) and the config directory, and the path
     denials of every session (SF-100, section Jobs) apply too, but the Task checks' parent.
   - The stored check records the base `commit` it read.
+- **A Task that builds on another** (`src/builds-on.ts`): the session cannot read
+  `.software-factory/`, so the factory gives it the Task files of the chain in its prompt.
+  - The walk, `buildsOnChain`: from the Task file, the Task file of the ticket its `builds_on`
+    names (the active file `.software-factory/<ticket>.md` first, then the archived copy under
+    `archive/`), then the one that Task builds on, up to the first Task without `builds_on`. It
+    never throws, and reads no file for a Task without `builds_on`.
+  - What is sent, `checkChain`: the Tasks of the chain that are not merged (by `ticketMerged`; a
+    merged ticket and every ticket above it are not sent, the repository holds their code), each
+    whole and never cut, nearest first, at most `MAX_BUILDS_ON_BYTES` (128 KiB) of text in all. A
+    Task that does not fit is left out and the next ones are still tried; the prompt names the
+    ones left out, and the checker takes what the checked Task says they introduce as given.
+  - The prompt changes in three places: its second line says the Implementer does not start from
+    the checkout but from the change of the tickets it builds on, and that the `<builds_on_task>`
+    blocks are part of the plan; a `- Builds on:` line after the `- Codebase:` one says that what
+    a block's Task creates, changes or removes counts as code the Implementer starts from, a claim
+    a block contradicts is a `contradiction` (the block's ticket and section in `where`), a name
+    neither the repository nor a block introduces is `missing`, and a block's own Task gets no
+    finding (with the sentence naming the Tasks left out, when there are any); and one
+    `<builds_on_task ticket="…" path="…">` block per Task sent, in the chain's order, right before
+    `<task_file>`. Without a chain, or with the whole chain merged, the prompt is as before, byte
+    for byte.
+  - A chain that cannot be used fails the check, and no session runs: a ticket with no Task file
+    ("T-2 builds on T-1, which has no Task file."), a Task file that is not valid ("T-2 builds on
+    T-1, whose Task file is not valid."), a Task file that is still the skeleton ("T-2 builds on
+    T-1, whose Task file is still the skeleton."), a chain that comes back to a ticket it already
+    holds ("The builds_on chain of T-2 comes back to a ticket it already holds: T-2 → T-3.", the
+    chain read before the repeat) and a chain longer than `MAX_SLICES` ("The builds_on chain of
+    T-2 is longer than 20 Tasks."). A merged ticket is not held to these.
+  - The record's `builds_on`: one `{ticket, sha256, how}` per Task of the chain, `how` `sent`,
+    `left_out` or `merged`; set when the chain is not empty, on a checked record and on the record
+    of a session that failed. `sf check-task` prints it as its second line:
+    `Builds on: T-2 (sent), T-1 (merged)`.
 - **The output** (one zod definition, `checkOutput`, sent as the JSON schema): `paraphrase` first,
   what the Task proposes in the checker's own words (3–8 sentences), written before any finding;
   `findings`, each `{kind, severity, where, problem, expected}` with `kind` `decision` (a choice the
@@ -972,7 +1006,7 @@ runs it by itself after each change of a Task file (below); the user can always 
 - **Storage**: `<state>/checks/<ws>/<ticket>/<first 16 hex of the Task file's sha256>.json`: the
   output, the model, the estimated cost and the times; never in the work checkout. A later check
   of the same Task file replaces it. A check of another version of the Task file than the current
-  one is **stale**. A failed check (an error, a turn limit, no or an invalid output) is stored as
+  one, or made before a Task file it builds on changed, is **stale**. A failed check (an error, a turn limit, no or an invalid output) is stored as
   `failed` with its error, withheld or redacted like a failed review's (SF-045); it never counts
   as ready.
 - **Where it runs and shows**: `sf check-task <workspace> <ticket>` runs one in its own process
@@ -1215,7 +1249,9 @@ SF-065. The agents of a job see the images its Task file refers to without havin
   Task text's sha256 without a reference, otherwise the sha256 of the text, a newline and the
   sorted `<name>:<sha256>` lines of the referenced images (`<name>:missing` for one that cannot
   be read; an archived Task file's images are read from `archive/<ticket>/`), so a changed image
-  makes the check stale. `write_task`'s sha256 and `job.json`'s `task_sha256` stay text-only.
+  makes the check stale. For a Task with `builds_on` the lines of its chain follow the image
+  lines, in the chain's order (`builds_on <ticket>:<sha256>`, `chainLines` in
+  `src/builds-on.ts`), so a changed Task file in the chain makes the check stale too. `write_task`'s sha256 and `job.json`'s `task_sha256` stay text-only.
 - **Logs**: the `prompt` event records the image names, types and sizes (`images`), never the
   bytes; image data in a logged SDK message (a Read of an image) is replaced by a note of its
   length. The Stream shows "Images: 1.png, 2.png" under the prompt. A Task file without a
@@ -1374,6 +1410,7 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   from `origin/<base>` as any job. The job records `builds_on` and `builds_on_commit` (the commit
   it started from; `null` when it started from its base); both are `null` on every other job, and
   a record written without them reads them as `null`. MR preparation and Approve treat it as section MR preparation says.
+  The Task check reads the chain's Task files (section Task check, A Task that builds on another).
 - When the session is idle (its last queued turn ended), the factory publishes an iteration: the
   Report (the last assistant text, plus `## Changed files` and `## Denied actions`), the Patch
   (`git diff <base commit>` plus untracked files in the worktree, without ignored,

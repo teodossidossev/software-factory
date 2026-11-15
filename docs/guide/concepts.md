@@ -15,8 +15,8 @@ says where the dashboard shows a different label.
    (the `## Review brief`). You can plan with ChatGPT, with Claude Code, by hand, or start from the
    dashboard's New ticket ([Planning](planning.md)).
 3. **The Task check reads the plan** before anything is built: a fresh read-only Claude session sees
-   only the Task file and the repository, says in its own words what the Task asks, and lists what is
-   missing, contradictory or left undecided. It only advises.
+   only the Task file, the Tasks it builds on and the repository, says in its own words what the
+   Task asks, and lists what is missing, contradictory or left undecided. It only advises.
 4. **You start the job**, or put the ticket in the **queue**, which starts it when a slot is free,
    its plan check is `ready` and the tickets it waits for are merged.
 5. **The Implementer works**: Claude Code, headless, in a Git worktree of its own on a new branch
@@ -58,7 +58,7 @@ plan ─► Task file ─► Task check ─► Start / queue ─► iteration �
 | **Task file** | Task | `.software-factory/<ticket>.md` in the workspace's checkout: front matter, the task, the `## Review brief`, and the `## Fix N` sections the factory appends. The complete instruction for the Implementer and the brief for the reviewers. |
 | **Ticket draft** (skeleton) | `draft` | A Task file written by New ticket before anyone planned it: front matter and a status line. It cannot be started or queued. |
 | **Context owner** | Context owner, Plan with (ChatGPT or Claude Code) | The model you plan with. It only plans: reads the repository, writes the Task file. It never starts, reviews or approves. |
-| **Task check** (`sf check-task`) | Check, Check the plan, Plan check | A fresh read-only Claude session that reads the Task file and the repository before Start and gives `ready`, `not_ready` or `failed`, with findings. Only advises; the queue waits for `ready`. |
+| **Task check** (`sf check-task`) | Check, Check the plan, Plan check | A fresh read-only Claude session that reads the Task file, the Tasks it builds on and the repository before Start and gives `ready`, `not_ready` or `failed`, with findings. Only advises; the queue waits for `ready`. |
 | **Queue** (`sf queue`) | the Queue column, "Run up to N jobs at once" | One ordered list of planned tickets over all workspaces and the limit `max_running`; `sf serve` starts the next one by itself when a slot is free. |
 | **Job** | a card in Implementing, Reviewing, Your turn or Done | One ticket being implemented on one branch. Its state is one of the states below. |
 | **Runner** (`sf run`) | | The process of one job, detached from `sf serve`, so restarting `sf serve` leaves the job running. |

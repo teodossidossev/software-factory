@@ -441,8 +441,32 @@ export async function unmergedPaths(cwd: string): Promise<string[]> {
 }
 
 // How the factory's commit and rebase at Clean ended: the branch is ready, the rebase stopped on
-// conflicts in files (and stays in progress), or a failure (no rebase left in progress).
-export type Prepared = { kind: 'ready' } | { kind: 'conflict'; files: string[] } | { kind: 'failed'; failure: MrFailure };
+// conflicts in files (and stays in progress), or a failure (no rebase left in progress); or
+// nothing was committed because the staged tree is not the reviewed one (unreviewed): paths are
+// the paths that differ, null when they cannot be listed; nothing is left staged and HEAD is at
+// the base commit.
+export type Prepared =
+  | { kind: 'ready' }
+  | { kind: 'conflict'; files: string[] }
+  | { kind: 'failed'; failure: MrFailure }
+  | { kind: 'unreviewed'; paths: string[] | null };
+
+// The most paths the messages of an unreviewed change name; the rest are counted.
+export const MAX_UNREVIEWED_PATHS = 50;
+
+// The Report section of the iteration that brings an unreviewed change back to review.
+export function unreviewedNote(iteration: number, paths: string[] | null): string {
+  let changed = `not known (the tree recorded for iteration ${iteration} cannot be read)`;
+  if (paths !== null) {
+    const more = paths.length - MAX_UNREVIEWED_PATHS;
+    changed = paths.slice(0, MAX_UNREVIEWED_PATHS).join(', ') + (more > 0 ? ` and ${more} more` : '');
+  }
+  return [
+    '## MR preparation',
+    '',
+    `Nothing was committed: the worktree no longer matches iteration ${iteration}, the iteration that was reviewed. Changed since then: ${changed}. This iteration is the worktree as it is now.`,
+  ].join('\n');
+}
 
 // Aborts a rebase in progress; true when there was one (also one that sf serve left behind when
 // it restarted during a conflict turn).
@@ -461,11 +485,19 @@ export async function abortRebase(cwd: string): Promise<boolean> {
 // onlyOwn (a job that builds on another ticket, src/builds-on.ts): only that one commit is replayed
 // onto targetCommit (`rebase --onto <targetCommit> <baseCommit>`), so the other ticket's earlier
 // prepared commit under it, which its new one does not contain, is left behind.
-export async function commitAndRebase(cwd: string, input: { baseCommit: string; targetCommit: string; mrText: string; onlyOwn?: boolean }): Promise<Prepared> {
-  const { baseCommit, targetCommit, mrText } = input;
+// With reviewedTree (the commit_tree of the reviewed iteration), a staged tree that is not it is
+// not committed (unreviewed).
+export async function commitAndRebase(cwd: string, input: { baseCommit: string; targetCommit: string; mrText: string; onlyOwn?: boolean; reviewedTree?: string }): Promise<Prepared> {
+  const { baseCommit, targetCommit, mrText, reviewedTree } = input;
   await factoryGitOk(cwd, ['reset', '-q', '--mixed', baseCommit]);
   for (const chunk of chunks(await commitPaths(cwd, baseCommit))) {
     await factoryGitOk(cwd, ['add', '--all', '--', ...chunk.map(literal)]);
+  }
+  if (reviewedTree !== undefined && (await factoryGitOk(cwd, ['write-tree'])).trim() !== reviewedTree) {
+    const listed = await factoryGit(cwd, ['diff-index', '--cached', '--name-only', '-z', reviewedTree]);
+    const differ = listed.code === 0 && !listed.truncated ? nulList(listed.stdout.toString('utf8')) : [];
+    await factoryGitOk(cwd, ['reset', '-q', '--mixed', baseCommit]);
+    return { kind: 'unreviewed', paths: differ.length > 0 ? differ : null };
   }
   const staged = await factoryGit(cwd, ['diff', '--cached', '--quiet']);
   if (staged.code === 0) {

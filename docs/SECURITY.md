@@ -91,6 +91,15 @@ refused), and the factory's test command passed in a sandbox without network on 
   `.claude`, `.mcp.json` or `.codex` fails; so does one where any of them is a link, before it
   starts. The merge runs them again, in the same sandbox, on the change merged into the base as
   it is now; a conflict or a failure refuses the merge, and nothing is merged.
+- **What is committed is what the reviewers saw.** Every published iteration records the tree the
+  factory's commit would have: the worktree's change built in a temporary index, without
+  `.software-factory/` (the MR text, the steps checklist). MR preparation stages the worktree's
+  change and commits it only when its tree is the one the reviewed iteration recorded, whichever
+  way the job got there (a clean verdict, your Accept or Skip, Retry). When the test run, the MR
+  text turn or anything else changed a file of the change after that review, nothing is
+  committed: the worktree as it is goes back to review as a new iteration, whose Report names the
+  changed paths. The comparison is of the commit before its rebase; a rebase conflict's
+  resolution goes back to review as before.
 - **The Codex gate runs in a read-denying wrapper.** It sees no secrets and no other jobs. Secrets
   in its findings are masked. The wrapper refuses new Unix sockets, so the gate cannot reach your
   X server, session bus or other local services through one.
@@ -172,12 +181,6 @@ refused), and the factory's test command passed in a sandbox without network on 
   read (`/etc`, `/opt`).
 - **A phone that is lost unlocked** opens the dashboard. The dangerous actions still need the
   ticket typed. Keep the QR code with the token private.
-- **The commit is not compared with what the reviewers saw.** They review each iteration's Patch.
-  After the last clean review, the workspace's test command runs in the worktree, then the
-  Implementer writes the MR text in a turn of its own, and the factory commits the worktree as it
-  is. A source file the test run wrote, or one the MR text turn changed, reaches the merge request
-  unreviewed: the test run is checked for changes to `.git` and the agent configuration only, and
-  the MR text turn is kept to the MR text by its prompt alone.
 - **The reviewers read the Task file in the worktree.** The Claude review, the Codex gate and the
   simplification pass read `.software-factory/<ticket>.md` from the job's worktree, where the
   Implementer can write. Only a prompt rule keeps it from editing that file; the factory's own copy

@@ -15,7 +15,7 @@ import { checkBranchFree, isAncestor, savedRef, settleAfterPush, subjectOf } fro
 import { handoffSensitive } from '../handoff-sensitive.js';
 import { claudeReviews, type FileChange, type Handover, type Job, type JobMr, type JobState, now } from '../jobs.js';
 import { pushedBranch, targetBranch } from '../continues.js';
-import { abortRebase, branchesOnOrigin, commitAndRebase, commitMessage, continueRebase, gitFailure, mergeRequestLink, messageText, mrMessage, mrProblems, mrTextProblem, originUrl, parseOrigin, PROTECTED_BRANCHES, pushBranch, readMrText, refuseGuardedLfs, rebaseInProgress, resolveTarget, rewriteMessage, sameMessage, unmergedPaths, validBranchName, withAccepted, withChecks, withFindings, withNits, withSimplifications, worktreesOn } from '../mr.js';
+import { abortRebase, branchesOnOrigin, commitAndRebase, commitMessage, continueRebase, gitFailure, MAX_UNREVIEWED_PATHS, mergeRequestLink, messageText, mrMessage, mrProblems, mrTextProblem, originUrl, parseOrigin, PROTECTED_BRANCHES, pushBranch, readMrText, refuseGuardedLfs, rebaseInProgress, resolveTarget, rewriteMessage, sameMessage, unmergedPaths, unreviewedNote, validBranchName, withAccepted, withChecks, withFindings, withNits, withSimplifications, worktreesOn } from '../mr.js';
 import { type LedgerEntry, notFixed } from '../ledger.js';
 import { MergeChecks } from '../merge-check.js';
 import { buildPatch, notificationLine, type Patch } from '../patch.js';
@@ -189,7 +189,8 @@ export class MrPart {
   // The end of a turn of MR preparation (mark_clean). After the MR text turn: validate the text,
   // then the factory commits and rebases in the worktree. A rebase that stops on conflicts stays
   // in progress for one conflict turn, whose end comes back here (conflictIdle). Ready: record
-  // the branch tip, remove the worktree and hand the job to the user.
+  // the branch tip, remove the worktree and hand the job to the user. A worktree that no longer
+  // matches the reviewed iteration's commit_tree is not committed and goes back to review.
   async mrIdle(job: Job, live: Live, outcome: IdleOutcome): Promise<void> {
     const cwd = live.cwd;
     // The job as last written: with mr_conflict_turn once the conflict turn is under way.
@@ -203,9 +204,13 @@ export class MrPart {
         await this.conflictIdle(job, live, outcome);
         return;
       }
-      const stopped = outcome.ok ? await implementerQuestion(this.#store.jobs, job, cwd) : outcome;
-      if (stopped !== undefined) {
-        await needsHuman(stopped.code, stopped.message);
+      if (!outcome.ok) {
+        await needsHuman(outcome.code, outcome.message);
+        return;
+      }
+      const question = await implementerQuestion(this.#store.jobs, job, cwd);
+      if (question !== undefined) {
+        await needsHuman(question.code, question.message);
         return;
       }
       // The guard's terms, before anything quotes the MR text: an invalid title is masked.
@@ -266,9 +271,14 @@ export class MrPart {
         }
       }
       const targetCommit = job.target_commit!;
-      const prepared = await this.#locks.gitLocked(job.workspace, () => commitAndRebase(cwd, { baseCommit: job.base_commit!, targetCommit, mrText: mrText.text, onlyOwn: job.builds_on !== null }));
+      const reviewedTree = (await this.#store.jobs.readMeta(job.workspace, job.ticket, job.iteration)).commit_tree;
+      const prepared = await this.#locks.gitLocked(job.workspace, () => commitAndRebase(cwd, { baseCommit: job.base_commit!, targetCommit, mrText: mrText.text, onlyOwn: job.builds_on !== null, reviewedTree }));
       if (prepared.kind === 'failed') {
         await needsHuman(prepared.failure.code, prepared.failure.message);
+        return;
+      }
+      if (prepared.kind === 'unreviewed') {
+        await this.#unreviewed(job, live, outcome, prepared.paths);
         return;
       }
       if (userText !== undefined) {
@@ -365,6 +375,18 @@ export class MrPart {
     const note = `## MR preparation\n\nThe rebase onto ${targetRef} (${targetCommit}) had conflicts in ${files.join(', ')}, resolved by the Implementer. The Patch is now against the target.`;
     const { job: published, changes } = await this.#peers.turns.publish(rebased, live, outcome, await buildPatch(cwd, targetCommit), [note]);
     // from: preparing_mr (mrIdle, from #idle), working (#idle)
+    await this.#peers.reviews.startReview(await this.#store.transition(published, 'awaiting_review', 'mr_turn_end', undefined, [notificationLine(changes)]));
+  }
+
+  // MR preparation committed nothing: the worktree no longer matches the reviewed iteration. The
+  // worktree as it is goes back to review as the next iteration, against the same base, as after
+  // a conflict turn; base_commit, target_commit and mr_attempts stay.
+  async #unreviewed(job: Job, live: Live, outcome: Extract<IdleOutcome, { ok: true }>, paths: string[] | null): Promise<void> {
+    const named = paths?.slice(0, MAX_UNREVIEWED_PATHS) ?? null;
+    const more = paths === null ? 0 : Math.max(0, paths.length - MAX_UNREVIEWED_PATHS);
+    await this.#store.jobs.appendEvent(job.workspace, job.ticket, { ts: now(), iteration: job.iteration, type: 'unreviewed_change', paths: named, more });
+    const { job: published, changes } = await this.#peers.turns.publish(job, live, outcome, await buildPatch(live.cwd, job.base_commit!), [unreviewedNote(job.iteration, paths)]);
+    // from: preparing_mr (mrIdle)
     await this.#peers.reviews.startReview(await this.#store.transition(published, 'awaiting_review', 'mr_turn_end', undefined, [notificationLine(changes)]));
   }
 

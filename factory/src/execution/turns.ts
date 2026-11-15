@@ -8,6 +8,7 @@ import { join, resolve as resolvePath, sep } from 'node:path';
 import { withoutImageData } from '../attachments.js';
 import { FactoryError } from '../errors.js';
 import { runGit } from '../git.js';
+import { worktreeTree } from '../guard.js';
 import { attachWorktree, checkBranchFree, isAncestor } from '../handoff.js';
 import { jobUserMessages } from '../job-stream.js';
 import { claudeReviews, type FileChange, type Handover, type Job, type JobState, now, type PauseStep, statesWith } from '../jobs.js';
@@ -377,14 +378,16 @@ export class TurnsPart {
     return marksOf(declared, scope, this.#settings.config.sensitivePaths);
   }
 
-  // Writes the next iteration (Report, Patch and the file list) and returns the job with its
-  // iteration counted.
+  // Writes the next iteration (Report, Patch, the file list and commit_tree, the tree the
+  // factory's commit of the worktree would have against the job's base) and returns the job with
+  // its iteration counted.
   async publish(job: Job, live: Live, outcome: Success, built: Patch, extraSections: string[]): Promise<{ job: Job; changes: FileChange[] }> {
     const { workspace: workspaceName, ticket } = job;
     const number = job.iteration + 1;
     const total = outcome.result.total_cost_usd ?? null;
     const previousTotal = number > 1 ? ((await this.#store.jobs.readMeta(workspaceName, ticket, number - 1)).cost_usd_total ?? null) : null;
     const changes = await fileChanges(live.cwd, job.base_commit!, built.files, await this.#marks(live.workspace, ticket));
+    const commitTree = await worktreeTree(live.cwd, job.base_commit!);
     const sections = [outcome.text.trim() || '(The Implementer wrote no report text.)', ...extraSections, changedFilesSection(built.files, built.truncated, changes)];
     if (outcome.denials.length > 0) {
       sections.push(['## Denied actions', '', ...outcome.denials.map((tool) => `- ${tool}`)].join('\n'));
@@ -407,6 +410,7 @@ export class TurnsPart {
         cost_usd_total: total,
         duration_ms: outcome.result.duration_ms ?? null,
         base_commit: job.base_commit!,
+        commit_tree: commitTree,
       },
     });
     return { job: { ...job, iteration: number }, changes };

@@ -206,14 +206,14 @@ function finishTicketForm(submission: number, planned: string | null): void {
 }
 
 // The ticket waiting for its row, once listed: its page opens only when the user is still where
-// the create left them (the board, no drawer); else it is dropped.
+// the create left them (a main view, the home or the board, no drawer); else it is dropped.
 function openAwaitedTicket(): void {
   const key = state.openWhenListed;
   if (key === null || ticketByKey(key) === null) {
     return;
   }
   state.openWhenListed = null;
-  if (ui.screen === 'board' && state.drawer === null) {
+  if ((ui.screen === 'board' || ui.screen === 'home') && state.drawer === null) {
     openTicket(key);
   }
 }

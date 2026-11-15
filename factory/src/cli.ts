@@ -40,7 +40,8 @@ import { localTime } from './local-time.js';
 import { collectMetrics, metricsLines } from './metrics.js';
 import { QueueStore, RunQueue } from './queue.js';
 import { followJobs, lockPath, runJob } from './runner.js';
-import { jobNotification, notifyConfig, notifyTaskCheck, sendNotification, stateNotifier } from './notify.js';
+import { applyNetDefaults } from './net-defaults.js';
+import { notifyConfig, notifyTaskCheck, sendNotification, stateNotifier, testNotification } from './notify.js';
 import {
   configDir, HANDOFF_MODES, ignoredWorkCheckouts, isHandoffMode, isNotifyMode, isWorkspaceColor, loadRegistry, resolveWorkspace, saveRegistry, setWorkspaceNotify, verifyCheckout,
   WORKSPACE_COLORS, workspaceColor, type WorkspaceEntry, workspaceNotify, workspaceNotifyMode,
@@ -746,12 +747,7 @@ async function notifyTest(args: string[]): Promise<void> {
   if (args.length !== 0) {
     throw new UsageError('notify-test takes no arguments.');
   }
-  const now = new Date().toISOString();
-  const job: Job = {
-    workspace: 'test', ticket: 'SF-TEST', branch: 'SF-TEST-notification', base: 'main', continues: null, builds_on: null, builds_on_commit: null,base_commit: null, worktree: null, prepared_commit: null,
-    target_commit: null, mr_attempts: 0, mr_conflict_turn: false, fixes: 0, gate_fixes: 0, gate_tokens: 0, state: 'pushed', iteration: 0, session_id: null, mr: null, created_at: now, updated_at: now,
-  };
-  const results = await sendNotification(jobNotification(job, ['A test notification from sf notify-test']), notifyConfig());
+  const results = await sendNotification(testNotification(new Date().toISOString()), notifyConfig());
   for (const result of results) {
     console.log(`${result.channel}: ${result.status} (${result.message})`);
   }
@@ -1476,6 +1472,7 @@ function guardEnvFile(): string[] {
 }
 
 async function main(argv: string[]): Promise<void> {
+  applyNetDefaults(); // before any connection: a longer connect attempt (src/net-defaults.ts)
   const [command, ...rest] = argv;
   // SF_* settings from the environment file (auth.env), for every command alike; sf guard's own
   // failure never quotes the file's line.

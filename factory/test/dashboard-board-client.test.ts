@@ -7,7 +7,9 @@
 // 15 s read of api/jobs, the toast, the run queue (SF-071: the stepper, the status line, the queued cards, the
 // toggle, the failed start, drag and drop and Alt+Up/Down; hidden without a queue), and no inline style or
 // prototype-only part; SF-084: the dependency chips and their states, Needed by, the highlight, the
-// chip's focus, the cycle line, the workspace stripe and chip, the filter chips and the ⋯ menu. Script checks, not browser acceptance: the manual steps are in factory/README.md.
+// chip's focus, the cycle line, the workspace stripe and chip, the filter chips and the ⋯ menu; SF-226: the home beside the board
+// (#home: the Home and Board tabs, Needs you oldest first with the board's buttons, the Coordinator card moved to the view
+// shown, the home's keys). Script checks, not browser acceptance: the manual steps are in factory/README.md.
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
@@ -438,10 +440,10 @@ test('board client (SF-160): "N waits for you" counts every workspace, hides at 
 test('board client (SF-160): the top bar\'s pages: the tabs with Board current and Archived\'s count, and the page select below 1100 px opening the same pages and drawers', async () => {
   const page = await openBoard([], [], [workspace('app')]);
   assert.deepEqual(page.document.querySelectorAll('.topbar .tabs button').map((tab) => [tab.id, tab.textContent, tab.getAttribute('aria-current')]), [
-    ['open-board', 'Board', 'page'], ['open-digest', 'Digest', null], ['open-stats', 'Stats', null], ['open-merge-requests', 'Merge requests', null], ['open-archived', 'Archived (0)', null], ['open-workspaces', 'Workspaces', null], ['open-skills', 'Skills', null],
+    ['open-home', 'Home', null], ['open-board', 'Board', 'page'], ['open-digest', 'Digest', null], ['open-stats', 'Stats', null], ['open-merge-requests', 'Merge requests', null], ['open-archived', 'Archived (0)', null], ['open-workspaces', 'Workspaces', null], ['open-skills', 'Skills', null],
   ]);
   const pages = page.$('page-select');
-  assert.deepEqual([pages.value, (pages.children as FakeElement[]).map((option) => option.textContent)], ['board', ['Board', 'Digest', 'Stats', 'Merge requests', 'Archived (0)', 'Workspaces', 'Skills']]);
+  assert.deepEqual([pages.value, (pages.children as FakeElement[]).map((option) => option.textContent)], ['board', ['Home', 'Board', 'Digest', 'Stats', 'Merge requests', 'Archived (0)', 'Workspaces', 'Skills']]);
   pages.value = 'workspaces';
   pages.dispatch('change');
   assert.deepEqual([page.$('drawer').hidden, pages.value], [false, 'board']);
@@ -1615,9 +1617,10 @@ test('board client (SF-119): a chip pointing into a folded column unfolds it (st
 });
 
 // The Coordinator card (coordinator.js): the board with api/coordinator answered by the test's
-// current state, and the stream's opening events.
-async function openCoordinator(answer: () => unknown): Promise<Page> {
+// current state, and the stream's opening events; hash: the page's address at load.
+async function openCoordinator(answer: () => unknown, hash = ''): Promise<Page> {
   const page = await loadPage(STATIC_DIR, (path) => (path === 'api/jobs' ? { jobs: [] } : path === 'api/coordinator' ? answer() : undefined));
+  page.location.hash = hash;
   page.document.dispatch('DOMContentLoaded');
   await page.flush();
   const stream = page.streams.at(-1)!;
@@ -1756,3 +1759,178 @@ async function loadBoard(jobs: Job[], clipboard: { writeText(text: string): Prom
   await page.flush();
   return page;
 }
+
+// SF-226: the home beside the board. Its cards; whether #home, #cols and #board are hidden; the
+// tabs marked as the page shown.
+const homeCards = (page: Page): FakeElement[] => page.$('home-needs-list').children.filter(isCard);
+const homeCard = (page: Page, key: string): FakeElement => homeCards(page).find((item) => item.dataset.key === key)!;
+const views = (page: Page): boolean[] => [page.$('home').hidden, page.$('cols').hidden, page.$('board').hidden];
+const currentTabs = (page: Page): string[] => ['open-home', 'open-board'].filter((id) => page.$(id).getAttribute('aria-current') === 'page');
+const HOME_SHOWN = [false, true, false];
+const BOARD_SHOWN = [true, false, false];
+
+test('board client (SF-226): the Home tab, the page select and #home at load show the home under the top bar; the Board tab the columns; #board at load the board; Escape stays on the home', async () => {
+  const page = await openBoard([job('T-1', 'needs_human')], []);
+  const pages = page.$('page-select');
+  assert.deepEqual([views(page), page.location.hash, currentTabs(page), pages.value], [BOARD_SHOWN, '', ['open-board'], 'board']);
+  page.$('open-home').click();
+  assert.deepEqual([views(page), page.location.hash, currentTabs(page), pages.value], [HOME_SHOWN, '#home', ['open-home'], 'home']);
+  page.key('Escape');
+  assert.deepEqual([views(page), page.location.hash], [HOME_SHOWN, '#home']);
+  page.$('open-board').click();
+  assert.deepEqual([views(page), page.location.hash, currentTabs(page), pages.value], [BOARD_SHOWN, '#', ['open-board'], 'board']);
+  // The page select: Home, and a drawer opened from the home leaves the select at Home.
+  pages.value = 'home';
+  pages.dispatch('change');
+  assert.deepEqual([views(page), page.location.hash, currentTabs(page), pages.value], [HOME_SHOWN, '#home', ['open-home'], 'home']);
+  pages.value = 'workspaces';
+  pages.dispatch('change');
+  assert.deepEqual([page.$('drawer').hidden, views(page), pages.value], [false, HOME_SHOWN, 'home']);
+
+  const home = await openBoard([job('T-1', 'needs_human')], [], [workspace('app')], '#home');
+  assert.deepEqual([views(home), home.location.hash, currentTabs(home), home.$('page-select').value, keys(home, 'you')], [HOME_SHOWN, '#home', ['open-home'], 'home', ['app/T-1']]);
+  const board = await openBoard([job('T-1', 'needs_human')], [], [workspace('app')], '#board');
+  assert.deepEqual([views(board), board.location.hash, currentTabs(board)], [BOARD_SHOWN, '#board', ['open-board']]);
+});
+
+test('board client (SF-226): Needs you lists the Your turn jobs of the workspaces the filter shows, the oldest wait first (a tie by key), with their count; none says so', async () => {
+  const jobs = [
+    job('N', 'needs_human', { updated_at: minutesAgo(30), error: { code: 'max_turns', message: 'x' } }),
+    job('R', 'ready_for_human_review', { updated_at: minutesAgo(90) }),
+    job('H', 'handed_over', { updated_at: minutesAgo(10), prepared_commit: 'a'.repeat(40) }),
+    { ...job('P', 'paused', { updated_at: minutesAgo(5) }), workspace: 'web' },
+    job('W', 'working', { updated_at: minutesAgo(120) }),
+    job('D', 'pushed', { updated_at: minutesAgo(200) }),
+  ];
+  const page = await openBoard(jobs, [], [workspace('app'), workspace('web')], '#home');
+  const count = (): string => page.$('home-needs-count').textContent;
+  assert.deepEqual([homeCards(page).map(keyOfCard), count()], [['app/R', 'app/N', 'app/H', 'web/P'], '4']);
+  const select = page.$('workspace-filter');
+  select.value = 'web';
+  select.dispatch('change');
+  assert.deepEqual([homeCards(page).map(keyOfCard), count()], [['web/P'], '1']);
+  select.value = '';
+  select.dispatch('change');
+  const at = minutesAgo(20);
+  page.streams.at(-1)!.emit('jobs', { jobs: [job('B', 'paused', { updated_at: at }), job('A', 'paused', { updated_at: at })] });
+  assert.deepEqual(homeCards(page).map(keyOfCard), ['app/A', 'app/B']);
+  page.streams.at(-1)!.emit('jobs', { jobs: [] });
+  assert.deepEqual([page.$('home-needs-list').children.map((child) => [(child as FakeElement).className, child.textContent]), count()], [[['empty', 'Nothing waits for you.']], '0']);
+});
+
+test('board client (SF-226): a Needs you card: the key, the chip, the code, the age, the title, the job page\'s sentence, its note and the board\'s buttons through the one listener; a click opens the job', async () => {
+  const gate = job('G', 'needs_human', { updated_at: minutesAgo(30), error: { code: 'gate_rounds', message: 'x' }, gate_fixes: 2, stop: { items: [{}, {}], saves_lines: null } });
+  const failed = job('F', 'needs_human', { updated_at: minutesAgo(25), error: { code: 'review_failed', message: 'overloaded' } });
+  const ready = job('R', 'ready_for_human_review', { updated_at: minutesAgo(20), handoff_skipped: { message: 'The checkout has changes.' } });
+  const paused = job('P', 'paused', { updated_at: minutesAgo(15), paused: { from: 'working', step: 'turn', at: minutesAgo(15) }, task_changed: true });
+  const evil = job('X', 'needs_human', { updated_at: minutesAgo(10), title: '<script>alert(1)</script>', error: { code: 'max_turns', message: 'x' } });
+  const page = await openBoard([gate, failed, ready, paused, evil], [], [workspace('app')], '#home');
+  const say = (key: string): string[] => {
+    const line = part(homeCard(page, key), 'hm-say')!;
+    return [line.className, line.textContent];
+  };
+
+  const g = homeCard(page, 'app/G');
+  assert.deepEqual([g.dataset.open, g.getAttribute('tabindex'), g.classList.contains('card')], ['app/G', '0', true]);
+  const row = part(g, 'row1')!;
+  assert.deepEqual(row.children.map((child) => [(child as FakeElement).className.split(' ')[0], child.textContent]), [['key', 'G'], ['wschip', 'app'], ['tag', 'gate_rounds'], ['hm-age', '30 min ago']]);
+  assert.equal(part(row, 'tag')!.getAttribute('title'), 'error code');
+  assert.match(part(row, 'hm-age')!.getAttribute('title')!, /^Waiting since \d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/);
+  assert.equal(part(g, 'title')!.textContent, 'Title of G');
+  assert.deepEqual(say('app/G'), ['hm-say ask', 'Codex asked for fixes 2 times, the limit. Accept the change without its 2 open findings, or tell the Implementer what to fix.']);
+  assert.deepEqual(buttons(g).filter((element) => element.classList.contains('primary')).map((element) => element.textContent), ['Decide 2 findings']);
+
+  // An error: Retry review posts once, as on the board, and opens no page.
+  assert.equal(say('app/F')[0], 'hm-say err');
+  button(homeCard(page, 'app/F'), 'Retry review')!.click();
+  await page.flush();
+  assert.deepEqual([posts(page).map((request) => [request.path, request.body]), onJobPage(page), page.location.hash], [[['api/jobs/app/F/review', '{}']], false, '#home']);
+  button(homeCard(page, 'app/F'), 'Retry review')!.click();
+  await page.flush();
+  assert.equal(posts(page).length, 1);
+
+  // Ready: its buttons and the refused hand-over's note; paused: the changed Task file's note.
+  assert.deepEqual(say('app/R'), ['hm-say ready', 'Reviews are clean and the MR text is written. Push when you are happy.']);
+  assert.deepEqual(labels(homeCard(page, 'app/R')), ['Review the MR and push', 'Create merge request…']);
+  assert.deepEqual(part(homeCard(page, 'app/R'), 'note')!.textContent, 'Not handed over to your checkout: The checkout has changes.');
+  assert.deepEqual(say('app/P'), ['hm-say', 'Paused by you during iteration 2.']);
+  assert.deepEqual([part(homeCard(page, 'app/P'), 'note')!.className, part(homeCard(page, 'app/P'), 'note')!.textContent], ['meta note', 'Task file changed since the job started']);
+  assert.deepEqual(labels(homeCard(page, 'app/P')), ['Resume']);
+  // A title's markup stays text.
+  assert.equal(part(homeCard(page, 'app/X'), 'title')!.textContent, '<script>alert(1)</script>');
+  assert.ok(page.$('home').all().every((element) => element.tagName !== 'SCRIPT'));
+
+  // A click on a card opens the job's Stream; Back goes to the board in this slice.
+  homeCard(page, 'app/G').click();
+  await page.flush();
+  assert.deepEqual([onJobPage(page), page.location.hash, page.$('scrStream').hidden], [true, '#app/G', false]);
+  (page.$('jhead').children[0] as FakeElement).click();
+  assert.deepEqual([views(page), page.location.hash, page.document.activeElement], [BOARD_SHOWN, '#', card(page, 'app/G')]);
+});
+
+test('board client (SF-226): the Coordinator card is one element, under Needs you on the home and above the columns on the board; switching reads api/coordinator no more', async () => {
+  const page = await openCoordinator(() => ({ version: 1, status: { text: 'Planning', at: minutesAgo(1) }, questions: [], link: null, next_question: 1 }), '#home');
+  const coord = page.$('coord');
+  const reads = (): number => page.requests.filter((request) => request.path === 'api/coordinator').length;
+  // The card's parent, and the elements right before and after it.
+  const place = (): Array<string | undefined> => {
+    const siblings = coord.parentNode!.children as FakeElement[];
+    const at = siblings.indexOf(coord);
+    return [coord.parentNode!.id, siblings[at - 1]?.id, siblings[at + 1]?.id];
+  };
+  page.streams.at(-1)!.emit('coordinator', {});
+  await page.flush();
+  assert.deepEqual([coord.hidden, place().slice(0, 2), part(coord, 'coord-status')!.textContent, reads()], [false, ['home', 'home-needs'], 'Planning', 1]);
+  page.$('open-board').click();
+  assert.deepEqual([coord.hidden, place()[0], place()[2], page.document.querySelectorAll('#coord').length, reads()], [false, 'board', 'cols', 1, 1]);
+  page.$('open-home').click();
+  assert.deepEqual([place().slice(0, 2), page.document.querySelectorAll('#coord').length, reads()], [['home', 'home-needs'], 1, 1]);
+  page.streams.at(-1)!.emit('coordinator', {});
+  await page.flush();
+  page.$('open-board').click();
+  assert.deepEqual([place()[2], reads()], ['cols', 2]);
+});
+
+test('board client (SF-226): on the home j and k move between its cards, a redraw keeps the focus, Enter opens the focused one; "N waits for you" scrolls Needs you into view', async () => {
+  const jobs = [job('A', 'needs_human', { updated_at: minutesAgo(30) }), job('B', 'paused', { updated_at: minutesAgo(10) }), job('W', 'working')];
+  const page = await openBoard(jobs, [ticket('app/Q')], [workspace('app')], '#home');
+  page.key('j');
+  assert.equal(page.document.activeElement, homeCard(page, 'app/A'));
+  page.key('j');
+  page.key('j');
+  assert.equal(page.document.activeElement, homeCard(page, 'app/B'));
+  page.streams.at(-1)!.emit('jobs', { jobs });
+  assert.equal(page.document.activeElement, homeCard(page, 'app/B'));
+  page.key('k');
+  assert.equal(page.document.activeElement, homeCard(page, 'app/A'));
+  page.key('Enter');
+  await page.flush();
+  assert.deepEqual([onJobPage(page), page.location.hash], [true, '#app/A']);
+  // #home again: the focus on the card that opened the page.
+  page.location.hash = '#home';
+  page.window.dispatch('hashchange');
+  await page.flush();
+  assert.deepEqual([views(page), page.document.activeElement], [HOME_SHOWN, homeCard(page, 'app/A')]);
+  page.$('waits').click();
+  assert.deepEqual([page.$('home-needs').scrolledIntoView, page.document.querySelector('#cols .col.you')!.scrolledIntoView], [1, 0]);
+  assert.equal((page.$('waits') as unknown as { title: string }).title, 'Show what waits for you');
+});
+
+test('board client (SF-226): a ticket Create & plan made while the home is shown opens its page once listed', async () => {
+  const page = await openBoard([], [], [workspace('app')], '#home');
+  page.$('open-new-ticket').click();
+  page.$('ticket-workspace').value = 'app';
+  page.$('ticket-key').value = 'N-1';
+  page.$('ticket-title').value = 'Ticket N-1';
+  page.$('ticket-request').value = 'Make it so.';
+  page.$('owner-chatgpt').checked = false;
+  page.$('owner-claude').checked = true;
+  page.$('ticket-plan').click();
+  await page.flush();
+  posts(page)[0]!.respond(200, { ok: true, result: { workspace: 'app', ticket: 'N-1', path: '.software-factory/N-1.md', base: 'main' } });
+  await page.flush();
+  assert.deepEqual([page.$('drawer').hidden, page.location.hash], [true, '#home']);
+  page.streams.at(-1)!.emit('tickets', { tickets: [ticket('app/N-1')], archived: [] });
+  await page.flush();
+  assert.deepEqual([page.location.hash, page.$('ticket').hidden], ['#app/N-1/ticket', false]);
+});

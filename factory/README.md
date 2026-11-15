@@ -50,6 +50,9 @@ bin/sf pins                       # the open pins the user placed on the dashboa
 bin/sf pins resolve <id>          # mark a pin resolved (also one resolved already; pin_not_found for an unknown id); it leaves the page at its next read; needs sf serve
 bin/sf pins clear                 # remove every pin, open and resolved, and start the ids at 1 again (also over an unreadable pins.json): "Removed N pins."; needs sf serve
 bin/sf norms [workspace]          # the norms in force (section Norms): each value of norms.json with its source (default, file or workspace), then the file's problems; exit 0 with problems too; needs sf serve
+bin/sf vision                     # the stored visions (section Vision): one row per workspace and language with its files and last put; needs sf serve
+bin/sf vision put <workspace> <lang> <dir>  # store one language (en first, then bg) of a workspace's vision from the absolute folder <dir> (VISION.md, CODEMAP.md, chapters/<name>.md), all or nothing, and build its page; needs sf serve
+bin/sf vision remove <workspace> [lang]     # remove one language (bg before en), or the whole vision without one; needs sf serve
 bin/sf queue list                 # the run queue (section Run queue): the limit, the running count, held or not, the queued tickets in order with what each waits for, the next one, the starts that failed; needs sf serve
 bin/sf queue add <workspace> <ticket> [--at N]  # queue a planned ticket at position N (1-based; default the end); needs sf serve
 bin/sf queue remove <workspace> <ticket>        # take it out of the queue; needs sf serve
@@ -4352,7 +4355,8 @@ messages of a form in the drawer stay under the form.
 and an archived ticket's Task (the whole width on a phone); ✕, a click beside it or Escape closes it.
 **Workspaces** lists the registry (name, path, live jobs, a
 problem such as a missing checkout) with Remove (off while the workspace has a live job; the
-registration only, nothing on disk changes) and an Add form: a name and the path of the local
+registration only, nothing on disk changes), led by a *Vision ↗* link on the card of a workspace
+with a vision (section Vision; its page in a new tab), and an Add form: a name and the path of the local
 checkout, typed or pasted (the page cannot browse the machine's disk), validated as `sf workspace
 add` does (an absolute path that exists and is the root of a non-bare Git work tree, a name not
 registered yet) with the refusal shown as it comes. **New ticket** takes the workspace (by
@@ -4627,7 +4631,7 @@ POST (anything else `405` with `Allow: GET, POST`):
 |---|---|
 | `api/jobs` | `{jobs: [...]}`: workspace, ticket, branch, base, state, iteration, mr_attempts, fixes, gate_fixes, gate_tokens, updated_at, created_at, error, and for the board (SF-046) `title` (of the Task file, or `null`), `cost_usd` (the estimate of the iterations and their Claude reviews, or `null`), `review` and `gate` (the last iteration's verdicts: `clean`, `fix`, `failed` or `null`) and `review_ended_at` (the end of that clean or fix Claude review, or `null`); `mr` (the merge request on the Git host or `null`) and `mr_host` (`{host, reason}`: `github`, `gitlab` or `null`, and why the merge request actions are off or `null`); for the v3 card (SF-077) `now` (`{who, what, ts}` of a running job: the Implementer's last tool call or the first line of its last text, read from at most the last 256 KB of `events.jsonl`; the Claude review or the Codex gate reviewing iteration N; the MR writer; else `null`), `tool_calls` (the Implementer's tool calls in the job, counted incrementally: only the bytes added since the last count are read) and `stop` (for `needs_human`, `{items, saves_lines}`: the suggestions of the last simplification pass and the lines they save, the ledger entries to settle (`escalated`, `review_disputed`), the open ones (`review_churn`) or the last gate's items (`gate_rounds`, `gate_budget`), none for other codes; `null` otherwise); `progress` (`src/progress.ts`; the job detail's `job` has it too): for a running job (`starting`, `working`, `awaiting_review`, `preparing_mr`) `{steps, phase, fix_round, ready_from, ready_to}`, else `null` (`waiting_limit` and `paused` too). `steps` (`[{text, done}]`) are the checklist lines of the worktree's `.software-factory/<ticket>.steps.md`, read when the payload is built (none for a missing file, a link or a file without checklist lines; any number, each cut to 200 characters); `phase` is `code` (`starting`, `working`), `claude` (`awaiting_review` while the Claude review runs on the job and the iteration's `review.json` has no verdict yet), `codex` (else in `awaiting_review`) or `mr_text` (`preparing_mr`); `fix_round` is the job's `fixes`. The estimate reads the history of the finished jobs (pushed, aborted, failed, ready for review or handed over; current and archived) of the workspace, or of every workspace while it has fewer than 10, read again at most once an hour: per iteration the working turn (`meta.json` `ended_at − started_at`), the Claude review (`review.json` with a verdict) and the gate (`gate.json`), and the MR text (from the state change into `preparing_mr` to the next one in `events.jsonl`), each over the iterations that have it. Remaining from = (the steps left / the steps, 1 without steps, 0 outside `code`) × the working turn's p25 + the medians of the reviews still ahead (Claude's only on a job with it and until its verdict, the gate's until its verdict) + the MR text's median; to = the same with the p75, plus, while `fix_round` is 0, one fix round (the working turn's median and the medians of the job's reviews). `ready_from` and `ready_to` are now plus those (ISO strings). While the history has no working turn yet (a new installation), the estimate starts from the factory's own history when it was planned (`BASE_DURATIONS`: a working turn's p25, median and p75 10, 19 and 32 min, each review 2 min, the MR text 1 min); SF-129 (`src/stops.ts`): `stop_code`, `stop_kind` and `stop_group` (the canonical row of a `needs_human` job's stop, `null` otherwise), `actions` (`[{action, label, primary, danger}]`: the actions the job's page shows, in order) and `availability` (every action's `''` or why it is off; Accept from the real review) |
 | `api/jobs/<ws>/<ticket>` | `{job, iterations: [{number, started_at, ended_at, cost_usd, changed_files, patch_truncated, denials, files, review, gate, gate_override, simplify}], mr, gate, history: [{ts, from, to, error?} or {ts, event: "gate_overridden", code, unapplied} or {ts, event: "merge_request", action, number, url, state}], mr_title, ledger, settle_ids, confirm_actions, explanation, lead: {size, target_hours, started_at, ready_at, done_at, seconds: {working, waiting_for_user, in_user_hands, parked, total}, returns, over_target}}`; `lead` is the job's lead time from `history` and its target by the Task's `size:` (SF-219, section Lead time); `job` has the fields of an `api/jobs` row's job part, `stop_code`, `stop_kind`, `stop_group`, `actions` and `availability` included (SF-129); `settle_ids` the ids of the ledger entries the stop block offers *Accept risk* / *Must fix* for (`[]` unless the stop's row has a settlement); `confirm_actions` the actions that need the job's ticket typed again on the remote port (SF-139: `approve`, `retry`, `archive`, `mr-create`, `mr-merge`, `merged-archive`), on both ports; `mr_title` is the MR text's first line or `null`; `explanation` is the job's `explanation.json` while it is the current stop's (SF-106, section Stop explanations), else `null`; `ledger` is `ledger.json` as written (`[]` before the first Fix section, SF-052); `gate` is whether the Codex gate is on, `gate_override` the iteration's `gate-override.json` or `null`, `simplify` its `simplify.json` (SF-055) or `null` |
-| `api/workspaces` | `{workspaces: [{name, path, liveJobs, problem, handoff, color, app, description, derived_description, digest}], handoff_default, digest}`: the registry, the checkout's path, its non-terminal jobs, why the checkout cannot be used now or `null`, its own hand-over setting or `null`, and its colour on the board (SF-084: its `color`, else the one its name picks); SF-103: its app (its own, else its name), its own description or `null`, the description derived from the repository or `null`, `digest: {track, my_work}`; at the top `handoff_default` (`checkout` or `off`, from `SF_HANDOFF`) and the morning digest's `digest: {times, weekdays_only, language}` (SF-210: `times` sorted) |
+| `api/workspaces` | `{workspaces: [{name, path, liveJobs, problem, handoff, color, app, description, derived_description, digest, vision?}], handoff_default, digest}`: the registry, the checkout's path, its non-terminal jobs, why the checkout cannot be used now or `null`, its own hand-over setting or `null`, and its colour on the board (SF-084: its `color`, else the one its name picks); SF-103: its app (its own, else its name), its own description or `null`, the description derived from the repository or `null`, `digest: {track, my_work}`; `vision: true` when the workspace has a vision page (section Vision; the drawer's *Vision ↗* link), else no key; at the top `handoff_default` (`checkout` or `off`, from `SF_HANDOFF`) and the morning digest's `digest: {times, weekdays_only, language}` (SF-210: `times` sorted) |
 | `api/workspaces/<ws>/merge-requests` | the open merge requests of the workspace's origin on its Git host, as `sf mr list` reads them (section Reading the open merge requests and their review comments): `[{number, title, author, source, target, url, updated_at, draft}]`, newest update first, at most 50; read on the host at each request, nothing written to it; `409 mr_token_missing` or `mr_host_unsupported`, `502 mr_auth_failed`, `mr_host_error` or `mr_host_unreachable`; a name that is not a workspace's, an unknown workspace or any query is an empty 404 |
 | `api/workspaces/<ws>/merge-requests/<number>/threads` | the review threads of one merge request, as `sf mr comments` reads them: `[{id, resolved, path, line, comments: [{author, body, created_at, bot}]}]`, oldest first; `path` and `line` `null` for a general comment, `resolved` `null` where the host has no such state (GitHub); `bot` a bot's or SonarQube's comment; the refusals as above; a number that is not a whole number from 1 is an empty 404 |
 | `api/workspaces/<ws>/merge-requests/<number>/overview` | the overview of one merge request (section Reading the open merge requests and their review comments): `{number, ready, reasons, behind, pipeline: {state, text, url} \| null, sonar: {gate_failed, new_issues, url} \| null, comments: {human, bot}}`; read on the host at each request (its status and threads), nothing written to it; the refusals and empty 404s as for `.../threads` |
@@ -4635,6 +4639,7 @@ POST (anything else `405` with `Allow: GET, POST`):
 | `api/digests/<id>` | the stored record `digest/<id>.json` (SF-103); an unknown id or any query is an empty 404 |
 | `api/pins` | the dashboard's pins (section Pins), `pins.json` read as `sf pins` reads it: `{pins: [{id, route, selector, text, rect: {x, y, w, h, vw, vh}, note, at, resolved}]}`, every stored pin in id order, open and resolved; any query is an empty 404; `409 pins_unreadable` for a file that is not JSON or not this shape |
 | `api/coordinator` | the coordinator's state, `coordinator.json` read as `sf coordinator` reads it (section Coordinator card): `{version, status: {text, at} \| null, questions: [{id, text, at}], link, next_question}`; any query is an empty 404; written only by `sf coordinator` |
+| `vision/<workspace>` | the workspace's vision page (section Vision), `page.html` as `sf vision` stored it, `text/html; charset=utf-8` under its own `content-security-policy` (`VISION_PAGE_CSP`: a sandbox with scripts only, an opaque origin that loads nothing), with `cache-control: no-store`, `nosniff` and `no-referrer` kept; a name without a page, any query or a longer path is an empty 404; another method `405`; written only by `sf vision` |
 | `api/tickets` | `{tickets: [{workspace, ticket, title, base, draft, request, job, lands_after, attachments, conversation: {message, url}, queue_position, queue_error, queue_reason, queue_force, queue_retry}], archived: [{workspace, ticket, title}], job_lands_after: [{workspace, ticket, lands_after}], queue: {max_running, running, held, hold_reason, next, on_limit, limit_hold}}`: the Task files without a live job; `queue_position` its 1-based place in the run queue or `null`, `queue_error` the queue's failed start `{code, message}` or `null`, `queue_reason` why its plan holds it in the queue ("plan not ready: N blocker, M major", "plan check failed", "plan being checked", "plan not checked") or `null`, `queue_force` whether Start anyway was given (SF-086), `queue_retry` the next try of a queued start that could not fetch `{code: "fetch_failed", at, retries}` or `null` (SF-236), `queue` the run queue (`next`: `{workspace, ticket}` of the first entry that waits for nothing and whose plan does not hold it, or `null`; `on_limit` the rule at a usage limit's reset and `limit_hold` `{parked, resets_at}` while a job is parked, else `null`, SF-072; the whole `queue` is `null` without a run queue) (SF-071, section Run queue); `lands_after` the tickets its Task file waits for, `[{workspace, ticket, state}]` with `state` `merged`, `pushed`, `running`, `planned` or `missing` (SF-084, section Dashboard), and `job_lands_after` the same for the Task files with a live job; `attachments` its images `[{name, bytes, type}]` (SF-064, section Ticket images); `draft` is true for a skeleton; `request` the user's words of New ticket or `null`; `job` is the last job's state or `null`; `url` is `https://chatgpt.com/?q=<message URL-encoded>`, or `null` when too long |
 | `api/jobs/<ws>/<ticket>/iterations/<n>/report` | the Report, `text/markdown` |
 | `api/jobs/<ws>/<ticket>/iterations/<n>/patch` | the Patch, `text/x-diff` |
@@ -5878,6 +5883,102 @@ A job's lead time (SF-219, `src/lead-time.ts`) is measured from its state change
 
 Only the job's detail (`api/jobs/<ws>/<ticket>`) carries it, as `lead`, computed from the history
 it already reads (one read of `events.jsonl`); the rows of `api/jobs` do not.
+
+## Vision
+
+A workspace's vision (src/vision.ts) is its Markdown files in English (`en`, the source) and in
+Bulgarian (`bg`, its translation), kept in the state directory as exactly the folder one would
+commit, and one page built from them (src/vision-page.ts). For now it stays in the factory; to
+move it into the workspace's repository, copy `<state dir>/vision/<workspace>/<lang>/` as it is.
+The layout, folders 0700 and files 0600:
+
+```
+<state dir>/vision/                         made by sf serve at its start
+  <workspace>/
+    en/VISION.md  en/CODEMAP.md  en/chapters/<name>.md
+    bg/VISION.md  bg/CODEMAP.md  bg/chapters/<name>.md
+    page.html                               built from en and bg at each put and remove
+```
+
+**The commands** need a running `sf serve` (one process writes the store; the writes run one at a
+time). The language and the folder are words of the command; the folder is an absolute path,
+because `sf serve` reads it, not the terminal (`"$PWD/vision"` gives one).
+
+```
+$ sf vision put bookshop en /home/me/bookshop-vision/en
+Stored the vision of bookshop (en): 4 files.
+$ sf vision put bookshop bg /home/me/bookshop-vision/bg
+Stored the vision of bookshop (bg): 3 files.
+$ sf vision
+workspace  language  files  updated
+bookshop   bg        3      2026-11-14 11:12:05
+bookshop   en        4      2026-11-14 11:10:44
+$ sf vision remove bookshop bg
+Removed the vision of bookshop (bg).
+$ sf vision remove bookshop
+Removed the vision of bookshop (en).
+```
+
+With no vision, `sf vision` prints `No workspace has a vision (sf vision put <workspace> en <dir>
+stores one).` `en` comes first: a put of `bg` needs `en` stored, and `en` cannot be removed while
+`bg` is (remove `bg` first, or the whole vision). With `en` alone, the page's Bulgarian side shows
+the English text with its note. `sf vision` answers while `sf update` drains or builds; put and
+remove are refused then (`update_in_progress`). A refusal is `sf: <message>`, exit 1; a wrong
+count of words the usage error, exit 2.
+
+**A put** replaces the files of one language with those of the folder, all or nothing. Before
+anything is written, it checks, and refuses the first problem found:
+
+- the language is `bg` or `en` (`invalid_language`, for remove too); the workspace is registered
+  (`workspace_not_found`); the folder is an absolute path without NUL and can be listed
+  (`vision_folder`);
+- the folder's entries are a regular file `VISION.md` (required), a regular file `CODEMAP.md` and
+  a folder `chapters` whose entries are regular files named a lower-case letter or digit, then up
+  to 60 lower-case letters, digits or `-`, then `.md` (`vision_entry`: a symbolic link, another
+  name, a wrong kind, a missing `VISION.md`, a file that cannot be opened); the folder itself may
+  be reached through a link, its entries may not;
+- at most 64 chapters, each file at most 524,288 bytes, the files of one language at most
+  2,097,152 bytes together (`vision_too_large`);
+- each file is UTF-8 text without a NUL byte (`vision_not_text`); each is opened without
+  following a link or waiting on a pipe, and must be a regular file by its open handle;
+- in its turn: `bg` without `en` stored (`vision_needs_en`); then the page is built.
+
+Then the files go into a staging folder `<workspace>/.<lang>.new`, their bytes unchanged, which
+is swapped in for `<lang>` (the old one renamed to `.<lang>.old`, then removed), and `page.html`
+is written atomically. A refused or failed put changes nothing stored, with two gaps: `sf serve`
+killed between the swap's two renames leaves `<lang>` missing (its old files stay in
+`.<lang>.old` until the next put or remove of that language), and a failed write of `page.html`
+leaves the new files with the old page until the next put or remove. A remove refuses
+`vision_not_found` (nothing stored, that language not stored, or a name that is no workspace
+name) and `vision_needs_en`; it does not read the registry, so the vision of a workspace that
+left it is listed and can be removed. No message holds a path of the disk.
+
+The store follows no link: every folder under `<state dir>/vision` is opened without following a
+link, and what is in it is reached only through that folder's handle (Linux's
+`/proc/self/fd/<fd>`), each stored file read through a handle opened the same way and checked to
+be a regular file. A link found in place of a folder or file of the store is read as nothing (that
+language or workspace is not stored, `sf vision` and the dashboard leave it out); a put or remove
+that needs it refuses `vision_unsafe` (`"vision/bookshop" in the store is not a plain folder;
+nothing was changed.`) before it writes anything, and a put of a language replaces a link in that
+language's place without following it.
+
+**Why sf serve makes the folder.** An agent session denies the state directory's entries it finds
+when it starts ([the trust model's limits](../docs/guide/trust-model.md#the-limits)); a folder made by the first put would stay readable to the
+sessions already running. So `sf serve` makes `<state dir>/vision` (0700) before it listens or
+resumes a job, and every session after it denies it: no agent session reads a vision, and it goes
+to no model.
+
+**The page** is built at each put and remove and stored as `page.html`; `GET vision/<workspace>`
+answers that file (section Dashboard, its routes table) under its own policy, `VISION_PAGE_CSP`:
+`sandbox allow-scripts; default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:`.
+It runs as an opaque origin, without the dashboard's cookie, storage or API, and loads nothing;
+its script's `localStorage` calls are caught, so it opens in Bulgarian each time, unless its URL's
+fragment names a place in English (the URL keeps the place). The Workspaces drawer's card of a
+workspace with a page has a *Vision ↗* link (a new tab; on a phone, the page select's
+Workspaces); `api/workspaces` flags it `vision: true`. The link follows the `workspaces` payload:
+it shows with the dashboard's next `workspaces` event (a reload, or any setup change), not by
+itself after a put. These are new files that no older factory reads, so the state format version
+does not change.
 
 ## History
 

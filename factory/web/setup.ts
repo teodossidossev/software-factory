@@ -158,7 +158,7 @@ function renderWorkspaces(): void {
     remove.type = 'button';
     remove.disabled = state.setupPending.has('workspace') || row.liveJobs > 0;
     remove.addEventListener('click', () => void removeWorkspace(row.name));
-    line.append(edit, remove, el('span', 'hint', row.liveJobs > 0 ? `${row.liveJobs} live job${row.liveJobs === 1 ? '' : 's'}: finish or abort them first.` : 'The registration only; nothing on disk changes.'));
+    line.append(...(row.vision === true ? [tabLink('btn btn-sm', 'Vision ↗', `vision/${encodeURIComponent(row.name)}`)] : []), edit, remove, el('span', 'hint', row.liveJobs > 0 ? `${row.liveJobs} live job${row.liveJobs === 1 ? '' : 's'}: finish or abort them first.` : 'The registration only; nothing on disk changes.'));
     item.append(line);
     return item;
   }));

@@ -13,11 +13,12 @@ import { jobLead } from './lead-time.js';
 import { shownSuggestion, waits } from './planner.js';
 import { historyOf, phaseOf, type Progress, progressOf, readSteps } from './progress.js';
 import { configDir } from './registry.js';
-import type { TicketRow } from './setup.js';
+import type { TicketRow, WorkspaceRow } from './setup.js';
 import type { CheckSummary } from './task-check.js';
 import { turnLimitLine } from './turn-limit.js';
 import { mayTouch, parseFrontMatter, taskScope, taskSha256 } from './task-file.js';
 import { type JobFacts, jobActions, NO_FACTS, settleEntries, stopFields } from './stops.js';
+import { visionPages } from './vision.js';
 import { shortInput } from './watch.js';
 
 // The file counts of the last published iteration: every file, the undeclared sensitive
@@ -376,9 +377,12 @@ export async function jobsPayload(jobs: JobStore, setup: DashboardSetup, actions
   return { jobs: list };
 }
 
-// The workspaces, the hand-over default and the morning digest's settings.
-export async function workspacesPayload(setup: DashboardSetup) {
-  return { workspaces: await setup.workspaces(), ...(await setup.workspaceSettings()) };
+// The workspaces, the hand-over default and the morning digest's settings. A workspace with a
+// vision page in stateDir (src/vision.ts) has vision: true, the drawer's link to it; the others no key.
+export async function workspacesPayload(setup: DashboardSetup, stateDir: string) {
+  const [rows, pages] = await Promise.all([setup.workspaces(), visionPages(stateDir)]);
+  const workspaces: (WorkspaceRow & { vision?: true })[] = rows.map((row) => (pages.includes(row.name) ? { ...row, vision: true } : row));
+  return { workspaces, ...(await setup.workspaceSettings()) };
 }
 
 // A ticket's check summary for the board, or none when it cannot be read.

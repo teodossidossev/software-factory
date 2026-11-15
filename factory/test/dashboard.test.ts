@@ -20,6 +20,7 @@ import { askQuestion, readCoordinator, setLink, setStatus } from '../src/coordin
 import { type EventRecord, type Job, JobStore } from '../src/jobs.js';
 import { buildPatch, fileChanges } from '../src/patch.js';
 import { saveRegistry } from '../src/registry.js';
+import { putVision, VISION_PAGE_CSP } from '../src/vision.js';
 import { act, CSP, fakeActions, fakeSetup, fetchRaw, openStream, type Stream, ticketRow, workspaceRow } from './support/dashboard-client.js';
 import type { DashboardDigests } from '../src/dashboard.js';
 import type { HealthCheck } from '../src/health.js';
@@ -248,6 +249,49 @@ test('dashboard: GET api/coordinator answers the coordinator\'s file (empty with
       stream.close();
     }
   });
+});
+
+test('dashboard: GET vision/<workspace> serves the stored page under its own policy with the security headers; 404 without; no write; api/workspaces and the stream flag the workspace', async () => {
+  const setup = fakeSetup([workspaceRow('bookshop'), workspaceRow('web')]);
+  await withDashboard('dash-vision', fakeActions(), async (dashboard, { state }) => {
+    const base = dashboard.url;
+    const page = (path: string) => fetchRaw(new URL(path, base));
+    const missing = await page('vision/bookshop');
+    assert.deepEqual([missing.status, missing.body], [404, '']);
+    const config = join(temp, 'dash-vision-config');
+    const source = join(temp, 'dash-vision-source');
+    await mkdir(config, { recursive: true });
+    await mkdir(source, { recursive: true });
+    await saveRegistry({ workspaces: { bookshop: { read_checkout: '/srv/bookshop' } } }, config);
+    await writeFile(join(source, 'VISION.md'), '# Bookshop\n\nV1 (observed) The shop sells <b>books</b>.\n');
+    await putVision({ stateDir: state, configDir: config }, 'bookshop', 'en', source);
+    const reply = await page('vision/bookshop');
+    assert.deepEqual(
+      [reply.status, reply.headers['content-type'], reply.headers['content-security-policy'], reply.headers['cache-control'], reply.headers['x-content-type-options'], reply.headers['referrer-policy']],
+      [200, 'text/html; charset=utf-8', VISION_PAGE_CSP, 'no-store', 'nosniff', 'no-referrer'],
+    );
+    assert.equal(reply.body, await readFile(join(state, 'vision', 'bookshop', 'page.html'), 'utf8'));
+    assert.ok(reply.body.startsWith('<!doctype html>'));
+    assert.ok(!reply.body.includes(state) && !reply.body.includes(source));
+    for (const path of ['vision/bookshop?x=1', 'vision/web', 'vision/Bad_Name', 'vision/bookshop/x', 'vision/']) {
+      const other = await page(path);
+      assert.deepEqual([other.status, other.body], [404, ''], path);
+    }
+    for (const method of ['POST', 'PUT'] as const) {
+      const write = await act(base, 'vision/bookshop', {}, { method });
+      assert.deepEqual([write.status, write.headers.allow], [405, 'GET'], method);
+    }
+    const flagged = (payload: { workspaces: Record<string, unknown>[] }) => payload.workspaces.map((row) => [row.name, row.vision]);
+    assert.deepEqual(flagged(JSON.parse((await page('api/workspaces')).body)), [['bookshop', true], ['web', undefined]]);
+    const rows = JSON.parse((await page('api/workspaces')).body).workspaces as Record<string, unknown>[];
+    assert.equal('vision' in rows[1]!, false);
+    const stream = await openStream(new URL('api/stream', base));
+    try {
+      assert.deepEqual(flagged(await stream.next('workspaces')), [['bookshop', true], ['web', undefined]]);
+    } finally {
+      stream.close();
+    }
+  }, setup);
 });
 
 test('dashboard (SF-103): the digest list and one digest, a manual run and digest_running; 404 without digests', async () => {

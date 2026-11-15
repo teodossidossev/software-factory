@@ -157,7 +157,7 @@ test('while sf update drains or builds, a command not open while updating is ref
       }
     }
     assert.deepEqual(COMMAND_LIST.filter((command) => command.openWhileUpdating === true).map(socketName).sort(),
-      ['check', 'coordinator', 'digest-latest', 'mcp-port', 'mr-comments', 'mr-list', 'mr-status', 'norms', 'pause', 'ping', 'pins', 'pins-clear', 'pins-resolve', 'queue-list', 'serve-busy', 'skills']);
+      ['check', 'coordinator', 'digest-latest', 'mcp-port', 'mr-comments', 'mr-list', 'mr-status', 'norms', 'pause', 'ping', 'pins', 'pins-clear', 'pins-resolve', 'queue-list', 'serve-busy', 'skills', 'vision']);
     // From the CLI: refused with exit 1; the open pause reaches the job (there is none).
     const accept = await runCli(env, ['accept', 'app', 'T-1']);
     assert.equal(accept.code, 1);

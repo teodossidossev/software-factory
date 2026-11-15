@@ -437,7 +437,7 @@ async function mergeWorld(name: string, command: string | undefined): Promise<Me
   };
   const execution = new Execution(config, (workspace) => resolveWorkspace(workspace, w.env.config), () => {}, '', { launch: runnerLauncher(processEnv(w.env)) });
   const job: Job = {
-    workspace: 'app', ticket: 'T-1', branch: BRANCH, base: 'main', continues: null, base_commit: null, target_commit: null, worktree: null, prepared_commit: originHead(w),
+    workspace: 'app', ticket: 'T-1', branch: BRANCH, base: 'main', continues: null, builds_on: null, builds_on_commit: null,base_commit: null, target_commit: null, worktree: null, prepared_commit: originHead(w),
     mr_attempts: 1, mr_conflict_turn: false, fixes: 0, gate_fixes: 0, gate_tokens: 0, state: 'pushed', iteration: 2, session_id: null,
     mr: { host: 'github', number: 1, url: 'https://github.com/acme/app/pull/1', state: 'open' }, created_at: '2026-11-09T10:00:00.000Z', updated_at: '2026-11-09T10:05:00.000Z',
   };

@@ -74,6 +74,9 @@ export const STOPS = {
   // again after a fix of guard-terms.txt or auth.env.
   guard_hit: row('error', [RETRY, SEND, ABORT], { aliases: ['guard_terms_invalid', 'guard_failed'] }),
   tests_unavailable: row('error', [RETRY, ACCEPT, SEND, ABORT], { group: 'tests' }),
+  // MR preparation of a part whose ticket it builds on has no prepared commit (src/builds-on.ts):
+  // sf retry once that ticket is ready again.
+  builds_on_not_ready: row('error', [RETRY, GO_ON, ABORT]),
   max_turns: row('decision', [GO_ON, ABORT]),
   review_failed: row('error', [action('review', 'Retry review'), ABORT]),
   serve_restarted: row('error', [GO_ON, RESTART, ABORT]),

@@ -187,6 +187,60 @@ export async function branchMerged(checkout: string, job: Omit<JobFacts, 'events
   }
 }
 
+// The newest archived job of the ticket (JobStore.archive's <ticket>.<stamp> directories), or
+// undefined.
+async function lastArchivedJob(jobs: JobStore, ref: TicketRef): Promise<JobFacts | undefined> {
+  let names: string[];
+  try {
+    names = await readdir(join(jobs.root, ref.workspace));
+  } catch { // no job directory of the workspace: no archived job
+    return undefined;
+  }
+  const prefix = `${ref.ticket}.`;
+  const archived = names.filter((name) => name.startsWith(prefix) && ARCHIVED_JOB_STAMP.test(name.slice(prefix.length))).sort();
+  for (const name of archived.reverse()) {
+    try {
+      const data = JSON.parse(await readFile(join(jobs.root, ref.workspace, name, 'job.json'), 'utf8')) as Record<string, unknown>;
+      const mr = data.mr as Record<string, unknown> | null | undefined;
+      if (data.workspace === ref.workspace && data.ticket === ref.ticket && typeof data.state === 'string' && typeof data.branch === 'string' && typeof data.base === 'string') {
+        return {
+          state: data.state, branch: data.branch, base: data.base, prepared_commit: typeof data.prepared_commit === 'string' ? data.prepared_commit : null,
+          mr: mr !== null && typeof mr === 'object' && typeof mr.state === 'string' ? { state: mr.state } : null, eventsPath: jobs.eventsPath(ref.workspace, name),
+        };
+      }
+    } catch { // not a readable job record: the one before it
+    }
+  }
+  return undefined;
+}
+
+// Whether a pushed job is merged by what the factory recorded: a job with merged_on_target is
+// (written by the pass of merged jobs, from its base or its Git host, and by Merged — archive);
+// else the merge request state the factory recorded decides when there is one (merged or not:
+// open and closed are not merged); undefined without either, when Git decides.
+async function recordedMerge(job: JobFacts): Promise<boolean | undefined> {
+  if (await mergedOnTarget(job.eventsPath)) {
+    return true;
+  }
+  return job.mr === null ? undefined : job.mr.state === 'merged';
+}
+
+// Whether the ticket is merged by the dependency rule (DependencyState's merged), asked now
+// without the merge check's cache: its last job (live or archived) is pushed and merged, by what
+// the factory recorded, else by Git in checkout (branchMerged). A live job in any other state
+// is not merged; a job record that cannot be read counts as none.
+export async function ticketMerged(jobs: JobStore, ref: TicketRef, checkout: string): Promise<boolean> {
+  const current = await jobs.read(ref.workspace, ref.ticket).catch(() => undefined);
+  if (current !== undefined && !TERMINAL_STATES.includes(current.state)) {
+    return false;
+  }
+  const last: JobFacts | undefined = current !== undefined ? { ...current, eventsPath: jobs.eventsPath(ref.workspace, ref.ticket) } : await lastArchivedJob(jobs, ref);
+  if (last?.state !== 'pushed') {
+    return false;
+  }
+  return (await recordedMerge(last)) ?? (await branchMerged(checkout, last)) !== undefined;
+}
+
 async function isFile(path: string): Promise<boolean> {
   try {
     return (await lstat(path)).isFile();
@@ -544,43 +598,16 @@ export class Setup {
     return active || archived ? 'planned' : 'missing';
   }
 
-  // The newest archived job of the ticket (JobStore.archive's <ticket>.<stamp> directories), or
-  // undefined.
-  async #lastArchivedJob(ref: TicketRef): Promise<JobFacts | undefined> {
-    let names: string[];
-    try {
-      names = await readdir(join(this.#jobs.root, ref.workspace));
-    } catch { // no job directory of the workspace: no archived job
-      return undefined;
-    }
-    const prefix = `${ref.ticket}.`;
-    const archived = names.filter((name) => name.startsWith(prefix) && ARCHIVED_JOB_STAMP.test(name.slice(prefix.length))).sort();
-    for (const name of archived.reverse()) {
-      try {
-        const data = JSON.parse(await readFile(join(this.#jobs.root, ref.workspace, name, 'job.json'), 'utf8')) as Record<string, unknown>;
-        const mr = data.mr as Record<string, unknown> | null | undefined;
-        if (data.workspace === ref.workspace && data.ticket === ref.ticket && typeof data.state === 'string' && typeof data.branch === 'string' && typeof data.base === 'string') {
-          return {
-            state: data.state, branch: data.branch, base: data.base, prepared_commit: typeof data.prepared_commit === 'string' ? data.prepared_commit : null,
-            mr: mr !== null && typeof mr === 'object' && typeof mr.state === 'string' ? { state: mr.state } : null, eventsPath: this.#jobs.eventsPath(ref.workspace, name),
-          };
-        }
-      } catch { // not a readable job record: the one before it
-      }
-    }
-    return undefined;
+  #lastArchivedJob(ref: TicketRef): Promise<JobFacts | undefined> {
+    return lastArchivedJob(this.#jobs, ref);
   }
 
-  // Merged: a job with merged_on_target is (written by the pass of merged jobs, from its base or its Git
-  // host, and by Merged — archive); else the merge request
-  // state the factory recorded decides when there is one (merged or not: open and closed are not
-  // merged); only without one does Git decide, its answer kept MERGE_CHECK_TTL_MS per ticket (fresh: asked again).
+  // Merged by recordedMerge; only without a recorded answer does Git decide, its answer kept
+  // MERGE_CHECK_TTL_MS per ticket (fresh: asked again).
   async #merged(ref: TicketRef, job: JobFacts, entry: WorkspaceEntry | undefined, fresh: boolean): Promise<boolean> {
-    if (await mergedOnTarget(job.eventsPath)) {
-      return true;
-    }
-    if (job.mr !== null) {
-      return job.mr.state === 'merged';
+    const recorded = await recordedMerge(job);
+    if (recorded !== undefined) {
+      return recorded;
     }
     if (entry === undefined) {
       return false;

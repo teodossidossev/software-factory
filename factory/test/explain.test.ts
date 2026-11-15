@@ -59,7 +59,7 @@ function entry(id: string, status: LedgerEntry['status'], extra: Partial<LedgerE
 const T0 = '2026-11-06T10:00:00.000Z';
 function stopped(code: string, extra: Partial<Job> = {}, message = `The stop of ${code}.`): Job {
   return {
-    workspace: 'app', ticket: 'T-1', branch: 'T-1-rows', base: 'main', continues: null, base_commit: null, target_commit: null, worktree: '/wt/T-1', prepared_commit: null,
+    workspace: 'app', ticket: 'T-1', branch: 'T-1-rows', base: 'main', continues: null, builds_on: null, builds_on_commit: null,base_commit: null, target_commit: null, worktree: '/wt/T-1', prepared_commit: null,
     mr_attempts: 0, mr_conflict_turn: false, fixes: 2, gate_fixes: 0, gate_tokens: 0, state: 'needs_human', iteration: 3, session_id: 's1', mr: null,
     created_at: '2026-11-06T09:00:00.000Z', updated_at: T0, error: { code, message }, ...extra,
   };

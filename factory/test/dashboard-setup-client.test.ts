@@ -24,7 +24,7 @@ function detail(ticket: string) {
   return { job: job(ticket), iterations: [], mr: false, history: [] };
 }
 
-const workspace = (name: string, liveJobs = 0, problem: string | null = null, handoff: 'checkout' | 'off' | null = null) => ({ name, path: `/srv/${name}`, liveJobs, problem, handoff });
+const workspace = (name: string, liveJobs = 0, problem: string | null = null, handoff: 'checkout' | 'off' | null = null): { name: string; path: string; liveJobs: number; problem: string | null; handoff: 'checkout' | 'off' | null; vision?: true } => ({ name, path: `/srv/${name}`, liveJobs, problem, handoff });
 
 function ticket(key: string, extra: Record<string, unknown> = {}) {
   const [workspaceName, name] = key.split('/') as [string, string];
@@ -309,6 +309,22 @@ test('setup client (SF-103): the Morning digest section saves the times, weekday
     await page.flush();
     assert.equal(posts(page).length, 1, times);
   }
+});
+
+test('setup client: a workspace with a vision has a Vision ↗ link before Edit, in a new tab without the opener; it follows the workspaces event', async () => {
+  const page = await openPage([], [{ ...workspace('bookshop'), vision: true }, workspace('web')], []);
+  page.$('open-workspaces').click();
+  const [bookshop, web] = items(page, 'workspace-list');
+  const links = bookshop!.all().filter((element) => element.tagName === 'A');
+  assert.equal(links.length, 1);
+  const vision = links[0]!;
+  assert.deepEqual([vision.textContent, vision.href, vision.target, vision.rel, vision.className], ['Vision ↗', 'vision/bookshop', '_blank', 'noopener noreferrer', 'btn btn-sm']);
+  const row = vision.parentNode as FakeElement;
+  assert.equal(row.children.indexOf(vision), row.children.indexOf(named(bookshop!, 'Edit')) - 1);
+  assert.equal(link(web!), undefined);
+  page.streams.at(-1)!.emit('workspaces', { workspaces: [workspace('bookshop'), workspace('web')] });
+  await page.flush();
+  assert.equal(link(items(page, 'workspace-list')[0]!), undefined);
 });
 
 test('setup client: the new-ticket form posts the exact fields, clears on success, keeps them on a refusal', async () => {

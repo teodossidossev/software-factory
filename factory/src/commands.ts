@@ -1,5 +1,5 @@
-// The commands that go to sf serve over its socket, in one table (sf coordinator's, sf norms's and sf pins's
-// entries are written in src/coordinator.ts, src/norms.ts and src/pins.ts and spread into it): for each, its name, its
+// The commands that go to sf serve over its socket, in one table (sf coordinator's, sf norms's, sf pins's and sf vision's
+// entries are written in src/coordinator.ts, src/norms.ts, src/pins.ts and src/vision.ts and spread into it): for each, its name, its
 // arguments and flags as the help shows them, its help description, whether it answers while sf
 // update drains or builds, and the call it makes in sf serve. The CLI (src/cli.ts) builds its help
 // lines, its argument check and its socket call from it; sf serve's socket handler
@@ -22,6 +22,7 @@ import { type SkillsView, skillsLines, skillsView, switchSkill } from './skills.
 import { stateDir } from './config.js';
 import type { TaskChecks } from './task-check.js';
 import { TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
+import { VISION_ANSWERS, VISION_COMMANDS } from './vision.js';
 
 // A wrong command line: exit 2 from the CLI (with the help), bad_request from the socket.
 export class UsageError extends FactoryError {
@@ -233,7 +234,7 @@ export const COMMANDS = {
   },
   // sf coordinator: the dashboard's Coordinator card (src/coordinator.ts); each write tells the pages.
   ...COORDINATOR_COMMANDS,
-  ...NORMS_COMMANDS, // sf norms: the norms in force, norms.json read at each call (src/norms.ts).
+  ...NORMS_COMMANDS, ...VISION_COMMANDS, // sf norms: the norms in force, norms.json read at each call (src/norms.ts); sf vision (src/vision.ts).
   ...PINS_COMMANDS, // sf pins: the dashboard's pins, pins.json (src/pins.ts).
 
   // The requests of sf's own steps, no command of their own.
@@ -581,7 +582,7 @@ const ANSWERS = new Map<Command, (result: Result, flags: Flags) => Answer>([
   [COMMANDS.skills, (result) => ({ lines: skillsLines(result as unknown as SkillsView), failed: false })],
   [COMMANDS.skillsSet, (result) => ({ lines: skillsLines(result as unknown as SkillsView), failed: false })],
   ...COORDINATOR_ANSWERS,
-  ...NORMS_ANSWERS,
+  ...NORMS_ANSWERS, ...VISION_ANSWERS,
   ...PINS_ANSWERS,
   [COMMANDS.abort, (result, flags) => ({
     lines: [

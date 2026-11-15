@@ -1,6 +1,6 @@
 // The dashboard's reads: the GET route table (the page's files, the JSON payloads, a job's
 // detail, Stream, MR text, Merge request screen, Changes and iteration files, the Stats page, the
-// digests, the health checks, the coordinator's state, the pins, the planned ticket page, a Task file, a
+// digests, the health checks, the coordinator's state, a workspace's vision page, the pins, the planned ticket page, a Task file, a
 // ticket's images, a workspace's merge requests) and the Task check's GET. Nothing here changes anything; every
 // answer is written through the context.
 import type { IncomingMessage, ServerResponse } from 'node:http';
@@ -17,6 +17,7 @@ import { WORKSPACE_NAME_PATTERN } from './registry.js';
 import { skillsForClients, skillsView, skillText } from './skills.js';
 import { STATS_DAYS, type StatsDays } from './stats.js';
 import type { CheckRecord } from './task-check.js';
+import { readVisionPage, VISION_PAGE_CSP } from './vision.js';
 import { followLines } from './watch.js';
 
 // The events.jsonl lines of one page of the job's Stream.
@@ -50,7 +51,7 @@ export function readHandlers(ctx: DashboardContext) {
   const getRoutes: GetRoute[] = [
     ...[...files].map(([pattern, file]): GetRoute => ({ pattern, handler: ({ res }) => body(res, file.type, file.body) })),
     { pattern: 'api/jobs', handler: async ({ res, remote }) => sendJson(res, 200, await jobsOf(remote)) },
-    { pattern: 'api/workspaces', handler: async ({ res }) => sendJson(res, 200, await workspacesPayload(setup)) },
+    { pattern: 'api/workspaces', handler: async ({ res }) => sendJson(res, 200, await workspacesPayload(setup, ctx.stateDir)) },
     { pattern: 'api/tickets', handler: async ({ res }) => sendJson(res, 200, await ticketsPayload(setup, checks, queue)) },
     // api/stream is the change feed's (src/dashboard-changes.ts openStream); startDashboard's handle sends it there.
     { pattern: 'api/stats', handler: ({ res, query }) => statsView(res, query) },
@@ -58,6 +59,9 @@ export function readHandlers(ctx: DashboardContext) {
     { pattern: 'api/health', when: (query) => health !== undefined && noQuery(query), handler: ({ res }) => sendJson(res, 200, health!.list()) },
     // The coordinator's state (src/coordinator.ts), which only sf coordinator writes.
     { pattern: 'api/coordinator', when: noQuery, handler: async ({ res }) => sendJson(res, 200, await readCoordinator(ctx.stateDir)) },
+    // A workspace's vision page (src/vision.ts), which only sf vision writes: user content, under
+    // its own policy (an opaque origin that loads nothing); the security headers set before stay.
+    { pattern: 'vision/*', when: noQuery, handler: ({ res, params: [workspace] }) => visionRead(res, workspace!) },
     // The installed skills, the agent roles' choice and the coordinator's (sf skills; without the
     // coordinator checkout's path), and one skill's SKILL.md, read from the skills' source folder (a
     // name that is not an installed skill's is refused).
@@ -86,6 +90,15 @@ export function readHandlers(ctx: DashboardContext) {
     { pattern: 'api/workspaces/*/merge-requests/*/threads', when: noQuery, handler: ({ res, params }) => hostRead(res, mergeRequestThreadsRead(actions, params)) },
     { pattern: 'api/workspaces/*/merge-requests/*/overview', when: noQuery, handler: ({ res, params }) => hostRead(res, mergeRequestOverviewRead(actions, params)) },
   ];
+
+  async function visionRead(res: ServerResponse, workspace: string): Promise<void> {
+    const page = await readVisionPage(ctx.stateDir, workspace);
+    if (page === undefined) {
+      empty(res, 404);
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': VISION_PAGE_CSP }).end(page);
+  }
 
   async function hostRead(res: ServerResponse, found: Promise<unknown>): Promise<void> {
     try {

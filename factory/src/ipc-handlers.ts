@@ -6,6 +6,7 @@ import { FactoryError } from './errors.js';
 import type { IpcHandler } from './ipc.js';
 import type { TestHooks } from './test-hooks.js';
 import { refuseWhileUpdating } from './update.js';
+import { ensureVisionRoot } from './vision.js';
 
 export interface SocketHandlerOptions extends Serve {
   stateDir: string;
@@ -19,6 +20,8 @@ export interface SocketHandlerOptions extends Serve {
 }
 
 export function socketHandler(options: SocketHandlerOptions): IpcHandler {
+  // <state>/vision before sf serve listens or resumes a job: each session started later denies it.
+  ensureVisionRoot(options.stateDir);
   return async ({ command: name, args }) => {
     const command = socketCommand(name);
     // The updating marker's gate: every command that changes something is refused before

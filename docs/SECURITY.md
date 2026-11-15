@@ -139,6 +139,13 @@ refused), and the factory's test command passed in a sandbox without network on 
     in the state directory. Only `sf coordinator`, through `sf serve`, writes it; the dashboard
     only reads it, and shows every text as text. The chat link is limited to `https://claude.ai/`,
     checked when it is written and again on the page.
+  - A workspace's vision is local files in the state directory (folders 0700, files 0600), in
+    `<state dir>/vision/`, which `sf serve` makes at its start so that no agent session reads it.
+    Only `sf vision`, through `sf serve`, writes it, from a folder you name, following no link in
+    it; no dashboard route writes it. Its page is served behind the token under its own policy
+    (`VISION_PAGE_CSP`): an opaque origin that can use neither the dashboard's cookie and storage
+    nor its API, and loads nothing. Every Markdown text on it is escaped, and its only script is
+    the factory's.
   - A pin of point mode stores the page's hash, a selector, up to 200 characters of the element's
     text, its position and the note, in `<state dir>/pins.json` (mode 0600), on this machine
     only. It is written only through the dashboard's checked POSTs (the exact Origin, JSON, the

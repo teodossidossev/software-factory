@@ -68,7 +68,7 @@ export function changeFeed(ctx: DashboardContext): DashboardFeed {
     // The Coordinator card reads its state once on connect, then after each change.
     send(stream, 'coordinator', {});
     // The start screen's data: on connect whole, later after each change (changed).
-    send(stream, 'workspaces', await workspacesPayload(setup));
+    send(stream, 'workspaces', await workspacesPayload(setup, ctx.stateDir));
     send(stream, 'tickets', await ticketsPayload(setup, checks, queue));
     if (key === undefined) {
       return;
@@ -159,7 +159,7 @@ export function changeFeed(ctx: DashboardContext): DashboardFeed {
         details.push({ followers, detail: await jobDetail(jobs, job, gateOn, actions, setup) });
       }
     }
-    const workspaces = change.workspaces ? await workspacesPayload(setup) : undefined;
+    const workspaces = change.workspaces ? await workspacesPayload(setup, ctx.stateDir) : undefined;
     const tickets = change.tickets === undefined ? undefined : {
       ...(await ticketsPayload(setup, checks, queue)),
       ...(change.tickets === 'all' ? {} : { changed: [...change.tickets.values()].map(([workspace, ticket]) => ({ workspace, ticket })) }),

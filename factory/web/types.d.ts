@@ -463,6 +463,8 @@ interface WorkspaceRow {
   description: string | null;
   derived_description: string | null;
   digest: { track: boolean; my_work: boolean };
+  // A vision page is stored (src/vision.ts): the card links vision/<name>.
+  vision?: true;
 }
 
 // The run queue of the tickets payload: src/queue.ts QueueView.

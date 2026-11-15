@@ -229,6 +229,34 @@ Cost: one model session per digest, about $0.30 with Sonnet for three repositori
 measure, before the English texts, which add to it); each scheduled time is one session. The page
 and `sf digest --now` show each digest's cost.
 
+## A workspace's vision
+
+A workspace's vision is its Markdown files (`VISION.md`, an optional `CODEMAP.md`, and
+`chapters/<name>.md`) in English and in Bulgarian, kept by the factory and read as one page on the
+dashboard. `sf serve` must be running. Store English first, then Bulgarian, each from a folder
+given as an absolute path (`sf serve` reads it, not your terminal):
+
+```
+sf vision put bookshop en "$PWD/vision/en"
+sf vision put bookshop bg "$PWD/vision/bg"
+sf vision                      # what is stored: workspace, language, files, last put
+sf vision remove bookshop bg   # one language (Bulgarian before English)
+sf vision remove bookshop      # the whole vision
+```
+
+A put replaces that language's files, all or nothing, and builds the page again; a refusal says
+what is wrong (a link, a file that does not belong, a file too large, text that is not UTF-8) and
+changes nothing. With English alone, the page's Bulgarian side shows the English text with a note.
+
+To read it, open **Workspaces** (on a phone, the page select's Workspaces): the card of a
+workspace with a vision has **Vision ↗**, which opens the page in a new tab. A card shows the link
+after the dashboard's next update of the workspaces (a reload does it); an open page shows a new
+put when it is reloaded. The page opens in Bulgarian, with a switch to English.
+
+No agent session reads the vision, and it goes to no model: it is in the state directory, which
+every session denies. To move it into the workspace's repository later, copy
+`<state dir>/vision/<workspace>/<lang>/` as it is. More: [Vision](../../factory/README.md#vision).
+
 ## Cleaning old jobs and worktrees
 
 - **Worktrees** are removed by the factory at the hand-over or the push, by `sf reset`, by
@@ -275,7 +303,7 @@ something logs `sandbox reaper: ended …`, and a failure logs `sandbox reaper: 
 | --- | --- |
 | `~/.config/software-factory/` | `workspaces.json`, `norms.json`, `auth.env` (holds your tokens: keep the backup private), `rules/`, `tunnel-runtime.key` |
 | `.software-factory/` in each workspace's checkout | the Task files, their images, the archived tickets: they are **not in Git** |
-| `~/.local/state/software-factory/` | the jobs' history, `queue.json`, the Task checks, the tickets' history, the morning digests, the dashboard token; worth keeping, not needed to start again (leave out `worktrees/`, `digest/mirrors/` and `sf.sock`) |
+| `~/.local/state/software-factory/` | the jobs' history, `queue.json`, the Task checks, the tickets' history, the morning digests, the workspaces' visions (`vision/`), the dashboard token; worth keeping, not needed to start again (leave out `worktrees/`, `digest/mirrors/` and `sf.sock`) |
 
 Copy them while no job runs, or stop `sf serve` first. A restored state directory needs the same
 workspaces and checkouts.

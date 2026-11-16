@@ -199,7 +199,7 @@ test('sf coordinator: the writes go through sf serve, which tells the open pages
     const before = events();
     for (const [args, message] of [
       [['link', 'https://claude.ai.evil.com/x'], /must be an https:\/\/claude\.ai\/ URL/], [['answered', 'q1'], /no open question "q1"; open: q2/],
-      [['status', 'x'.repeat(301)], /301 characters; at most 300/], [['status', 'x', '--clear'], /needs the status or --clear/],
+      [['status', 'x'.repeat(2001)], /2001 characters; at most 2000/], [['status', 'x', '--clear'], /needs the status or --clear/],
     ] as const) {
       const refused = await runCli(env, ['coordinator', ...args]);
       assert.equal(refused.code, 1, args.join(' '));
@@ -207,6 +207,8 @@ test('sf coordinator: the writes go through sf serve, which tells the open pages
     }
     assert.equal(await write(['status', '--clear']), `status: none\nquestions:\n${shown.stdout.split('\n')[2]}\nlink: https://claude.ai/chat/abc\n`);
     assert.equal(events(), before + 1, 'only the writes that went through tell the pages');
+    // A status of several lines, after -- as it starts with "-": its further lines under its first.
+    assert.match(await write(['status', '--', '- SF-210 planned\n- SF-211 queued']), /^status: - SF-210 planned {2}\(.+\)\n {8}- SF-211 queued\nquestions:/);
   } finally {
     stream.close();
     await stop(served);

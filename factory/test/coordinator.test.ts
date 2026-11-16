@@ -1,15 +1,16 @@
 // The coordinator's state (src/coordinator.ts): the status set and cleared, the bounds, the
 // questions asked and answered with ids never given twice, the chat link's rules, the read of a
-// missing or not-JSON file, and the atomic write with mode 0600.
+// missing or not-JSON file, the atomic write with mode 0600, and how sf coordinator prints it.
 import assert from 'node:assert/strict';
 import { mkdtemp, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mock, test } from 'node:test';
 import {
-  answerQuestion, askQuestion, chatLink, coordinatorFile, MAX_QUESTION_CHARS, MAX_QUESTION_NUMBER, MAX_QUESTIONS, MAX_STATUS_CHARS, readCoordinator, setLink, setStatus, stateOf,
+  answerQuestion, askQuestion, chatLink, coordinatorFile, coordinatorLines, MAX_QUESTION_CHARS, MAX_QUESTION_NUMBER, MAX_QUESTIONS, MAX_STATUS_CHARS, readCoordinator, setLink, setStatus, stateOf,
 } from '../src/coordinator.js';
 import { FactoryError } from '../src/errors.js';
+import { localTime } from '../src/local-time.js';
 
 const state = (name: string): Promise<string> => mkdtemp(join(tmpdir(), `sf-coordinator-${name}-`));
 const EMPTY = { version: 1, status: null, questions: [], link: null, next_question: 1 };
@@ -45,11 +46,14 @@ test('the status: set with its time, replaced, cleared; written atomically with 
   assert.equal(JSON.parse(await readFile(coordinatorFile(dir), 'utf8')).version, 1);
 });
 
-test('the bounds: a status of 300 characters, a question of 1,000, 10 open; more is refused and nothing changes', async () => {
+test('the bounds: a status of 2,000 characters, a question of 1,000, 10 open; more is refused and nothing changes; a status keeps its line breaks', async () => {
   const dir = await state('bounds');
+  assert.equal(MAX_STATUS_CHARS, 2000);
   await setStatus(dir, 'é'.repeat(MAX_STATUS_CHARS));
   await assert.rejects(setStatus(dir, 'x'.repeat(MAX_STATUS_CHARS + 1)), refused('too_long'));
-  assert.equal((await readCoordinator(dir)).status?.text, 'é'.repeat(300));
+  assert.equal((await readCoordinator(dir)).status?.text, 'é'.repeat(MAX_STATUS_CHARS));
+  await setStatus(dir, '  Waiting.\n\n- SF-1 a\n  more\n');
+  assert.equal((await readCoordinator(dir)).status?.text, 'Waiting.\n\n- SF-1 a\n  more');
   await assert.rejects(setStatus(dir, '   '), refused('bad_request'));
   await assert.rejects(askQuestion(dir, 'x'.repeat(MAX_QUESTION_CHARS + 1)), refused('too_long'));
   await assert.rejects(askQuestion(dir, ''), refused('bad_request'));
@@ -130,4 +134,14 @@ test('the link: only https://claude.ai/ URLs, with no user or password; cleared'
   // A link edited into the file by hand is checked on the read too.
   await writeFile(coordinatorFile(dir), JSON.stringify({ version: 1, link: 'javascript:alert(1)' }));
   assert.equal((await readCoordinator(dir)).link, null);
+});
+
+test('sf coordinator prints a status\'s further lines under its first, indented by the width of "status: "', () => {
+  const at = AT.toISOString();
+  const lines = coordinatorLines({ ...EMPTY, version: 1, status: { text: 'Waiting.\n\n- SF-1 a\n  more', at }, questions: [{ id: 'q1', text: 'Which?\nThis one', at }] });
+  assert.deepEqual(lines, [
+    `status: Waiting.  (${localTime(at)})`, '', '        - SF-1 a', '          more',
+    'questions:', `  q1  ${localTime(at)}  Which?`, '      This one', 'link: none',
+  ]);
+  assert.deepEqual(coordinatorLines({ ...EMPTY, version: 1, status: { text: 'Planning', at } }).slice(0, 2), [`status: Planning  (${localTime(at)})`, 'questions: none']);
 });

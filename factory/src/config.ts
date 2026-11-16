@@ -186,6 +186,17 @@ export function worktreeRoot(env: NodeJS.ProcessEnv = process.env): string {
   return join(stateDir(env), 'worktrees');
 }
 
+// Where the planning copies live: SF_PLANNING_DIR (absolute), else ~/planning.
+export function planningDir(env: NodeJS.ProcessEnv = process.env): string {
+  if (env.SF_PLANNING_DIR) {
+    if (!isAbsolute(env.SF_PLANNING_DIR)) {
+      throw new FactoryError('invalid_config', 'SF_PLANNING_DIR must be an absolute path.');
+    }
+    return env.SF_PLANNING_DIR;
+  }
+  return join(env.HOME || homedir(), 'planning');
+}
+
 // Comma-separated globs; empty entries are dropped.
 function globList(raw: string | undefined): string[] {
   return (raw ?? '').split(',').map((pattern) => pattern.trim()).filter((pattern) => pattern !== '');

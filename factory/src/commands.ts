@@ -130,7 +130,7 @@ export const COMMANDS = {
   },
   retry: {
     name: 'retry', args: ['<workspace>', '<ticket>'],
-    description: 'Retry a transient MR preparation failure (fetch_failed, mr_serve_restarted, mr_interrupted, mr_commit_failed, mr_rebase_failed, mr_failed) or a stop of the guard (guard_hit, guard_terms_invalid, guard_failed) or a test command that could not run (tests_unavailable) without a new review; on mr_push_failed: push again',
+    description: 'Retry a transient MR preparation failure (fetch_failed, mr_serve_restarted, mr_interrupted, mr_commit_failed, mr_rebase_failed, mr_failed) or a stop of the guard (guard_hit, guard_terms_invalid, guard_failed) or a test command that could not run (tests_unavailable) or a part whose earlier part has no prepared commit (builds_on_not_ready) without a new review; on mr_push_failed: push again',
     run: (s, [w = '', t = '']) => s.execution.retryMr(w, t),
   },
   accept: {

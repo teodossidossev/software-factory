@@ -3124,7 +3124,9 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
      report plus `## MR preparation` ("Nothing was committed: the worktree no longer matches
      iteration 1, the iteration that was reviewed. Changed since then: src/extra.ts. This
      iteration is the worktree as it is now."). The job goes back to `awaiting_review` (action
-     `mr_turn_end`), as after a conflict turn: no stop, and the next Clean prepares again.
+     `mr_turn_end`), as after a conflict turn: no stop, and the next Clean prepares again. When
+     the iteration so published, reviewed clean, again does not match at its own MR preparation,
+     the job stops for you instead, with `unreviewed_change`: nothing is committed or published.
      `.software-factory/` (the MR text, the steps checklist) is in neither tree. An iteration
      published before the factory recorded `commit_tree` is committed without the comparison.
    - An empty index diff is `mr_empty`.
@@ -3188,6 +3190,7 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    | `mr_text_missing` | `.software-factory/<ticket>.mr.md` absent or empty |
    | `mr_text_invalid` | over 64 KiB, a first line that breaks `commitHeader(ticket)` in `src/rules.ts` (`<type>(<ticket>): <summary>`, type one of `feat fix chore refactor docs test perf build ci style revert`, at most 72 characters, no trailing period), or a missing `## What`, `## Why`, `## How`, `## Why the change`, `## Special things to note`, `## Change outline`, `## Testing` or `## Checklist` heading, or a `## Testing` line that starts with `By hand` or `Manual` (after any list marker, checkbox or emphasis) and does not contain `not` (`testingProblem` in `src/rules.ts`) |
    | `mr_empty` | the reviewed change has nothing to commit against `base_commit` |
+   | `unreviewed_change` | the worktree changed again after the review of an iteration that itself brought an unreviewed change back to review (nothing is committed or published) |
    | `mr_commit_failed` | `git commit` failed, for example without a Git identity (stderr in the message) |
    | `mr_rebase_failed` | `git rebase` failed without conflicts; it was aborted |
    | `mr_conflict` | the conflict turn failed or left markers, or the rebase did not continue; it was aborted. When the continue failed, the resolution is kept in `iterations/NNN/conflict-resolution.diff` (named in the message) |
@@ -3224,7 +3227,7 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    and cleared when the resolved iteration goes back to `awaiting_review` (and when MR preparation
    starts); while it is set Retry is refused ("tell the Implementer to go on"). So a stop after a
    clean verdict on the resolved iteration is retryable again. A retry that fails again stops the job with the new code; nothing is retried by
-   itself. The other codes (`mr_conflict`, `implementer_question`, `mr_text_missing`, `mr_text_invalid`, `mr_empty`,
+   itself. The other codes (`mr_conflict`, `implementer_question`, `mr_text_missing`, `mr_text_invalid`, `mr_empty`, `unreviewed_change`,
    `mr_push_protected`, a failed MR text turn) need the Implementer: `sf say`. On `mr_push_failed`
    `sf retry` is `sf approve` (without `--as-is`, step 7): the push again.
 6. Ready: the MR text, with the nits, is copied to `mr.md` (an MR text the user saved on the Merge
@@ -4370,6 +4373,7 @@ words of each row, keyed by `stop_code`:
 | `implementer_question` | decision | Question for you before any change | Answer |
 | `mr_text_missing`, `mr_text_invalid` | error | MR text missing or invalid | Tell it to fix it |
 | `mr_empty` | error | Nothing to commit | Tell it what is missing |
+| `unreviewed_change` | decision | Changed after review | Tell it how |
 | `mr_commit_failed`, `mr_rebase_failed`, `mr_failed` | error | MR preparation failed | Retry (Tell it to go on after a conflict turn) |
 | `fetch_failed` | error | Fetch failed | Retry (Tell it to go on after a conflict turn) |
 | `guard_hit`, `guard_terms_invalid`, `guard_failed` | error | Guard stopped the MR | Retry (Tell it how after a conflict turn) |
@@ -4408,6 +4412,7 @@ confirmation where it has one; *Tell it to go on* is a message, "Go on." when th
 | `implementer_question` | the Implementer's open questions (the message) | Send, Abort… |
 | `mr_text_missing`, `mr_text_invalid` | the rule it breaks | Send, Abort… |
 | `mr_empty` | nothing | Send, Abort… |
+| `unreviewed_change` | the whole message | Send, Abort… |
 | `mr_commit_failed`, `mr_rebase_failed`, `mr_failed` | the whole message | Retry, Tell it to go on, Abort…; after a conflict turn no Retry |
 | `fetch_failed` | the whole message | Retry, Abort…; after a conflict turn Tell it to go on, Abort… |
 | `guard_hit`, `guard_terms_invalid`, `guard_failed` | the whole message | Retry (as `sf retry`, SF-122), Send, Abort…; after a conflict turn no Retry |

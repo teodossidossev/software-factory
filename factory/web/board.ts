@@ -196,6 +196,10 @@ const STOPS = {
     reason: 'Nothing to commit', button: () => 'Tell it what is missing',
     sentence: (job: JobRow) => `The reviewed change has nothing to commit against ${job.base}. Tell the Implementer what is missing, or abort.`,
   },
+  unreviewed_change: {
+    reason: 'Changed after review', button: () => 'Tell it how',
+    sentence: () => 'The worktree changes at every MR preparation, after the review. Tell the Implementer how to leave it as reviewed, or abort.',
+  },
   mr_failed: {
     reason: 'MR preparation failed', button: (job: JobRow) => (retryOn(job) ? 'Retry' : 'Tell it to go on'),
     sentence: (job: JobRow) => (retryOn(job)

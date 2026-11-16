@@ -454,18 +454,37 @@ export type Prepared =
 // The most paths the messages of an unreviewed change name; the rest are counted.
 export const MAX_UNREVIEWED_PATHS = 50;
 
+// The text that names the paths of an unreviewed change in its messages: the first
+// MAX_UNREVIEWED_PATHS, the rest counted; for null, that the tree recorded for the iteration
+// cannot be read.
+function unreviewedPathsText(iteration: number, paths: string[] | null): string {
+  if (paths === null) {
+    return `not known (the tree recorded for iteration ${iteration} cannot be read)`;
+  }
+  const more = paths.length - MAX_UNREVIEWED_PATHS;
+  return paths.slice(0, MAX_UNREVIEWED_PATHS).join(', ') + (more > 0 ? ` and ${more} more` : '');
+}
+
 // The Report section of the iteration that brings an unreviewed change back to review.
 export function unreviewedNote(iteration: number, paths: string[] | null): string {
-  let changed = `not known (the tree recorded for iteration ${iteration} cannot be read)`;
-  if (paths !== null) {
-    const more = paths.length - MAX_UNREVIEWED_PATHS;
-    changed = paths.slice(0, MAX_UNREVIEWED_PATHS).join(', ') + (more > 0 ? ` and ${more} more` : '');
-  }
   return [
     '## MR preparation',
     '',
-    `Nothing was committed: the worktree no longer matches iteration ${iteration}, the iteration that was reviewed. Changed since then: ${changed}. This iteration is the worktree as it is now.`,
+    `Nothing was committed: the worktree no longer matches iteration ${iteration}, the iteration that was reviewed. Changed since then: ${unreviewedPathsText(iteration, paths)}. This iteration is the worktree as it is now.`,
   ].join('\n');
+}
+
+// Whether a Report carries the note of an unreviewed change (unreviewedNote): the iteration was
+// published by MR preparation, not by an Implementer turn.
+export function isUnreviewedReport(report: string): boolean {
+  return /^## MR preparation\n\nNothing was committed: the worktree no longer matches iteration \d+, the iteration that was reviewed\./m.test(report);
+}
+
+// The message of the stop unreviewed_change: the worktree changed again after the review of an
+// iteration that itself brought an unreviewed change back to review.
+export function unreviewedAgainMessage(iteration: number, paths: string[] | null): string {
+  const changed = (paths === null ? 'files ' : '') + unreviewedPathsText(iteration, paths);
+  return `The worktree changed again after the review of iteration ${iteration}, in ${changed}: something rewrites these files at every MR preparation (the workspace's test command, or the MR text turn). Tell the Implementer how to leave them as they were reviewed, or abort.`;
 }
 
 // Aborts a rebase in progress; true when there was one (also one that sf serve left behind when

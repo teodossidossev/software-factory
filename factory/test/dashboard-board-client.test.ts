@@ -609,6 +609,7 @@ const STOP_CARDS: Array<[string, 'decision' | 'error', string, string, Record<st
   ['mr_text_missing', 'error', 'MR text missing or invalid', 'Tell it to fix it'],
   ['mr_text_invalid', 'error', 'MR text missing or invalid', 'Tell it to fix it'],
   ['mr_empty', 'error', 'Nothing to commit', 'Tell it what is missing'],
+  ['unreviewed_change', 'decision', 'Changed after review', 'Tell it how'],
   ['mr_commit_failed', 'error', 'MR preparation failed', 'Retry'],
   ['mr_rebase_failed', 'error', 'MR preparation failed', 'Retry'],
   ['mr_failed', 'error', 'MR preparation failed', 'Retry'],

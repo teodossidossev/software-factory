@@ -19,8 +19,8 @@ The workspace and the ticket are in the user's message.
    and fast-forwarded it when it set the copy up (the copy's commands reach no network); elsewhere,
    `git fetch origin` and fast-forward it first.
 2. Call `guide`. In a planning copy, read `.claude/planning-copy.md` and every file it names for
-   this ticket: the user's request, the user's rules for the workspace, the product vision.
-   Elsewhere, the user's request is in their message.
+   this ticket: the user's request, the user's rules for the workspace, the product vision, and
+   where the ticket's prototypes go (step 3). Elsewhere, the user's request is in their message.
 3. Read the ticket's Task file and each of its images with `read_attachment`. A Task file that
    already holds a delivery plan means a planning in progress: resume from its status line.
 4. Read what binds the ticket in the repository: its agent and convention documents (testing
@@ -38,7 +38,51 @@ Done when the frontier is empty and the user confirmed. Then write the **deliver
 ([ANATOMY.md](ANATOMY.md)) over the ticket's Task file with `write_task`: from here on, nothing
 lives only in this chat.
 
-## 3. Cut
+## 3. Prototype
+
+The user's notes come mostly after they see what was built: show it to them before the cut. For
+every part of the ticket that changes what the user sees, or a state model they reason about,
+build a throwaway prototype, let the user try it, and turn their reactions into decisions.
+
+1. **Name the questions.** List what the user should try: how a screen looks and behaves (the
+   `prototype` skill's UI branch), or whether a state model or rule holds through its awkward
+   cases (its LOGIC branch). One prototype answers one question. A ticket with neither (a
+   mechanical, refactoring or purely internal change) gets none: write why under the delivery
+   plan's **Prototypes**, and go to Cut.
+2. **Build each one with the `prototype` skill.** A planning copy can neither run nor change the
+   product, so every prototype is one self-contained HTML file, the UI branch's too: its variants
+   (three by default, at most five) in that one file, switched by the skill's floating bar
+   without changing the page's address, each built on the real screen's structure, texts and
+   data shapes as the code you read gives them. Where the skill and these rules differ, these
+   rules win:
+   - **Where.** Write it with the Write tool into the ticket's prototypes folder, which
+     `.claude/planning-copy.md` names, as `<question>.html`: lower-case letters, digits and `-`,
+     starting with a letter or a digit, at most 64 characters with `.html`, for example
+     `export-states.html`. It is the only place you write. Nothing is committed and no branch is
+     made: the folder keeps the file, and the delivery plan names it. Outside a planning copy,
+     ask the user where to write it.
+   - **What it may use.** Inline CSS and JavaScript only: nothing from the network (no CDN,
+     font, image address or fetch), no storage or cookies, no `alert`, `confirm` or `prompt`, no
+     form submission, no new window, no download, no `eval` or `new Function`; it never reloads
+     or navigates itself. At most 4 MB. The phone first: it works on a screen 360 pixels wide.
+   - **Its words.** The question it answers at its top; every label in the product's own
+     language and words.
+   - **Never published.** No artifact, no claude.ai page, no document, no connector: a company
+     ticket's prototype holds company content and stays on this machine.
+3. **Hand it over.** For each prototype, tell the user the question, the file's path and what to
+   try. When the user asks for another case or variant, change the file in place and say so.
+4. **Turn reactions into decisions.** Each reaction the user confirms becomes a decision of the
+   delivery plan (`D-n`) that names the prototype's file; one that changes an earlier answer
+   reopens it as a grilling round. Record each prototype under **Prototypes**.
+
+When the `prototype` skill is not installed or is switched off for the planner, or the
+prototypes folder is missing or refuses the write, say so: go on without a prototype only when
+the user agrees, and record why under **Prototypes**.
+
+Done when every prototype's question has the user's answer, recorded as decisions, or the
+delivery plan says why the ticket has none.
+
+## 4. Cut
 
 Cut by the guide's `## Slicing a solution`. Show the cut as a table (slice, kind, what, size,
 depends on) and name the slices that can go in parallel. Ask whether the slices get the tracker's
@@ -47,14 +91,14 @@ rules and say what it breaks before following it.
 
 Done when the user approved the cut. Record it in the delivery plan.
 
-## 4. Tracer
+## 5. Tracer
 
 Take one slice to green before writing the others: the independent slice with the widest
 **blast radius**. Trace it, write it, green it (the three moves below). What its check finds is
 what this repository's checker demands: write each finding class you had not foreseen into the
 delivery plan's **lessons**, as a rule for the remaining slices.
 
-## 5. The rest
+## 6. The rest
 
 Take the remaining slices in dependency order, up to four traces at a time, the lessons added to
 each brief. A slice is traced only after the slices it builds on are green: a check can still
@@ -93,8 +137,8 @@ major:
 A slice is done when its check is `ready`. After two rounds that are not, follow the guide: stop
 and hand the open findings to the user.
 
-## 6. Hand over
+## 7. Hand over
 
-Report one table: slice, kind, size, depends on, check rounds. List the decisions taken without
-asking and the risks left. Set the delivery plan's status to `planned`. Ask whether to queue; on
-yes, `queue_add` the slices in dependency order.
+Report one table: slice, kind, size, depends on, check rounds. List the prototypes and what each
+settled, the decisions taken without asking, and the risks left. Set the delivery plan's status
+to `planned`. Ask whether to queue; on yes, `queue_add` the slices in dependency order.

@@ -197,9 +197,13 @@ A Claude Code session that runs in the workspace's checkout may also simply writ
 ### The planning skill
 
 The factory ships its planning method as a Claude Code skill, `factory/skills/planning-tasks`: it
-grills you, cuts the work into slices by the slicing rules, has a sub-agent trace each slice
-through the code before the slice's Task file is written, and fixes what the Task check finds
-until the check is ready. To use it by hand:
+grills you; for what you will see, or a state model you reason about, it builds a throwaway
+prototype, an HTML file you try before anything is cut, and turns your reactions into decisions;
+then it cuts the work into slices by the slicing rules, has a sub-agent trace each slice through
+the code before the slice's Task file is written, and fixes what the Task check finds until the
+check is ready. It builds the prototypes with your installed `prototype` skill (`npx skills add`
+installs it); without it, or for a ticket with nothing to see or reason about, it says why there
+is none. To use it by hand:
 
 1. Run `sf planner setup my-app`: it clones the repository into `~/planning/my-app`, registers the
    software-factory MCP server for that folder and installs the skill. Open Claude Code there once

@@ -466,14 +466,26 @@ textarea.mdedit.fld { font: 12.5px/1.5 var(--mono); padding: 8px; border: 1px so
 [hidden]:not([hidden=until-found i]) { display: none !important; }
 .bhint { margin: 12px 0 0; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); color: var(--muted); font-size: 13px; }
 .col .linkish { margin-top: 8px; }
-/* The Coordinator card above the columns (coordinator.js): compact; an accent border while a question is open. */
-.coord { margin: 12px max(16px, env(safe-area-inset-right, 0px)) 0 max(16px, env(safe-area-inset-left, 0px)); padding: 8px 12px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); display: grid; gap: 6px; font-size: 13px; }
+/* The Coordinator card (coordinator.js) above the columns, with a job card's padding: its title,
+   then a box with the status (paragraphs keep their line breaks, "- " lines a list, ticket keys
+   links with their title muted), Show all / Show less when it folds, the footer (the age at the
+   left, Open the chat at the right) and the questions; an accent border while a question is open.
+   On the Home (below) the card is bare and the title stands above the box, as Needs you's heading
+   above its cards. */
+.coord { margin: 12px max(16px, env(safe-area-inset-right, 0px)) 0 max(16px, env(safe-area-inset-left, 0px)); padding: 10px 12px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); display: grid; gap: 6px; font-size: 13px; min-width: 0; }
 .coord.asks { border-color: var(--accent); box-shadow: inset 3px 0 var(--accent); }
-.coord-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
-.coord-head h2 { margin: 0; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
-.coord-status { overflow-wrap: anywhere; }
+.coord-title { margin: 0; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.coord-box { display: grid; gap: 6px; min-width: 0; }
+.coord-status { display: grid; gap: 6px; line-height: 1.5; overflow-wrap: anywhere; }
+.coord-status p { margin: 0; white-space: pre-line; }
+.coord-status ul { margin: 0; padding-left: 18px; display: grid; gap: 2px; }
+.coord-tk { color: var(--accent); }
+.coord-ttl { color: var(--muted); }
+.coord-more { justify-self: start; }
+.coord-more:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.coord-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
 .coord-age { color: var(--muted); font-size: 12px; white-space: nowrap; }
-.coord-chat { margin-left: auto; text-decoration: none; }
+.coord-chat { margin-left: auto; color: var(--fg); }
 .coord-none { margin: 0; }
 .coord-qs { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
 .coord-q { display: flex; gap: 10px; align-items: baseline; }
@@ -497,8 +509,9 @@ button.tag:hover { border-color: var(--accent); }
 /* The home (web/home.ts), beside the board under the same top bar: one column, at most 960 px and
    centred, with the board's side padding; Needs you's heading as a column's, its list and empty line
    as a column's, its cards the board's .card with how long each waits at the right of the first line
-   and the job page's sentence in its kind's colour; the Coordinator card under it without the
-   margins it has above the columns. From 1100 px (the top bar's one row) two columns, at most
+   and the job page's sentence in its kind's colour; the Coordinator card under it, bare: its title
+   stands above its box as Needs you's heading above its cards, and the box has the card's panel,
+   border and accent while a question is open. From 1100 px (the top bar's one row) two columns, at most
    1440 px: Needs you and the Coordinator card side by side in the first row. */
 #home { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; align-items: start; max-width: 960px; margin-inline: auto; padding-block: 16px;
   padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
@@ -514,7 +527,9 @@ button.tag:hover { border-color: var(--accent); }
 #home .hm-say.ask { color: var(--s-human); }
 #home .hm-say.err { color: var(--del); }
 #home .hm-say.ready { color: var(--s-ready); }
-#home .coord { margin: 0; }
+#home .coord { margin: 0; padding: 0; background: none; border: 0; box-shadow: none; gap: 8px; }
+#home .coord-box { padding: 10px 12px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); }
+#home .coord.asks .coord-box { border-color: var(--accent); box-shadow: inset 3px 0 var(--accent); }
 @media (min-width: 1100px) {
   #home { max-width: 1440px; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); }
   #home .hm-needs { grid-column: 1; grid-row: 1; }
@@ -961,6 +976,7 @@ a.mq-badge:hover { text-decoration: underline; }
   .colfold, .trow, .handover .ho-item { min-height: 44px; }
   .handover .ho-x, .toast-x { width: 44px; height: 44px; line-height: 44px; text-align: center; }
   .ffq, .dtool select, .dg-pick, .finding .decide input.note, .hselect, .needs, .hlight { min-height: 44px; }
+  .coord-more { min-height: 44px; }
   /* iOS zooms into a field whose text is smaller than 16 px. */
   :is(input, select, textarea) { font-size: 16px !important; }
   .why:not(:empty) { display: grid; }

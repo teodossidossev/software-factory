@@ -1731,6 +1731,121 @@ test('board client: the Coordinator card reads api/coordinator on each coordinat
   assert.equal(page.timers.length, timers);
 });
 
+// The coordinator's state with this status, written a minute ago.
+const coordStatus = (text: string) => ({ version: 1, status: { text, at: minutesAgo(1) }, questions: [], link: null, next_question: 1 });
+// The status's blocks as shown: a paragraph's tag and text, a list's tag and its items' texts.
+const coordBlocksShown = (page: Page): Array<[string, ...string[]]> => (page.$('coord-text').children as FakeElement[])
+  .map((block) => [block.tagName, ...(block.tagName === 'UL' ? (block.children as FakeElement[]).map((item) => item.textContent) : [block.textContent])]);
+const coordMore = (page: Page): FakeElement | null => page.$('coord').querySelector('[data-coord-focus="more"]');
+// Tells the page the coordinator's state changed, and lets it read the state again.
+async function coordChanged(page: Page): Promise<void> {
+  page.streams.at(-1)!.emit('coordinator', {});
+  await page.flush();
+}
+
+test('board client: the Coordinator card shows the status as paragraphs and lists under its title, every text as text; a long one folds behind Show all, kept across a redraw and a switch between the Home and the board; a short one has no toggle', async () => {
+  let shown: unknown = coordStatus('Waiting.\nTwo run.\n\n- SF-1 queued\n- SF-2 runs\n  on iteration 2\n\nThen <b>x</b>.');
+  const page = await openCoordinator(() => shown);
+  await coordChanged(page);
+  const coord = page.$('coord');
+  // The title, then the box: the status, the toggle, the footer with the age.
+  assert.deepEqual((coord.children as FakeElement[]).map((child) => [child.tagName, child.className]), [['H2', 'coord-title'], ['DIV', 'coord-box']]);
+  assert.deepEqual((part(coord, 'coord-box')!.children as FakeElement[]).map((child) => child.className), ['coord-status', 'linkish coord-more', 'coord-foot']);
+  assert.equal(part(coord, 'coord-title')!.textContent, 'Coordinator');
+  // Collapsed: the first block only.
+  assert.deepEqual(coordBlocksShown(page), [['P', 'Waiting.\nTwo run.']]);
+  assert.deepEqual([coordMore(page)!.textContent, coordMore(page)!.getAttribute('aria-expanded'), coordMore(page)!.getAttribute('aria-controls')], ['Show all', 'false', 'coord-text']);
+  coordMore(page)!.click();
+  await page.flush();
+  const whole: Array<[string, ...string[]]> = [['P', 'Waiting.\nTwo run.'], ['UL', 'SF-1 queued', 'SF-2 runs on iteration 2'], ['P', 'Then <b>x</b>.']];
+  assert.deepEqual(coordBlocksShown(page), whole);
+  assert.deepEqual(page.$('coord-text').all().map((element) => element.tagName).filter((tag) => !['P', 'UL', 'LI'].includes(tag)), []);
+  assert.deepEqual([coordMore(page)!.textContent, coordMore(page)!.getAttribute('aria-expanded'), page.document.activeElement], ['Show less', 'true', coordMore(page)]);
+  // A board render and a switch to the Home and back keep the choice.
+  page.streams.at(-1)!.emit('jobs', { jobs: [] });
+  await page.flush();
+  page.$('open-home').click();
+  await page.flush();
+  assert.deepEqual([coord.parentNode!.id, coordBlocksShown(page), coordMore(page)!.getAttribute('aria-expanded')], ['home', whole, 'true']);
+  page.$('open-board').click();
+  await page.flush();
+  assert.deepEqual([coord.parentNode!.id, coordBlocksShown(page), coordMore(page)!.textContent], ['board', whole, 'Show less']);
+  coordMore(page)!.click();
+  await page.flush();
+  assert.deepEqual([coordBlocksShown(page), coordMore(page)!.getAttribute('aria-expanded'), page.document.activeElement], [[['P', 'Waiting.\nTwo run.']], 'false', coordMore(page)]);
+  // A one-line status: one paragraph, no toggle.
+  shown = coordStatus('Planning the next slice.');
+  await coordChanged(page);
+  assert.deepEqual([coordBlocksShown(page), coordMore(page)], [[['P', 'Planning the next slice.']], null]);
+});
+
+test('board client: a long Coordinator status previews at most 3 lines of its first block and at most 200 characters, cut at a space and ended with "…"', async () => {
+  let shown: unknown = coordStatus('- one\n- two\n- three\n- four\n- five');
+  const page = await openCoordinator(() => shown);
+  await coordChanged(page);
+  assert.deepEqual([coordBlocksShown(page), coordMore(page)?.textContent], [[['UL', 'one', 'two', 'three']], 'Show all']);
+  // Three items: the whole block, no toggle.
+  shown = coordStatus('- one\n- two\n- three');
+  await coordChanged(page);
+  assert.deepEqual([coordBlocksShown(page), coordMore(page)], [[['UL', 'one', 'two', 'three']], null]);
+  // 300 characters in one paragraph: cut before the last space of the first 200.
+  const paragraph = `${'abcdefgh '.repeat(33)}abc`;
+  assert.equal(paragraph.length, 300);
+  shown = coordStatus(paragraph);
+  await coordChanged(page);
+  const [tag, preview = ''] = coordBlocksShown(page)[0] ?? [''];
+  assert.deepEqual([tag, preview.length <= 201, preview.endsWith('…'), paragraph.startsWith(preview.slice(0, -1)), paragraph[preview.length - 1], coordMore(page)?.textContent], ['P', true, true, true, ' ', 'Show all']);
+  // Without a space: the first 200 kept whole.
+  shown = coordStatus('x'.repeat(300));
+  await coordChanged(page);
+  assert.deepEqual(coordBlocksShown(page), [['P', `${'x'.repeat(200)}…`]]);
+  // The only space the first character: cut before it, the preview "…" alone, Show all.
+  shown = coordStatus(` ${'x'.repeat(300)}`);
+  await coordChanged(page);
+  assert.deepEqual([coordBlocksShown(page), coordMore(page)?.textContent], [[['P', '…']], 'Show all']);
+  // The lines of a cut paragraph stay lines.
+  shown = coordStatus(`${'a '.repeat(60)}\n${'b '.repeat(60)}`);
+  await coordChanged(page);
+  const [, lines = ''] = coordBlocksShown(page)[0] ?? [''];
+  assert.deepEqual([lines.split('\n').length, lines.endsWith('b…'), [...lines].length <= 201], [2, true, true]);
+});
+
+test('board client: a ticket key in the Coordinator status links to its ticket page (the Queue) or its job page, its title beside its first mention and as the tooltip; an ambiguous or unknown key stays text', async () => {
+  const page = await openCoordinator(() => coordStatus('Next SF-211. SF-208 runs; SF-211 again, web/SF-300 and SF-300 and SF-999.'));
+  const stream = page.streams.at(-1)!;
+  stream.emit('workspaces', { workspaces: [workspace('app'), workspace('web')] });
+  stream.emit('jobs', { jobs: [job('SF-208', 'working')] });
+  stream.emit('tickets', { tickets: [ticket('app/SF-211'), ticket('app/SF-300'), ticket('web/SF-300')], archived: [] });
+  await coordChanged(page);
+  const text = page.$('coord-text');
+  assert.deepEqual(coordBlocksShown(page), [['P', 'Next SF-211 (Ticket SF-211). SF-208 (Title of SF-208) runs; SF-211 again, web/SF-300 (Ticket SF-300) and SF-300 and SF-999.']]);
+  assert.deepEqual(text.all().filter((element) => element.tagName === 'A').map((link) => [link.textContent, link.getAttribute('href'), link.getAttribute('title'), link.getAttribute('data-coord-focus'), link.getAttribute('target')]), [
+    ['SF-211', '#app/SF-211/ticket', 'Ticket SF-211', 't0', null], ['SF-208', '#app/SF-208', 'Title of SF-208', 't1', null],
+    ['SF-211', '#app/SF-211/ticket', 'Ticket SF-211', 't2', null], ['web/SF-300', '#web/SF-300/ticket', 'Ticket SF-300', 't3', null],
+  ]);
+  assert.deepEqual(text.all().filter((element) => element.classList.contains('coord-ttl')).map((title) => title.textContent), [' (Ticket SF-211)', ' (Title of SF-208)', ' (Ticket SF-300)']);
+});
+
+test('board client: the focus on the Coordinator card\'s toggle or on a ticket link stays there across a board render', async () => {
+  const jobs = [job('SF-208', 'working')];
+  const page = await openCoordinator(() => coordStatus('SF-208 runs.\n\n- next'));
+  const stream = page.streams.at(-1)!;
+  stream.emit('jobs', { jobs });
+  await coordChanged(page);
+  const before = coordMore(page)!;
+  before.focus();
+  stream.emit('jobs', { jobs });
+  await page.flush();
+  assert.notEqual(coordMore(page), before);
+  assert.equal(page.document.activeElement, coordMore(page));
+  const link = page.$('coord').querySelector('[data-coord-focus="t0"]')!;
+  link.focus();
+  stream.emit('jobs', { jobs });
+  await page.flush();
+  const now = page.$('coord').querySelector('[data-coord-focus="t0"]')!;
+  assert.deepEqual([now === link, page.document.activeElement === now, now.textContent], [false, true, 'SF-208']);
+});
+
 test('board client (SF-208): a waiting card shows the planner\'s note clamped with Review the suggestion and no Send, Discuss the result or its Copy, and Open the planning chat on any card; a link or Copy does not open the job', async () => {
   const note = 'Keep the button,\nrename it,\nand add a test,\nthen stop.';
   const suggestion = { note, sha256: 'a'.repeat(64), at: '2026-11-01T10:06:00.000Z' };

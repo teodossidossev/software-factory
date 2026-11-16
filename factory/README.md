@@ -46,7 +46,7 @@ bin/sf start <workspace> <ticket> # start the job in a worktree of its own (same
 bin/sf skills                     # the installed skills and which agent role uses each (section The agents' skills); needs sf serve
 bin/sf skills set <role> <skill> on|off  # switch an installed skill on or off for an agent role; jobs started afterwards use it; needs sf serve
 bin/sf coordinator                # the coordinator's state on the board's Coordinator card (section Coordinator card): status, open questions with their ids, the chat's link; needs sf serve
-bin/sf coordinator status [text...] [--clear]  # what the coordinator does now (at most 300 characters, too_long beyond), with the time; --clear removes it; needs sf serve
+bin/sf coordinator status [text...] [--clear]  # what the coordinator does now (at most 2,000 characters, too_long beyond), with the time: several lines in one quoted argument, "- " lines a list; -- before a text that starts with "-"; --clear removes it; needs sf serve
 bin/sf coordinator ask <text...>  # a question that waits for the user's answer (at most 1,000 characters, 10 open: too_many_questions); prints its id, q1, q2, ...; needs sf serve
 bin/sf coordinator answered <id>  # take the answered question off the card (unknown_question for an id not open); needs sf serve
 bin/sf coordinator link <url> | --clear  # the chat's link for Open the chat: an https://claude.ai/ URL only (bad_link otherwise); --clear removes it; needs sf serve
@@ -5306,8 +5306,9 @@ dashboard writes the state, answers go to the chat.
 - **Writing it**: only the `sf coordinator` commands (section Commands), run by `sf serve` over its
   socket like the other writing commands, one write at a time; without a running `sf serve` they
   fail as the others do, and while `sf update` drains or builds the writes are refused
-  (`update_in_progress`; the read `sf coordinator` answers). The bounds: a status of at most 300
-  characters and a question of at most 1,000 (`too_long`; an empty one is `bad_request`), 10 open
+  (`update_in_progress`; the read `sf coordinator` answers). The bounds: a status of at most 2,000
+  characters (several lines in one quoted argument, its line breaks kept; no stdin form; a text
+  that starts with "-" goes after `--`) and a question of at most 1,000 (`too_long`; an empty one is `bad_request`), 10 open
   questions (`too_many_questions`); `answered` of an id not open is `unknown_question`. The link is
   taken only when it parses with `URL` as `https:`, host exactly `claude.ai`, the default port and
   no user or password (`bad_link` otherwise: `http:`, `claude.ai.evil.com`, `user@claude.ai`,
@@ -5317,15 +5318,43 @@ dashboard writes the state, answers go to the chat.
   feed's `coordinator` kind: every open page gets a `coordinator` event (no data), and the card
   reads `GET api/coordinator` again; the stream sends one on connect too, so the card reads once
   when the board opens. There is no timer of its own: each board render renders the card again,
-  so its ages follow the board's refresh.
+  so its ages follow the board's refresh. `sf coordinator` prints a status's further lines under
+  its first, indented by 8 spaces (the width of `status: `).
 - **The card**: hidden until its first read. With no state at all one muted line, "The
-  coordinator has not reported (sf coordinator)". Otherwise the status and how long ago ("3 min
-  ago": `ago` of `web/core.ts`, as the health panel's "checked ..."); older than 2 hours the status
-  is muted with "quiet since <time>" (HH:MM today, else the date and time, as the health panel's
-  since). Then *Open the chat* when a link is set (`target="_blank" rel="noopener noreferrer"`,
-  the URL checked again on the page by the same rules, so a link that is not claude.ai's is never
-  shown). The open questions follow in the order asked (newest last), each with its age; with any
-  open question the card has the accent border. Every text is set as text, never HTML.
+  coordinator has not reported (sf coordinator)". Otherwise the title *Coordinator* and a box with,
+  in order: the status, *Show all* / *Show less* when it folds, a footer, and the questions. On the
+  board the card has a job card's padding; on the home the title stands above the box, as Needs
+  you's heading above its cards, so from 1100 px the two columns' headings and first boxes line up.
+  - *The status* reads as the coordinator's answer to "status?". A blank line ends a block; a line
+    that starts with "- " (after any spaces) is a list item, items in a row one list, and a line
+    that starts with two or more spaces right after an item continues it (joined with one space);
+    other lines make a paragraph that keeps its line breaks. No other Markdown: `**bold**`, links
+    and headings stay text. Without a status, a muted "No status".
+  - *Ticket links*: a word (a longest run of letters, digits, `.`, `_`, `-` and `/`, less its dots
+    at the end, case-sensitive) `<workspace>/<ticket>` of a known ticket, or a bare `<ticket>` that
+    exactly one workspace's known tickets have, is a link in the same tab: a ticket of the board's
+    Queue to its ticket page (`#<ws>/<ticket>/ticket`), else a job to its job page
+    (`#<ws>/<ticket>`). A bare key two workspaces have and an unknown key stay text; the workspace
+    filter does not narrow them; before the jobs and tickets arrive no word links (the next board
+    render draws the links). The ticket's title follows its first mention, in parentheses and
+    muted (a tooltip alone does not show on a phone), and every link has the title as its tooltip.
+  - *Folding*: the preview is the first block, at most 3 of its lines (a paragraph's lines or a
+    list's items); when those, joined with a line break each, hold more than 200 characters, the
+    first 200 are cut before their last space (kept whole without one), the end trimmed and "…"
+    added. *Show all* (`aria-expanded`, `aria-controls="coord-text"`) shows only when the preview
+    leaves something out (a second block, a fourth line, or a cut); the choice is the page's, not
+    stored, and one for the home and the board. Collapsed, the card stays short above the columns.
+  - *The footer*: the status's age at the left ("3 min ago": `ago` of `web/core.ts`, as the health
+    panel's "checked ..."; older than 2 hours the status is muted with "quiet since <time>", HH:MM
+    today, else the date and time, as the health panel's since), and *Open the chat* at the right
+    when a link is set (`target="_blank" rel="noopener noreferrer"`, the URL checked again on the
+    page by the same rules, so a link that is not claude.ai's is never shown).
+  - *The questions*, not folded (they wait for an answer, at most 10), in the order asked (newest
+    last), each with its age; with any open question the card (the home: its box) has the accent
+    border.
+
+  Every text is set as text or a text node, never HTML. Every board render draws the card again;
+  the toggle, a ticket link or *Open the chat* that had the focus has it again after.
 
 ### Pins
 
@@ -5399,7 +5428,8 @@ screen (the empty hash).
   you" scrolls Needs you into view on the home, Your turn on the board.
 - **The Coordinator card** is one element, moved by `placeCoordinator` to the view shown: right
   after Needs you on the home, right before the columns on the board. Moving it reads nothing:
-  `api/coordinator` is still read once per `coordinator` event.
+  `api/coordinator` is still read once per `coordinator` event. On the home the card is bare: its
+  title stands above its box, as Needs you's heading stands above its cards.
 - **Needs you**, oldest first: the jobs of Your turn (`needs_human`, `ready_for_human_review`,
   `handed_over`, `paused`) of the workspaces the filter shows, by the time of their last state
   change, the earliest first (a tie by key), with their count; none: "Nothing waits for you.".
@@ -5415,8 +5445,8 @@ screen (the empty hash).
   the home goes nowhere. Alt+Up and Alt+Down stay the board's.
 - **Layout.** One column, at most 960 px, centred, with the board's side padding. From 1100 px two
   columns (3 : 2, at most 1440 px): Needs you and the Coordinator card side by side in the first
-  row, so both things that wait for the user are on top on a desktop; a phone keeps one column in
-  the user's order.
+  row, so both things that wait for the user are on top on a desktop, their headings and first
+  boxes on one line; a phone keeps one column in the user's order.
 
 ### Phone and tablet
 
@@ -5489,7 +5519,13 @@ attribute and with neither find it again after the board redraws (an ancestor's 
 a nearer data- attribute; an id that is not a plain name is escaped; a data- attribute anchors
 where no id is above); a marker stays inside the window however wide its id; a marker sits at its element's
 corner and moves with a scroll; Escape leaves the mode; at 390 px the panel scrolls nothing
-sideways). A failing
+sideways), and the Coordinator card (`test/browser/coordinator.test.ts`, a status of 1,500 to
+2,000 characters as the coordinator writes it and the chat's link: at 1280 px on the home its title
+and box line up with Needs you's heading and first card within 1 px, the footer's age and *Open the
+chat* share a row within 2 px with the button at the right, Enter on the focused *Show all* opens
+and closes the status and keeps the focus, and collapsed above the board's columns the card is at
+most 220 px high; at 360 and 390 px neither the home nor the board scrolls sideways, open or not,
+and the footer keeps its row). A failing
 test saves a screenshot to `dist/test-results/<file>-<test name>.png` and prints its path. They
 run headless; `SF_BROWSER_HEADED=1 npm run test:browser` shows the window. A check that fails
 because of a defect in the factory's own code is kept and marked as a node:test todo until the

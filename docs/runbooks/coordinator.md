@@ -68,8 +68,23 @@ rule changes, change it here, through a pull request like any other change.
 - **Show the user on the dashboard what you do** (the Coordinator card on the board; the user
   follows the chat on another device):
   - Once per session, set the chat's link: `sf coordinator link https://claude.ai/chat/<id>`.
-  - When you start a step that takes minutes, set your status: `sf coordinator status "<what you
-    do now>"` (at most 300 characters); `sf coordinator status --clear` when you are idle.
+  - When you start a step that takes minutes, set your status, written as your answer to
+    "status?": a first paragraph of one or two lines, then one "- " line per ticket in play, by its
+    key alone (the card adds the title and links it); at most 2,000 characters, in one quoted
+    argument after `--`:
+
+    ```
+    sf coordinator status -- "$(cat <<'EOF'
+    Waiting for you on SF-210's review; two jobs run.
+
+    - SF-210 ready for your review
+    - SF-211 implementing, iteration 2
+    EOF
+    )"
+    ```
+
+    The card folds a long status to its first lines behind *Show all*.
+    `sf coordinator status --clear` when you are idle.
   - Each question you put to the user: `sf coordinator ask "<the question>"` (it prints the id,
     `q1`, `q2`, ...). When the answer comes, `sf coordinator answered <id>`.
   - `sf coordinator` shows what the card shows. The dashboard never writes it: the answers come in

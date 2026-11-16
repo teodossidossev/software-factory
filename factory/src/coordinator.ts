@@ -17,7 +17,7 @@ import { FactoryError } from './errors.js';
 import { localTime } from './local-time.js';
 
 // The bounds, in characters: a status, a question; and the open questions at most.
-export const MAX_STATUS_CHARS = 300;
+export const MAX_STATUS_CHARS = 2000;
 export const MAX_QUESTION_CHARS = 1000;
 export const MAX_QUESTIONS = 10;
 
@@ -187,7 +187,7 @@ export const COORDINATOR_COMMANDS = {
   },
   coordinatorStatus: {
     name: 'coordinator status', args: ['[text...]'], flags: ['--clear'],
-    description: `What the coordinator does now, on the dashboard's Coordinator card with its time (at most ${MAX_STATUS_CHARS} characters); --clear removes it`,
+    description: `What the coordinator does now, on the dashboard's Coordinator card with its time: at most ${MAX_STATUS_CHARS} characters, several lines in one quoted argument (lines starting with "- " are a list; put -- before a text that starts with "-"); --clear removes it`,
     run: (_s, words, flags) => setStatus(serveStateDir(), textOrClear(words, flags, 'status')),
   },
   coordinatorAsk: {
@@ -207,12 +207,15 @@ export const COORDINATOR_COMMANDS = {
   },
 } satisfies Record<string, Command>;
 
-// The state as sf coordinator prints it: the status with its time, each open question with its id
-// and time (a text of several lines indented under it), the link.
+// The state as sf coordinator prints it: the status's first line with its time and its further
+// lines indented by the width of "status: " under it, each open question with its id and time (a
+// text of several lines indented under it), the link.
 export function coordinatorLines(state: CoordinatorState): string[] {
   const when = (at: string): string => localTime(at) ?? at;
+  const [statusFirst = '', ...statusMore] = state.status === null ? [] : state.status.text.split('\n');
   return [
-    `status: ${state.status === null ? 'none' : `${state.status.text}  (${when(state.status.at)})`}`,
+    `status: ${state.status === null ? 'none' : `${statusFirst.trimEnd()}  (${when(state.status.at)})`}`,
+    ...statusMore.map((line) => `        ${line}`.trimEnd()),
     state.questions.length === 0 ? 'questions: none' : 'questions:',
     ...state.questions.flatMap((question) => {
       const [first = '', ...more] = question.text.split('\n');

@@ -459,6 +459,8 @@ interface WorkspaceRow {
   handoff: HandoffMode | null;
   // src/registry.ts WorkspaceColor.
   color: string;
+  // src/setup.ts WorkspaceRow.label: absent when the workspace has none.
+  label?: string;
   app: string;
   description: string | null;
   derived_description: string | null;

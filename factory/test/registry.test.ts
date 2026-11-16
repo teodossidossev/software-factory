@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { FactoryError } from '../src/errors.js';
 import {
-  configDir, digestSettings, editedEntry, MAX_DIGEST_TIMES, explainSettings, isNotifyMode, loadRegistry, NOTIFY_MODES, parseRegistry, resolveWorkspace, saveRegistry, WORKSPACE_COLORS, workspaceApp, workspaceColor,
+  configDir, digestSettings, editedEntry, MAX_DIGEST_TIMES, MAX_LABEL_CHARS, explainSettings, isNotifyMode, loadRegistry, NOTIFY_MODES, parseRegistry, resolveWorkspace, saveRegistry, WORKSPACE_COLORS, workspaceApp, workspaceColor,
   workspaceDigest, workspaceNotify, workspaceNotifyMode,
 } from '../src/registry.js';
 
@@ -155,6 +155,19 @@ test('parseRegistry (SF-084): a workspace may set color to one of the palette na
     invalid(JSON.stringify({ workspaces: { app: { read_checkout: '/srv/app', color } } }));
   }
   assert.throws(() => parseRegistry(JSON.stringify({ workspaces: { app: { read_checkout: '/srv/app', color: 'pink' } } })), /workspaces\.app\.color/);
+});
+
+test('parseRegistry and editedEntry (SF-280): label is one line of 1 to 24 characters after trimming; anything else is refused naming its key; the Edit keeps it', () => {
+  assert.equal(MAX_LABEL_CHARS, 24);
+  for (const [label, read] of [[' exp ', 'exp'], ['second', 'second'], ['x', 'x'], ['l'.repeat(24), 'l'.repeat(24)], [' front end ', 'front end']] as const) {
+    assert.deepEqual(parseRegistry(JSON.stringify({ workspaces: { app: { read_checkout: '/srv/app', label } } })).workspaces.app, { read_checkout: '/srv/app', label: read });
+  }
+  for (const label of ['', '   ', 'l'.repeat(25), 'two\nlines', 'tab\there', 'del\u007f', 'second\n', '\tsecond', 'second\t', '\r\nsecond', null, 1]) {
+    const text = JSON.stringify({ workspaces: { app: { read_checkout: '/srv/app', label } } });
+    assert.throws(() => parseRegistry(text), (error: unknown) => error instanceof FactoryError && error.code === 'registry_invalid' && /workspaces\.app\.label/.test(error.message), text);
+  }
+  const edit = { read_checkout: '/srv/b', description: '', app: '', handoff: 'default', color: 'auto', digest: { track: false, my_work: false } } as const;
+  assert.deepEqual(editedEntry({ read_checkout: '/srv/a', label: 'second' }, edit), { read_checkout: '/srv/b', label: 'second' });
 });
 
 test('parseRegistry (SF-103): description, app and digest per workspace, the top-level digest settings with defaults; unknown keys still refused', () => {

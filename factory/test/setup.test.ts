@@ -95,6 +95,12 @@ test('setup: workspaces, add with the CLI rules, remove and its live-job guard',
   assert.deepEqual((await loadRegistry(env.config)).workspaces.third, { read_checkout: third, color: 'grey' });
   assert.deepEqual((await setup.workspaces()).map((row) => [row.name, row.color]), [['app', 'teal'], ['second', 'orange'], ['third', 'grey']]);
   await setup.removeWorkspace('third');
+  // Its label: on the row when the registry gives one, else no label key.
+  const registry = await loadRegistry(env.config);
+  await saveRegistry({ ...registry, workspaces: { ...registry.workspaces, second: { ...registry.workspaces.second!, label: 'second' } } }, env.config);
+  const labelled = await setup.workspaces();
+  assert.equal(labelled.find((row) => row.name === 'second')?.label, 'second');
+  assert.deepEqual(labelled.filter((row) => row.name !== 'second').map((row) => 'label' in row), [false]);
 
   // Live jobs are counted; a workspace with a live job cannot be removed; a missing checkout is a problem, not a failure.
   await jobs.write(jobOf('second', 'S-1', 'working'));

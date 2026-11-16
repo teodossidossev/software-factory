@@ -44,7 +44,10 @@ function ticket(key: string, extra: Record<string, unknown> = {}) {
 }
 
 // The colour as the server sends it (SF-084): the configured one, else the hash of the name.
-const workspace = (name: string, color?: WorkspaceColor) => ({ name, path: `/srv/${name}`, liveJobs: 0, problem: null, handoff: null, color: workspaceColor(name, color) });
+// Its label only when given, as the server leaves the key out without one.
+const workspace = (name: string, color?: WorkspaceColor, label?: string) => ({
+  name, path: `/srv/${name}`, liveJobs: 0, problem: null, handoff: null, color: workspaceColor(name, color), ...(label !== undefined ? { label } : {}),
+});
 
 type Job = ReturnType<typeof job>;
 
@@ -1371,22 +1374,41 @@ test('board client (SF-084): a dependency cycle of any length shows on each of i
     ['Dependency cycle: A → B → C → A', 'Dependency cycle: B → C → A → B', 'Dependency cycle: C → A → B → C', 'Dependency cycle: S → S', undefined, undefined]);
 });
 
-test('board client (SF-084): each card has its workspace stripe and chip; the configured colour wins over the hash; a long name is shortened in the middle', async () => {
+test('board client (SF-084): each card has its workspace stripe and chip; the configured colour wins over the hash; a long name is shown whole (SF-280)', async () => {
   const long = 'customer-portal-frontend-app';
   const page = await openBoard([job('T-1', 'working'), { ...job('L-1', 'needs_human'), workspace: long }], [ticket('web/W-1'), ticket(`${long}/L-2`)],
     [workspace('app'), workspace('web', 'orange'), workspace(long)]);
   assert.deepEqual(['app/T-1', 'web/W-1'].map((key) => card(page, key).className), ['card ws-teal', 'card ws-orange']);
   const chip = part(card(page, 'web/W-1'), 'wschip')!;
-  assert.deepEqual([chip.className, chip.textContent, chip.getAttribute('title'), (chip.children[0] as FakeElement).className], ['wschip ws-orange', 'web', 'Workspace web', 'wsdot ws-orange']);
+  assert.deepEqual([chip.className, chip.textContent, chip.getAttribute('title')], ['wschip ws-orange', 'web', 'Workspace web']);
+  assert.equal(chip.all().length, 0);
   // The hash of the name, as the server sends it, when none is configured: a+p+p = 321, 321 mod 8 = 1.
   assert.equal(part(card(page, 'app/T-1'), 'wschip')!.className, 'wschip ws-teal');
   for (const key of [`${long}/L-1`, `${long}/L-2`]) {
     const item = part(card(page, key), 'wschip')!;
-    assert.deepEqual([item.textContent, item.getAttribute('title')], ['custome…tend-app', `Workspace ${long}`]);
+    assert.deepEqual([item.textContent, item.getAttribute('title')], ['customer-portal-frontend-app', `Workspace ${long}`]);
   }
   // A workspace the registry no longer lists: no colour class, the name still there.
   page.streams.at(-1)!.emit('workspaces', { workspaces: [workspace('app')] });
   assert.deepEqual([card(page, 'web/W-1').className, part(card(page, 'web/W-1'), 'wschip')!.textContent], ['card', 'web']);
+});
+
+test('board client (SF-280): a labelled workspace\'s chip says its label on the Home, the board and the job page header; its title the name; without the label, the whole name', async () => {
+  const name = 'app-frontend-second';
+  const labelled = [workspace(name, undefined, 'second')];
+  const jobs = [{ ...job('A-1', 'needs_human'), workspace: name }];
+  const chipOf = (item: FakeElement): string[] => {
+    const chip = part(item, 'wschip')!;
+    assert.equal(chip.all().length, 0);
+    return [chip.className, chip.textContent, chip.getAttribute('title')!];
+  };
+  const expected = [`wschip ws-${workspaceColor(name)}`, 'second', `Workspace ${name}`];
+  assert.deepEqual(chipOf(homeCard(await openBoard(jobs, [], labelled, '#home'), `${name}/A-1`)), expected);
+  const board = await openBoard(jobs, [], labelled, '');
+  assert.deepEqual(chipOf(card(board, `${name}/A-1`)), expected);
+  board.streams.at(-1)!.emit('workspaces', { workspaces: [workspace(name)] });
+  assert.deepEqual(chipOf(card(board, `${name}/A-1`)), [`wschip ws-${workspaceColor(name)}`, name, `Workspace ${name}`]);
+  assert.deepEqual(chipOf((await openBoard(jobs, [], labelled, `#${name}/A-1`)).$('jhead')), expected);
 });
 
 test('board client (SF-084): the job page header shows the workspace chip in its colour, Waits for and Needed by', async () => {

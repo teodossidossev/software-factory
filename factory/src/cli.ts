@@ -218,12 +218,14 @@ async function serve(options: { tunnel?: 'off' } = {}): Promise<{ dashboard: URL
   // runners', below), on every change of the queue; a pass that changed something refreshes every page.
   // At a usage limit's reset it resumes the parked jobs (or marks them, under wait) and sends one
   // notification. With the automatic checks the queue starts a ticket only when its plan is ready or
-  // forced, and a ticket added without a check gets one.
+  // forced, and a ticket added without a check, or found without one once nothing else holds it,
+  // gets one.
   const runQueue = new RunQueue(queueStore, execution, setup, jobs, {
     onChange: () => dashboard?.refreshSetup(),
     notify: (notification) => sendNotification(notification, notifyConfig()),
     planCheck: (workspace, ticket) => planCheck(checks, autoChecks, workspace, ticket),
     onAdded: (workspace, ticket) => void autoChecks?.triggerIfUnchecked(workspace, ticket),
+    onUnchecked: (workspace, ticket) => void autoChecks?.triggerIfUnchecked(workspace, ticket),
     // The updating marker: no start and no limit reset while sf update drains or builds.
     updating: () => updateMarked(config.stateDir),
     // A ticket queued by itself (auto_queue) is recorded in its history.

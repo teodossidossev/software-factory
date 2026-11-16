@@ -122,7 +122,7 @@ interface World {
 }
 
 // Workspace app (a checkout cloned from a bare origin) and, with web, workspace web too.
-async function world(name: string, options: { web?: boolean; recheckMs?: number } & Pick<RunQueueOptions, 'planCheck' | 'onAdded' | 'history'> = {}): Promise<World> {
+async function world(name: string, options: { web?: boolean; recheckMs?: number } & Pick<RunQueueOptions, 'planCheck' | 'onAdded' | 'onUnchecked' | 'history'> = {}): Promise<World> {
   const env = await newEnv(name);
   const repo = await newRepo(env, `${name}-repo`, true);
   if (options.web === true) {
@@ -137,6 +137,7 @@ async function world(name: string, options: { web?: boolean; recheckMs?: number 
   const make = (): RunQueue => new RunQueue(store, execution, setup, jobs, {
     resolve, ...(options.recheckMs !== undefined ? { recheckMs: options.recheckMs } : {}),
     ...(options.planCheck !== undefined ? { planCheck: options.planCheck } : {}), ...(options.onAdded !== undefined ? { onAdded: options.onAdded } : {}),
+    ...(options.onUnchecked !== undefined ? { onUnchecked: options.onUnchecked } : {}),
     ...(options.history !== undefined ? { history: options.history } : {}),
   });
   return { env, repo, origin: join(temp, `${name}-repo-origin.git`), jobs, store, execution, setup, queue: make(), again: make };
@@ -304,6 +305,55 @@ test('SF-086: the plan is asked again just before the start: a Task file written
   await w.queue.idle();
   assert.deepEqual(w.execution.starts, []);
   assert.deepEqual(await queued(w), ['app/R-1']);
+});
+
+test('SF-239: a pass asks for the check of a queued ticket whose plan is not checked once nothing else holds it, whatever the free slots; never for one that waits, waits for its next try, is forced or has another plan state; nothing under a hold', TIMEOUT, async () => {
+  const plans = new Map<string, PlanCheck>([
+    ['app/U-6', { state: 'ready', blockers: 0, majors: 0 }],
+    ['app/U-7', { state: 'not_ready', blockers: 1, majors: 0 }],
+    ['app/U-8', { state: 'failed', blockers: 0, majors: 0 }],
+    ['app/U-9', { state: 'checking', blockers: 0, majors: 0 }],
+    ['app/U-10', { state: 'not_needed', blockers: 0, majors: 0 }],
+  ]);
+  const asked: string[] = [];
+  const w = await world('queue-unchecked', {
+    planCheck: async (workspace, ticket) => plans.get(`${workspace}/${ticket}`) ?? { state: 'none', blockers: 0, majors: 0 },
+    onUnchecked: (workspace, ticket) => asked.push(`${workspace}/${ticket}`),
+  });
+  await plan(w, 'U-0');
+  await plan(w, 'B-1');
+  await plan(w, 'U-1');
+  await plan(w, 'U-2', { landsAfter: 'U-0' });
+  await plan(w, 'U-3', { buildsOn: 'B-1' });
+  for (const ticket of ['U-4', 'U-5', 'U-6', 'U-7', 'U-8', 'U-9', 'U-10']) {
+    await plan(w, ticket);
+  }
+  // No slot is free: another ticket's job works and the limit is 1.
+  await w.queue.limit(1);
+  await w.jobs.write(jobRecord('app', 'X-1', 'working'));
+  await w.jobs.write(jobRecord('app', 'B-1', 'working'));
+  await w.queue.hold();
+  for (const ticket of ['U-1', 'U-2', 'U-3', 'U-4', 'U-5', 'U-6', 'U-7', 'U-8', 'U-9', 'U-10']) {
+    await w.queue.add('app', ticket);
+  }
+  await w.queue.force('app', 'U-4');
+  // U-5's next try is an hour ahead.
+  const file = await w.store.read();
+  await w.store.write({ ...file, entries: file.entries.map((entry) => (entry.ticket === 'U-5' ? { ...entry, retry_at: new Date(Date.now() + 3_600_000).toISOString(), retries: 1 } : entry)) });
+  // Held: nothing is asked for.
+  await settle(w.queue);
+  assert.deepEqual(asked, []);
+  // Released: only the unchecked one that waits for nothing, though no slot is free; again in the next pass.
+  await w.queue.release();
+  await w.queue.idle();
+  assert.deepEqual(asked, ['app/U-1']);
+  await settle(w.queue);
+  assert.deepEqual(asked, ['app/U-1', 'app/U-1']);
+  assert.deepEqual(w.execution.starts, []);
+  // The ticket U-3 builds on has a prepared commit to build on: it is asked for too, after U-1.
+  await w.jobs.write({ ...(await w.jobs.read('app', 'B-1'))!, state: 'ready_for_human_review', prepared_commit: 'a'.repeat(40) });
+  await settle(w.queue);
+  assert.deepEqual(asked, ['app/U-1', 'app/U-1', 'app/U-1', 'app/U-3']);
 });
 
 test('Fix 1 R2: the last look at the plan and the start hold the ticket\'s lock: a write under it before the look holds the entry; one asked during the start waits for the job\'s claim', TIMEOUT, async () => {

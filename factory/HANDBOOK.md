@@ -173,9 +173,10 @@ Rules:
 
 - Every slice leaves the base branch releasable: it builds, its tests pass, and unfinished work
   is not reachable by a user.
-- A `change` or `switch` slice stays within about 400 changed lines, tests included, and 10
-  files. One that would be larger is cut again along the next axis of step 4. Mechanical,
-  preparation and cleanup slices have no limit, but hold only their kind.
+- A `change` or `switch` slice aims at about 400 changed lines, tests included, and 10 files.
+  Up to about 600 lines it needs no reason and is no finding: aim small, but do not cut a slice
+  that is only a little over. One that would be larger than that is cut again along the next axis
+  of step 4. Mechanical, preparation and cleanup slices have no limit, but hold only their kind.
 - A slice whose description needs "and" between two outcomes is two slices. A `change` slice
   under about 50 lines joins its neighbour.
 - Tests go with the code they test, never in a slice of their own (step 2's pinning test is the

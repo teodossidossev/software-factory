@@ -5882,7 +5882,7 @@ defaults, and a workspace entry:
 
 | Key | Meaning | Valid |
 | --- | --- | --- |
-| `slice.change_max_lines` | the most added plus removed lines, tests included, of a slice that changes behaviour | an integer from 1 to 100000 |
+| `slice.change_max_lines` | the added plus removed lines, tests included, a slice that changes behaviour aims at; up to one and a half times it needs no reason, beyond that the slice is cut again | an integer from 1 to 100000 |
 | `slice.change_max_files` | the most changed files of such a slice | an integer from 1 to 100000 |
 | `slice.min_lines` | the size under which such a slice should join its neighbour | an integer from 1 to 100000 |
 | `lead_time_hours.small`, `.medium`, `.complex` | the target from a job's start to its merge request, by the Task's size | a number above 0 and at most 1000 |

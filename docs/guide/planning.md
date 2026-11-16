@@ -301,7 +301,8 @@ ask you a question between Start and your own review, so leave no decision open.
   `builds_on:` (a ticket of the same workspace) or wait for the merge.
 - **Size**: cut a solution into slices by kind of change: mechanical, preparation, change (the
   thinnest working path, then one axis of widening per slice), the switch, cleanup. A change or
-  switch slice stays within about 400 changed lines, tests included, and 10 files; the other kinds
+  switch slice aims at about 400 changed lines, tests included, and 10 files, and up to about 600
+  lines needs no reason; one larger than that is cut again. The other kinds
   have no limit but hold only their kind. Prefer slices that start from the base branch and can
   merge in any order; use `builds_on:` and `lands_after` only when a slice needs another's code or
   must not merge first. Slices that need each other's code are built in a row, each with

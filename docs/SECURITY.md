@@ -133,6 +133,13 @@ refused), and the factory's test command passed in a sandbox without network on 
   and package credentials are denied to every tool. The MCP server is registered for the copy's
   folder only (Claude Code's local scope, in `~/.claude.json`, which every session the factory
   starts is denied).
+- **A planning copy holds none of the repository's Claude Code configuration.** `sf planner
+  setup` checks the copy out without anything the repository tracks under a `.claude/` folder but
+  its `CLAUDE.md` (its settings, hooks, skills, agents, commands and rules) and without its
+  `.mcp.json` (its MCP servers), at every run; the copy keeps the code and its instructions. A
+  repository that tracks `.claude` itself as a link, a file or a submodule is refused. Only a
+  configuration file with changes of yours, or a `.mcp.json` Git does not track, stays in the
+  copy: the setup names it in a warning, and it loads until you remove it.
 - **The read-only sessions load no MCP server.** The morning digest, which reads other people's
   commit messages, the reviews and the Task check start without your MCP servers and deny every
   MCP tool, so nothing they read can drive one.
@@ -209,10 +216,6 @@ refused), and the factory's test command passed in a sandbox without network on 
 - **A planner's shell can open Unix sockets** on Linux unless Claude Code's seccomp filter is
   installed (`npm install -g @anthropic-ai/sandbox-runtime`). The factory's own socket is hidden
   from it, with the state folder.
-- **The planned repository's own Claude Code settings** (a committed `.claude/settings.json`) merge
-  into the planner's: their hooks run as you, outside the sandbox. The factory will start planner
-  sessions without them (SF-246); until then, read a repository's `.claude/` before you trust its
-  planning copy.
 - **A phone that is lost unlocked** opens the dashboard. The dangerous actions still need the
   ticket typed. Keep the QR code with the token private.
 

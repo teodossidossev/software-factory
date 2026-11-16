@@ -207,8 +207,10 @@ installs it); without it, or for a ticket with nothing to see or reason about, i
 is none. To use it by hand:
 
 1. Run `sf planner setup my-app`: it clones the repository into `~/planning/my-app`, registers the
-   software-factory MCP server for that folder and installs the skill. Open Claude Code there once
-   and accept its trust dialog.
+   software-factory MCP server for that folder and installs the skill. The copy holds the
+   repository's code and its `CLAUDE.md` files, never its Claude Code configuration: what it tracks
+   under `.claude/` folders, and its `.mcp.json`, stay out, so none of its hooks, skills, agents or
+   MCP servers run. Open Claude Code there once and accept its trust dialog.
 2. Start Claude Code there and send `/planning-tasks workspace my-app, ticket APP-12`, followed by
    your words, or the first message the ticket's page offers.
 

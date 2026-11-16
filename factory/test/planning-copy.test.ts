@@ -1,14 +1,15 @@
 // sf planner setup <workspace>: the planning copy it prepares (the clone, the exclude, the skill, the
 // pointers file, the settings, the MCP server registered with a fake claude for that folder only),
 // the token in no output and no file of the copy, a second run's fast-forward and its notes, and
-// every refusal with its code; plannerSettings for a given environment.
+// every refusal with its code; the repository's Claude Code configuration kept out of the copy by
+// its sparse checkout; plannerSettings for a given environment.
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { chmod, lstat, mkdir, readdir, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { FactoryError } from '../src/errors.js';
@@ -580,3 +581,137 @@ function runShell(command: string, input: string, env: NodeJS.ProcessEnv): Promi
     child.stdin.end(input);
   });
 }
+
+// Files written in the checkout (each holding its own path), committed and pushed to its origin.
+// -f: a global ignore of the machine may name them.
+async function pushFiles(repo: string, paths: string[], message: string): Promise<void> {
+  for (const path of paths) {
+    await mkdir(dirname(join(repo, path)), { recursive: true });
+    await writeFile(join(repo, path), `${path}\n`);
+  }
+  git(repo, 'add', '-f', ...paths);
+  git(repo, 'commit', '-q', '-m', message);
+  git(repo, 'push', '-q', 'origin', 'main');
+}
+
+test("sf planner setup keeps the repository's Claude Code configuration out of the copy", async () => {
+  const { env, repo, copy } = await plannerEnv('planner-config');
+  const config = ['.claude/settings.json', '.claude/agents/a.md', 'sub/.claude/skills/y/SKILL.md', '.mcp.json'];
+  await pushFiles(repo, [...config, '.claude/CLAUDE.md'], 'claude config');
+  const factoryFiles = ['.claude/planning-copy.md', '.claude/settings.local.json', '.claude/skills/planning-tasks/SKILL.md'];
+  // The copy holds the repository's CLAUDE.md and the factory's files, none of the others but
+  // those named; its sparse checkout is set and its status clean but for changed files.
+  const leftOut = (stays: string[] = [], status = ''): void => {
+    for (const path of config) {
+      assert.equal(existsSync(join(copy, path)), stays.includes(path), path);
+    }
+    for (const path of ['.claude/CLAUDE.md', 'README.md', ...factoryFiles]) {
+      assert.equal(existsSync(join(copy, path)), true, path);
+    }
+    assert.deepEqual(git(copy, 'sparse-checkout', 'list').split('\n').filter((line) => line !== ''), ['/*', '!**/.claude/*', '**/.claude/CLAUDE.md', '!/.mcp.json']);
+    assert.equal(git(copy, 'status', '--porcelain', '--untracked-files=no'), status);
+  };
+
+  // CO-1: a first run.
+  const first = await setup(env);
+  leftOut();
+  assert.doesNotMatch(first.stdout, /^(note|warning):/m);
+  assert.equal(await readFile(join(copy, '.claude', 'CLAUDE.md'), 'utf8'), '.claude/CLAUDE.md\n');
+
+  // CO-2: a copy made before (its sparse checkout disabled) loses them at its next run.
+  git(copy, 'sparse-checkout', 'disable');
+  for (const path of config) {
+    assert.equal(existsSync(join(copy, path)), true, path);
+  }
+  await setup(env);
+  leftOut();
+
+  // CO-3: a fast-forward changes the settings and CLAUDE.md: the first stays out, the second is
+  // updated.
+  const origin = git(repo, 'config', '--get', 'remote.origin.url').trim();
+  const pusher = join(temp, 'planner-config-pusher');
+  execFileSync('git', ['clone', '-q', origin, pusher]);
+  await writeFile(join(pusher, '.claude', 'settings.json'), '{"hooks":{}}\n');
+  await writeFile(join(pusher, '.claude', 'CLAUDE.md'), 'Updated.\n');
+  git(pusher, 'commit', '-q', '-a', '-m', 'change the config');
+  git(pusher, 'push', '-q', 'origin', 'main');
+  await setup(env);
+  assert.equal(git(copy, 'rev-parse', 'HEAD'), git(pusher, 'rev-parse', 'HEAD'));
+  assert.equal(await readFile(join(copy, '.claude', 'CLAUDE.md'), 'utf8'), 'Updated.\n');
+  leftOut();
+
+  // CO-4: a configuration file with changes of the user's stays, with a warning; the run succeeds.
+  git(copy, 'sparse-checkout', 'disable');
+  await writeFile(join(copy, '.claude', 'agents', 'a.md'), 'mine\n');
+  const changed = await runCli(env, ['planner', 'setup', 'app']);
+  assert.equal(changed.code, 0, changed.stderr);
+  assert.match(changed.stdout, /^warning: \.claude\/agents\/a\.md stays in the planning copy of app: it has changes of yours, or Git does not track it\. Claude Code would load it there: remove it and run sf planner setup app again\.$/m);
+  assert.equal(changed.stdout.match(/^warning:/gm)?.length, 1, changed.stdout);
+  assert.equal(await readFile(join(copy, '.claude', 'agents', 'a.md'), 'utf8'), 'mine\n');
+  leftOut(['.claude/agents/a.md'], ' M .claude/agents/a.md\n');
+});
+
+test('a failed sparse checkout stops sf planner setup', async () => {
+  const { env, copy } = await plannerEnv('planner-sparse-fails');
+  // A git first on PATH that fails every sparse-checkout and runs the real git otherwise.
+  const real = execFileSync('which', ['git'], { encoding: 'utf8' }).trim();
+  const fake = join(temp, 'planner-sparse-fails-git');
+  await mkdir(fake);
+  await writeFile(join(fake, 'git'), `#!/bin/sh\nfor arg in "$@"; do\n  if [ "$arg" = sparse-checkout ]; then echo 'fatal: simulated' >&2; exit 128; fi\ndone\nexec '${real}' "$@"\n`);
+  await chmod(join(fake, 'git'), 0o755);
+  env.extra = { ...env.extra, PATH: `${fake}:${env.extra!.PATH}` };
+  const result = await runCli(env, ['planner', 'setup', 'app']);
+  assert.equal(result.code, 1, result.stdout);
+  assert.equal(result.stderr.trim(), "sf: The planning copy of app could not leave out the repository's Claude Code configuration: simulated");
+  // The clone was made; no later step ran.
+  assert.equal(existsSync(join(copy, 'README.md')), true);
+  assert.equal(existsSync(join(copy, '.claude', 'planning-copy.md')), false);
+  assert.equal(existsSync(join(copy, '.claude')), false);
+
+  // Its code, on the next run of the existing copy: runGit finds git on this process's PATH.
+  const path = process.env.PATH;
+  process.env.PATH = `${fake}:${path}`;
+  try {
+    await assert.rejects(plannerCommand(['setup', 'app'], {
+      env: processEnv(env), stateDir: env.state, configDir: env.config, mcpPort: async () => 18787, print: () => undefined,
+    }), (error: unknown) => {
+      assert.ok(error instanceof FactoryError, String(error));
+      assert.equal(error.code, 'planning_copy_unsafe');
+      assert.equal(error.message, "The planning copy of app could not leave out the repository's Claude Code configuration: simulated");
+      return true;
+    });
+  } finally {
+    process.env.PATH = path;
+  }
+  assert.equal(existsSync(join(copy, '.claude')), false);
+});
+
+test('a repository that tracks .claude as a link is refused', async () => {
+  const { env, repo, copy, bin } = await plannerEnv('planner-config-link');
+  await mkdir(join(repo, 'conf'));
+  await writeFile(join(repo, 'conf', 'settings.json'), '{"hooks":{}}\n');
+  await symlink('conf', join(repo, '.claude'));
+  git(repo, 'add', '-f', '.claude', 'conf');
+  git(repo, 'commit', '-q', '-m', 'a linked .claude');
+  git(repo, 'push', '-q', 'origin', 'main');
+  const message = 'The repository tracks .claude as a link, a file or a submodule, not a folder: the planning copy of app cannot leave its Claude Code configuration out.';
+
+  const result = await runCli(env, ['planner', 'setup', 'app']);
+  assert.equal(result.code, 1, result.stdout);
+  assert.equal(result.stderr.trim(), `sf: ${message}`);
+  assert.equal(existsSync(join(copy, '.claude', 'planning-copy.md')), false);
+  // Nothing was written through the link.
+  assert.deepEqual(await readdir(join(copy, 'conf')), ['settings.json']);
+  assert.equal(existsSync(join(bin, 'claude.log')), false);
+
+  // Its code, on the next run of the existing copy.
+  await assert.rejects(plannerCommand(['setup', 'app'], {
+    env: processEnv(env), stateDir: env.state, configDir: env.config, mcpPort: async () => 18787, print: () => undefined,
+  }), (error: unknown) => {
+    assert.ok(error instanceof FactoryError, String(error));
+    assert.equal(error.code, 'planning_copy_unsafe');
+    assert.equal(error.message, message);
+    return true;
+  });
+  assert.equal(existsSync(join(copy, '.claude', 'planning-copy.md')), false);
+});

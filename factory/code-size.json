@@ -2,7 +2,7 @@
   "src/cli.ts": 1573,
   "src/digest.ts": 819,
   "src/execution/control.ts": 690,
-  "src/execution/mr-steps.ts": 1320,
+  "src/execution/mr-steps.ts": 1265,
   "src/execution/reviews.ts": 876,
   "src/execution/start.ts": 614,
   "src/guard.ts": 832,

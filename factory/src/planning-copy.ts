@@ -13,6 +13,8 @@
 //    refused when the repository tracks them;
 // 6. the factory's planning-tasks skill copied into .claude/skills;
 // 7. .claude/planning-copy.md: where the user's request and rules are;
+// 7b. .claude/settings.local.json: permissions and sandbox replaced with plannerSettings' (read-only
+//    tools, the shell in Claude Code's sandbox, the secrets denied), the file's other keys kept;
 // 8. the factory's MCP server registered for that folder only (claude mcp, local scope: the token
 //    stays in Claude Code's ~/.claude.json), removed and added again so a rotated token arrives;
 // 9. the result, and what the user does next: accept Claude Code's trust dialog there once.
@@ -22,19 +24,23 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { appendFile, cp, lstat, mkdir, readFile, readlink, realpath, rename, rm, stat } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { writeFileAtomic } from './atomic.js';
+import { writeFileAtomic, writeFileAtomicWith } from './atomic.js';
 import { checkName, UsageError } from './commands.js';
-import { planningDir } from './config.js';
+import { envFilePath, planningDir } from './config.js';
 import { CLONE_TIMEOUT_MS, FETCH_TIMEOUT_MS, GIT_TIMEOUT_MS, originUrl, reason } from './digest.js';
 import { FactoryError } from './errors.js';
 import { withoutHostTokens } from './forge.js';
 import { type GitResult, runGit } from './git.js';
 import { PACKAGE_ROOT } from './package-root.js';
 import { loadRegistry, resolveWorkspace } from './registry.js';
+import { absoluteRule, claudeConfigDir, claudeUserSettings, HOME_CREDENTIALS } from './sandbox-denials.js';
+import { DASHBOARD_TOKEN_FILE, MCP_TOKEN_FILE } from './secrets.js';
 import { mcpBaseUrl, redactMcpToken, requireMcpToken, SERVER_NAME } from './server.js';
 import { requestFile } from './setup.js';
+import { tunnelProfile } from './tunnel.js';
 
 export interface PlannerDeps {
   env: NodeJS.ProcessEnv;           // process.env (SF_PLANNING_DIR, HOME, PATH)
@@ -60,7 +66,63 @@ const SKILL = 'planning-tasks';
 const FACTORY_DIR = fileURLToPath(PACKAGE_ROOT).replace(/\/+$/, '');
 const SKILL_SOURCE = join(FACTORY_DIR, 'skills', SKILL);
 const POINTERS = '.claude/planning-copy.md';
+const SETTINGS = '.claude/settings.local.json';
 const EXCLUDE_LINE = '/.claude/';
+
+// The planner's tools: the factory's MCP tools and reading tools; every other tool but the
+// sandboxed shell asks first.
+const ALLOWED_TOOLS = [`mcp__${SERVER_NAME}`, 'Read', 'Grep', 'Glob', 'Skill', 'Agent', 'Task', 'TodoWrite', 'ToolSearch'];
+// Writing tools, and the web: a search query or a fetched URL could carry what the planner read.
+const DENIED_TOOLS = ['Edit', 'Write', 'NotebookEdit', 'WebFetch', 'WebFetch(domain:*)', 'WebSearch'];
+// The folders of HOME_CREDENTIALS (its other entries are files).
+const HOME_CREDENTIAL_FOLDERS = new Set(['.ssh', '.codex', '.aws', '.config/gh']);
+// Credentials in the home directory beyond HOME_CREDENTIALS, true for a folder: GnuPG, Kubernetes,
+// GitLab's CLI and Docker's registry logins.
+const MORE_HOME_SECRETS: Array<[string, boolean]> = [['.gnupg', true], ['.kube', true], ['.config/glab-cli', true], ['.docker/config.json', false]];
+
+export interface PlannerSettings {
+  permissions: { allow: string[]; deny: string[] };
+  sandbox: { enabled: true; failIfUnavailable: true; autoAllowBashIfSandboxed: true; allowUnsandboxedCommands: false; filesystem: { denyWrite: string[]; denyRead: string[] } };
+}
+
+// The settings of a planning copy for the environment env (SF_ENV_FILE and SF_CONFIG_DIR through
+// envFilePath, HOME, CLAUDE_CONFIG_DIR, TUNNEL_CLIENT_PROFILE_DIR, XDG_CONFIG_HOME) and the
+// factory's state directory stateDir (the token rules and denyRead follow this argument).
+// The shell's boundary is the sandbox, not a list of commands: it writes nowhere (the factory is the
+// copy's only writer), reaches no network and cannot see the state folder (its socket, jobs and
+// tokens); without a working sandbox the session does not start. The Read tool still reads the
+// user's request files under the state folder. The secret files are denied to every tool.
+export function plannerSettings(env: NodeJS.ProcessEnv, stateDir: string): PlannerSettings {
+  const home = env.HOME || homedir();
+  const envFile = envFilePath(env);
+  const configDir = claudeConfigDir(env, home);
+  // Each secret path, true for a folder, in the order of the rules.
+  const files = (paths: string[]): Array<[string, boolean]> => paths.map((path) => [path, false]);
+  const secrets: Array<[string, boolean]> = [
+    ...files(envFile === undefined ? [] : [envFile]),
+    ...files([join(stateDir, MCP_TOKEN_FILE), join(stateDir, DASHBOARD_TOKEN_FILE)]),
+    ...files(claudeUserSettings(env, home)),
+    [join(configDir, '.credentials.json'), false],
+    [join(configDir, 'backups'), true],
+    ...HOME_CREDENTIALS.map((path): [string, boolean] => [join(home, path), HOME_CREDENTIAL_FOLDERS.has(path)]),
+    ...MORE_HOME_SECRETS.map(([path, folder]): [string, boolean] => [join(home, path), folder]),
+    [tunnelProfile(env, home), false],
+  ];
+  // A path an earlier step gave keeps its place and is not repeated.
+  const seen = new Set<string>();
+  const reads = secrets.filter(([path]) => !seen.has(path) && seen.add(path)).map(([path, folder]) => `Read(${absoluteRule(path)}${folder ? '/**' : ''})`);
+  return {
+    permissions: { allow: [...ALLOWED_TOOLS], deny: [...DENIED_TOOLS, ...reads] },
+    sandbox: {
+      enabled: true,
+      failIfUnavailable: true,
+      autoAllowBashIfSandboxed: true,
+      allowUnsandboxedCommands: false,
+      // The path as it is: the sandbox's path lists have no escape for glob characters.
+      filesystem: { denyWrite: ['.'], denyRead: [`/${stateDir}`] },
+    },
+  };
+}
 
 // sf planner setup <workspace>.
 export async function plannerCommand(args: string[], deps: PlannerDeps): Promise<void> {
@@ -132,6 +194,9 @@ async function prepare(planning: Planning, deps: PlannerDeps): Promise<void> {
   const text = await pointersText(name, base, deps);
   await writeFileAtomic(join(copy, POINTERS), Buffer.from(text, 'utf8'), 0o644);
 
+  // 7b. The settings.
+  await writeSettings(copy, name, deps);
+
   // 8. The MCP server.
   const token = await requireMcpToken(deps.stateDir);
   const port = await deps.mcpPort();
@@ -145,6 +210,7 @@ async function prepare(planning: Planning, deps: PlannerDeps): Promise<void> {
     `MCP server ${SERVER_NAME}: registered for this folder only (Claude Code local scope)`,
     `Skill ${SKILL}: installed in .claude/skills`,
     `Pointers: ${POINTERS}`,
+    "Settings: read-only; shell commands in Claude Code's sandbox (no writes, no network); secrets denied",
     `Next: open Claude Code there once and accept its trust dialog: cd ${copy} && claude`,
     `Then plan a ticket: /${SKILL} workspace ${name}, ticket <ticket>`,
   ]) {
@@ -300,7 +366,7 @@ async function prepareClaudeFolder(copy: string, name: string): Promise<void> {
       throw new FactoryError('planning_copy_unsafe', `.claude${sub} in ${name}'s planning copy is a link or not a folder: remove it and run sf planner setup again.`);
     }
   }
-  const tracked = out(await git(copy, ['ls-files', '--', `.claude/skills/${SKILL}`, POINTERS])).split('\n')[0];
+  const tracked = out(await git(copy, ['ls-files', '--', `.claude/skills/${SKILL}`, POINTERS, SETTINGS])).split('\n')[0];
   if (tracked !== undefined && tracked !== '') {
     throw new FactoryError('planning_copy_unsafe', `The repository of ${name} tracks ${tracked}, which the planning copy writes.`);
   }
@@ -337,6 +403,40 @@ async function pointersText(name: string, base: string, deps: PlannerDeps): Prom
     );
   }
   return `${lines.join('\n')}\n`;
+}
+
+// .claude/settings.local.json, missing or a regular file (never a link), a JSON object: its
+// permissions and sandbox replaced whole with plannerSettings', every other key kept in its place (a
+// new key last); written atomically with the file's mode, else 0600. The checks go by path: the
+// planner cannot write in the copy and the factory is its only writer, so a link there comes only
+// from the repository or an earlier tool.
+async function writeSettings(copy: string, name: string, deps: PlannerDeps): Promise<void> {
+  const path = join(copy, SETTINGS);
+  const found = await lstat(path).catch((error: NodeJS.ErrnoException) => (error.code === 'ENOENT' ? undefined : Promise.reject(error)));
+  if (found !== undefined && !found.isFile()) {
+    throw new FactoryError('planning_copy_unsafe', `${SETTINGS} in ${name}'s planning copy is a link or not a file: remove it and run sf planner setup again.`);
+  }
+  let data: unknown = {};
+  if (found !== undefined) {
+    try {
+      data = JSON.parse(await readFile(path, 'utf8'));
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) {
+        throw error;
+      }
+      data = undefined;
+    }
+  }
+  if (typeof data !== 'object' || data === null || Array.isArray(data)) {
+    throw new FactoryError('planning_copy_unusable', `${SETTINGS} in ${name}'s planning copy is not a JSON object: fix or remove it.`);
+  }
+  const settings = plannerSettings(deps.env, deps.stateDir);
+  const written = { ...data, permissions: settings.permissions, sandbox: settings.sandbox };
+  const mode = found === undefined ? 0o600 : found.mode & 0o777;
+  await writeFileAtomicWith(path, async (handle) => {
+    await handle.chmod(mode);
+    await handle.writeFile(`${JSON.stringify(written, null, 2)}\n`);
+  }, mode);
 }
 
 // claude mcp remove (its exit code ignored), then claude mcp add, both in the copy, local scope.

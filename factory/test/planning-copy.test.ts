@@ -1,16 +1,16 @@
 // sf planner setup <workspace>: the planning copy it prepares (the clone, the exclude, the skill, the
-// pointers file, the MCP server registered with a fake claude for that folder only), the token in
-// no output and no file of the copy, a second run's fast-forward and its notes, and every refusal
-// with its code.
+// pointers file, the settings, the MCP server registered with a fake claude for that folder only),
+// the token in no output and no file of the copy, a second run's fast-forward and its notes, and
+// every refusal with its code; plannerSettings for a given environment.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmod, lstat, mkdir, readdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readdir, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { FactoryError } from '../src/errors.js';
-import { plannerCommand } from '../src/planning-copy.js';
+import { plannerCommand, plannerSettings } from '../src/planning-copy.js';
 import { type Env, git, newEnv, newRepo, processEnv, runCli, temp } from './support/harness.js';
 
 const TOKEN = 'ab'.repeat(32);
@@ -129,6 +129,7 @@ test('a first run clones the workspace, installs the skill and the pointers, and
     'MCP server software-factory: registered for this folder only (Claude Code local scope)',
     'Skill planning-tasks: installed in .claude/skills',
     'Pointers: .claude/planning-copy.md',
+    "Settings: read-only; shell commands in Claude Code's sandbox (no writes, no network); secrets denied",
     `Next: open Claude Code there once and accept its trust dialog: cd ${copy} && claude`,
     'Then plan a ticket: /planning-tasks workspace app, ticket <ticket>',
   ]);
@@ -139,13 +140,11 @@ test('a second run fast-forwards a clean copy, leaves a changed one, and replace
   await setup(env);
   const checkoutHead = git(repo, 'rev-parse', 'HEAD');
 
-  // A clean copy is fast-forwarded; settings.local.json and the exclude stay as they are.
-  await writeFile(join(copy, '.claude', 'settings.local.json'), '{"permissions":{}}\n');
+  // A clean copy is fast-forwarded; the exclude stays as it is.
   const first = pushCommit(repo, 'first.txt');
   const clean = await setup(env);
   assert.equal(git(copy, 'rev-parse', 'HEAD').trim(), first);
   assert.doesNotMatch(clean.stdout, /^(note|warning):/m);
-  assert.equal(await readFile(join(copy, '.claude', 'settings.local.json'), 'utf8'), '{"permissions":{}}\n');
   assert.equal((await readFile(join(copy, '.git', 'info', 'exclude'), 'utf8')).split('\n').filter((line) => line === '/.claude/').length, 1);
 
   // A copy with changes is left as it is and says so.
@@ -300,4 +299,204 @@ test('sf planner setup refuses what it cannot use, each with its code', async ()
     assert.match(usage.stderr, /^sf: planner needs setup <workspace>\./);
   }
   assert.deepEqual(lines.filter((line) => line.includes(TOKEN)), []);
+});
+
+const PLANNER_ALLOW = ['mcp__software-factory', 'Read', 'Grep', 'Glob', 'Skill', 'Agent', 'Task', 'TodoWrite', 'ToolSearch'];
+const PLANNER_DENY_TOOLS = ['Edit', 'Write', 'NotebookEdit', 'WebFetch', 'WebFetch(domain:*)', 'WebSearch'];
+const sandboxWith = (denyRead: string): unknown => ({
+  enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false, filesystem: { denyWrite: ['.'], denyRead: [denyRead] },
+});
+
+test('plannerSettings: read-only tools, the secrets of this environment denied, the shell sandboxed', () => {
+  // SF_ENV_FILE and HOME only: Claude Code's configuration and the tunnel profile under HOME, and
+  // ~/.claude/.credentials.json once, with Claude Code's configuration (not again with the home
+  // directory's credentials).
+  const plain = plannerSettings({ SF_ENV_FILE: '/srv/sf/auth.env', HOME: '/home/u' }, '/var/sf/state');
+  assert.deepEqual(plain, {
+    permissions: {
+      allow: PLANNER_ALLOW,
+      deny: [
+        ...PLANNER_DENY_TOOLS,
+        'Read(//srv/sf/auth.env)',
+        'Read(//var/sf/state/mcp-token)',
+        'Read(//var/sf/state/dashboard-token)',
+        'Read(//home/u/.claude/settings.json)',
+        'Read(//home/u/.claude.json)',
+        'Read(//home/u/.claude/.credentials.json)',
+        'Read(//home/u/.claude/backups/**)',
+        'Read(//home/u/.ssh/**)',
+        'Read(//home/u/.codex/**)',
+        'Read(//home/u/.aws/**)',
+        'Read(//home/u/.config/gh/**)',
+        'Read(//home/u/.git-credentials)',
+        'Read(//home/u/.config/git/credentials)',
+        'Read(//home/u/.netrc)',
+        'Read(//home/u/.npmrc)',
+        'Read(//home/u/.gnupg/**)',
+        'Read(//home/u/.kube/**)',
+        'Read(//home/u/.config/glab-cli/**)',
+        'Read(//home/u/.docker/config.json)',
+        'Read(//home/u/.config/tunnel-client/software-factory.yaml)',
+      ],
+    },
+    sandbox: sandboxWith('//var/sf/state'),
+  });
+
+  // Every override: the rules follow them; the state directory's glob characters are escaped in the
+  // rules, not in denyRead.
+  const moved = plannerSettings({
+    SF_ENV_FILE: '/etc/sf/auth.env', HOME: '/home/v', CLAUDE_CONFIG_DIR: '/opt/claude', TUNNEL_CLIENT_PROFILE_DIR: '/opt/tunnel', XDG_CONFIG_HOME: '/home/v/xdg',
+  }, '/data/sf(2)/state');
+  assert.deepEqual(moved, {
+    permissions: {
+      allow: PLANNER_ALLOW,
+      deny: [
+        ...PLANNER_DENY_TOOLS,
+        'Read(//etc/sf/auth.env)',
+        'Read(//data/sf\\(2\\)/state/mcp-token)',
+        'Read(//data/sf\\(2\\)/state/dashboard-token)',
+        'Read(//opt/claude/settings.json)',
+        'Read(//opt/claude/.claude.json)',
+        'Read(//opt/claude/.credentials.json)',
+        'Read(//opt/claude/backups/**)',
+        'Read(//home/v/.ssh/**)',
+        'Read(//home/v/.codex/**)',
+        'Read(//home/v/.aws/**)',
+        'Read(//home/v/.config/gh/**)',
+        'Read(//home/v/.git-credentials)',
+        'Read(//home/v/.config/git/credentials)',
+        'Read(//home/v/.netrc)',
+        'Read(//home/v/.npmrc)',
+        'Read(//home/v/.claude/.credentials.json)',
+        'Read(//home/v/.gnupg/**)',
+        'Read(//home/v/.kube/**)',
+        'Read(//home/v/.config/glab-cli/**)',
+        'Read(//home/v/.docker/config.json)',
+        'Read(//opt/tunnel/software-factory.yaml)',
+      ],
+    },
+    sandbox: sandboxWith('//data/sf(2)/state'),
+  });
+
+  // SF_ENV_FILE empty: no environment file, no rule for one.
+  const noEnvFile = plannerSettings({ SF_ENV_FILE: '', HOME: '/home/w' }, '/home/w/.local/state/software-factory');
+  assert.deepEqual(noEnvFile, {
+    permissions: {
+      allow: PLANNER_ALLOW,
+      deny: [
+        ...PLANNER_DENY_TOOLS,
+        'Read(//home/w/.local/state/software-factory/mcp-token)',
+        'Read(//home/w/.local/state/software-factory/dashboard-token)',
+        'Read(//home/w/.claude/settings.json)',
+        'Read(//home/w/.claude.json)',
+        'Read(//home/w/.claude/.credentials.json)',
+        'Read(//home/w/.claude/backups/**)',
+        'Read(//home/w/.ssh/**)',
+        'Read(//home/w/.codex/**)',
+        'Read(//home/w/.aws/**)',
+        'Read(//home/w/.config/gh/**)',
+        'Read(//home/w/.git-credentials)',
+        'Read(//home/w/.config/git/credentials)',
+        'Read(//home/w/.netrc)',
+        'Read(//home/w/.npmrc)',
+        'Read(//home/w/.gnupg/**)',
+        'Read(//home/w/.kube/**)',
+        'Read(//home/w/.config/glab-cli/**)',
+        'Read(//home/w/.docker/config.json)',
+        'Read(//home/w/.config/tunnel-client/software-factory.yaml)',
+      ],
+    },
+    sandbox: sandboxWith('//home/w/.local/state/software-factory'),
+  });
+
+  // RO-2: the planner reads the user's rules and requests with the Read tool.
+  for (const settings of [plain, moved, noEnvFile]) {
+    assert.deepEqual(settings.permissions.deny.filter((rule) => /\/(rules|requests)\b/.test(rule)), []);
+  }
+});
+
+test("sf planner setup writes the copy's settings and keeps the file's other keys", async () => {
+  const { env, copy } = await plannerEnv('planner-settings');
+  const file = join(copy, '.claude', 'settings.local.json');
+  const expected = plannerSettings(processEnv(env), env.state);
+  assert.ok(expected.permissions.deny.includes(`Read(/${join(env.state, 'mcp-token')})`));
+
+  // A first run: the file made, mode 0600, the token in it nowhere.
+  const first = await setup(env);
+  assert.match(first.stdout, /^Settings: read-only; shell commands in Claude Code's sandbox \(no writes, no network\); secrets denied$/m);
+  assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), expected);
+  assert.equal((await stat(file)).mode & 0o777, 0o600);
+  assert.equal((await readFile(file, 'utf8')).includes(TOKEN), false);
+
+  // The user's keys kept with their values and in their place, permissions replaced whole, sandbox
+  // last; written in place, the file keeps its mode 0600.
+  const hooks = { Stop: [{ hooks: [{ type: 'command', command: 'echo stopped' }] }] };
+  await writeFile(file, `${JSON.stringify({ model: 'opus', permissions: { allow: ['Bash(awk:*)'], defaultMode: 'acceptEdits' }, hooks })}\n`);
+  const second = await setup(env);
+  assert.match(second.stdout, /^Settings: /m);
+  const written = JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(written), ['model', 'permissions', 'hooks', 'sandbox']);
+  assert.deepEqual(written, { model: 'opus', permissions: expected.permissions, hooks, sandbox: expected.sandbox });
+  assert.equal(JSON.stringify(written).includes('Bash(awk:*)'), false);
+  assert.equal((await stat(file)).mode & 0o777, 0o600);
+
+  // Another mode the user gave the file is kept.
+  await chmod(file, 0o640);
+  await setup(env);
+  assert.equal((await stat(file)).mode & 0o777, 0o640);
+  assert.equal(git(copy, 'status', '--porcelain'), '');
+});
+
+test('a settings file that is a link or not an object is refused, untouched', async () => {
+  const { env, repo, copy } = await plannerEnv('planner-settings-refused');
+  await setup(env);
+  const file = join(copy, '.claude', 'settings.local.json');
+  const refused = async (code: string, message: string): Promise<void> => {
+    await assert.rejects(plannerCommand(['setup', 'app'], {
+      env: processEnv(env), stateDir: env.state, configDir: env.config, mcpPort: async () => 18787, print: () => undefined,
+    }), (error: unknown) => {
+      assert.ok(error instanceof FactoryError, String(error));
+      assert.equal(error.code, code);
+      assert.equal(error.message, message);
+      return true;
+    });
+  };
+
+  // A link, to a file or to nowhere, and a folder: unsafe, nothing written through the link.
+  const unsafe = ".claude/settings.local.json in app's planning copy is a link or not a file: remove it and run sf planner setup again.";
+  const outside = join(temp, 'planner-settings-outside.json');
+  await writeFile(outside, '{"hooks":{}}\n');
+  await rm(file);
+  await symlink(outside, file);
+  await refused('planning_copy_unsafe', unsafe);
+  assert.equal((await lstat(file)).isSymbolicLink(), true);
+  assert.equal(await readFile(outside, 'utf8'), '{"hooks":{}}\n');
+  await rm(file);
+  await symlink(join(temp, 'planner-settings-nowhere.json'), file);
+  await refused('planning_copy_unsafe', unsafe);
+  assert.equal(existsSync(join(temp, 'planner-settings-nowhere.json')), false);
+  await rm(file);
+  await mkdir(file);
+  await refused('planning_copy_unsafe', unsafe);
+  assert.deepEqual(await readdir(file), []);
+  await rm(file, { recursive: true });
+
+  // Not a JSON object: unusable, the file unchanged.
+  const unusable = ".claude/settings.local.json in app's planning copy is not a JSON object: fix or remove it.";
+  for (const text of ['[]\n', 'null\n', '"text"\n', '{"permissions":\n', '']) {
+    await writeFile(file, text, { mode: 0o600 });
+    await refused('planning_copy_unusable', unusable);
+    assert.equal(await readFile(file, 'utf8'), text);
+  }
+  await rm(file);
+  await setup(env);
+
+  // A repository that tracks the settings file.
+  await mkdir(join(repo, '.claude'));
+  await writeFile(join(repo, '.claude', 'settings.local.json'), '{}\n');
+  // -f: a global ignore of the machine may name the file.
+  git(repo, 'add', '-f', '.claude/settings.local.json');
+  git(repo, 'commit', '-q', '-m', 'settings');
+  git(repo, 'push', '-q', 'origin', 'main');
+  await refused('planning_copy_unsafe', 'The repository of app tracks .claude/settings.local.json, which the planning copy writes.');
 });

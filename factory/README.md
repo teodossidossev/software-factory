@@ -396,8 +396,9 @@ rules. It runs again at any time and refreshes the copy in place. The steps, in 
    what the factory writes there never shows as a change.
 5. **The `.claude` folder.** `.claude` and `.claude/skills` must each be missing or a folder; a link
    or anything else is `planning_copy_unsafe`, checked before anything is written there. A
-   repository that tracks `.claude/skills/planning-tasks` or `.claude/planning-copy.md` is
-   `planning_copy_unsafe` too. Missing folders are made with mode 0700.
+   repository that tracks `.claude/skills/planning-tasks`, `.claude/planning-copy.md` or
+   `.claude/settings.local.json` is `planning_copy_unsafe` too. Missing folders are made with mode
+   0700.
 6. **The skill.** `.claude/skills/planning-tasks` is removed (a link there is removed itself, never
    its target) and the factory's `skills/planning-tasks/` copied in its place: a copy, so it does
    not follow whatever branch the factory's checkout is on.
@@ -406,6 +407,44 @@ rules. It runs again at any time and refreshes the copy in place. The steps, in 
    (`<state dir>/requests/<workspace>/<ticket>.md`), and your rules files that exist
    (`rules/<workspace>.md`, then `rules/global.md`, in the config directory); the skill reads it
    and every file it names.
+
+   **The settings.** `.claude/settings.local.json` makes the copy read-only to the planner
+   (`plannerSettings`). Its `permissions` and `sandbox` keys are replaced whole at every run; every
+   other key (hooks, `skillOverrides`, your own) keeps its value and its place, and a rule you added
+   to `permissions` is dropped, so the copy stays read-only.
+   - `permissions.allow`: the factory's MCP tools (`mcp__software-factory`) and the reading tools
+     `Read`, `Grep`, `Glob`, with `Skill`, `Agent`, `Task`, `TodoWrite` and `ToolSearch`. No
+     `Bash(...)` rule: a list of commands is not read-only (`sed` and `awk` run commands,
+     `git diff --output` and `find -fprint` write files), so the sandbox is the boundary. Any other
+     tool but the sandboxed shell asks you first.
+   - `permissions.deny`: `Edit`, `Write`, `NotebookEdit`, `WebFetch`, `WebFetch(domain:*)` and
+     `WebSearch` (a query or a URL could carry what the planner read), then a `Read` rule, denied to
+     every tool and to the sandboxed commands, for each secret of the environment `sf planner setup`
+     runs in, each once: the environment file (`SF_ENV_FILE`, else `auth.env` in the config
+     directory; none with `SF_ENV_FILE` empty); the MCP and dashboard token files in the state
+     directory; Claude Code's user settings and global config (`settings.json` and `.claude.json`),
+     its `.credentials.json` and `backups/` (under `CLAUDE_CONFIG_DIR`, else `~/.claude`); the
+     credentials in the home directory the jobs deny (`.ssh`, `.codex`, `.aws`, `.config/gh`,
+     `.git-credentials`, `.config/git/credentials`, `.netrc`, `.npmrc`,
+     `.claude/.credentials.json`), and `.gnupg`, `.kube`, `.config/glab-cli`,
+     `.docker/config.json`; the tunnel client's profile, which holds the MCP token
+     (`software-factory.yaml` in `TUNNEL_CLIENT_PROFILE_DIR`, else in `tunnel-client/` of
+     `XDG_CONFIG_HOME` or `~/.config`). A moved
+     configuration or state directory moves its rules at the next run. No rule names the rules or
+     the requests folder: the planner reads them with the `Read` tool.
+   - `sandbox`: `enabled`, so the shell's commands run in Claude Code's sandbox;
+     `autoAllowBashIfSandboxed`, so they run without a prompt and the planner reads as freely as
+     before; `allowUnsandboxedCommands: false`, so the model cannot ask to leave it;
+     `failIfUnavailable`, so without a working sandbox the session does not start (fail closed);
+     `filesystem.denyWrite: ["."]`, so the commands write nowhere in the copy (nor anywhere else; the
+     factory, at its next run, is the copy's only writer, and the planner's `git fetch` reaches no
+     network); `filesystem.denyRead` with the state directory, which holds `sf.sock`, the jobs and
+     the tokens, hidden from the shell. The `Read` tool still reads your request files there, which
+     `.claude/planning-copy.md` names; the token files are denied to it by the rules above.
+   - `.claude/settings.local.json` must be missing or a regular file: a link or anything else is
+     `planning_copy_unsafe`, a file that is not a JSON object `planning_copy_unusable`; neither is
+     changed. It is written atomically, with its mode (0600 when new), and holds paths, never a
+     secret. On Linux Claude Code's sandbox needs `bwrap` and `socat`.
 8. **The MCP server.** With the MCP token (`no_mcp_token` without one) and the MCP port (`SF_PORT`,
    else the running `sf serve`'s), `claude` from `PATH` (the Claude Code you open the copy with;
    `claude_not_found` without it) runs in the copy `claude mcp remove software-factory --scope
@@ -417,8 +456,8 @@ rules. It runs again at any time and refreshes the copy in place. The steps, in 
    timeout or a failed `add` is `planner_mcp_failed`, with the end of its output, the token shown
    as `<token>`.
 9. **The output.** The warnings and notes of step 3, then the copy's path with its base branch and
-   short commit, the MCP registration, the skill, the pointers file, and what to do next: open
-   Claude Code in the copy once (`cd <copy> && claude`) and accept its folder trust dialog, then
+   short commit, the MCP registration, the skill, the pointers file, the settings, and what to do
+   next: open Claude Code in the copy once (`cd <copy> && claude`) and accept its folder trust dialog, then
    `/planning-tasks workspace <workspace>, ticket <ticket>`. The factory never accepts that dialog
    for you.
 

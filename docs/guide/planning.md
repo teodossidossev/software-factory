@@ -155,7 +155,8 @@ own terminal, not through an agent's session, whose transcript would keep the UR
 `sf planner setup <workspace>` does this for a planning copy: a clone of the workspace's repository
 in `~/planning/<workspace>` (`SF_PLANNING_DIR`), with the server registered for that folder only,
 the factory's planning skill and `.claude/planning-copy.md` (README, The planning copy). Open Claude
-Code there once and accept its trust dialog.
+Code there once and accept its trust dialog. The copy is read-only to the planner: its shell
+commands run in Claude Code's sandbox, and the factory's secrets are denied to every tool.
 
 Then, with `sf serve` running, start from the dashboard:
 

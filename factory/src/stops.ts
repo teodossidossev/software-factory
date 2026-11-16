@@ -152,12 +152,16 @@ export interface MrHost {
 }
 
 // What the rules read besides the job: the ledger, the Claude review and the gate of the last
-// iteration (read only for a needs_human job), and the workspace's Git host.
+// iteration (read only for a needs_human job), the workspace's Git host and its hand-over setting
+// (handsOver).
 export interface JobFacts {
   ledger: LedgerEntry[];
   review: ReviewRecord | undefined;
   gate?: GateRecord | undefined;
   mrHost?: MrHost | null;
+  // Whether the job's workspace hands a job ready for review over to its checkout (its handoff in
+  // workspaces.json, else SF_HANDOFF, is checkout); absent, it does not.
+  handsOver?: boolean;
 }
 
 export const NO_FACTS: JobFacts = { ledger: [], review: undefined, gate: undefined, mrHost: null };

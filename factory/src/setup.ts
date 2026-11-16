@@ -380,6 +380,16 @@ export class Setup {
     return { handoff_default: this.#handoffDefault, digest };
   }
 
+  // The hand-over setting of the workspace: its own handoff in workspaces.json (an own property of
+  // a valid name, as resolveWorkspace reads it), else SF_HANDOFF (checkout when none was given),
+  // also for a name the registry does not hold. A registry that cannot be read throws as
+  // loadRegistry throws.
+  async handoffOf(name: string): Promise<HandoffMode> {
+    const { workspaces } = await loadRegistry(this.#configDir);
+    const entry = WORKSPACE_NAME_PATTERN.test(name) && Object.hasOwn(workspaces, name) ? workspaces[name] : undefined;
+    return entry?.handoff ?? this.#handoffDefault;
+  }
+
   // The same rules as `sf workspace add <name> --read <path> [--handoff ...] [--color ...]`: the name
   // pattern, an absolute path that is the root of a non-bare Git work tree, a name not registered
   // yet. handoff: the workspace's own hand-over setting; undefined: SF_HANDOFF applies. color: its

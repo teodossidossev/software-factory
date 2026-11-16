@@ -91,6 +91,17 @@ async function mrHostOf(actions: DashboardActions, workspace: string): Promise<M
   }
 }
 
+// Whether a workspace hands its jobs ready for review over to its checkout (its handoff, else
+// SF_HANDOFF, is checkout); a registry that cannot be read counts as off, logged.
+async function handsOverOf(setup: DashboardSetup, workspace: string): Promise<boolean> {
+  try {
+    return (await setup.handoffOf(workspace)) === 'checkout';
+  } catch (error) {
+    console.error(error);
+    return false;
+  }
+}
+
 // Whether the Task file of a paused job changed since the Implementer was last given it:
 // its sha256 against the job's; null for a job not paused, without a recorded sha256, or whose Task
 // file cannot be read.
@@ -145,11 +156,11 @@ async function progressFor(jobs: JobStore, job: Job): Promise<Progress | null> {
 }
 
 // What the rules of a job's actions read (src/stops.ts): for a needs_human job its ledger and the
-// last iteration's Claude review and gate; for every job the workspace's Git host. Only the
-// stopped jobs cost the extra reads.
-async function ruleFacts(jobs: JobStore, job: Job, mrHost: MrHost): Promise<JobFacts> {
+// last iteration's Claude review and gate; for every job the workspace's Git host and whether it
+// hands its jobs over (handsOver). Only the stopped jobs cost the extra reads.
+async function ruleFacts(jobs: JobStore, job: Job, mrHost: MrHost, handsOver: boolean): Promise<JobFacts> {
   if (job.state !== 'needs_human') {
-    return { ...NO_FACTS, mrHost };
+    return { ...NO_FACTS, mrHost, handsOver };
   }
   const last = job.iteration >= 1;
   return {
@@ -157,6 +168,7 @@ async function ruleFacts(jobs: JobStore, job: Job, mrHost: MrHost): Promise<JobF
     review: last ? await jobs.readReview(job.workspace, job.ticket, job.iteration) : undefined,
     gate: last ? await jobs.readGate(job.workspace, job.ticket, job.iteration) : undefined,
     mrHost,
+    handsOver,
   };
 }
 
@@ -361,14 +373,17 @@ export async function plannerOf(jobs: JobStore, setup: DashboardSetup, job: Job)
 export async function jobsPayload(jobs: JobStore, setup: DashboardSetup, actions: DashboardActions, toolCalls: ToolCallCounter) {
   const list = [];
   const hosts = new Map<string, MrHost>();
+  const handsOverBy = new Map<string, boolean>();
   for (const job of await jobs.list()) {
     if (!hosts.has(job.workspace)) {
       hosts.set(job.workspace, await mrHostOf(actions, job.workspace));
+      handsOverBy.set(job.workspace, await handsOverOf(setup, job.workspace));
     }
     const facts = await boardFacts(jobs, job);
     const host = hosts.get(job.workspace)!;
+    const handsOver = handsOverBy.get(job.workspace)!;
     list.push({
-      ...jobSummary(job, await fileCounts(jobs, job), host, await taskChangedOf(setup, job), await ruleFacts(jobs, job, host), await progressFor(jobs, job)),
+      ...jobSummary(job, await fileCounts(jobs, job), host, await taskChangedOf(setup, job), await ruleFacts(jobs, job, host, handsOver), await progressFor(jobs, job)),
       title: await setup.taskTitle(job.workspace, job.ticket), ...facts,
       now: await nowOf(jobs, job, facts), tool_calls: await toolCalls.count(jobs.eventsPath(job.workspace, job.ticket)), stop: await stopOf(jobs, job),
       planner: await plannerOf(jobs, setup, job),
@@ -523,7 +538,7 @@ export async function jobDetail(jobs: JobStore, job: Job, gate: boolean, actions
   }
   const mrText = await jobs.readMrText(job.workspace, job.ticket);
   const mrHost = await mrHostOf(actions, job.workspace);
-  const facts = await ruleFacts(jobs, job, mrHost);
+  const facts = await ruleFacts(jobs, job, mrHost, await handsOverOf(setup, job.workspace));
   const ledger = job.state === 'needs_human' ? facts.ledger : await jobs.readLedger(job.workspace, job.ticket);
   const history = await stateHistory(jobs, job.workspace, job.ticket);
   return {

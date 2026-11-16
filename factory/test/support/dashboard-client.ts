@@ -369,6 +369,8 @@ export function fakeSetup(workspaces: WorkspaceRow[] = [], tickets: TicketRow[] 
     ),
     editWorkspace: (name, edit) => reply(['editWorkspace', name, edit], { ...workspaceRow(name, edit.path), description: edit.description === '' ? null : edit.description, app: edit.app === '' ? name : edit.app, digest: edit.digest }),
     workspaceSettings: async () => fake.settings,
+    // As Setup.handoffOf: the listed row's handoff, else the settings' handoff_default.
+    handoffOf: async (name) => fake.rows.workspaces.find((row) => row.name === name)?.handoff ?? fake.settings.handoff_default,
     // As Setup.saveDigestSettings: the stub's settings with the keys given over them.
     saveDigestSettings: (input) => reply(['saveDigestSettings', input], { ...fake.settings.digest, ...input }),
     removeWorkspace: (name) => reply(['removeWorkspace', name], { removed: name }),

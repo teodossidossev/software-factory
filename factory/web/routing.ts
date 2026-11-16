@@ -283,13 +283,13 @@ function onClick(event: MouseEvent): void {
   if (clicked !== null && clicked.closest('#health-wrap') === null) {
     closeHealth(false);
   }
-  // The hand-over panel's More menu closes on a choice and on a click outside it.
-  if (state.handoverMenu && clicked !== null && clicked.closest('[data-homenu]') === null
+  // The composer's More menu closes on a choice and on a click outside it.
+  if (state.moreMenu && clicked !== null && clicked.closest('[data-homenu]') === null
     && (clicked.closest('.ho-menu') === null || clicked.closest('[role="menuitem"]') !== null)) {
-    setHandoverMenu(false);
+    setMoreMenu(false);
   }
   if (target?.dataset.homenu !== undefined) {
-    setHandoverMenu(!state.handoverMenu);
+    setMoreMenu(!state.moreMenu);
     return;
   }
   if (target?.dataset.dismiss !== undefined) {
@@ -530,17 +530,17 @@ function onKey(event: KeyboardEvent): void {
     event.preventDefault();
     return;
   }
-  // The hand-over panel's More menu: Escape closes it only (the page stays), the focus back
+  // The composer's More menu: Escape closes it only (the page stays), the focus back
   // on More; Arrow Down and Up move between its items.
-  if (state.handoverMenu && event.key === 'Escape') {
+  if (state.moreMenu && event.key === 'Escape') {
     event.preventDefault();
-    setHandoverMenu(false);
-    $('handover-panel')?.querySelector<HTMLElement>('[data-homenu]')?.focus();
+    setMoreMenu(false);
+    byId('composer').querySelector<HTMLElement>('[data-homenu]')?.focus();
     return;
   }
-  if (state.handoverMenu && (event.key === 'ArrowDown' || event.key === 'ArrowUp') && target !== null && target.closest('.ho-more') !== null) {
+  if (state.moreMenu && (event.key === 'ArrowDown' || event.key === 'ArrowUp') && target !== null && target.closest('.ho-more') !== null) {
     event.preventDefault();
-    handoverMenuKey(event);
+    moreMenuKey(event);
     return;
   }
   if (target?.id === 'vdiv' && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {

@@ -186,6 +186,16 @@ test('setup (SF-103): the payload\'s settings and saveDigestSettings: validated,
   assert.deepEqual((await loadRegistry(env.config)).digest, { model: 'opus', times: ['09:00'], weekdays_only: true, language: 'Deutsch' });
 });
 
+test('setup: handoffOf answers the workspace\'s own handoff, else SF_HANDOFF (checkout when none was given), also for a name not registered', async () => {
+  const env = await newEnv('setup-handoff');
+  const jobs = new JobStore(env.state);
+  await saveRegistry({ workspaces: { app: { read_checkout: join(temp, 'handoff-app'), handoff: 'checkout' }, web: { read_checkout: join(temp, 'handoff-web') } } }, env.config);
+  const off = new Setup({ configDir: env.config, jobs, exclusive: (work) => work(NO_RETIREMENT), handoffDefault: 'off' });
+  assert.deepEqual([await off.handoffOf('app'), await off.handoffOf('web'), await off.handoffOf('nope'), await off.handoffOf('constructor')], ['checkout', 'off', 'off', 'off']);
+  const unset = new Setup({ configDir: env.config, jobs, exclusive: (work) => work(NO_RETIREMENT) });
+  assert.equal(await unset.handoffOf('web'), 'checkout');
+});
+
 test('setup: tickets lists the Task files without a live job; createTicket writes the draft once', async () => {
   const env = await newEnv('setup-tickets');
   const repo = await newRepo(env, 'setup-tickets-repo', true);

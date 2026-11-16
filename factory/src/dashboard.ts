@@ -82,7 +82,7 @@ const SECURITY_HEADERS = {
 // The dashboard's script: classic scripts that share the page's globals, in load order.
 // dashboard.html has one deferred <script> per entry, in this order; nothing at the top level of a
 // file uses a name defined in a later one.
-export const DASHBOARD_SCRIPTS = ['core.js', 'job-screens.js', 'job-page.js', 'header.js', 'board.js', 'coordinator.js', 'routing.js', 'home.js', 'ticket-page.js', 'reports.js', 'mr-row.js', 'review-page.js', 'digest-brief.js', 'setup.js', 'skills.js', 'health.js', 'pins.js', 'main.js'] as const;
+export const DASHBOARD_SCRIPTS = ['core.js', 'job-screens.js', 'job-page.js', 'composer.js', 'header.js', 'board.js', 'coordinator.js', 'routing.js', 'home.js', 'ticket-page.js', 'reports.js', 'mr-row.js', 'review-page.js', 'digest-brief.js', 'setup.js', 'skills.js', 'health.js', 'pins.js', 'main.js'] as const;
 export type DashboardScript = (typeof DASHBOARD_SCRIPTS)[number];
 // The files of each entry of DASHBOARD_SCRIPTS, in load order: url, the file
 // served, is the build output dist/web/<name>.js; source, the file written by hand, is
@@ -122,8 +122,9 @@ export type DashboardActions = Pick<Execution, 'start' | 'approve' | 'abort' | '
 // readAttachment: a ticket's images. setTicketOwner: the ticket page's switch of who plans it.
 // setPlanningChat and planningOf: a ticket's planning chat link, and the job payloads' planner block.
 // editWorkspace, workspaceSettings and saveDigestSettings: the Workspaces dialog's Edit, the
-// payload's settings and the Morning digest section.
-export type DashboardSetup = Pick<Setup, 'workspaces' | 'addWorkspace' | 'editWorkspace' | 'workspaceSettings' | 'saveDigestSettings' | 'removeWorkspace' | 'tickets' | 'jobDependencies' | 'createTicket' | 'archiveTicket' | 'restoreTicket' | 'deleteTicket' | 'setTicketOwner' | 'archivedTickets' | 'taskText' | 'taskTitle'
+// payload's settings and the Morning digest section. handoffOf: a workspace's hand-over setting,
+// for the rules of a job's actions.
+export type DashboardSetup = Pick<Setup, 'workspaces' | 'addWorkspace' | 'editWorkspace' | 'workspaceSettings' | 'handoffOf' | 'saveDigestSettings' | 'removeWorkspace' | 'tickets' | 'jobDependencies' | 'createTicket' | 'archiveTicket' | 'restoreTicket' | 'deleteTicket' | 'setTicketOwner' | 'archivedTickets' | 'taskText' | 'taskTitle'
   | 'taskFile' | 'saveTask' | 'addAttachment' | 'removeAttachment' | 'readAttachment' | 'setPlanningChat' | 'planningOf'>;
 
 // The morning digest: the list, one record, a manual run.
@@ -148,6 +149,7 @@ const unavailable = async (): Promise<never> => {
 const NO_SETUP: DashboardSetup = {
   workspaces: async () => [],
   workspaceSettings: async () => ({ handoff_default: 'checkout', digest: { times: [...DIGEST_DEFAULTS.times], weekdays_only: DIGEST_DEFAULTS.weekdays_only, language: DIGEST_DEFAULTS.language } }),
+  handoffOf: async () => 'checkout',
   tickets: async () => [],
   jobDependencies: async () => [],
   archivedTickets: async () => [],

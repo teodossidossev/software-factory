@@ -149,3 +149,18 @@ iterations, and after a clean one the gate said `fix` in 16 of 33: each reviewer
 an iteration of their own.
 
 The rest of this ADR stands.
+
+## Amendment 2026-11-16 (SF-131): the Codex gate is the main reviewer
+
+What changes: the Codex gate is the main reviewer. The Claude review runs only on a ticket whose
+Task file says `review: claude`, or, with `SF_CLAUDE_REVIEW=always`, on every ticket but those that
+say `review: codex`; with the gate off it reviews every job. A job without the Claude review has
+the gate as its only reviewer, at gate level `full` on every iteration, and `SF_GATE_MAX_ROUNDS`
+does not apply to it. Fix sections are capped at 3 (`SF_MAX_ITERATIONS`); at the cap Accept takes
+the iteration whatever the last verdict, and its open findings are listed in the MR text.
+
+Why: the audit of 2026-11-07 (`docs/audits/2026-11-07-audit.md`): the gate found 94 blocker or
+major items (58 fixed), the Claude review 20 (6 fixed) for 18% of the cost, and jobs with 4 or more
+iterations were 36% of the cost. The user agreed to a two-week experiment.
+
+The rest of this ADR stands, read with this amendment.

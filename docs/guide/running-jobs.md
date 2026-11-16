@@ -19,14 +19,18 @@ the Context owner to `queue_add` it). `sf serve` starts the first queued ticket 
 
 - fewer than `max_running` jobs run (all workspaces together; the board's "Run up to [− N +] jobs
   at once", `sf queue limit N`, default `SF_MAX_JOBS` = 3),
-- its Task check is `ready` (or you pressed *Start anyway*, `sf queue force`),
-- every ticket of its `lands_after` is merged,
+- its Task check is `ready`, or the Task needs none and has none
+  ([Planning](planning.md#the-task-check)), or you pressed *Start anyway* (`sf queue force`),
+- every ticket of its `lands_after` is merged, and the ticket of its `builds_on` has a prepared
+  commit or is merged,
 - the queue is not held (by you, or by a job parked on a usage limit).
 
 It never starts a ticket twice. A start the queue could not make leaves the ticket out of the queue
-with "Start failed: <message>" on its card. Reorder by dragging a queued card (or Alt+↑/↓ while it
-is focused, `sf queue move my-app APP-12 1`); `sf queue list` shows the queue with what each entry
-waits for.
+with "Start failed: <message>" on its card, except one that could not fetch the base
+(`fetch_failed`): the ticket keeps its place, and the queue tries again 5 minutes later, then 10,
+then every 15 ("start failed (fetch_failed); next try HH:MM"). Reorder by dragging a queued card
+(or Alt+↑/↓ while it is focused, `sf queue move my-app APP-12 1`); `sf queue list` shows the queue
+with what each entry waits for.
 
 **The command line.**
 
@@ -57,14 +61,20 @@ when the branch exists already (`branch_exists`), a worktree of the ticket is le
 3. **Publish**: when the session is idle, the factory publishes the iteration: the Report (with the
    changed files, sensitive and out-of-scope paths first), the Patch (the uncommitted difference to
    the base, new files included), and the file list. State `awaiting_review`.
-4. **Gate level**: as the round starts, before either review, the gate level is decided from the
-   job's whole change: `full` (sensitive or `may_touch` paths, security-relevant names, agents'
-   instruction files, more than 400 changed lines or 12 files), `light` (the gate runs while it has
-   asked for no fix yet), or `none` (documentation only).
-5. **The joint round**: a fresh read-only Claude session (the Claude review) and, when the level
-   says so, the Codex CLI in a read-only sandbox (the gate) review the iteration at the same time,
-   against the Task file, the Review brief, the rules and the ledger. Each returns `fix` or `clean`
-   with items, each `blocker`, `major` or `nit`; the iteration is clean only when both are.
+4. **Gate level**: as the round starts, before either review, the gate level is decided. A job
+   without the Claude review gets `full` on every iteration: the gate is its only reviewer. On a
+   job with the Claude review it comes from the job's whole change: `full` (sensitive or
+   `may_touch` paths, security-relevant names, agents' instruction files, more than 400 changed
+   lines or 12 files), `light` (the gate runs while it has asked for no fix yet), or `none`
+   (documentation only).
+5. **The review round**: by default (`SF_CLAUDE_REVIEW=ticket`) the Codex CLI in a read-only
+   sandbox (the gate) reviews the iteration alone. On a ticket whose Task file says
+   `review: claude` (with `SF_CLAUDE_REVIEW=always`, every ticket but those that say
+   `review: codex`) the round is joint: a fresh read-only Claude session (the Claude review)
+   and, when the level says so, the gate review it at the same time. With the gate off
+   (`SF_GATE=off`, or no Codex found) the Claude review reviews alone. Each reviewer reads the
+   Task file, the Review brief, the rules and the ledger and returns `fix` or `clean` with items,
+   each `blocker`, `major` or `nit`; in a joint round the iteration is clean only when both are.
 6. **Fix**: a verdict of either with a blocker or major item makes one `## Fix N` in the Task
    file: a lead line per reviewer, then each item with its ledger id, `1. [R7, major] …`, and who
    raised it (an item both raised is one item), the nits last, as optional. The next turn runs
@@ -96,9 +106,10 @@ typical durations (a working turn 10 to 32 min, a review 2 min, the MR text 1 mi
 file the card still shows the phase and the range. The job's page shows the same block in its
 header, the steps always open.
 
-The limits that stop the loop for you: `SF_MAX_ITERATIONS` fix sections (5), `SF_GATE_MAX_ROUNDS`
-gate fix rounds (5), `SF_GATE_MAX_TOKENS` gate tokens (5,000,000), and the ledger's own stops
-(escalations, disputes, churn). See [When a job stops](when-a-job-stops.md).
+The limits that stop the loop for you: `SF_MAX_ITERATIONS` fix sections (3), `SF_GATE_MAX_ROUNDS`
+gate fix rounds (5, only on a job with the Claude review), `SF_GATE_MAX_TOKENS` gate tokens
+(5,000,000), and the ledger's own stops (escalations, disputes, churn). See
+[When a job stops](when-a-job-stops.md).
 
 ## The job's page
 

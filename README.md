@@ -2,9 +2,11 @@
 
 A local tool that takes a planned ticket through Claude Code without you having to watch it. You
 plan the ticket into a Task file (with ChatGPT, with Claude Code, on the dashboard or by hand);
-the factory runs Claude Code headless in a Git worktree of its own, has every iteration reviewed by
-a fresh Claude session and the Codex CLI, turns their findings into fix rounds by itself, and when
-both are clean writes the merge request text and makes one commit. You get the result in your own
+the factory runs Claude Code headless in a Git worktree of its own, has every iteration reviewed (by
+default by the Codex CLI alone; on a ticket that says `review: claude`, by a fresh Claude session
+and, when the gate level runs it, the Codex CLI, in the same round; with the gate off, by the
+Claude session alone), turns the findings into fix rounds by itself, and when the reviews are
+clean writes the merge request text and makes one commit. You get the result in your own
 checkout, or push it and open the merge request from the dashboard.
 
 It runs on your machine, for one person: `sf serve` serves the planning tools (MCP, port 8787, behind a token: `sf mcp-url`),
@@ -13,8 +15,9 @@ the dashboard (port 8788) and the run queue, and each job runs in a process of i
 ## Quick start
 
 Requires Linux, Node.js 24 or later, Git, Claude Code logged in (with an `implement` skill), and,
-for the Codex gate (the review beside the Claude review, in the same round), the Codex CLI logged
-in with your ChatGPT account. The full list:
+for the Codex gate (by default the only reviewer; on a ticket that says `review: claude`, beside
+the Claude review in the same round when the gate level runs it), the Codex CLI logged in with your
+ChatGPT account. The full list:
 [Install](docs/guide/install.md#prerequisites).
 
 1. **Get it and build it**:

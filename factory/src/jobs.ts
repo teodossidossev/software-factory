@@ -235,12 +235,27 @@ const jobSchema = z.strictObject({
   state: z.enum(JOB_STATES),
   // Number of published iterations.
   iteration: z.number().int().min(0),
-  // Number of Fix sections written (by the reviewers' fix verdicts); SF_MAX_ITERATIONS limits it.
+  // Number of Fix sections written: the reviewers', sf fix, the user's Must fix, Simplify and the
+  // Guard's (not the Tests Fix).
   fixes: z.number().int().min(0).default(0),
-  // Fix verdicts of the gate; SF_GATE_MAX_ROUNDS limits them.
+  // Fix sections the gate asked for (a joint Fix only when the gate's verdict is a fix); the light
+  // gate level reads it.
   gate_fixes: z.number().int().min(0).default(0),
   // Input plus output tokens of every gate run of the job; SF_GATE_MAX_TOKENS limits them.
   gate_tokens: z.number().int().min(0).default(0),
+  // The job's review rounds without progress: rounds that asked for a Fix while no fewer blocker
+  // and major ledger entries were open than after any earlier such round, or that reopened one.
+  // Absent: 0.
+  stalled_fixes: z.number().int().min(0).optional(),
+  // The fewest open blocker and major ledger entries after any review round of the job that asked
+  // for a Fix; absent before the first.
+  least_open: z.number().int().min(0).optional(),
+  // Of those rounds without progress, the ones whose Fix the gate asked for. Absent: 0.
+  gate_stalled: z.number().int().min(0).optional(),
+  // The job's gate_tokens when its gate budget began counting. Absent: 0.
+  gate_budget_from: z.number().int().min(0).optional(),
+  // The ticket is important: its Task file said important: true at Start. Absent: not important.
+  important: z.literal(true).optional(),
   // The iteration the simplification pass started on, written before it runs; absent until then.
   // Once set, the pass never runs again on the job, whatever became of that run.
   simplify_iteration: z.number().int().min(1).optional(),

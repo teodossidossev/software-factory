@@ -898,10 +898,10 @@ a new `sf serve` and an old runner.
 ## State format version
 
 The state directory holds `state-version` (SF-101, `src/state-version.ts`), a whole number: the
-format of the state files the factory last wrote. This release writes `5`. `sf serve` and every
+format of the state files the factory last wrote. This release writes `6`. `sf serve` and every
 runner (`sf run`) read it at start: a missing file gets the current version; an equal one goes on;
-a lower one runs the migrations from it to the current one in order (`MIGRATIONS`; none exist
-yet), then writes the new number; a higher one refuses to start with `state_too_new` ("the state
+a lower one runs the migrations from it to the current one in order (`MIGRATIONS`), then
+writes the new number; a higher one refuses to start with `state_too_new` ("the state
 was written by a newer factory; update the factory"). A file that holds no whole number is
 `state_version_invalid`.
 
@@ -919,7 +919,8 @@ digest record (`digest/<id>.json`) holds every model text as `{text, en}` and ma
 `in_progress`, which an older factory's Digest page reads wrongly; its migration from 3 changes
 nothing, since the page still reads a record of plain strings without `in_progress`. Version 5
 (SF-236): a `queue.json` entry may hold `retry_at` and `retries`; its migration from 4 changes
-nothing.
+nothing. Version 6 (SF-291): `job.json` may hold `stalled_fixes`, `least_open`, `gate_stalled`,
+`gate_budget_from` and `important`; its migration from 5 changes nothing.
 
 A new file or event that no older factory reads, and that changes the meaning of nothing it does
 read, is not a change of the format. So SF-128 kept `STATE_VERSION` at 1: its `tests-<N>.json`
@@ -3968,7 +3969,7 @@ State layout under `${SF_STATE_DIR}`:
 ```
 sf.sock                                  # 0600, while sf serve runs; one JSON request/response per connection
 dashboard-token                          # 0600, the dashboard token of the last sf serve start
-jobs/<workspace>/<ticket>/job.json       # workspace, ticket, branch, base, base_commit, target_commit, worktree, prepared_commit, mr_attempts, mr_conflict_turn (SF-087: the MR preparation in progress ran a conflict turn; no Retry then), state, iteration, fixes, gate_fixes, gate_tokens, simplify_iteration (SF-055, absent until the simplification pass starts), session_id, created_at, updated_at, error, mr ({host, number, url, state, merge_commit?} or null)
+jobs/<workspace>/<ticket>/job.json       # workspace, ticket, branch, base, base_commit, target_commit, worktree, prepared_commit, mr_attempts, mr_conflict_turn (SF-087: the MR preparation in progress ran a conflict turn; no Retry then), state, iteration, fixes, gate_fixes, gate_tokens, stalled_fixes, least_open, gate_stalled and gate_budget_from (the limits' counts; absent means none), important (absent: not important), simplify_iteration (SF-055, absent until the simplification pass starts), session_id, created_at, updated_at, error, mr ({host, number, url, state, merge_commit?} or null)
 jobs/<workspace>/<ticket>/events.jsonl   # {ts, iteration, message | prompt | state | type: "notify_failed" | "review" | "review_failed" | "review_message" | "gate_event" | "gate_overridden" | "gate_level" | "simplify" | "simplify_chosen" | "merge_request" | "mr_edited" | ...}; what sf watch reads
 jobs/<workspace>/<ticket>/iterations/NNN/{report.md,patch.diff,meta.json,review.json,gate.json,gate-level.json,gate-override.json,simplify.json,gate-schema.json,gate-output.json,conflict-resolution.diff}
 jobs/<workspace>/<ticket>/ledger.json    # the findings ledger (SF-052): one entry per review item of a Fix section, from the first one on

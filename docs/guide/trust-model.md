@@ -247,10 +247,16 @@ worktree path as `<worktree>` and the checkout's as `<checkout>`, so no real pat
 machine through it. Whatever the Implementer or a reviewer quoted from your code in those texts
 goes too. `suggest_changes` sends nothing out; it stores a note you send or dismiss.
 
+A Claude Code planner in a planning copy (`sf planner setup`) reads the copy with its own tools
+and the user's request and rules files with the Read tool; the same files go to Anthropic. Its
+shell commands run in Claude Code's sandbox; the secret files are denied to every tool (README,
+The planning copy).
+
 ## What runs outside the sandbox
 
 The factory itself, as you: `git fetch`, the worktrees, the commit and rebase at Clean, the push,
-the merge request on the Git host, the hand-over to your checkout, the notifications. None of these
+the merge request on the Git host, the hand-over to your checkout, the notifications, and
+`sf planner setup`: the copy's clone and fetch, and `claude mcp add` for the copy's folder. None of these
 are open to an agent; the agent only writes files in its worktree, and the factory decides what
 to commit. It commits only what the reviewers saw: the tree it stages must be the one the reviewed
 iteration recorded when it was published; otherwise nothing is committed, and the worktree goes

@@ -124,6 +124,15 @@ refused), and the factory's test command passed in a sandbox without network on 
   the job waits for you, and is bounded at 4000 characters. The planning chat link is only ever a
   `https://chatgpt.com/` link, checked when it is saved and again before the page links it, and is
   opened only by your click.
+- **The Claude Code planner can only read.** `sf planner setup` gives the planning copy's sessions
+  the factory's planning tools and reading tools; web search and fetch are denied, and any other
+  tool but the sandboxed shell asks you first. Their shell commands run in Claude Code's sandbox:
+  they write nowhere, reach no network, and cannot see the factory's state folder; without a
+  working sandbox the session does not start. Reads of the environment file, the MCP and dashboard
+  tokens, Claude Code's own configuration and credentials, the tunnel profile, and SSH, cloud, Git
+  and package credentials are denied to every tool. The MCP server is registered for the copy's
+  folder only (Claude Code's local scope, in `~/.claude.json`, which every session the factory
+  starts is denied).
 - **The read-only sessions load no MCP server.** The morning digest, which reads other people's
   commit messages, the reviews and the Task check start without your MCP servers and deny every
   MCP tool, so nothing they read can drive one.
@@ -195,6 +204,13 @@ refused), and the factory's test command passed in a sandbox without network on 
   jobs reach the merge request without a test run.
 - **Outside the home directory** a sandboxed command still reads what the system lets any user
   read (`/etc`, `/opt`).
+- **A planner's shell can open Unix sockets** on Linux unless Claude Code's seccomp filter is
+  installed (`npm install -g @anthropic-ai/sandbox-runtime`). The factory's own socket is hidden
+  from it, with the state folder.
+- **The planned repository's own Claude Code settings** (a committed `.claude/settings.json`) merge
+  into the planner's: their hooks run as you, outside the sandbox. The factory will start planner
+  sessions without them (SF-246); until then, read a repository's `.claude/` before you trust its
+  planning copy.
 - **A phone that is lost unlocked** opens the dashboard. The dangerous actions still need the
   ticket typed. Keep the QR code with the token private.
 

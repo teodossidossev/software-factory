@@ -4785,7 +4785,7 @@ retargets a request, and an answer that arrives for another job changes nothing 
 The page is plain HTML, CSS and JavaScript, with no external resources, under
 `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self';
 img-src 'self' blob:; frame-ancestors 'none'` (`blob:` for New ticket's thumbnails before upload, SF-064) and `Cache-Control: no-store`, `X-Frame-Options: DENY`; every value is rendered as text.
-The HTML and the CSS are in `static/`, and nothing else. The page's JavaScript is thirteen classic scripts that
+The HTML and the CSS are in `static/`, and nothing else. The page's JavaScript is nineteen classic scripts that
 share its globals, loaded with `defer` in the order of `DASHBOARD_SCRIPTS` (`src/dashboard.ts`,
 SF-136, SF-137); the server serves those and no other script, and none is longer than 2,500 lines.
 The page code lives only in `web/`, in TypeScript (SF-146 to SF-150): each script's source
@@ -4804,7 +4804,9 @@ naming the type, when a type of `web/types.d.ts` has neither.
 
 - `core.js`: constants, state, the DOM, format and HTTP helpers.
 - `job-screens.js`: what the job page reads, Task check, Changes, Merge request, Stream.
-- `job-page.js`: the job page's header, composer, hand-over panel, job actions.
+- `job-page.js`: the job page's header and the job's actions (availability, outcomes, requests, confirmations).
+- `composer.js`: the job page's composer: its sentence, the planner block, the message box and the
+  actions' row, the hand-over panel and the composer's More ▾ menu.
 - `header.js`: the top bar of the home and the board: what waits for you, the pages, the workspace
   filter, the pill's running count, the run limit and the reset rule.
 - `board.js`: board, cards, workspaces and dependencies, queue, toast.

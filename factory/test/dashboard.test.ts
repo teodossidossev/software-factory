@@ -91,8 +91,9 @@ test('dashboard: token, static files with the security headers, 404 and 405 with
     // top bar's header.js before board.js; SF-202: the Skills page's skills.js after setup.js; the
     // board's Coordinator card, coordinator.js, right after board.js; SF-209: the merge request
     // row, mr-row.js, right before review-page.js; SF-211: point mode, pins.js, right before main.js;
-    // SF-226: the home and the two main views, home.js, right after routing.js).
-    assert.deepEqual([...DASHBOARD_SCRIPTS], ['core.js', 'job-screens.js', 'job-page.js', 'header.js', 'board.js', 'coordinator.js', 'routing.js', 'home.js', 'ticket-page.js', 'reports.js', 'mr-row.js', 'review-page.js', 'digest-brief.js', 'setup.js', 'skills.js', 'health.js', 'pins.js', 'main.js']);
+    // SF-226: the home and the two main views, home.js, right after routing.js; SF-285: the job page's
+    // composer, composer.js, right after job-page.js).
+    assert.deepEqual([...DASHBOARD_SCRIPTS], ['core.js', 'job-screens.js', 'job-page.js', 'composer.js', 'header.js', 'board.js', 'coordinator.js', 'routing.js', 'home.js', 'ticket-page.js', 'reports.js', 'mr-row.js', 'review-page.js', 'digest-brief.js', 'setup.js', 'skills.js', 'health.js', 'pins.js', 'main.js']);
     // SF-136: every script of DASHBOARD_SCRIPTS is served as JavaScript, each with its own text (its
     // header names it); SF-137: none is longer than 2,500 lines.
     for (const file of DASHBOARD_SCRIPTS) {

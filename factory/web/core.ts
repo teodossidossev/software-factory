@@ -172,7 +172,7 @@ interface PageState {
   armed: { action: string; key: string } | null;
   remote: boolean;
   ticketAsk: { ticket: string; resolve: (confirmed: boolean) => void } | null;
-  handoverMenu: boolean;
+  moreMenu: boolean;
   workspaces: WorkspaceRow[] | null;
   tickets: TicketRow[] | null;
   archived: ArchivedRow[];
@@ -248,8 +248,8 @@ const state: PageState = {
   // dialog of an action that pushes or merges ({ ticket, resolve }).
   remote: false,
   ticketAsk: null,
-  // The hand-over panel's More menu is open.
-  handoverMenu: false,
+  // The composer's More ▾ menu is open.
+  moreMenu: false,
   // The registry, the tickets without a live job and the archived ones (null until the stream
   // sends them), the requests out for the setup forms and the ticket actions, and the open
   // confirmation of a ticket's start or delete.

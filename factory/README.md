@@ -4749,7 +4749,7 @@ retargets a request, and an answer that arrives for another job changes nothing 
 
 The page is plain HTML, CSS and JavaScript, with no external resources, under
 `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self';
-img-src 'self' blob:` (`blob:` for New ticket's thumbnails before upload, SF-064) and `Cache-Control: no-store`; every value is rendered as text.
+img-src 'self' blob:; frame-ancestors 'none'` (`blob:` for New ticket's thumbnails before upload, SF-064) and `Cache-Control: no-store`, `X-Frame-Options: DENY`; every value is rendered as text.
 The HTML and the CSS are in `static/`, and nothing else. The page's JavaScript is thirteen classic scripts that
 share its globals, loaded with `defer` in the order of `DASHBOARD_SCRIPTS` (`src/dashboard.ts`,
 SF-136, SF-137); the server serves those and no other script, and none is longer than 2,500 lines.
@@ -4809,7 +4809,7 @@ POST (anything else `405` with `Allow: GET, POST`):
 | `api/digests/<id>` | the stored record `digest/<id>.json` (SF-103); an unknown id or any query is an empty 404 |
 | `api/pins` | the dashboard's pins (section Pins), `pins.json` read as `sf pins` reads it: `{pins: [{id, route, selector, text, rect: {x, y, w, h, vw, vh}, note, at, resolved}]}`, every stored pin in id order, open and resolved; any query is an empty 404; `409 pins_unreadable` for a file that is not JSON or not this shape |
 | `api/coordinator` | the coordinator's state, `coordinator.json` read as `sf coordinator` reads it (section Coordinator card): `{version, status: {text, at} \| null, questions: [{id, text, at}], link, next_question}`; any query is an empty 404; written only by `sf coordinator` |
-| `vision/<workspace>` | the workspace's vision page (section Vision), `page.html` as `sf vision` stored it, `text/html; charset=utf-8` under its own `content-security-policy` (`VISION_PAGE_CSP`: a sandbox with scripts only, an opaque origin that loads nothing), with `cache-control: no-store`, `nosniff` and `no-referrer` kept; a name without a page, any query or a longer path is an empty 404; another method `405`; written only by `sf vision` |
+| `vision/<workspace>` | the workspace's vision page (section Vision), `page.html` as `sf vision` stored it, `text/html; charset=utf-8` under its own `content-security-policy` (`VISION_PAGE_CSP`: a sandbox with scripts only, an opaque origin that loads nothing), with `cache-control: no-store`, `nosniff`, `no-referrer` and `x-frame-options: DENY` kept; a name without a page, any query or a longer path is an empty 404; another method `405`; written only by `sf vision` |
 | `api/tickets` | `{tickets: [{workspace, ticket, title, base, draft, request, job, lands_after, attachments, conversation: {message, url}, queue_position, queue_error, queue_reason, queue_force, queue_retry}], archived: [{workspace, ticket, title}], job_lands_after: [{workspace, ticket, lands_after}], queue: {max_running, running, held, hold_reason, next, on_limit, limit_hold}}`: the Task files without a live job; `queue_position` its 1-based place in the run queue or `null`, `queue_error` the queue's failed start `{code, message}` or `null`, `queue_reason` why its plan holds it in the queue ("plan not ready: N blocker, M major", "plan check failed", "plan being checked", "plan not checked") or `null`, `queue_force` whether Start anyway was given (SF-086), `queue_retry` the next try of a queued start that could not fetch `{code: "fetch_failed", at, retries}` or `null` (SF-236), `queue` the run queue (`next`: `{workspace, ticket}` of the first entry that waits for nothing and whose plan does not hold it, or `null`; `on_limit` the rule at a usage limit's reset and `limit_hold` `{parked, resets_at}` while a job is parked, else `null`, SF-072; the whole `queue` is `null` without a run queue) (SF-071, section Run queue); `lands_after` the tickets its Task file waits for, `[{workspace, ticket, state}]` with `state` `merged`, `pushed`, `running`, `planned` or `missing` (SF-084, section Dashboard), and `job_lands_after` the same for the Task files with a live job; `attachments` its images `[{name, bytes, type}]` (SF-064, section Ticket images); `draft` is true for a skeleton; `request` the user's words of New ticket or `null`; `job` is the last job's state or `null`; `url` is `https://chatgpt.com/?q=<message URL-encoded>`, or `null` when too long |
 | `api/jobs/<ws>/<ticket>/iterations/<n>/report` | the Report, `text/markdown` |
 | `api/jobs/<ws>/<ticket>/iterations/<n>/patch` | the Patch, `text/x-diff` |
@@ -6141,7 +6141,7 @@ to no model.
 
 **The page** is built at each put and remove and stored as `page.html`; `GET vision/<workspace>`
 answers that file (section Dashboard, its routes table) under its own policy, `VISION_PAGE_CSP`:
-`sandbox allow-scripts; default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:`.
+`sandbox allow-scripts; default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; frame-ancestors 'none'`.
 It runs as an opaque origin, without the dashboard's cookie, storage or API, and loads nothing;
 its script's `localStorage` calls are caught, so it opens in Bulgarian each time, unless its URL's
 fragment names a place in English (the URL keeps the place). The Workspaces drawer's card of a

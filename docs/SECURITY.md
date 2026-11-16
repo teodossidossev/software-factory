@@ -160,7 +160,8 @@ refused), and the factory's test command passed in a sandbox without network on 
     `SF_DASHBOARD_REMOTE_LOGINS`.
   - Approve, Retry, Create merge request, Merge, Archive and Merged — archive from there need the
     ticket typed again.
-  - A foreign web page cannot act on it.
+  - A foreign web page cannot act on it, nor show it inside a frame to trick a click
+    (`frame-ancestors 'none'`, `X-Frame-Options: DENY`).
   - No token is written to a log.
   - The coordinator's state (its status, its open questions and its chat link) is a local file
     in the state directory. Only `sf coordinator`, through `sf serve`, writes it; the dashboard

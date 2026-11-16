@@ -85,6 +85,7 @@ test('dashboard: token, static files with the security headers, 404 and 405 with
       const reply = await fetchRaw(`${origin}${path}`);
       assert.deepEqual([reply.status, reply.body], [404, ''], path);
       assert.equal(reply.headers['content-security-policy'], CSP, path);
+      assert.equal(reply.headers['x-frame-options'], 'DENY', path);
     }
     // SF-137: the dashboard's scripts, in load order (SF-153: health.js before main.js; SF-160: the
     // top bar's header.js before board.js; SF-202: the Skills page's skills.js after setup.js; the
@@ -104,6 +105,7 @@ test('dashboard: token, static files with the security headers, 404 and 405 with
       assert.equal(reply.status, 200, path);
       assert.equal(reply.headers['content-type'], `${type}; charset=utf-8`);
       assert.equal(reply.headers['content-security-policy'], CSP);
+      assert.equal(reply.headers['x-frame-options'], 'DENY', path);
       assert.equal(reply.headers['cache-control'], 'no-store');
       assert.equal(reply.headers['x-content-type-options'], 'nosniff');
       assert.ok(reply.body.includes(marker), path);
@@ -181,7 +183,7 @@ test('dashboard (SF-153): GET api/health is the checks\' last result; the stream
   await withDashboard('dash-health', fakeActions(), async (dashboard) => {
     const base = dashboard.url;
     const reply = await fetchRaw(new URL('api/health', base));
-    assert.deepEqual([reply.status, reply.headers['content-type'], reply.headers['content-security-policy']], [200, 'application/json; charset=utf-8', CSP]);
+    assert.deepEqual([reply.status, reply.headers['content-type'], reply.headers['content-security-policy'], reply.headers['x-frame-options']], [200, 'application/json; charset=utf-8', CSP, 'DENY']);
     assert.deepEqual(JSON.parse(reply.body), checks);
     assert.equal((await fetchRaw(new URL('api/health?x=1', base))).status, 404);
     assert.equal((await act(base, 'api/health', {})).status, 405);
@@ -267,9 +269,11 @@ test('dashboard: GET vision/<workspace> serves the stored page under its own pol
     await putVision({ stateDir: state, configDir: config }, 'bookshop', 'en', source);
     const reply = await page('vision/bookshop');
     assert.deepEqual(
-      [reply.status, reply.headers['content-type'], reply.headers['content-security-policy'], reply.headers['cache-control'], reply.headers['x-content-type-options'], reply.headers['referrer-policy']],
-      [200, 'text/html; charset=utf-8', VISION_PAGE_CSP, 'no-store', 'nosniff', 'no-referrer'],
+      [reply.status, reply.headers['content-type'], reply.headers['content-security-policy'], reply.headers['cache-control'], reply.headers['x-content-type-options'], reply.headers['referrer-policy'], reply.headers['x-frame-options']],
+      [200, 'text/html; charset=utf-8', VISION_PAGE_CSP, 'no-store', 'nosniff', 'no-referrer', 'DENY'],
     );
+    // The vision page's own policy forbids frames too.
+    assert.ok(VISION_PAGE_CSP.endsWith("; frame-ancestors 'none'"), VISION_PAGE_CSP);
     assert.equal(reply.body, await readFile(join(state, 'vision', 'bookshop', 'page.html'), 'utf8'));
     assert.ok(reply.body.startsWith('<!doctype html>'));
     assert.ok(!reply.body.includes(state) && !reply.body.includes(source));

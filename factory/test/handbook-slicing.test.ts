@@ -34,7 +34,8 @@ test('the Handbook has ## Slicing a solution before ## Task file format, with th
   }
   assert.deepEqual([...at].sort((a, b) => a - b), at, 'the kinds are out of order');
   assert.match(section, phrase("A slice's kind is one of `mechanical`, `preparation`, `change` (steps 3 and 4), `switch` and `cleanup`."));
-  assert.match(section, phrase('A `change` or `switch` slice stays within about 400 changed lines, tests included, and 10 files.'));
+  assert.match(section, phrase('A `change` or `switch` slice aims at about 400 changed lines, tests included, and 10 files.'));
+  assert.match(section, phrase('Up to about 600 lines it needs no reason and is no finding'));
   assert.match(section, phrase('A `change` slice under about 50 lines joins its neighbour.'));
   assert.match(section, phrase('"Slice 2 of 5 (change): ..."'));
 });

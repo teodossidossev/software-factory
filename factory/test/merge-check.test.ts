@@ -498,6 +498,9 @@ test('sf mr merge of a continuing job runs the merge check on <continues>, the b
     assert.deepEqual([merged.state, merged.mr.state], ['pushed', 'merged']);
     assert.deepEqual(puts(w), [{ merge_method: 'merge', sha: originHead(w) }]);
     assert.deepEqual((await checkedEvents(w)).map((event) => event.outcome), ['passed']);
+    // The branch deleted is the pushed one too.
+    assert.deepEqual(merged.remote_branch, { name: BRANCH, outcome: 'deleted' });
+    assert.deepEqual(w.fake.deleted, [BRANCH]);
   } finally {
     await w.fake.close();
   }

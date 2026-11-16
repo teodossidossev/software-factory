@@ -162,6 +162,40 @@ test('GitHub: create opens a pull request with the title and body, then reuses i
   }
 });
 
+test('GitHub: deleteBranch deletes the ref with its slashes kept; gone only on "Reference does not exist"; other refusals keep the host\'s words', async () => {
+  const fake = await startFakeForge('github', 'acme/app');
+  try {
+    const forge = forgeFor('git@github.com:acme/app.git', forgeSettings({ SF_GITHUB_TOKEN: GH_TOKEN, SF_GITHUB_API: fake.url }));
+    fake.mrs.push(opened(1, 'T-1-change-readme', 'main', 'merged'), opened(2, 'team/a+b', 'main', 'merged'));
+    const deletions = (): string[] => fake.requests.filter((r) => r.method === 'DELETE').map((r) => r.path);
+    assert.equal(await forge.deleteBranch('T-1-change-readme'), 'deleted');
+    assert.deepEqual(deletions(), ['/repos/acme/app/git/refs/heads/T-1-change-readme']);
+    assert.deepEqual(fake.deleted, ['T-1-change-readme']);
+    assert.equal(await forge.deleteBranch('team/a+b'), 'deleted');
+    assert.equal(deletions()[1], '/repos/acme/app/git/refs/heads/team/a%2Bb');
+    assert.deepEqual(fake.deleted, ['T-1-change-readme', 'team/a+b']);
+    // Already deleted: GitHub's own words.
+    assert.equal(await forge.deleteBranch('T-1-change-readme'), 'gone');
+    fake.fail.push({ match: /^DELETE /, status: 422, body: { message: 'Reference does not exist' } });
+    assert.equal(await forge.deleteBranch('T-9-other'), 'gone');
+    assert.equal(fake.requests.length, 4);
+
+    fake.fail.push({ match: /^DELETE /, status: 403, body: { message: 'Resource not accessible by personal access token' } });
+    assert.deepEqual(await refusal(forge.deleteBranch('T-1-change-readme')), {
+      code: 'mr_host_error',
+      message: 'GitHub refused to delete the branch T-1-change-readme: HTTP 403: Resource not accessible by personal access token (does SF_GITHUB_TOKEN have access to the repository?).',
+    });
+    // A 422 for any other reason is not taken for a missing branch.
+    fake.fail.push({ match: /^DELETE /, status: 422, body: { message: 'Validation Failed' } });
+    assert.deepEqual(await refusal(forge.deleteBranch('T-1-change-readme')), { code: 'mr_host_error', message: 'GitHub refused to delete the branch T-1-change-readme: HTTP 422: Validation Failed.' });
+    for (const request of fake.requests) {
+      assert.equal(request.headers.authorization, `Bearer ${GH_TOKEN}`);
+    }
+  } finally {
+    await fake.close();
+  }
+});
+
 test('GitHub: not mergeable (conflicts, a draft, failing required checks) is refused with the reason; a 401 names the variable without the token; other refusals keep the host\'s words', async () => {
   const fake = await startFakeForge('github', 'acme/app');
   try {
@@ -243,6 +277,40 @@ test('GitLab: create (new and reused) with the description, status with the pipe
       assert.equal(request.headers['private-token'], undefined);
       const { authorization: _auth, ...others } = request.headers;
       assert.doesNotMatch(JSON.stringify([request.path, request.body, others]), /TESTTOKEN/);
+    }
+  } finally {
+    await fake.close();
+  }
+});
+
+test('GitLab: deleteBranch deletes the branch with the whole name encoded; gone only on "404 Branch Not Found"; a missing project throws', async () => {
+  const fake = await startFakeForge('gitlab', 'group/app');
+  try {
+    const forge = forgeFor(`${fake.url}/group/app.git`, forgeSettings({ SF_GITLAB_TOKEN: GL_TOKEN, SF_GITLAB_URL: `${fake.url}/api/v4` }));
+    fake.mrs.push(opened(1, 'T-1-change-readme', 'main', 'merged'), opened(2, 'team/a+b', 'main', 'merged'));
+    const deletions = (): string[] => fake.requests.filter((r) => r.method === 'DELETE').map((r) => r.path);
+    assert.equal(await forge.deleteBranch('T-1-change-readme'), 'deleted');
+    assert.deepEqual(deletions(), ['/api/v4/projects/group%2Fapp/repository/branches/T-1-change-readme']);
+    assert.deepEqual(fake.deleted, ['T-1-change-readme']);
+    assert.equal(await forge.deleteBranch('team/a+b'), 'deleted');
+    assert.equal(deletions()[1], '/api/v4/projects/group%2Fapp/repository/branches/team%2Fa%2Bb');
+    assert.deepEqual(fake.deleted, ['T-1-change-readme', 'team/a+b']);
+    // Already deleted: GitLab's own words.
+    assert.equal(await forge.deleteBranch('T-1-change-readme'), 'gone');
+    fake.fail.push({ match: /^DELETE /, status: 404, body: { message: '404 Branch Not Found' } });
+    assert.equal(await forge.deleteBranch('T-9-other'), 'gone');
+    assert.equal(fake.requests.length, 4);
+
+    // A 404 for the project is not taken for a missing branch.
+    fake.fail.push({ match: /^DELETE /, status: 404, body: { message: '404 Project Not Found' } });
+    assert.deepEqual(await refusal(forge.deleteBranch('T-1-change-readme')), {
+      code: 'mr_host_error',
+      message: 'GitLab 127.0.0.1 refused to delete the branch T-1-change-readme: HTTP 404: 404 Project Not Found (does SF_GITLAB_TOKEN have access to the repository?).',
+    });
+    fake.fail.push({ match: /^DELETE /, status: 403, body: { message: '403 Forbidden' } });
+    assert.equal((await refusal(forge.deleteBranch('T-1-change-readme'))).code, 'mr_host_error');
+    for (const request of fake.requests) {
+      assert.equal(request.headers.authorization, `Bearer ${GL_TOKEN}`);
     }
   } finally {
     await fake.close();

@@ -164,8 +164,11 @@ What the Codex gate cost and what its findings were worth, one row per job (curr
 
 The totals add the jobs, gate runs, tokens, findings by outcome, the overall yield, the share of
 iterations at each gate level and the records that could not be read. A low yield with many tokens
-says the gate costs more than it finds: consider `SF_GATE_LEVEL=auto` (the default),
-`SF_GATE_MAX_ROUNDS` or Accept on churn. The exact counting rules:
+says the gate costs more than it finds. On jobs with the Claude review, consider
+`SF_GATE_LEVEL=auto` (the default) or a lower `SF_GATE_MAX_ROUNDS`; on a job without it the gate
+is the only reviewer, at level `full` in every round, and `SF_GATE_MAX_ROUNDS` does not apply to
+it: `SF_MAX_ITERATIONS` and `SF_GATE_MAX_TOKENS` bound it. Or Accept on churn. The exact
+counting rules:
 [sf metrics](../../factory/README.md#sf-metrics).
 
 ## Logs: where to look

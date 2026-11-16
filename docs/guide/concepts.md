@@ -18,18 +18,24 @@ says where the dashboard shows a different label.
    only the Task file, the Tasks it builds on and the repository, says in its own words what the
    Task asks, and lists what is missing, contradictory or left undecided. It only advises.
 4. **You start the job**, or put the ticket in the **queue**, which starts it when a slot is free,
-   its plan check is `ready` and the tickets it waits for are merged.
+   its plan check is `ready` (or the Task needs none) and what it waits for is done: its
+   `lands_after` tickets merged, its `builds_on` ticket prepared or merged.
 5. **The Implementer works**: Claude Code, headless, in a Git worktree of its own on a new branch
    `APP-12-<slug>`, never in your checkout. Its first turn runs `/implement .software-factory/APP-12.md`.
    When it stops, the factory publishes an **iteration**: its Report and the Patch (the uncommitted
    difference to the base).
-6. **Two reviewers review the iteration** in the same round, at the same time (the **joint
-   round**): a fresh read-only Claude session (the **Claude review**) and the **Codex gate** (the
-   Codex CLI on your ChatGPT plan). A verdict of either with a blocker or major finding makes one
-   `## Fix N` section appended to the Task file, with the findings of both, each naming who raised
-   it, and the next iteration starts by itself. Every finding gets an id in the **ledger** (`R1`,
-   `R2`, …) so it is never argued twice.
-7. **Clean**: when both reviews have no blocker or major finding, the factory may offer you a
+6. **The reviewers review the iteration**: by default the **Codex gate** alone (the Codex CLI on
+   your ChatGPT plan). A ticket whose Task file says `review: claude` (with
+   `SF_CLAUDE_REVIEW=always`, every ticket but those that say `review: codex`) also gets a fresh
+   read-only Claude session (the **Claude review**): when the gate level runs the gate, both
+   review it in the same round, at the same time (the **joint round**); otherwise the Claude
+   review reviews alone. With the gate off, the Claude review reviews every ticket alone. A verdict
+   with a blocker or major finding makes one `## Fix N` section appended to the Task file (in a
+   joint round with the findings of both, each naming who raised it), and the next iteration
+   starts by itself. Every finding gets an id in the **ledger** (`R1`, `R2`, …) so it is never
+   argued twice.
+7. **Clean**: when the round's reviews (in a joint round, both) have no blocker or major finding,
+   the factory may offer you a
    **simplification pass** (only after fix rounds), then runs **MR preparation**: the Implementer
    writes the **MR text** (title and description), and the factory commits the change as one commit
    with that text as the message and rebases it onto the base branch.
@@ -45,9 +51,9 @@ At any point the job may **stop for you** (`needs_human`) with a code saying why
 limit, a failure. [When a job stops](when-a-job-stops.md) lists them all.
 
 ```
-plan ─► Task file ─► Task check ─► Start / queue ─► iteration ─► Claude review + Codex gate ─► Clean
-                                                       ▲                      │                    │
-                                                       └─────── Fix N ◄───────┘                    ▼
+plan ─► Task file ─► Task check ─► Start / queue ─► iteration ─► Codex gate (+ Claude review) ─► Clean
+                                                       ▲                      │                      │
+                                                       └─────── Fix N ◄───────┘                      ▼
                                                                     MR preparation ─► hand-over or push ─► merge
 ```
 
@@ -68,7 +74,7 @@ plan ─► Task file ─► Task check ─► Start / queue ─► iteration �
 | **Iteration** | Iteration N | One run of one section of the Task file: the task first, then each Fix section. It produces a Report and a Patch. |
 | **Report** | Report | The Implementer's account of an iteration: what was done, the checks run, open questions, an answer per Fix item. |
 | **Claude review** | Claude review | A fresh read-only Claude session that reviews each iteration against the Task file, the rules and the ledger. |
-| **Codex gate** | Codex gate | The review by the Codex CLI: in the same round as the Claude review, at the same time, or alone on a job without it. Its **gate level** (`full`, `light`, `none`) decides how much of it an iteration gets. |
+| **Codex gate** | Codex gate | The review by the Codex CLI: in the same round as the Claude review, at the same time, or alone on a job without it. On a job with the Claude review, its **gate level** (`full`, `light`, `none`) decides how much of it an iteration gets; alone, it reviews every iteration. |
 | **Joint round** | | The review of an iteration by the Claude review and the Codex gate at the same time; their findings make one Fix section, and the iteration is clean only when both verdicts are. |
 | **Fix section** | Fix N | `## Fix N`, appended by the factory from a verdict with a blocker or major item; it starts the next iteration. |
 | **Severity** | blocker, major, nit | The weight of a finding. Only blockers and majors make a fix; nits never block and go into the MR text. |
@@ -96,8 +102,8 @@ stateDiagram-v2
     starting --> failed: launch, recover
     starting --> aborted: abort
 
-    working --> awaiting_review: publish
-    working --> needs_human: publish, recover, repair_handover
+    working --> awaiting_review: publish, mr_turn_end
+    working --> needs_human: publish, mr_turn_end, recover, repair_handover
     working --> paused: pause
     working --> waiting_limit: park
     working --> aborted: abort
@@ -127,8 +133,9 @@ stateDiagram-v2
     waiting_limit --> needs_human: limit_reset, repair_handover
     waiting_limit --> aborted: abort
 
+    preparing_mr --> working: tests
     preparing_mr --> awaiting_review: mr_turn_end
-    preparing_mr --> needs_human: mr_turn_end, ready, pause, recover, repair_handover
+    preparing_mr --> needs_human: mr_turn_end, tests, ready, pause, recover, repair_handover
     preparing_mr --> ready_for_human_review: ready, repair_handover
     preparing_mr --> handed_over: ready
     preparing_mr --> aborted: abort

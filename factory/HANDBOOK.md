@@ -77,7 +77,8 @@ plan ─► write_task ─► Task check ─► user: Start ─► iteration ─
 ```
 
 The Claude review runs only on tickets that ask for it (`review: claude`, below), unless the user
-set `SF_CLAUDE_REVIEW=always`; otherwise the Codex gate is the only reviewer.
+set `SF_CLAUDE_REVIEW=always`; otherwise the Codex gate is the only reviewer. With the gate off
+(`SF_GATE=off`, or no Codex found) the Claude review reviews every ticket alone.
 
 Limits: the run queue starts its tickets while fewer than its limit `max_running` of jobs run in
 every workspace together (1-20, the user sets it; `SF_MAX_JOBS`, default 3, is only its default); a

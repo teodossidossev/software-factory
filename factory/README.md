@@ -17,8 +17,11 @@ the job, inside Claude Code's sandbox. At Clean the Implementer writes the merge
 and the factory commits and rebases, and the user finishes the ticket with approve (the push) or abort, from the terminal (`sf approve`,
 `sf abort`) or from the dashboard (section Dashboard), or with `sf reset` (terminal only), and is
 told about the states that need them through a desktop notification and ntfy. Every published
-iteration is reviewed by a fresh read-only Claude session and, when it finds it clean, by the Codex
-gate (section Jobs); their fix verdicts become the next Fix section without anyone in between.
+iteration is reviewed (section Jobs): by default by the Codex gate alone; on a ticket whose Task
+file says `review: claude` (with `SF_CLAUDE_REVIEW=always`, every ticket but those that say
+`review: codex`) by a fresh read-only Claude session and, when the gate level runs it, the Codex
+gate, in the same round and at the same time; with the gate off, by the Claude session alone.
+Their fix verdicts become the next Fix section without anyone in between.
 
 ## Commands
 
@@ -65,7 +68,7 @@ bin/sf queue on-limit resume-then-queue|resume-only|wait  # what the queue does 
 bin/sf queue force <workspace> <ticket>        # Start anyway: the queued ticket starts whatever its Task check says; needs sf serve
 bin/sf say <workspace> <ticket> <message...>   # a user message into the session; on a handed-over job it is Ask for changes (section Hand-over to your checkout); needs sf serve
 bin/sf review <workspace> <ticket>             # retry a failed Claude review (needs_human with review_failed); needs sf serve
-bin/sf retry <workspace> <ticket>              # retry a transient MR preparation failure (fetch_failed, mr_serve_restarted, mr_interrupted, mr_commit_failed, mr_rebase_failed, mr_failed) or a stop of the guard (guard_hit, guard_terms_invalid, guard_failed) without a new review; on mr_push_failed: push again; needs sf serve
+bin/sf retry <workspace> <ticket>              # retry a transient MR preparation failure (fetch_failed, mr_serve_restarted, mr_interrupted, mr_commit_failed, mr_rebase_failed, mr_failed) or a stop of the guard (guard_hit, guard_terms_invalid, guard_failed), a test command that could not run (tests_unavailable) or a part whose `builds_on` ticket has no prepared commit (builds_on_not_ready) without a new review; on mr_push_failed: push again; needs sf serve
 bin/sf accept <workspace> <ticket>             # accept the last iteration over a stopped gate (gate_rounds, gate_budget, gate_failed) or a ledger stop (review_churn, review_disputed), with a clean Claude review or none on the job, or at the Fix round limit (iteration_limit) whatever the last verdict, and prepare the MR; or skip the simplification pass's suggestions (simplify_offered); needs sf serve
 bin/sf simplify <workspace> <ticket>           # apply the simplification pass's suggestions (needs_human with simplify_offered): one Fix section "Simplify", reviewed as usual; needs sf serve
 bin/sf settle <workspace> <ticket> <id> accept|fix [note...]  # settle an escalated or contested finding of the ledger (needs_human); needs sf serve
@@ -1973,8 +1976,9 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   kill a running round; its outcome is then never applied. `sf serve` kills a running gate when it
   stops.
 - The **gate level** (SF-092, `src/gate-level.ts`): as each round starts with the gate on, before
-  either review and before the gate's budget check, the iteration gets a level from the job's whole change at
-  that iteration (its `meta.json` `files`):
+  either review and before the gate's budget check, the iteration gets a level: on a job without
+  the Claude review always `full` (reason `no Claude review`: the gate is its only reviewer); on a
+  job with it, from the job's whole change at that iteration (its `meta.json` `files`):
   - `full` (the gate's rounds, up to `SF_GATE_MAX_ROUNDS`) when `SF_GATE_LEVEL=full`; or a changed
     path (a rename's old path too, by `SENSITIVE_PATHS` and `SF_SENSITIVE_PATHS`) is sensitive
     (`declared` or `undeclared`, section Marked paths), named by the Task's `may_touch` (read from
@@ -5998,7 +6002,8 @@ order, whichever workspace is asked (or none); only the asked one's values are u
 workspace)` is the same over the parsed file. `decision_docs` is read by the Task check and both
 reviewers, which get the list of the documents it matches (`src/decisions.ts`; section Task check,
 and the review's prompt in section Jobs); `lead_time_hours` gives a job's lead-time target (SF-219,
-section Lead time); nothing reads the `slice` values yet.
+section Lead time); the Task check reads `slice.change_max_files` (section Task check: the
+`overreach` major at `slice norm`); nothing reads `slice.change_max_lines` or `slice.min_lines` yet.
 
 `sf norms [workspace]` (a command of `sf serve`, open while `sf update` drains or builds) prints the
 file's path, each effective value with its source (`default`, `file` or `workspace`), the decision

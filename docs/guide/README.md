@@ -7,9 +7,11 @@ through everything you do with it from day to day.
 
 The Software Factory is a local tool for one person on one machine. You plan a ticket (with ChatGPT,
 with Claude Code, on the dashboard or by hand) into a **Task file**; the factory then runs
-Claude Code headless on it in a Git worktree of its own, has every iteration reviewed by a fresh
-Claude session and by the Codex CLI, turns their findings into fix rounds by itself, and when both
-are clean writes the merge request text, makes one commit and rebases it. You get the result in
+Claude Code headless on it in a Git worktree of its own, has every iteration reviewed (by default by
+the Codex CLI alone; on a ticket that says `review: claude`, by a fresh Claude session and, when
+the gate level runs it, the Codex CLI, in the same round; with the gate off, by the Claude session
+alone), turns the findings into fix rounds by itself, and when the reviews are clean writes the
+merge request text, makes one commit and rebases it. You get the result in
 your own checkout (or push it from the dashboard), review it, and push or merge. It exists to remove
 the **idle gap**: the time between Claude finishing and someone noticing. Nobody has to watch a
 terminal between Start and your own review.

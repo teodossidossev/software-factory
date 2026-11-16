@@ -100,7 +100,7 @@ effect and says only whether each token is set.
 | `SF_GATE_MAX_ROUNDS` | `5` | positive integer | Fix sections the gate asked for per job on a job with the Claude review; the next gate fix stops the job (`gate_rounds`), unless the Claude review of the same round gives a fix, which then applies alone. On a job without the Claude review, `SF_MAX_ITERATIONS` limits the rounds instead. |
 | `SF_GATE_MAX_TOKENS` | `5000000` | 1 to 1000000000 | Input plus output tokens of all gate runs of a job; at the ceiling no gate starts (the Claude review runs alone) and a clean round stops the job (`gate_budget`). |
 | `SF_GATE_TIMEOUT_MS` | `900000` (15 min) | 1 to 86400000 | How long one gate run may take; then it is killed (`gate_failed`). |
-| `SF_GATE_LEVEL` | `auto` | `auto`, `full`, empty | `auto` picks `full`, `light` (one round) or `none` (documentation only) from the risk of the change; `full` runs the gate in every round. |
+| `SF_GATE_LEVEL` | `auto` | `auto`, `full`, empty | On a job with the Claude review, `auto` picks `full`, `light` (one round) or `none` (documentation only) from the risk of the change, and `full` runs the gate in every round. A job without the Claude review gets `full` on every iteration, whatever this says: the gate is its only reviewer. |
 | `SF_GATE_FULL_PATHS` | empty | comma-separated globs | Changed paths that always make the gate level `full`, for example `src/billing/**,migrations/**`. |
 
 ### Models
@@ -384,7 +384,10 @@ A value comes from the workspace's entry under `workspaces`, else the top level,
 `slice` and `lead_time_hours` merge key by key, `decision_docs` replaces the whole list.
 `sf norms [workspace]` (needs `sf serve`) prints each value in force with its source (`default`,
 `file` or `workspace`) and the problems of the whole file, every workspace's entry included.
-Nothing uses the values yet.
+The Task check uses `slice.change_max_files` for a Task of kind `change` (or none) or `switch`
+([Planning](planning.md#the-task-check)), a job's lead-time target is `lead_time_hours` of its
+Task's `size`, and the Task check and the reviewers get the documents `decision_docs` matches;
+nothing uses `slice.change_max_lines` or `slice.min_lines` yet.
 
 How it differs from the environment file:
 
@@ -628,10 +631,12 @@ check: required
 | `title` | yes | the title in the header and on the card | A short title; the branch name is `<ticket>-<slug of the title>`. |
 | `base` | yes | **Starts from** | The branch the job starts from and the MR targets. A feature branch when the ticket needs work that is not merged yet. |
 | `continues` | no | (not shown) | The source branch of a merge request already open on `origin` that this ticket adds to; `base` stays that merge request's target. The job starts from `origin/<continues>`, is rebased onto its latest tip at Clean, and Approve pushes the commit onto it (never forced; the job's own branch is not pushed), so the open merge request is reused. Refused when it equals `base`, is `main` or `master`, or is not a valid branch name (letters, digits, `.`, `_`, `/`, `-`; not starting with `-` or `/`, not ending with `/`, `.` or `.lock`, no `..` or `//`). See [Planning](planning.md#a-follow-up-to-an-open-merge-request). |
+| `builds_on` | no | (not shown; "Waits for" on the Queue card) | The ticket of this workspace, not merged yet, whose change this part builds on: the job starts from the commit that ticket's job prepared, Approve is refused until that ticket is merged, and the queue waits until that ticket's job has a prepared commit. Once that ticket is merged, the job starts from `base` as any job. Refused when it names the ticket itself, is not a ticket key, or comes with `continues`. See the [Handbook's Task file format](../../factory/HANDBOOK.md#task-file-format). |
 | `scope` | no | **Files it will change** | Every file the ticket is expected to create, change or delete, tests and docs included (paths or globs). A changed path outside it (and outside `may_touch`) must be justified to a reviewer, or it is a fix item. Without it nothing is checked ("No list: the job may change any file, and nothing is checked."). |
 | `may_touch` | no | **Files it will change**, marked 🔒 | Sensitive paths (manifests, lockfiles, CI, configuration) the ticket may change on purpose. A sensitive path not named here needs a reviewer's acceptance. Also counts as in scope. |
 | `lands_after` | no | **Waits for** (and "Waits for" on the Queue card) | The tickets this one waits for: `APP-11` in the same workspace, `my-api/API-7` in another. The queue starts it only when all are merged; Start by hand does not wait. |
 | `check` | no | **Plan check** (`not needed` with the reason, or the check's result) | Whether the Task needs a plan check. `check: skip`: never. `check: required` (or any other value): always. Without it a Task needs one when it has no `scope`, more than 10 scope entries, a glob in `scope`, a `lands_after` ticket of another workspace or more than 1,200 words (the whitespace-separated words of the whole file, front matter included); otherwise it is small and starts from the queue without a check (`write_task` answers `not_needed`). A Check pressed by hand always runs, and its verdict counts as before. |
+| `review` | no | (not shown) | Who reviews the ticket's iterations: `claude` adds the Claude review, in the same round as the Codex gate when the gate level runs it; `codex` has the gate alone even with `SF_CLAUDE_REVIEW=always`. Without it, or with any other value, `SF_CLAUDE_REVIEW` decides (by default the gate alone). With the gate off the Claude review reviews every ticket. Read once, at Start. |
 | `size` | no | (not shown) | The planner's estimate of the Task: `small`, `medium` or `complex`. It picks the job's lead-time target, `lead_time_hours.<size>` of the [norms](#norms-normsjson). Without it, or with any other value, the Task is `medium`. |
 | `part_of` | no | (not shown) | The task this Task is a slice of, as a ticket name (`APP-10`). With `slice` set too, the merge request's *Special things to note* begins "Slice N of M of APP-10." Any other value is ignored, and the plan check lists it as a nit. |
 | `slice` | no | (not shown) | Which slice this is and how many there are: `N/M` in digits, 1 <= N <= M <= 20. Any other value is ignored, and the plan check lists it as a nit. |

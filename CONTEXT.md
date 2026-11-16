@@ -14,7 +14,8 @@ make it zero. Every feature is judged by how much of it it removes.
 ### People and agents
 
 **Context owner**:
-ChatGPT, in the web conversation where a Ticket is planned. It plans only: it reads the Workspace,
+The model a Ticket is planned with: ChatGPT in its web conversation, or Claude Code (or another
+MCP client) through the factory's MCP server. It plans only: it reads the Workspace,
 discusses the Ticket with the User, writes the Task file with its Review brief and tells the User
 it is ready. It does not start, review or approve Jobs.
 _Avoid_: reviewer (ambiguous), planner, ChatGPT connector
@@ -57,21 +58,25 @@ Implementer and the complete brief for the Reviews.
 _Avoid_: instruction, instruction.md, spec
 
 **Ticket draft**:
-A Task file as the Dashboard writes it from the User's request before the Context owner has
-planned: the header, the request verbatim under `## Request`, and a `## Status: draft` line. The
-Context owner replaces it with the Task format through `write_task`; the factory treats it as a
-Task file otherwise.
+A Task file as the Dashboard writes it for a new Ticket before the Context owner has planned: the
+front matter, the title heading, a `## Status: waiting for the Context owner` line and a note (the
+older marker `## Status: draft` counts the same). The User's request is not in it: it opens the
+Context owner's conversation instead. The Context owner replaces it with the Task format through
+`write_task`; until then it cannot be started or queued (`task_draft`).
 _Avoid_: stub, placeholder task, request file
 
 **Task check**:
 The reading of a Task file before Start by a fresh read-only Claude session that sees only the
-Task file and the repository at the Task's base, in a checkout of its own: never the Context
+Task file, its images, the Task files of the Tickets it builds on (`builds_on`) and the repository
+at the Task's base, in a checkout of its own: never the Context
 owner's conversation, the Jobs or the Ledger. It paraphrases the Task first, then lists findings (a decision left to the Implementer, a
 contradiction with the code, something missing, an overreach, an unclear passage), each with a
 Severity, and the files it expects to change. It is `ready` without a blocker or major finding,
 `not_ready` otherwise; a failed one is never ready. It is kept per version of the Task file, and
-one of an earlier version is stale. It only advises: Start stays the User's call. The User runs it
-(Check on the board, `sf check-task`); the Context owner reads it (`task_check`) and rewrites the
+one of an earlier version is stale. It only advises: Start stays the User's call. `sf serve` runs it
+by itself 60 s after the last change of a Task file that needs one (unless
+`SF_TASK_CHECK_AUTO=off`), and the User runs it with Check on the board or `sf check-task`; the
+Context owner reads it (`task_check`) and rewrites the
 Task from it.
 _Avoid_: plan review, lint, pre-review (for a Task check); Review (that is of an Iteration)
 
@@ -108,8 +113,10 @@ _Avoid_: suspended, on hold, stopped (for a Paused Job); aborted (that Job has e
 The one order of the planned Tickets of every Workspace that the factory starts by itself, and the
 run limit `max_running`: how many Jobs may run at once (starting, working, awaiting review,
 preparing the MR or Waiting for limits) in every Workspace together; the User sets it, `SF_MAX_JOBS` is only its
-default. When a slot is free, `sf serve` starts the first queued Ticket whose `lands_after`
-Tickets are all merged; it never starts one twice. The limit gates only these starts: a start by
+default. When a slot is free, `sf serve` starts the first queued Ticket whose Task check is
+`ready` (or not needed, or forced with Start anyway), whose `lands_after` Tickets are all merged
+and whose `builds_on` Ticket has a prepared commit or is merged; it never starts one twice. The
+limit gates only these starts: a start by
 hand always goes, and its Job counts as running. The User adds, removes, reorders, holds and
 releases it (the board, `sf queue`); the Context owner reads it and adds to it.
 _Avoid_: backlog, schedule, planned list (for the Queue); slots per workspace
@@ -158,7 +165,10 @@ _Avoid_: protected file, system file
 **Review**:
 The check of one Iteration against its Task file, the repository standards and the Handbook's
 review rules, by a fresh read-only Claude session the factory starts in the Worktree when the
-Iteration is published. It ends with a verdict, `fix` or `clean`, and items with a Severity. The
+Iteration of a Job with the Claude Review is published: its Task file says `review: claude`, or
+`SF_CLAUDE_REVIEW=always` and it does not say `review: codex`, or the Gate is off. On any other
+Job the Gate alone reviews the Iteration. It ends with a verdict, `fix` or `clean`, and items with
+a Severity. The
 factory acts on it as `fix` only with a blocker or major item (or an undeclared Sensitive path not
 accepted): the items become the next Fix section. Otherwise it counts as `clean`. With the Gate
 on, it runs in a Joint round with the Gate. A failed Review hands the Job to the User.
@@ -219,8 +229,10 @@ _Avoid_: OpenAI reviewer, second opinion
 
 **Gate level**:
 How much of the Gate an Iteration gets: `full`, `light` (the Gate runs only while the Job has no
-Fix from the Gate) or `none`; decided when the Round starts, before either Review. It is decided
-from the risk of the Job's whole change at that Iteration: `full` for a change that touches a
+Fix from the Gate) or `none`; decided when the Round starts, before either Review. On a Job
+without the Claude Review it is always `full`: the Gate is its only Review. On a Job with it, it is
+decided from the risk of the Job's whole change at that Iteration: `full` for a change that
+touches a
 Sensitive path, a `may_touch` path, a security-relevant or agents' instructions file, is large or
 cannot be known; `none` for documentation only. A Gate the level skips leaves the Claude Review to
 decide, as with the Gate off.

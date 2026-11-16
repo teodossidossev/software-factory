@@ -81,6 +81,7 @@ the sentence, the full finding texts and the factory's raw message.
 | --- | --- | --- | --- |
 | `review_failed` | Claude review could not run · Retry review | The Claude review errored, ran out of its steps, or gave no valid verdict. | Retry review (`sf review`). Refused with `review_off` when `SF_REVIEW=off`. If it keeps failing, raise `SF_REVIEW_MAX_TURNS` and restart `sf serve`. |
 | `gate_failed` | Codex gate gave no verdict · Decide | The Codex CLI exited with an error, timed out (`SF_GATE_TIMEOUT_MS`), or wrote no valid verdict. | Check `codex login` and the message; then *Tell it to go on* (the iteration is reviewed again), or Accept and prepare MR when Claude is clean. |
+| `gate_sandbox_unavailable` | Stopped | The Codex gate did not start: with the sandbox on it runs only inside bubblewrap (`bwrap` on `PATH`), on Linux, on x64 or arm64; the message names what is missing. | Install bubblewrap (or, where the message says so, run with `SF_SANDBOX=off`), then Send "Go on." (`sf say my-app APP-12 "Go on."`): a new turn, and its iteration is reviewed as usual. Or Abort. |
 
 ## Errors of MR preparation
 
@@ -98,6 +99,7 @@ the sentence, the full finding texts and the factory's raw message.
 | `fetch_failed` | Fetch failed · Retry | `git fetch origin <base>` failed or took over 60 s (at Clean). | Check the network and your Git credentials, then Retry. |
 | `guard_hit`, `guard_terms_invalid`, `guard_failed` | Guard stopped the MR · Retry | The guard found text that must not be published, or could not read its terms or `auth.env` ([Configuration: the guard](configuration.md#the-guard)). | Tell the Implementer how to word it (Send), or fix the file and Retry (`sf retry`). |
 | `tests_unavailable` | Tests could not run · Retry | The workspace's `test_command` could not run: `bwrap` (bubblewrap) is missing or its sandbox did not start, or the command exited with 126 or 127 (not executable, not found). The reason is the message's first line. | Fix it on this machine (install bubblewrap, install the dependencies in the worktree, correct `test_command` in `workspaces.json`), then Retry (`sf retry`): the tests run again. Or Accept and prepare MR without tests, or Send. |
+| `builds_on_not_ready` | The part it builds on is being changed · Retry | This ticket builds on another (`builds_on:`), and that ticket's job has no prepared commit now (you asked it for changes), so MR preparation has nothing to rebase onto. | Once that ticket is ready for review, handed over or pushed again, Retry (`sf retry`). |
 
 After a conflict turn there is no Retry (the resolution was not reviewed yet): use *Tell it to go
 on*. Another stop's code with a failed MR text turn (`session_failed`, `max_turns`, …) is handled as
@@ -205,6 +207,7 @@ The queue never stops a job, but a queued ticket may wait. Its card says why:
 | Queue held: usage limit, resets at 03:00 | Wait, or resume or abort the parked jobs; `sf queue release` does not end this hold. |
 | Queue held: usage limit reset, resume the parked jobs | Resume them (*Resume*), then release the queue. |
 | N running · 0 slots free | Wait, or `sf queue limit <N>`. |
+| start failed (fetch_failed); next try HH:MM | Nothing: the queue's start could not fetch the base, and the ticket keeps its place; the queue tries again 5 minutes later, then 10, then every 15. `sf queue remove` stops it. |
 | Start failed: `<message>` | The queue's start was refused (`task_draft`, `branch_exists`, `base_not_found`, …); the ticket left the queue. Fix the cause and add it again. |
 
 ## Refusals you may meet

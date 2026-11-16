@@ -4,7 +4,7 @@ This page covers the ways to take a finished job: the hand-over to your own chec
 opening the merge request from the factory, editing the MR text, and what happens after; and a
 job from the review comments of a merge request already open.
 
-When both reviews are clean, MR preparation has left the job's branch with **one commit**, rebased
+When the reviews are clean, MR preparation has left the job's branch with **one commit**, rebased
 onto the base, with the MR text as its message. Nothing is pushed yet. You get a notification, and
 the job is either **handed over** to your checkout (`handed_over`, the default) or waits in
 **`ready_for_human_review`** (hand-over off, or refused).
@@ -102,7 +102,8 @@ sf mr merge my-app APP-12           # merge it through the host's API (a merge c
 - **Create merge request** opens a pull request (GitHub) or merge request (GitLab) from the branch
   into the base, with the MR title and description; an open one for the branch is reused. It needs
   `SF_GITHUB_TOKEN` or `SF_GITLAB_TOKEN` ([Configuration](configuration.md#push-and-merge-request-providers));
-  the host is chosen from `origin`'s URL (`github.com` is GitHub, any other host GitLab).
+  the host is chosen from `origin`'s URL: `github.com` is GitHub; the host of `SF_GITLAB_URL` when
+  it is set, else `gitlab.com`, is GitLab; any other host is refused (`mr_host_unsupported`).
 - **Merge** merges an open merge request through the host's API, as a merge commit, never by a
   push. A draft, a conflict, failing required checks or missing approvals refuse it
   (`mr_not_mergeable`, with the host's reason); nothing changes then.

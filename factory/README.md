@@ -37,6 +37,7 @@ bin/sf serve                      # foreground; Ctrl+C stops it; prints the dash
 bin/sf up [--no-open] [--no-tunnel]   # sf serve (with its tunnel, section sf up) and the dashboard opened in the browser; --no-tunnel is SF_TUNNEL=off; Ctrl+C stops both; npm start at the repository root
 bin/sf mcp-url [--header|--rotate|--port]   # the MCP URL with its token (section MCP endpoint); --header: the URL without it and the bearer header; --rotate: a new token, taken at once by a running sf serve (restart the tunnel); works without sf serve
 bin/sf planner setup <workspace>   # the workspace's planning copy for Claude Code (section MCP endpoint, The planning copy): cloned or fast-forwarded, the MCP server for that folder, the planning skill, .claude/planning-copy.md
+bin/sf planner waiting <workspace> [permission]   # the planning copy's Stop and Notification hook (section Notifications): tells you that the planner waits for you; always exits 0
 bin/sf dashboard [--open] [--rotate]  # the dashboard URL of the last sf serve start; --open opens it with xdg-open; --rotate removes the token so the next sf serve makes a new one; works without sf serve
 bin/sf check-task <workspace> <ticket>  # the Task check (section Task check): paraphrase, findings by severity, verdict; stored by sha; works without sf serve
 bin/sf rules <workspace> [ticket] # the coding rules the agents would be given (section Coding rules): paths, sources, sizes, the files left out; never their text; works without sf serve
@@ -412,9 +413,10 @@ rules. It runs again at any time and refreshes the copy in place. The steps, in 
    and every file it names.
 
    **The settings.** `.claude/settings.local.json` makes the copy read-only to the planner
-   (`plannerSettings`). Its `permissions` and `sandbox` keys are replaced whole at every run; every
-   other key (hooks, `skillOverrides`, your own) keeps its value and its place, and a rule you added
-   to `permissions` is dropped, so the copy stays read-only.
+   (`plannerSettings`). Its `permissions` and `sandbox` keys are replaced whole at every run, and in
+   `hooks` the events `Stop` and `Notification`; every other key (`skillOverrides`, your own) and
+   every other hook event keeps its value and its place, and a rule you added to `permissions` is
+   dropped, so the copy stays read-only.
    - `permissions.allow`: the factory's MCP tools (`mcp__software-factory`) and the reading tools
      `Read`, `Grep`, `Glob`, with `Skill`, `Agent`, `Task`, `TodoWrite` and `ToolSearch`. No
      `Bash(...)` rule: a list of commands is not read-only (`sed` and `awk` run commands,
@@ -444,6 +446,12 @@ rules. It runs again at any time and refreshes the copy in place. The steps, in 
      network); `filesystem.denyRead` with the state directory, which holds `sf.sock`, the jobs and
      the tokens, hidden from the shell. The `Read` tool still reads your request files there, which
      `.claude/planning-copy.md` names; the token files are denied to it by the rules above.
+   - `hooks` (SF-245): `Stop` runs `'<factory>/bin/sf' planner waiting '<workspace>'`, and
+     `Notification` with the matcher `permission_prompt` the same with `permission`, each a command
+     hook with a 30-second timeout; the factory's `bin/sf` and the workspace's name are in single
+     quotes for the shell. They tell you on your phone that the planner waits for you (section
+     Notifications). Hooks run outside the sandbox, with your access, so the command reads the
+     factory's environment file and sends through its channels.
    - `.claude/settings.local.json` must be missing or a regular file: a link or anything else is
      `planning_copy_unsafe`, a file that is not a JSON object `planning_copy_unusable`; neither is
      changed. It is written atomically, with its mode (0600 when new), and holds paths, never a
@@ -459,8 +467,8 @@ rules. It runs again at any time and refreshes the copy in place. The steps, in 
    timeout or a failed `add` is `planner_mcp_failed`, with the end of its output, the token shown
    as `<token>`.
 9. **The output.** The warnings and notes of step 3, then the copy's path with its base branch and
-   short commit, the MCP registration, the skill, the pointers file, the settings, and what to do
-   next: open Claude Code in the copy once (`cd <copy> && claude`) and accept its folder trust dialog, then
+   short commit, the MCP registration, the skill, the pointers file, the settings, the hooks, and
+   what to do next: open Claude Code in the copy once (`cd <copy> && claude`) and accept its folder trust dialog, then
    `/planning-tasks workspace <workspace>, ticket <ticket>`. The factory never accepts that dialog
    for you.
 
@@ -3948,12 +3956,28 @@ first failure: "<ticket>: start failed" with "<ticket> could not fetch <base>; t
 again"; `Priority: default`, `Tags: warning`. Its workspace's `notify` setting applies (below; the
 brief body is "<workspace> · fetch_failed").
 
+A planner session in a planning copy (SF-245, section The planning copy) that waits for you is
+notified by the copy's hooks, `sf planner waiting <workspace> [permission]`: "Planner waits for you"
+when it ends a turn, "Planner waits for a permission" when it stops at a permission prompt;
+`Priority: high`, `Tags: speech_balloon`, the body the workspace's name only (no ticket, no text of
+the session). With Remote Control on, the session's page `https://claude.ai/code/<id>` goes to ntfy
+as its `Click` header, so a tap opens the session (an id of letters, digits, `_` and `-`, at most
+128, else no link). A finished turn stays silent while the planner's own sub-agents or crons run
+(the Stop event's `background_tasks` or `session_crons` not empty), and when your last own message
+in the session's transcript is younger than 45 seconds (a quick answer in a live exchange); a
+permission prompt is always notified. The workspace's `notify` setting applies (below; `brief`
+keeps the body and the link). The command always exits 0, so a hook never fails the session; what
+went wrong (an environment file that cannot be read or parsed, named by the file only, a refused
+name, a failed channel) is one line on stderr, and a broken environment file sends nothing.
+
 A workspace's `notify` setting (SF-215; `sf workspace notify <name> full|brief|off`, the field
 `notify` of its registry entry) decides how much the notifications of its jobs and Task checks tell.
 `full` (the default) is all of the above. `brief` keeps the ntfy title, priority and tags, and the
 body is one line: the workspace's name, and the error's code when the job has one (a "plan not
 ready" keeps its counts and the workspace; a "plan check failed" names the workspace only). No
-branch, path, error message, MR title or link goes to ntfy. The desktop notification stays full, since
+branch, path, error message, MR title or link to the repository or the Git host goes to ntfy; a
+planner's notification keeps its session's link, an opaque claude.ai address that opens only for
+your account. The desktop notification stays full, since
 it does not leave the machine. `off` sends nothing on either channel. The setting is read from the
 registry for each notification, so a change applies to the next one. A registry that cannot be read
 counts as `full`. Health, usage limit reset and digest notifications are not tied to a workspace and

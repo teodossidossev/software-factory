@@ -77,7 +77,7 @@ import { turnLimitLine } from './turn-limit.js';
 import { watchEvents } from './watch.js';
 import { DEFAULT_BUDGET_USD, DEFAULT_TIMEOUT_MIN, positiveDecimal, runSmoke } from './live-smoke.js';
 import { INSTALLED_SF, serviceCommand, updateService } from './service.js';
-import { PLANNER_USAGE, plannerCommand } from './planning-copy.js';
+import { isPlannerWaiting, PLANNER_USAGE, plannerCommand, plannerWaitingCommand } from './planning-copy.js';
 import { watchdog } from './watchdog.js';
 import { checkStateVersion } from './state-version.js';
 import { answerLines, checkArgs, checkJob, checkName, cliCommand, type Command, COMMANDS, socketName, UsageError, usageLines } from './commands.js';
@@ -1491,6 +1491,19 @@ function guardEnvFile(): string[] {
 async function main(argv: string[]): Promise<void> {
   applyNetDefaults(); // before any connection: a longer connect attempt (src/net-defaults.ts)
   const [command, ...rest] = argv;
+  // The planning copy's hook never fails the planner's session: an environment file that cannot be
+  // read or parsed is one stderr line (naming the file only) and exit 0.
+  if (command === 'planner' && isPlannerWaiting(rest)) {
+    await plannerWaitingCommand(rest, () => {
+      try {
+        loadEnvFile();
+      } catch { // unreadable or malformed: named by the file only, as parseEnvFile's message quotes the line
+        throw new Error(`${basename(envFilePath() ?? 'auth.env')} could not be read.`);
+      }
+      return { env: process.env, configDir: configDir() };
+    });
+    return;
+  }
   // SF_* settings from the environment file (auth.env), for every command alike; sf guard's own
   // failure never quotes the file's line.
   const fromEnvFile = command === 'guard' ? guardEnvFile() : loadEnvFile();

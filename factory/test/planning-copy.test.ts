@@ -3,9 +3,11 @@
 // the token in no output and no file of the copy, a second run's fast-forward and its notes, and
 // every refusal with its code; plannerSettings for a given environment.
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { chmod, lstat, mkdir, readdir, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -130,6 +132,7 @@ test('a first run clones the workspace, installs the skill and the pointers, and
     'Skill planning-tasks: installed in .claude/skills',
     'Pointers: .claude/planning-copy.md',
     "Settings: read-only; shell commands in Claude Code's sandbox (no writes, no network); secrets denied",
+    'Hooks: the phone hears when the planner waits for you (sf planner waiting)',
     `Next: open Claude Code there once and accept its trust dialog: cd ${copy} && claude`,
     'Then plan a ticket: /planning-tasks workspace app, ticket <ticket>',
   ]);
@@ -293,10 +296,10 @@ test('sf planner setup refuses what it cannot use, each with its code', async ()
   assert.equal(missing.stderr.trim(), 'sf: Claude Code (claude) is not on PATH: install it, then run sf planner setup again.');
 
   // No arguments, or others: the usage error, exit 2.
-  for (const args of [['planner'], ['planner', 'setup'], ['planner', 'start', 'app'], ['planner', 'setup', 'app', 'more']]) {
+  for (const args of [['planner'], ['planner', 'setup'], ['planner', 'start', 'app'], ['planner', 'setup', 'app', 'more'], ['planner', 'waiting'], ['planner', 'waiting', 'app', 'other'], ['planner', 'waiting', 'app', 'permission', 'more']]) {
     const usage = await runCli(env, args);
     assert.equal(usage.code, 2, args.join(' '));
-    assert.match(usage.stderr, /^sf: planner needs setup <workspace>\./);
+    assert.match(usage.stderr, /^sf: planner needs setup <workspace>, or waiting <workspace> \[permission\]\./);
   }
   assert.deepEqual(lines.filter((line) => line.includes(TOKEN)), []);
 });
@@ -415,6 +418,13 @@ test('plannerSettings: read-only tools, the secrets of this environment denied, 
   }
 });
 
+// The copy's hooks (PW-6): the factory's bin/sf and the workspace's name, each quoted for the shell.
+const SF_BIN = fileURLToPath(new URL('../../bin/sf', import.meta.url));
+const HOOKS = {
+  Stop: [{ hooks: [{ type: 'command', command: `'${SF_BIN}' planner waiting 'app'`, timeout: 30 }] }],
+  Notification: [{ matcher: 'permission_prompt', hooks: [{ type: 'command', command: `'${SF_BIN}' planner waiting 'app' permission`, timeout: 30 }] }],
+};
+
 test("sf planner setup writes the copy's settings and keeps the file's other keys", async () => {
   const { env, copy } = await plannerEnv('planner-settings');
   const file = join(copy, '.claude', 'settings.local.json');
@@ -424,19 +434,21 @@ test("sf planner setup writes the copy's settings and keeps the file's other key
   // A first run: the file made, mode 0600, the token in it nowhere.
   const first = await setup(env);
   assert.match(first.stdout, /^Settings: read-only; shell commands in Claude Code's sandbox \(no writes, no network\); secrets denied$/m);
-  assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), expected);
+  assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), { ...expected, hooks: HOOKS });
   assert.equal((await stat(file)).mode & 0o777, 0o600);
   assert.equal((await readFile(file, 'utf8')).includes(TOKEN), false);
 
   // The user's keys kept with their values and in their place, permissions replaced whole, sandbox
-  // last; written in place, the file keeps its mode 0600.
-  const hooks = { Stop: [{ hooks: [{ type: 'command', command: 'echo stopped' }] }] };
+  // last; the hooks' Stop and Notification replaced, PreToolUse kept (PW-6); written in place, the
+  // file keeps its mode 0600.
+  const preToolUse = [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'echo checked' }] }];
+  const hooks = { Stop: [{ hooks: [{ type: 'command', command: 'echo stopped' }] }], PreToolUse: preToolUse };
   await writeFile(file, `${JSON.stringify({ model: 'opus', permissions: { allow: ['Bash(awk:*)'], defaultMode: 'acceptEdits' }, hooks })}\n`);
   const second = await setup(env);
   assert.match(second.stdout, /^Settings: /m);
   const written = JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>;
   assert.deepEqual(Object.keys(written), ['model', 'permissions', 'hooks', 'sandbox']);
-  assert.deepEqual(written, { model: 'opus', permissions: expected.permissions, hooks, sandbox: expected.sandbox });
+  assert.deepEqual(written, { model: 'opus', permissions: expected.permissions, hooks: { PreToolUse: preToolUse, ...HOOKS }, sandbox: expected.sandbox });
   assert.equal(JSON.stringify(written).includes('Bash(awk:*)'), false);
   assert.equal((await stat(file)).mode & 0o777, 0o600);
 
@@ -500,3 +512,71 @@ test('a settings file that is a link or not an object is refused, untouched', as
   git(repo, 'push', '-q', 'origin', 'main');
   await refused('planning_copy_unsafe', 'The repository of app tracks .claude/settings.local.json, which the planning copy writes.');
 });
+
+test('PW-5: sf planner waiting exits 0 with no stdin, for an unknown workspace and for a refused name; the hook command runs', async () => {
+  const received: Array<{ title: unknown; click: unknown; body: string }> = [];
+  const ntfy = createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk: Buffer) => (body += chunk.toString('utf8')));
+    req.on('end', () => {
+      received.push({ title: req.headers.title, click: req.headers.click, body });
+      res.writeHead(200).end('{}');
+    });
+  });
+  await new Promise<void>((resolve) => ntfy.listen(0, '127.0.0.1', resolve));
+  try {
+    // No workspace registered at all, stdin empty: a Stop with no transcript is notified.
+    const env = await newEnv('planner-waiting');
+    env.extra = { SF_NTFY_URL: `http://127.0.0.1:${(ntfy.address() as AddressInfo).port}/sf`, CLAUDE_CODE_BRIDGE_SESSION_ID: 'session_01Ab' };
+    const waiting = await runCli(env, ['planner', 'waiting', 'app']);
+    assert.deepEqual([waiting.code, waiting.stdout, waiting.stderr], [0, '', '']);
+    const permission = await runCli(env, ['planner', 'waiting', 'app', 'permission']);
+    assert.deepEqual([permission.code, permission.stderr], [0, '']);
+    assert.deepEqual(received, [
+      { title: 'Planner waits for you', click: 'https://claude.ai/code/session_01Ab', body: 'app' },
+      { title: 'Planner waits for a permission', click: 'https://claude.ai/code/session_01Ab', body: 'app' },
+    ]);
+
+    // A name checkName refuses: one stderr line, exit 0, nothing sent.
+    const refusedName = await runCli(env, ['planner', 'waiting', '../app']);
+    assert.equal(refusedName.code, 0);
+    assert.match(refusedName.stderr, /^sf planner waiting: workspace name must be .*\n$/);
+    assert.equal(received.length, 2);
+
+    // The Stop hook's command as Claude Code runs it, with invalid JSON on stdin.
+    const hook = await runShell(HOOKS.Stop[0]!.hooks[0]!.command, 'not json', processEnv(env));
+    assert.deepEqual([hook.code, hook.stderr], [0, '']);
+    assert.deepEqual(received.map((entry) => entry.title), ['Planner waits for you', 'Planner waits for a permission', 'Planner waits for you']);
+
+    // An environment file that is malformed, or cannot be read (a folder): one stderr line naming
+    // the file only (never its line), exit 0, nothing sent. Another command still fails on it.
+    const envFile = join(env.config, 'auth.env');
+    await mkdir(env.config, { recursive: true });
+    await writeFile(envFile, 'SF_NTFY_TOKEN secret-in-a-broken-line\n');
+    for (const args of [['planner', 'waiting', 'app'], ['planner', 'waiting', 'app', 'permission']]) {
+      const broken = await runCli(env, args);
+      assert.deepEqual([broken.code, broken.stdout, broken.stderr], [0, '', 'sf planner waiting: auth.env could not be read.\n'], args.join(' '));
+    }
+    assert.equal((await runCli(env, ['planner', 'setup', 'app'])).code, 1);
+    await rm(envFile);
+    await mkdir(envFile);
+    const unreadable = await runCli(env, ['planner', 'waiting', 'app']);
+    assert.deepEqual([unreadable.code, unreadable.stderr], [0, 'sf planner waiting: auth.env could not be read.\n']);
+    assert.equal(received.length, 3);
+  } finally {
+    ntfy.closeAllConnections();
+    await new Promise<void>((resolve) => ntfy.close(() => resolve()));
+  }
+});
+
+// sh -c command with input on stdin: its exit code and stderr.
+function runShell(command: string, input: string, env: NodeJS.ProcessEnv): Promise<{ code: number | null; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('sh', ['-c', command], { env, stdio: ['pipe', 'ignore', 'pipe'] });
+    let stderr = '';
+    child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString('utf8')));
+    child.once('error', reject);
+    child.once('close', (code) => resolve({ code, stderr }));
+    child.stdin.end(input);
+  });
+}

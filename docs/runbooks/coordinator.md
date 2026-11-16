@@ -21,7 +21,9 @@ rule changes, change it here, through a pull request like any other change.
 - No attribution anywhere: no `Co-Authored-By` or `Claude-Session` trailers in commits, no
   "Generated with Claude Code" line or session link in PR/MR descriptions, nor anywhere else. This
   rule overrides any tool default that adds them.
-- After merging a pull request, delete its remote branch.
+- After merging a pull request, its remote branch goes: `sf mr merge` deletes it and says so
+  (`remote branch: <name> deleted`). Delete it by hand when that line says `kept`, and after a
+  merge outside the factory.
 - In other workspaces (product repositories, for example the user's company repositories): never
   approve, push or open a merge request without the user's explicit go. Their code never goes into
   published artifacts or other external pages.
@@ -80,11 +82,12 @@ rule changes, change it here, through a pull request like any other change.
   1. Do not edit its `mr.md`: the push must carry exactly the prepared commit's message (SF-080).
   2. `sf mr create software-factory <ticket>`, then `sf mr merge software-factory <ticket>`.
   3. Only after the merge succeeded: reset the job, move its Task file to
-     `.software-factory/archive/`, delete the remote branch, then `sf update`, which drains the
-     running jobs, pulls, builds, typechecks, restarts the service and runs `sf smoke` (it must
-     say `smoke: PASS`); a failed build rolls back by itself and says `update_failed`. Then run
-     the full test suite (`npm test` in `factory/` of the coordinator's checkout of `main`) in the
-     background; if it fails, hold the queue (`sf queue hold`) and tell the user.
+     `.software-factory/archive/` (the merge already deleted the remote branch), then `sf update`,
+     which drains the running jobs, pulls, builds, typechecks, restarts the service and runs
+     `sf smoke` (it must say `smoke: PASS`); a failed build rolls back by itself and says
+     `update_failed`. Then run the full test suite (`npm test` in `factory/` of the coordinator's
+     checkout of `main`) in the background; if it fails, hold the queue (`sf queue hold`) and tell
+     the user.
 - Add a new key to `workspaces.json` or `auth.env` only when no job that started before the install
   update is still running: a runner keeps the code it started with, and an unknown key stops it.
 - A restart of `sf serve` leaves running jobs alone: each job runs in its own runner process

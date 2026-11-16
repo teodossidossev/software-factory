@@ -197,7 +197,8 @@ refused), and the factory's test command passed in a sandbox without network on 
   an LFS file's pointer only.
 - **The network is open to the agents.** It has to be: Claude and Codex are remote models. The
   code a job works on goes to Anthropic and OpenAI; secrets do not.
-- **The factory itself runs as you,** outside any sandbox: fetch, commit, push, the merge request.
+- **The factory itself runs as you,** outside any sandbox: fetch, commit, push, the merge request,
+  and, after a merge it made, the deletion of that job's pushed branch on the host.
   That is why every change goes through a pull or merge request, and product repositories are
   never pushed without your go.
 - **The test command runs only where it is set.** The company workspaces have none yet, so their

@@ -8,10 +8,13 @@ The ticket's own Task file, with `check: skip`. It is the plan's memory outside 
 session continues from it, and the slices take their shared names from it. Its first line under
 the title says so: it is the index of the ticket's slices, and no job is started on it.
 
-- **Status**: one line: `grilling`, `cut agreed`, `writing (n of m green)` or `planned`; and the
-  base commit.
+- **Status**: one line: `grilling`, `prototyping`, `cut agreed`, `writing (n of m green)` or
+  `planned`; and the base commit.
 - **Decisions**: each product decision the user made: an id (`D-1`), one sentence, and what it
-  overrides in the request, an image or a document.
+  overrides in the request, an image or a document; a decision the user took on a prototype names
+  its file.
+- **Prototypes**: each prototype: its file, the question it answers, the user's reactions and the
+  decisions they became; or why the ticket has none.
 - **Cut**: the table the user approved: slice, kind, what, size, depends on.
 - **Contracts**: every name one slice introduces and another relies on (a component, a function
   with its signature, a translation key, a test id), with the slice that owns it.
@@ -46,7 +49,9 @@ the title says so: it is the index of the ticket's slices, and no job is started
 10. **Not in this slice**: what is left, and the slice that takes it.
 11. **Review brief**: what the reviewers check, and why the decisions were made.
 
-The Implementer sees this file alone: restate each decision the slice rests on, with its id.
+The Implementer sees this file alone: restate each decision the slice rests on, with its id. A
+decision taken on a prototype is restated in words: the Implementer, the Task check and the
+reviewers cannot open the prototype.
 
 A choice the user did not make is the user's to make first. Where the guide lets you take it
 yourself, it goes under the guide's heading "Decisions taken without asking", with its reason.

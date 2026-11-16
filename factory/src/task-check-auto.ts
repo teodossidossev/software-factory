@@ -1,8 +1,8 @@
 // The automatic Task checks of sf serve. A trigger, keyed by workspace/ticket, (re)schedules
 // a check of the ticket's current Task file AUTO_CHECK_DELAY_MS after its last trigger: write_task
-// after its write, the watcher of each workspace's .software-factory folder, a ticket added to the run
-// queue without a check. A new trigger cancels the ticket's pending check and its running automatic
-// one (a cancelled run stores nothing). When it fires, nothing runs for a missing file or a skeleton,
+// after its write, the watcher of each workspace's .software-factory folder, a ticket of the run
+// queue without a check (added, or found by a pass once nothing else holds it). A new trigger
+// cancels the ticket's pending check and its running automatic one (a cancelled run stores nothing). When it fires, nothing runs for a missing file or a skeleton,
 // a Task file that already has a check record (unless the trigger is a re-check of that record: a
 // retry of a failed one, a not_ready one after its base moved; src/task-check-recheck.ts), one that
 // needs no check (checkNeed), or a ticket whose job runs (non-terminal and not paused, as
@@ -182,10 +182,10 @@ export class AutoChecks {
     this.#entries.set(key, entry);
   }
 
-  // A trigger for a ticket added to the run queue: when its current Task file has no check record,
-  // it reschedules the ticket's check as every trigger does, a pending one included; nothing
-  // when a record of the current version exists, the Task needs no check or a check of the
-  // ticket runs.
+  // A trigger for a ticket added to the run queue, or found by a pass of it once nothing else holds
+  // it: when its current Task file has no check record, it reschedules the ticket's check as every
+  // trigger does, a pending one included; nothing when a record of the current version exists, the
+  // Task needs no check or a check of the ticket runs.
   async triggerIfUnchecked(workspace: string, ticket: string): Promise<void> {
     if (this.#checks.isRunning(workspace, ticket)) {
       return;

@@ -14,7 +14,8 @@
 // resumes) and holds the queue by hand.
 // With planCheck the scheduler starts a queued ticket only when the Task check of its current
 // Task file is ready or not needed, or its entry is forced (Start anyway);
-// otherwise the entry stays in place and its row says why.
+// otherwise the entry stays in place and its row says why. A pass asks for the check of an entry
+// that nothing else holds and whose plan has none (onUnchecked).
 // A queued ticket with builds_on (src/builds-on.ts) also waits for the ticket it builds on: until
 // that ticket's job has a prepared commit to build on, or the ticket is merged.
 // A start that cannot fetch its base (fetch_failed: the network is gone) leaves no job (the start
@@ -31,6 +32,7 @@ import type { Execution } from './execution.js';
 import { type Job, type JobStore, now, runningJobs, TERMINAL_STATES } from './jobs.js';
 import { limitResetNotification, type Notification, type NotifyModeOf } from './notify.js';
 import { type ByItself, lookByItself, RemovedStore, sameTicket } from './queue-by-itself.js';
+import { type PlanCheck, PLAN_NOT_CHECKED, planHold } from './queue-plan.js';
 import { fetchRetryNotification, RETRY_CODE, retryDelayMs, retryPending } from './queue-retry.js';
 import { MAX_RUNNING, MIN_RUNNING, ON_LIMIT_RULES, type OnLimitRule, type QueueEntry, type QueueError, type QueueFile, type QueueStore } from './queue-store.js';
 import { resolveWorkspace, type Workspace, WORKSPACE_NAME_DESCRIPTION, WORKSPACE_NAME_PATTERN, workspaceNotifyMode } from './registry.js';
@@ -39,8 +41,10 @@ import { taskSha256 } from './task-check.js';
 import { isDraft, landsAfter, parseFrontMatter, readTask, TASK_DIR, taskBuildsOn, TICKET_DESCRIPTION, TICKET_PATTERN, type TicketRef } from './task-file.js';
 import type { TicketHistory } from './ticket-history.js';
 
-// queue.json's format and store live in src/queue-store.ts; re-exported for the queue's users.
+// queue.json's format and store live in src/queue-store.ts, the plan check of an entry in
+// src/queue-plan.ts; re-exported for the queue's users.
 export { DEFAULT_ON_LIMIT, MAX_RUNNING, MIN_RUNNING, ON_LIMIT_RULES, type OnLimitRule, QUEUE_FILE, type QueueEntry, type QueueError, type QueueFile, QueueStore } from './queue-store.js';
+export type { PlanCheck } from './queue-plan.js';
 // How often a pass runs again while a queued ticket waits for a dependency and a slot is free, to
 // see merges done on the Git host.
 export const DEPENDENCY_RECHECK_MS = 5 * 60_000;
@@ -58,33 +62,6 @@ export function parkedJobs(jobs: Job[]): Job[] {
 // The parked jobs the reset timer still waits for: those whose reset was not handled under wait.
 function timedJobs(jobs: Job[]): Job[] {
   return parkedJobs(jobs).filter((job) => job.limit !== undefined && job.limit.reset_seen !== true);
-}
-
-// The Task check of a queued ticket's current Task file: ready, not_ready, failed, checking
-// (pending or running), none, or not_needed (no check of this version, and checkNeed says
-// it needs none), with its blocker and major counts.
-export interface PlanCheck {
-  state: 'ready' | 'not_ready' | 'failed' | 'checking' | 'none' | 'not_needed';
-  blockers: number;
-  majors: number;
-}
-
-// Why the scheduler skips a queued ticket for its plan, as its card says it; null when ready or not
-// needed.
-export function planReason(plan: PlanCheck): string | null {
-  switch (plan.state) {
-    case 'ready':
-    case 'not_needed':
-      return null;
-    case 'not_ready':
-      return `plan not ready: ${plan.blockers} blocker, ${plan.majors} major`;
-    case 'failed':
-      return 'plan check failed';
-    case 'checking':
-      return 'plan being checked';
-    case 'none':
-      return 'plan not checked';
-  }
 }
 
 // A queued ticket as the queue shows it: its 1-based position, the tickets it lands after that are
@@ -144,6 +121,10 @@ export interface RunQueueOptions {
   // Called after a ticket was added (the dashboard, the CLI and MCP alike; sf serve: the automatic
   // check of a ticket without one); never throws.
   onAdded?: (workspace: string, ticket: string) => void;
+  // Called in a pass for a queued ticket whose Task file has no check of its current version and
+  // that nothing else holds (sf serve: the automatic check of a ticket without one); never throws.
+  // Without it a pass asks for nothing and looks at no plan again.
+  onUnchecked?: (workspace: string, ticket: string) => void;
   // The updating marker: while it is true a pass starts no queued ticket and calls no
   // limitReset; the reset timer is armed again as always, so a parked job stays in waiting_limit.
   // Checked at the start of a pass and again right before each start and each limitReset.
@@ -177,6 +158,7 @@ export class RunQueue {
   readonly #notifyMode: NotifyModeOf;
   readonly #planCheck: ((workspace: string, ticket: string) => Promise<PlanCheck>) | undefined;
   readonly #onAdded: (workspace: string, ticket: string) => void;
+  readonly #onUnchecked: ((workspace: string, ticket: string) => void) | undefined;
   readonly #updating: () => boolean;
   readonly #history: Pick<TicketHistory, 'append'> | undefined;
   // The user's removals, beside queue.json.
@@ -206,6 +188,7 @@ export class RunQueue {
     this.#notifyMode = options.notifyMode ?? ((name) => workspaceNotifyMode(name));
     this.#planCheck = options.planCheck;
     this.#onAdded = options.onAdded ?? (() => {});
+    this.#onUnchecked = options.onUnchecked;
     this.#updating = options.updating ?? (() => false);
     this.#history = options.history;
     this.#removed = new RemovedStore(dirname(store.path));
@@ -291,7 +274,7 @@ export class RunQueue {
       await this.#removed.forget({ workspace, ticket });
       return { position: insert(queue, { workspace, ticket }, index ?? queue.entries.length) };
     });
-    this.#added(workspace, ticket);
+    this.#tell(this.#onAdded, workspace, ticket);
     return result;
   }
 
@@ -317,7 +300,7 @@ export class RunQueue {
       return { queued: true, position };
     }));
     if (result.queued) {
-      this.#added(workspace, ticket);
+      this.#tell(this.#onAdded, workspace, ticket);
       // No caller refreshes the pages after it (add's callers do): the change feed hears of it here.
       this.#onChange();
     }
@@ -343,10 +326,10 @@ export class RunQueue {
     return { resolved: target, content };
   }
 
-  // onAdded after a ticket joined; it never throws.
-  #added(workspace: string, ticket: string): void {
+  // A callback of the options for a ticket (onAdded, onUnchecked); it never throws.
+  #tell(callback: (workspace: string, ticket: string) => void, workspace: string, ticket: string): void {
     try {
-      this.#onAdded(workspace, ticket);
+      callback(workspace, ticket);
     } catch (error) {
       console.error(error);
     }
@@ -360,21 +343,6 @@ export class RunQueue {
       queue.entries[queuedIndex(queue, workspace, ticket)]!.force = true;
       return { force: true as const };
     });
-  }
-
-  // Why the entry's plan holds it (null: it does not): forced, no plan check, ready or not
-  // needed. A plan check that fails counts as not checked.
-  async #planHold(entry: QueueEntry): Promise<string | null> {
-    if (entry.force === true || this.#planCheck === undefined) {
-      return null;
-    }
-    const plan = await this.#planCheck(entry.workspace, entry.ticket).catch((error: unknown): PlanCheck => {
-      if (!(error instanceof FactoryError)) {
-        console.error(error);
-      }
-      return { state: 'none', blockers: 0, majors: 0 };
-    });
-    return planReason(plan);
   }
 
   // Takes a queued ticket out (not_queued otherwise): the user's "not now". The removal is recorded
@@ -470,7 +438,7 @@ export class RunQueue {
     for (const [index, entry] of queue.entries.entries()) {
       const info = await this.#taskInfo(entry);
       const waits = info === 'gone' ? [] : await this.#waits(info);
-      const hold = info === 'gone' ? null : await this.#planHold(entry);
+      const hold = info === 'gone' ? null : await planHold(this.#planCheck, entry);
       if (next === null && info !== 'gone' && waits.length === 0 && hold === null && !retryPending(entry, this.#clock())) {
         next = { workspace: entry.workspace, ticket: entry.ticket };
       }
@@ -508,6 +476,12 @@ export class RunQueue {
     return buildsOnCommit(await this.#jobs.read(ref.workspace, ref.ticket).catch(() => undefined)) !== null;
   }
 
+  // Whether the tickets a queued ticket waits for are done: those it lands after merged, the one it
+  // builds on merged or with a prepared commit to build on (#merged fetches as it says).
+  async #dependenciesDone(info: Exclude<TaskInfo, 'gone'>, fetched: Map<string, boolean>): Promise<boolean> {
+    return (await this.#merged(info.refs, fetched)) && (info.buildsOn === null || (await this.#canBuildOn(info.buildsOn)) || (await this.#merged([info.buildsOn], fetched)));
+  }
+
   // One pass: first the parked jobs whose usage limit reset (#resets) and the reset timer;
   // then, unless held by hand or by a parked job, the entries whose Task file is gone or whose ticket
   // has a live job leave the queue (and so do the start errors of those tickets); then, while fewer
@@ -516,7 +490,9 @@ export class RunQueue {
   // to build on) leaves queue.json and starts. An entry held by its plan
   // stays in place; the end of a Task check asks for a pass. An entry whose next try is ahead
   // (retry_at) is passed over; a start that fails with RETRY_CODE puts its entry back in its place
-  // with the next try, and the reset timer is armed again for it.
+  // with the next try, and the reset timer is armed again for it. Last, unless the factory is being
+  // updated, each entry that nothing else holds and whose plan has no check gets it asked for
+  // (onUnchecked), whatever the free slots.
   async #pass(): Promise<void> {
     clearTimeout(this.#timer);
     this.#timer = undefined;
@@ -576,10 +552,10 @@ export class RunQueue {
       waiting = false;
       for (const entry of queue.entries) {
         const info = infos.get(`${entry.workspace}/${entry.ticket}`);
-        if (info === undefined || info === 'gone' || heldNow.has(entry) || retryPending(entry, this.#clock()) || (await this.#planHold(entry)) !== null) {
+        if (info === undefined || info === 'gone' || heldNow.has(entry) || retryPending(entry, this.#clock()) || (await planHold(this.#planCheck, entry)) !== null) {
           continue;
         }
-        if ((await this.#merged(info.refs, fetched)) && (info.buildsOn === null || (await this.#canBuildOn(info.buildsOn)) || (await this.#merged([info.buildsOn], fetched)))) {
+        if (await this.#dependenciesDone(info, fetched)) {
           chosen = entry;
           break;
         }
@@ -597,7 +573,7 @@ export class RunQueue {
         if (this.#updating()) {
           return 'updating';
         }
-        if ((await this.#planHold(entry)) !== null) {
+        if ((await planHold(this.#planCheck, entry)) !== null) {
           return 'held';
         }
         const index = queue.entries.indexOf(entry);
@@ -654,6 +630,17 @@ export class RunQueue {
         continue;
       }
       running = runningJobs(await this.#jobs.list()).length;
+    }
+    // An entry whose plan has no check of its current Task file and that nothing else holds gets its
+    // check asked for, whatever the free slots.
+    const onUnchecked = this.#onUnchecked;
+    if (onUnchecked !== undefined && !this.#closed && !this.#updating()) {
+      for (const entry of queue.entries) {
+        const info = infos.get(`${entry.workspace}/${entry.ticket}`);
+        if (info !== undefined && info !== 'gone' && !retryPending(entry, this.#clock()) && (await planHold(this.#planCheck, entry)) === PLAN_NOT_CHECKED && (await this.#dependenciesDone(info, fetched))) {
+          this.#tell(onUnchecked, entry.workspace, entry.ticket);
+        }
+      }
     }
     // A slot is free and an entry waits for a dependency: look again later for a merge on the host.
     if (waiting && running < queue.max_running && !this.#closed) {

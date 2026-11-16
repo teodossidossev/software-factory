@@ -912,7 +912,9 @@ runs it by itself after each change of a Task file (below); the user can always 
   `SF_TASK_CHECK_AUTO=off`):
   - **Triggers**, per workspace and ticket: the MCP tool `write_task` after its write; the watcher
     (below); a ticket added to the run queue (the board, `sf queue add`, `queue_add`) whose current
-    Task file has no check and no check of it runs (a pending one is rescheduled, as by any trigger).
+    Task file has no check and no check of it runs (a pending one is rescheduled, as by any trigger);
+    a queued ticket that a pass of the run queue finds with no check of its current version once
+    nothing else holds it (section Run queue, The plan must be ready).
   - **One rule for timing**: every trigger (re)schedules a check of the ticket 60 s after its last
     trigger, so `write_task`'s own write and the watcher's event for it make one check. A new
     trigger cancels the ticket's pending check and its running automatic one; a cancelled run
@@ -3933,10 +3935,11 @@ last started a queued ticket, written with the entry's removal before each start
   is refused (`job_exists`), so the queue never starts a ticket twice, across concurrent events and
   restarts alike; `sf serve` stopping between the two leaves the ticket out of the queue without a
   job. A start refused with `job_limit` (a start by hand took the slot) puts the entry back where it
-  was and ends the pass; `fetch_failed` is tried again (below); any other refusal (`task_draft`,
-  `invalid_content`, `base_not_found`, `branch_exists`, …) leaves the ticket out of the queue with
-  `{code, message, at}` in `errors`, shown on its card as "Start failed: <message>"; adding it
-  again clears it.
+  was and ends the pass's starts; `fetch_failed` is tried again (below); any other refusal
+  (`task_draft`, `invalid_content`, `base_not_found`, `branch_exists`, …) leaves the ticket out of
+  the queue with `{code, message, at}` in `errors`, shown on its card as "Start failed: <message>";
+  adding it again clears it. Last, unless an update is in progress, every entry held by nothing but "plan
+  not checked" gets its check asked for (The plan must be ready, below).
 - **A start that cannot fetch** (SF-236): when the queue's own start fails with `fetch_failed`
   (`git fetch origin <base>` failed or timed out: the network is gone), the start removes the job
   record it made (nothing else exists yet: no branch, no worktree; a start by hand still fails its
@@ -3974,8 +3977,13 @@ last started a queued ticket, written with the entry's removal before each start
   "plan not checked" (no check of this version; also with `SF_TASK_CHECK_AUTO=off`: press Check or
   force it). A "plan check failed" entry is retried by itself, and a "plan not ready" one checked
   again when its base changes a path in its scope (section Task check, Re-checks of a queued
-  ticket). The end of every Task check asks for a pass. The last look at the plan and the start
-  run under the queue's lock of the ticket (`RunQueue.withTicket`), which `write_task` and the
+  ticket). A "plan not checked" one gets its check asked for in every pass once nothing else holds
+  it (not forced, no next try ahead, its `lands_after` tickets merged and the ticket it builds on
+  merged or with a prepared commit to build on), whatever the free slots (`onUnchecked`;
+  `sf serve`: `AutoChecks.triggerIfUnchecked`, which does nothing when a check of that version
+  exists or runs, or the Task needs none). A pending or running check reads "plan being checked",
+  so a pass never asks for it again. The end of every Task check asks for a pass. The last look at
+  the plan and the start run under the queue's lock of the ticket (`RunQueue.withTicket`), which `write_task` and the
   planned ticket page's Save also take around their write: such a write lands before that look
   (which then sees the new version) or after the job's claim (which refuses it, `job_active`), so
   the version started is the one found ready. A file changed outside the factory (an editor) is not

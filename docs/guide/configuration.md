@@ -366,7 +366,7 @@ and per workspace. You edit it; no command writes it. Every key is optional:
 
 | Key | Default | Allowed | Meaning |
 | --- | --- | --- | --- |
-| `slice.change_max_lines` | 400 | an integer from 1 to 100000 | the most added plus removed lines, tests included, of a slice that changes behaviour |
+| `slice.change_max_lines` | 400 | an integer from 1 to 100000 | the added plus removed lines, tests included, a slice that changes behaviour aims at; up to one and a half times it needs no reason, beyond that the slice is cut again |
 | `slice.change_max_files` | 10 | an integer from 1 to 100000 | the most changed files of such a slice |
 | `slice.min_lines` | 50 | an integer from 1 to 100000 | the size under which such a slice should join its neighbour |
 | `lead_time_hours.small` / `.medium` / `.complex` | 2 / 4 / 8 | a number above 0, at most 1000 | the target from a job's start to its merge request, by the Task's size |

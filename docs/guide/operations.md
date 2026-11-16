@@ -274,9 +274,9 @@ every session denies. To move it into the workspace's repository later, copy
 - **Tickets**: *Archive* in a Queue card's ⋯ menu (or on a Done card) moves the Task file and its
   images to `.software-factory/archive/`; *Delete…* (in the card's ⋯ menu or the Archived drawer)
   removes them.
-- **Branches**: the factory never deletes a pushed branch. Delete merged branches in your checkout
-  and on `origin` as usual. Restart deletes the old job's branch only when it has no commits and was
-  never pushed.
+- **Branches**: `sf mr merge` and *Merge…* delete the merged branch on `origin`. Delete merged
+  branches in your checkout, and on `origin` after a merge on the host, as usual. Restart deletes
+  the old job's branch only when it has no commits and was never pushed.
 - **Saved refs** `refs/factory/<ticket>` and `refs/factory/<ticket>-ask` go by themselves seven days
   after the job is pushed or aborted.
 - **Temporary files**: the Task check's temporary checkouts are removed when the check ends; files

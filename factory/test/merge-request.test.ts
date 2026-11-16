@@ -133,9 +133,13 @@ test('sf mr create from ready_for_human_review pushes, then opens the pull reque
     const merged = await runCli(env, ['mr', 'merge', 'app', 'T-1']);
     assert.equal(merged.code, 0, merged.stdout + merged.stderr);
     assert.equal(merged.stdout, [
-      'state: pushed', 'branch: T-1-change-readme', 'merge request: #1 merged', `merge commit: ${FAKE_MERGE_SHA}`, 'url: https://github.com/acme/app/pull/1', '',
+      'state: pushed', 'branch: T-1-change-readme', 'merge request: #1 merged', `merge commit: ${FAKE_MERGE_SHA}`, 'url: https://github.com/acme/app/pull/1',
+      'remote branch: T-1-change-readme deleted', '',
     ].join('\n'));
     assert.deepEqual(fake.requests.find((r) => r.method === 'PUT')?.body, { merge_method: 'merge' });
+    // Then the merged branch is deleted on the host, after the merge.
+    assert.deepEqual(fake.requests.slice(-2).map((r) => `${r.method} ${r.path}`), ['PUT /repos/acme/app/pulls/1/merge', 'DELETE /repos/acme/app/git/refs/heads/T-1-change-readme']);
+    assert.deepEqual(fake.deleted, ['T-1-change-readme']);
     job = (await jobs.read('app', 'T-1'))!;
     assert.deepEqual(job.mr, { host: 'github', number: 1, url: 'https://github.com/acme/app/pull/1', state: 'merged', merge_commit: FAKE_MERGE_SHA });
     // Merged: a second merge is refused before any request.
@@ -205,6 +209,8 @@ test('sf mr: a missing token and a wrong host turn the actions off and say why, 
     const blocked = await runCli(env, ['mr', 'merge', 'app', 'T-1']);
     assert.match(blocked.stderr, /^sf: GitHub refused to merge pull request #1: Required status check "test" is failing\. \(it is blocked: required checks or reviews have not passed\)\.$/m);
     assert.deepEqual([fake.mrs[0]!.state, (await jobs.read('app', 'T-1'))!.mr?.state], ['open', 'open']);
+    // A refused merge deletes nothing.
+    assert.deepEqual(fake.requests.filter((r) => r.method === 'DELETE'), []);
 
     // Merged by hand on the host: sf mr status records it.
     fake.mrs[0]!.state = 'merged';
@@ -245,12 +251,45 @@ test('sf mr against GitLab: SF_GITLAB_URL for the origin\'s host; create with th
     const merged = await runCli(env, ['mr', 'merge', 'app', 'T-1']);
     assert.equal(merged.code, 0, merged.stderr);
     assert.ok(fake.requests.some((r) => r.method === 'PUT' && r.path === '/api/v4/projects/group%2Fapp/merge_requests/1/merge'));
+    assert.equal(`${fake.requests.at(-1)!.method} ${fake.requests.at(-1)!.path}`, 'DELETE /api/v4/projects/group%2Fapp/repository/branches/T-1-change-readme');
+    assert.deepEqual(fake.deleted, ['T-1-change-readme']);
+    assert.match(merged.stdout, /\nremote branch: T-1-change-readme deleted\n$/);
     assert.equal((await jobs.read('app', 'T-1'))!.mr?.state, 'merged');
     assert.ok(fake.requests.every((r) => r.headers.authorization === `Bearer ${GL_TOKEN}`));
     assert.doesNotMatch((await allText(env.state)) + log(), /E2ESECRET/);
   } finally {
     await stop(served);
     await fake.close();
+  }
+});
+
+test('sf mr merge: a branch the host already deleted is already gone; a deletion the host refuses keeps the branch, says why, and leaves the merge as it is', async () => {
+  const cases = [
+    { status: 422, body: { message: 'Reference does not exist' }, line: 'remote branch: T-1-change-readme already gone' },
+    {
+      status: 403, body: { message: 'Resource not accessible by personal access token' },
+      line: 'remote branch: T-1-change-readme kept: GitHub refused to delete the branch T-1-change-readme: HTTP 403: Resource not accessible by personal access token (does SF_GITHUB_TOKEN have access to the repository?).',
+    },
+  ];
+  for (const [index, { status, body, line }] of cases.entries()) {
+    const fake = await startFakeForge('github', 'acme/app');
+    const env = await newEnv(`mr-delete-${index}`);
+    await envFile(env, [`SF_GITHUB_TOKEN=${TOKEN}`, `SF_GITHUB_API=${fake.url}`]);
+    const { jobs } = await pushedJob(env, `mr-delete-${index}-repo`, 'git@github.com:acme/app.git');
+    const { served } = await serveLogged(env);
+    try {
+      assert.equal((await runCli(env, ['mr', 'create', 'app', 'T-1'])).code, 0);
+      fake.fail.push({ match: /^DELETE /, status, body });
+      const merged = await runCli(env, ['mr', 'merge', 'app', 'T-1']);
+      assert.equal(merged.code, 0, merged.stdout + merged.stderr);
+      assert.equal(merged.stdout.split('\n').at(-2), line);
+      assert.deepEqual(fake.requests.filter((r) => r.method === 'DELETE').map((r) => r.path), ['/repos/acme/app/git/refs/heads/T-1-change-readme']);
+      assert.deepEqual(fake.deleted, []);
+      assert.deepEqual((await jobs.read('app', 'T-1'))!.mr, { host: 'github', number: 1, url: 'https://github.com/acme/app/pull/1', state: 'merged', merge_commit: FAKE_MERGE_SHA });
+    } finally {
+      await stop(served);
+      await fake.close();
+    }
   }
 });
 

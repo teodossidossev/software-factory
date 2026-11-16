@@ -55,7 +55,7 @@ import { ControlPart } from './execution/control.js';
 import { Core } from './execution/core.js';
 import type { CheckResult, ExclusiveScope, MrInput, MrOutcome, MrSaved, MrStatusOutcome, MrView, Resumed, Retired, StateListener } from './execution/dto.js';
 import { type HandoverRunning, HandoverPart } from './execution/handover-steps.js';
-import { MrPart } from './execution/mr-steps.js';
+import { MrPart, type RemoteBranch } from './execution/mr-steps.js';
 import type { JobStorePort, LivePort, LockPort, NoticePort, RunnerPort, SettingsPort, StopPort } from './execution/ports.js';
 import { ReviewsPart } from './execution/reviews.js';
 import type { ExecutionOptions } from './execution/shared.js';
@@ -253,7 +253,7 @@ export class Execution implements RunnerWork {
     return this.#parts.mr.resetMr(workspaceName, ticket);
   }
 
-  mergeMergeRequest(workspaceName: string, ticket: string): Promise<{ state: JobState; branch: string; mr: JobMr }> {
+  mergeMergeRequest(workspaceName: string, ticket: string): Promise<{ state: JobState; branch: string; mr: JobMr; remote_branch: RemoteBranch }> {
     return this.#parts.mr.mergeMergeRequest(workspaceName, ticket);
   }
 

@@ -161,8 +161,9 @@ text"); edit the commit message in your IDE instead. After the push it is read-o
 - The job is `pushed` (Done column: "Pushed · 2 iterations · 14:05", with the merge request's
   number, state and link once the factory knows one). Its worktree is gone; the branch stays in your
   checkout and on `origin`.
-- Merge on the host (or *Merge…*, `sf mr merge`). The factory does not delete the remote branch; do
-  it on the host or with `git push origin --delete APP-12-…` once merged.
+- Merge on the host (or *Merge…*, `sf mr merge`). `sf mr merge` and *Merge…* delete the merged
+  branch on the host; after a merge on the host, delete it there or with
+  `git push origin --delete APP-12-…`.
 - **Archive** on every Done card (pushed, aborted or failed) and on the job's page asks first
   ("Archive the job: its worktree is removed and it leaves the board. The branch and its commits
   stay."), then does what `sf reset` does: it ends the session, removes the worktree and archives
@@ -186,7 +187,7 @@ text"); edit the commit message in your IDE instead. After the push it is read-o
   workspace without a host token, press **Merged — archive**. A handed-over job is archived only on
   the host's word (no ref of your checkout is read for it, nothing fetched), after the same first
   step as Merged — archive. A job that continues an existing branch (`continues`) is never looked up
-  on the host. Nothing deletes a branch or a commit.
+  on the host. This pass deletes no branch and no commit.
 - Tickets that wait for this one (`lands_after`) can start once it counts as **merged**: the factory
   found it on its base (`merged_on_target`), its merge request is recorded `merged`, or (with no
   merge request recorded) its branch is in `origin/<base>`. After a merge on the host, *Refresh MR

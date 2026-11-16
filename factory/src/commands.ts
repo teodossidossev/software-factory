@@ -526,6 +526,12 @@ function mergeRequestShown(command: Command, result: Result): Answer {
     }
   } else if (command === COMMANDS.mrMerge && mr !== undefined) {
     lines.push(`merge request: #${mr.number} merged`, ...(typeof mr.merge_commit === 'string' ? [`merge commit: ${mr.merge_commit}`] : []), `url: ${mr.url}`);
+    // The pushed branch, which for a job with continues differs from the branch line.
+    const remote = result.remote_branch as { name: string; outcome: 'deleted' | 'gone' | 'kept'; reason?: string } | undefined;
+    if (remote !== undefined) {
+      const said = { deleted: 'deleted', gone: 'already gone', kept: `kept: ${remote.reason}` };
+      lines.push(`remote branch: ${remote.name} ${said[remote.outcome]}`);
+    }
   } else if (command === COMMANDS.mrStatus) {
     // A job without a record, looked up by its branch: how many open ones, or none.
     const found = result.found as { count: number } | undefined;

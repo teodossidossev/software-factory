@@ -160,6 +160,9 @@ export interface MrPeers {
   readonly turns: MrTurns;
 }
 
+// What became of the pushed branch on the host after sf mr merge: reason only with kept.
+export interface RemoteBranch { name: string; outcome: 'deleted' | 'gone' | 'kept'; reason?: string }
+
 export class MrPart {
   readonly #store: JobStorePort;
   readonly #locks: LockPort;
@@ -1349,15 +1352,21 @@ export class MrPart {
   // sf mr merge: merges the job's open merge request through the host's API (no push, no
   // force), after the merge check of a workspace with a test command (src/merge-check.ts). The
   // host's refusal (conflicts, failing required checks, a draft) comes back as mr_not_mergeable
-  // with its reason, and nothing changes.
-  mergeMergeRequest(workspaceName: string, ticket: string): Promise<{ state: JobState; branch: string; mr: JobMr }> {
+  // with its reason, and nothing changes. After the merge, the pushed branch is deleted on the
+  // host; a deletion that fails keeps the branch, with the reason, and leaves the merge as it is.
+  mergeMergeRequest(workspaceName: string, ticket: string): Promise<{ state: JobState; branch: string; mr: JobMr; remote_branch: RemoteBranch }> {
     return this.#mergeChecks.merge(workspaceName, ticket, (job) => this.#forge(job), async (job, forge, head) => {
       const merged = await forge.merge(job.mr.number, head);
       const next: Job = { ...job, mr: { ...job.mr, state: 'merged', merge_commit: merged.merge_commit } };
       await this.#store.jobs.write(next);
       await this.#mrEvent(next, 'merged');
       this.#notice.announce(next, [`Merge request #${job.mr.number} merged into ${job.base}`, job.mr.url]);
-      return { state: next.state, branch: next.branch, mr: next.mr! };
+      const name = pushedBranch(job);
+      const remote: RemoteBranch = await forge.deleteBranch(name).then(
+        (outcome) => ({ name, outcome }),
+        (error: unknown) => ({ name, outcome: 'kept' as const, reason: error instanceof Error ? error.message : String(error) }),
+      );
+      return { state: next.state, branch: next.branch, mr: next.mr!, remote_branch: remote };
     });
   }
 

@@ -3,7 +3,7 @@
 // repository), the note and the sf watch line of the unreviewed change, and end to end with the real
 // sf serve and the fake Claude: every iteration records commit_tree, a file the MR text turn or the
 // workspace's test command writes after the review sends the job back to review, and the next Clean
-// commits it.
+// commits it; a worktree that changes again at that next Clean stops the job for the user.
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { worktreeTree } from '../src/guard.js';
-import { commitAndRebase, unreviewedNote } from '../src/mr.js';
+import { commitAndRebase, isUnreviewedReport, unreviewedAgainMessage, unreviewedNote } from '../src/mr.js';
 import { saveRegistry } from '../src/registry.js';
 import { describeEvent, formatEvent } from '../src/watch.js';
 import { call, type Env, git, newEnv, newRepo, putTask, script, serve, stop, waitFor } from './support/harness.js';
@@ -115,6 +115,20 @@ test('UC-4: the note of the unreviewed change and its sf watch line', () => {
   assert.deepEqual(line({ paths: null, more: 0 }), ['10:11:12 [1] nothing committed: the worktree changed since iteration 1 was reviewed; back to review']);
 });
 
+test('UC-8: isUnreviewedReport finds the note of an unreviewed change after other text; the message of the stop names the paths as the note does', () => {
+  assert.equal(isUnreviewedReport(`# Report: T-1, iteration 2\n\n## Done\n\nNothing.\n\n${unreviewedNote(1, ['a.txt'])}\n`), true);
+  assert.equal(isUnreviewedReport(unreviewedNote(4, null)), true);
+  assert.equal(isUnreviewedReport('# Report: T-1, iteration 2\n\n## Done\n\nChanged a.txt.\n\n## MR preparation\n\nThe rebase onto main had conflicts in a.txt, resolved by the Implementer.\n'), false);
+  assert.equal(isUnreviewedReport(''), false);
+  assert.equal(
+    unreviewedAgainMessage(2, ['README.md']),
+    'The worktree changed again after the review of iteration 2, in README.md: something rewrites these files at every MR preparation (the workspace\'s test command, or the MR text turn). Tell the Implementer how to leave them as they were reviewed, or abort.',
+  );
+  const many = Array.from({ length: 53 }, (_, index) => `f${String(index).padStart(2, '0')}.txt`);
+  assert.ok(unreviewedAgainMessage(3, many).includes(`, in ${many.slice(0, 50).join(', ')} and 3 more: something rewrites`));
+  assert.ok(unreviewedAgainMessage(3, null).includes(', in files not known (the tree recorded for iteration 3 cannot be read): something rewrites'));
+});
+
 const jobDir = (env: Env): string => join(env.state, 'jobs', 'app', 'T-1');
 const meta = async (env: Env, iteration: number): Promise<Record<string, any>> => JSON.parse(await readFile(join(jobDir(env), 'iterations', String(iteration).padStart(3, '0'), 'meta.json'), 'utf8'));
 const testsRecord = async (env: Env, iteration: number): Promise<Record<string, any>> => JSON.parse(await readFile(join(jobDir(env), `tests-${iteration}.json`), 'utf8'));
@@ -184,6 +198,36 @@ test('UC-7: a file the workspace\'s test command writes is not committed after t
     const ready = await waitFor(served, 'T-1', 'ready_for_human_review', 2);
     assert.equal((await testsRecord(env, 2)).outcome, 'passed');
     assert.equal(git(repo, 'show', `${ready.branch}:README.md`), 'tested\n');
+  } finally {
+    await stop(served);
+  }
+});
+
+test('UC-9: a test command that rewrites a file of the change at every run: the first Clean goes back to review, the second stops the job for the user, with no event, no iteration and no commit', async () => {
+  const env = await newEnv('unreviewed-again');
+  const repo = await newRepo(env, 'unreviewed-again-repo', true);
+  await saveRegistry({ workspaces: { app: { read_checkout: repo, test_command: 'date +%s%N > README.md' } } }, env.config);
+  await putTask(env, repo, 'T-1', 'Change README');
+  await script(env, [
+    { write: { 'README.md': 'hello world\n' }, text: 'iteration 1' },
+    { write: { '.software-factory/T-1.mr.md': mrText() }, text: 'prepared' },
+    { write: { '.software-factory/T-1.mr.md': mrText() }, text: 'prepared again' },
+  ]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'T-1' });
+    await waitFor(served, 'T-1', 'awaiting_review', 1);
+    await call(served, 'mark_clean', { workspace: 'app', ticket: 'T-1' });
+    await waitFor(served, 'T-1', 'awaiting_review', 2);
+    await call(served, 'mark_clean', { workspace: 'app', ticket: 'T-1' });
+    const stopped = await waitFor(served, 'T-1', 'needs_human', 2);
+    assert.deepEqual(stopped.error, { code: 'unreviewed_change', message: unreviewedAgainMessage(2, ['README.md']) });
+    assert.equal(stopped.iteration, 2);
+    assert.deepEqual((await unreviewedEvents(env)).map(({ iteration, paths }) => ({ iteration, paths })), [{ iteration: 1, paths: ['README.md'] }]);
+    const record = JSON.parse(await readFile(join(jobDir(env), 'job.json'), 'utf8')) as Record<string, any>;
+    assert.equal(record.iteration, 2);
+    assert.match(record.base_commit, /^[0-9a-f]{40,64}$/);
+    assert.equal(git(repo, 'rev-parse', record.branch).trim(), record.base_commit);
   } finally {
     await stop(served);
   }

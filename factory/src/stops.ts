@@ -90,6 +90,7 @@ export const STOPS = {
   implementer_question: row('decision', [SEND, ABORT]),
   mr_text_missing: row('error', [SEND, ABORT], { aliases: ['mr_text_invalid'] }),
   mr_empty: row('error', [SEND, ABORT]),
+  unreviewed_change: row('decision', [SEND, ABORT]),
   worktree_remove_failed: row('error', [GO_ON, ABORT]),
   mr_push_failed: row('error', [action('approve', 'Push again'), ABORT]),
   // Renaming the branch is on the Merge request screen.

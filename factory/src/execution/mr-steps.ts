@@ -15,7 +15,7 @@ import { checkBranchFree, isAncestor, savedRef, settleAfterPush, subjectOf } fro
 import { handoffSensitive } from '../handoff-sensitive.js';
 import { claudeReviews, type FileChange, type Handover, type Job, type JobMr, type JobState, now } from '../jobs.js';
 import { pushedBranch, targetBranch } from '../continues.js';
-import { abortRebase, branchesOnOrigin, commitAndRebase, commitMessage, continueRebase, gitFailure, MAX_UNREVIEWED_PATHS, mergeRequestLink, messageText, mrMessage, mrProblems, mrTextProblem, originUrl, parseOrigin, PROTECTED_BRANCHES, pushBranch, readMrText, refuseGuardedLfs, rebaseInProgress, resolveTarget, rewriteMessage, sameMessage, unmergedPaths, unreviewedNote, validBranchName, withAccepted, withChecks, withFindings, withNits, withSimplifications, worktreesOn } from '../mr.js';
+import { abortRebase, branchesOnOrigin, commitAndRebase, commitMessage, continueRebase, gitFailure, isUnreviewedReport, MAX_UNREVIEWED_PATHS, mergeRequestLink, messageText, mrMessage, mrProblems, mrTextProblem, originUrl, parseOrigin, PROTECTED_BRANCHES, pushBranch, readMrText, refuseGuardedLfs, rebaseInProgress, resolveTarget, rewriteMessage, sameMessage, unmergedPaths, unreviewedAgainMessage, unreviewedNote, validBranchName, withAccepted, withChecks, withFindings, withNits, withSimplifications, worktreesOn } from '../mr.js';
 import { type LedgerEntry, notFixed } from '../ledger.js';
 import { MergeChecks } from '../merge-check.js';
 import { buildPatch, notificationLine, type Patch } from '../patch.js';
@@ -190,7 +190,8 @@ export class MrPart {
   // then the factory commits and rebases in the worktree. A rebase that stops on conflicts stays
   // in progress for one conflict turn, whose end comes back here (conflictIdle). Ready: record
   // the branch tip, remove the worktree and hand the job to the user. A worktree that no longer
-  // matches the reviewed iteration's commit_tree is not committed and goes back to review.
+  // matches the reviewed iteration's commit_tree is not committed and goes back to review, or,
+  // the second time in a row, stops the job for the user.
   async mrIdle(job: Job, live: Live, outcome: IdleOutcome): Promise<void> {
     const cwd = live.cwd;
     // The job as last written: with mr_conflict_turn once the conflict turn is under way.
@@ -380,8 +381,16 @@ export class MrPart {
 
   // MR preparation committed nothing: the worktree no longer matches the reviewed iteration. The
   // worktree as it is goes back to review as the next iteration, against the same base, as after
-  // a conflict turn; base_commit, target_commit and mr_attempts stay.
+  // a conflict turn; base_commit, target_commit and mr_attempts stay. When the reviewed iteration
+  // was itself published here, the job stops for the user instead (unreviewed_change), with no
+  // event and no new iteration.
   async #unreviewed(job: Job, live: Live, outcome: Extract<IdleOutcome, { ok: true }>, paths: string[] | null): Promise<void> {
+    const { report } = await this.#store.jobs.readIteration(job.workspace, job.ticket, job.iteration);
+    if (isUnreviewedReport(report)) {
+      // from: preparing_mr (mrIdle)
+      await this.#store.transition(job, 'needs_human', 'mr_turn_end', { code: 'unreviewed_change', message: unreviewedAgainMessage(job.iteration, paths).slice(0, 1000) });
+      return;
+    }
     const named = paths?.slice(0, MAX_UNREVIEWED_PATHS) ?? null;
     const more = paths === null ? 0 : Math.max(0, paths.length - MAX_UNREVIEWED_PATHS);
     await this.#store.jobs.appendEvent(job.workspace, job.ticket, { ts: now(), iteration: job.iteration, type: 'unreviewed_change', paths: named, more });

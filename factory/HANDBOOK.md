@@ -142,7 +142,8 @@ a Task file or a log.
   `software-factory` (every session the factory starts denies that server's tools) and never with
   `--scope project`, which writes the token into the repository's `.mcp.json`; `sf mcp-url --header` prints the URL
   without the token and the `Authorization` header for the header form. After `sf mcp-url
-  --rotate` the client needs the new URL.
+  --rotate` the client needs the new URL. `sf planner setup <workspace>` prepares a planning copy
+  with the server registered that way (README, The planning copy).
 
 ## Slicing a solution
 

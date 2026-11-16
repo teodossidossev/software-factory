@@ -152,6 +152,11 @@ loads into those sessions too) gives a job no way to the planning tools. Do not 
 where a job working in that repository can read it. Run `sf mcp-url` and `claude mcp add` in your
 own terminal, not through an agent's session, whose transcript would keep the URL.
 
+`sf planner setup <workspace>` does this for a planning copy: a clone of the workspace's repository
+in `~/planning/<workspace>` (`SF_PLANNING_DIR`), with the server registered for that folder only,
+the factory's planning skill and `.claude/planning-copy.md` (README, The planning copy). Open Claude
+Code there once and accept its trust dialog.
+
 Then, with `sf serve` running, start from the dashboard:
 
 1. **New ticket** (section 1, step 2) with the Context owner **Claude Code, in your terminal**. A
@@ -195,12 +200,10 @@ grills you, cuts the work into slices by the slicing rules, has a sub-agent trac
 through the code before the slice's Task file is written, and fixes what the Task check finds
 until the check is ready. To use it by hand:
 
-1. Clone the workspace's repository into a folder of its own (not your working checkout: the
-   skill fast-forwards the base branch) and register the software-factory MCP server there, as
-   above.
-2. Link the skill into that folder:
-   `mkdir -p .claude/skills && ln -s <factory repository>/factory/skills/planning-tasks .claude/skills/planning-tasks`.
-3. Start Claude Code there and send `/planning-tasks workspace my-app, ticket APP-12`, followed by
+1. Run `sf planner setup my-app`: it clones the repository into `~/planning/my-app`, registers the
+   software-factory MCP server for that folder and installs the skill. Open Claude Code there once
+   and accept its trust dialog.
+2. Start Claude Code there and send `/planning-tasks workspace my-app, ticket APP-12`, followed by
    your words, or the first message the ticket's page offers.
 
 ## 3. New ticket on the dashboard, then plan on its page

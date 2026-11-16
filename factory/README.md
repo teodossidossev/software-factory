@@ -33,6 +33,7 @@ bin/sf explain <ws> <ticket>      # the plain explanation of the job's current s
 bin/sf serve                      # foreground; Ctrl+C stops it; prints the dashboard URL with <token> (sf dashboard prints it in full)
 bin/sf up [--no-open] [--no-tunnel]   # sf serve (with its tunnel, section sf up) and the dashboard opened in the browser; --no-tunnel is SF_TUNNEL=off; Ctrl+C stops both; npm start at the repository root
 bin/sf mcp-url [--header|--rotate|--port]   # the MCP URL with its token (section MCP endpoint); --header: the URL without it and the bearer header; --rotate: a new token, taken at once by a running sf serve (restart the tunnel); works without sf serve
+bin/sf planner setup <workspace>   # the workspace's planning copy for Claude Code (section MCP endpoint, The planning copy): cloned or fast-forwarded, the MCP server for that folder, the planning skill, .claude/planning-copy.md
 bin/sf dashboard [--open] [--rotate]  # the dashboard URL of the last sf serve start; --open opens it with xdg-open; --rotate removes the token so the next sf serve makes a new one; works without sf serve
 bin/sf check-task <workspace> <ticket>  # the Task check (section Task check): paraphrase, findings by severity, verdict; stored by sha; works without sf serve
 bin/sf rules <workspace> [ticket] # the coding rules the agents would be given (section Coding rules): paths, sources, sizes, the files left out; never their text; works without sf serve
@@ -365,6 +366,68 @@ started by the run queue as before.
     was stored at; a stale file stays until the next store. Only the user's Send on the job page
     gives it to the Implementer, through `say` (section Dashboard, Composer).
 
+### The planning copy
+
+`sf planner setup <workspace>` (`src/planning-copy.ts`, no `sf serve` needed) prepares the folder a
+Claude Code session plans the workspace's tickets in: a clone of the workspace's repository with
+the factory's MCP server, its planning skill and a file that points the planner at your request and
+rules. It runs again at any time and refreshes the copy in place. The steps, in order:
+
+1. **The folder** is `<SF_PLANNING_DIR>/<workspace>` (default `~/planning/<workspace>`; a relative
+   `SF_PLANNING_DIR` is `invalid_config`). Its path is made real through its nearest existing
+   folder, so a link anywhere in `SF_PLANNING_DIR` or its parents is followed. A path that is, holds
+   or lies inside the checkout of any registered workspace is refused with `planning_copy_unusable`
+   ("set SF_PLANNING_DIR to another folder"): the factory never fetches into, fast-forwards or
+   writes a checkout of yours.
+2. **The origin** is the checkout's `origin` remote (a relative local path made absolute against
+   the checkout); a checkout without one is `no_origin`.
+3. **The clone.** A missing folder is cloned from the origin with the checkout's objects as a
+   reference (`--reference <checkout> --dissociate`), into a temporary sibling renamed into place;
+   a failure removes it and is `clone_failed`. An existing path must be a folder that is the root of
+   a Git work tree whose `remote.origin.url` is the origin, with a `.git` folder of its own (not a
+   link, not a worktree's `.git` file); anything else (a file, a link, another repository, a
+   worktree of your checkout) is `planning_copy_unusable` and is never repaired: move it away. An existing copy is
+   fetched (`--prune`); a failed fetch is a warning and the copy stays as it was. After a fetch the
+   base branch (the branch `origin/HEAD` points at, else `main`) is fast-forwarded to `origin`'s
+   only when the copy is on it and has no changes to tracked files; otherwise a note says why
+   nothing was fast-forwarded (changes, another branch, a detached HEAD), and a fast-forward that
+   fails is a warning. Git never prompts (`GIT_TERMINAL_PROMPT=0`, SSH in batch mode).
+4. **The exclude.** The copy's `.git/info/exclude` gets the line `/.claude/` when it has none, so
+   what the factory writes there never shows as a change.
+5. **The `.claude` folder.** `.claude` and `.claude/skills` must each be missing or a folder; a link
+   or anything else is `planning_copy_unsafe`, checked before anything is written there. A
+   repository that tracks `.claude/skills/planning-tasks` or `.claude/planning-copy.md` is
+   `planning_copy_unsafe` too. Missing folders are made with mode 0700.
+6. **The skill.** `.claude/skills/planning-tasks` is removed (a link there is removed itself, never
+   its target) and the factory's `skills/planning-tasks/` copied in its place: a copy, so it does
+   not follow whatever branch the factory's checkout is on.
+7. **The pointers.** `.claude/planning-copy.md` names the copy's workspace and base branch, the path
+   of the request file of a ticket created on the dashboard
+   (`<state dir>/requests/<workspace>/<ticket>.md`), and your rules files that exist
+   (`rules/<workspace>.md`, then `rules/global.md`, in the config directory); the skill reads it
+   and every file it names.
+8. **The MCP server.** With the MCP token (`no_mcp_token` without one) and the MCP port (`SF_PORT`,
+   else the running `sf serve`'s), `claude` from `PATH` (the Claude Code you open the copy with;
+   `claude_not_found` without it) runs in the copy `claude mcp remove software-factory --scope
+   local` (its result ignored), then `claude mcp add --scope local --transport http
+   software-factory http://127.0.0.1:<port>/mcp --header "Authorization: Bearer <token>"`: the
+   server for that folder only. Removed and added again at every run, so a token rotated with
+   `sf mcp-url --rotate` reaches the copy. The `local` scope keeps the token in Claude Code's own
+   `~/.claude.json`, never in the copy, and the command never prints it. Each run has 60 seconds; a
+   timeout or a failed `add` is `planner_mcp_failed`, with the end of its output, the token shown
+   as `<token>`.
+9. **The output.** The warnings and notes of step 3, then the copy's path with its base branch and
+   short commit, the MCP registration, the skill, the pointers file, and what to do next: open
+   Claude Code in the copy once (`cd <copy> && claude`) and accept its folder trust dialog, then
+   `/planning-tasks workspace <workspace>, ticket <ticket>`. The factory never accepts that dialog
+   for you.
+
+Every error and warning names paths as `<copy>`, `<planning folder>`, `<checkout>`, `<origin>`,
+`<factory>` (the factory's package folder, where the skill is copied from) or `~`, never an
+absolute path; only the output lines of step 9 show the copy's path, for your
+terminal. A file system error on the way (a folder that cannot be made or written) is
+`planning_copy_failed`, its paths shown the same way.
+
 ## Environment
 
 | Variable | Default | Meaning |
@@ -381,6 +444,7 @@ started by the run queue as before.
 | `SF_PLAN_SKILL` | the `planner` role's skills in the skills snapshot (`<state dir>/skills/grilling/SKILL.md` by default) | The planning skill whose body (without front matter) ends the instructions and `guide` as `## Planning method` (section MCP endpoint); set, it wins over the `planner` role's choice; empty: none. A missing file: the Quick start alone, and one warning at start. |
 | `SF_STATE_DIR` | `${XDG_STATE_HOME:-~/.local/state}/software-factory` | Job state and the `sf.sock` socket. |
 | `SF_WORKTREE_ROOT` | `${SF_STATE_DIR}/worktrees` | Where every job's worktree is created: `<root>/<workspace>/<ticket>`; absolute. |
+| `SF_PLANNING_DIR` | `~/planning` | Where `sf planner setup` keeps each workspace's planning copy: `<dir>/<workspace>`; absolute. |
 | `SF_MAX_JOBS` | `3` | The default of the run queue's limit `max_running` (section Run queue), within 1-20, while `queue.json` does not exist yet; `sf queue limit` and the board's stepper change the limit from then on. |
 | `SF_SENSITIVE_PATHS` | empty | Comma-separated globs added to the sensitive paths of `src/rules.ts`. |
 | `SF_CHECK_AFTER_START_MIN` | `15` | `check_after_minutes` in the result of a start and of the job's status during the first iteration. |

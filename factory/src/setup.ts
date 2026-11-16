@@ -313,6 +313,11 @@ function rowOf(name: string, entry: WorkspaceEntry, liveJobs: number, problem: s
   };
 }
 
+// The User's words of New ticket for a ticket: <state dir>/requests/<workspace>/<ticket>.<ext>.
+export function requestFile(stateDir: string, workspace: string, ticket: string, ext = 'md'): string {
+  return join(stateDir, 'requests', workspace, `${ticket}.${ext}`);
+}
+
 export class Setup {
   readonly #configDir: string;
   readonly #jobs: JobStore;
@@ -657,7 +662,7 @@ export class Setup {
   // repository: <state dir>/requests/<workspace>/<ticket>.md; who plans the ticket next to them,
   // in <ticket>.owner (ext "owner"), and its planning chat link in <ticket>.chat (ext "chat").
   #requestPath(name: string, ticket: string, ext = 'md'): string {
-    return join(dirname(this.#jobs.root), 'requests', name, `${ticket}.${ext}`);
+    return requestFile(dirname(this.#jobs.root), name, ticket, ext);
   }
 
   async #readRequest(name: string, ticket: string, ext = 'md'): Promise<string | null> {

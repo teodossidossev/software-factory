@@ -9,7 +9,8 @@
 // run`, the job's runner that sf serve starts (src/runner.ts), and `sf digest [--now]`
 // (the morning digest, through the socket of sf serve), `sf service` (sf serve as a systemd user
 // service, src/service.ts) and `sf update` (the install updated, drained first, src/update.ts) and
-// `sf guard` (the guard, src/guard.ts: run here, no sf serve needed; `sf guard install-hook` writes the pre-push hook).
+// `sf guard` (the guard, src/guard.ts: run here, no sf serve needed; `sf guard install-hook` writes the pre-push hook)
+// and `sf planner setup` (a workspace's planning copy for Claude Code, src/planning-copy.ts: no sf serve needed).
 // Exit codes: 0 ok, 1 error, 2 usage.
 import { spawn } from 'node:child_process';
 import { basename, dirname, join, relative, resolve } from 'node:path';
@@ -76,6 +77,7 @@ import { turnLimitLine } from './turn-limit.js';
 import { watchEvents } from './watch.js';
 import { DEFAULT_BUDGET_USD, DEFAULT_TIMEOUT_MIN, positiveDecimal, runSmoke } from './live-smoke.js';
 import { INSTALLED_SF, serviceCommand, updateService } from './service.js';
+import { PLANNER_USAGE, plannerCommand } from './planning-copy.js';
 import { watchdog } from './watchdog.js';
 import { checkStateVersion } from './state-version.js';
 import { answerLines, checkArgs, checkJob, checkName, cliCommand, type Command, COMMANDS, socketName, UsageError, usageLines } from './commands.js';
@@ -114,6 +116,7 @@ ${usageLines().join('\n')}
   sf smoke [--keep] [--timeout-min N] [--budget-usd N]  The live smoke test: one tiny real job (Claude Code, Codex, Git) from Task check to push, on a throwaway repository with a local bare remote, its own sf serve and state in one temporary directory (never yours); prints a pass/fail table. Models: SF_SMOKE_MODEL (default haiku), SF_SMOKE_CODEX_MODEL (default: Codex's); budget: --timeout-min (default ${DEFAULT_TIMEOUT_MIN}) and --budget-usd (default ${DEFAULT_BUDGET_USD}), positive numbers; --keep keeps the directory
   sf run <workspace> <ticket>                           The job's runner: its turns, reviews and gate, detached from sf serve (sf serve starts it; one per job)
   sf service install|uninstall|status                   sf serve as a systemd user service (software-factory.service in ~/.config/systemd/user, KillMode=process: running jobs outlive a stop or restart) with its watchdog (a timer that runs sf health --notify every five minutes, and an alert unit when systemd gives up restarting it); install writes and enables them (refused while an sf serve started by hand answers); logs: journalctl --user -u software-factory
+${PLANNER_USAGE.join('\n')}
   sf update [--check|--abandon] [--no-smoke]            Update the factory's Git install to origin/main: drains first (pauses the running jobs, waits for their runners to end), pulls, npm ci when the lockfile changed, builds and typechecks, restarts the service, resumes the jobs it paused and runs sf smoke; a failed step rolls back to the start commit. --check: how far behind, changes nothing; --abandon: remove the updating marker of an interrupted update and resume its jobs
 
 Notes:
@@ -1495,6 +1498,10 @@ async function main(argv: string[]): Promise<void> {
   }
   if (command === 'update') {
     await update(rest, fromEnvFile);
+    return;
+  }
+  if (command === 'planner') {
+    await plannerCommand(rest, { env: process.env, stateDir: stateDir(), configDir: configDir(), mcpPort, print: (line) => console.log(line) });
     return;
   }
   // The commands of the table (src/commands.ts), sent to sf serve.

@@ -216,7 +216,7 @@ simplification pass and the Task check alike.
 | --- | --- | --- | --- |
 | Implementer (and its MR turns) | its worktree, its workspace's checkout (with its `.git`), the kept paths of the home directory, the rest of the machine outside the home directory but the paths above | its worktree (outside its `.git` and its agent configuration: the guard and `denyWrite`), the sandbox's temporary directory | Bash in the sandbox |
 | Claude review, simplification pass | as the Implementer, with the guard | nothing (read-only tools) | none |
-| Task check | its own checkout of the Task's base only (a path guard on every tool call) | nothing | none |
+| Task check | its own checkout of the Task's base, or of the prepared commit of the ticket it builds on, only (a path guard on every tool call) | nothing | none |
 | Codex gate | as a job's sandboxed commands (the wrapper above): its worktree, the images, the Codex package and node, `CODEX_HOME`, the rest of the machine outside the home directory but the paths above | `CODEX_HOME`, the iteration's directory | read-only (Codex's own sandbox) |
 
 ## What the Context owner can read

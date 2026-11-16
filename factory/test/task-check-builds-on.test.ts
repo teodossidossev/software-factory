@@ -7,15 +7,18 @@ import { existsSync } from 'node:fs';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { buildsOnChain, chainLines, checkChain, type CheckChain } from '../src/builds-on.js';
+import { buildsOnChain, chainLines, checkChain, type CheckChain, preparedPoint } from '../src/builds-on.js';
 import { DECISION_CHECK_LINES } from '../src/decisions.js';
-import { type Job, JobStore, now } from '../src/jobs.js';
+import { type Job, type JobState, JobStore, now } from '../src/jobs.js';
 import { checkPrompt } from '../src/prompts.js';
 import type { Workspace } from '../src/registry.js';
 import { draftContent } from '../src/setup.js';
 import { type CheckOutput, type CheckRecord, CheckStore, checkLines, currentCheckSha256, TaskChecks, taskCheckSha256, taskSha256 } from '../src/task-check.js';
+import { AUTO_CHECK_DELAY_MS, AutoChecks, planCheck } from '../src/task-check-auto.js';
+import { SWEEP_MS } from '../src/task-check-recheck.js';
 import { MAX_SLICES, writeTask } from '../src/task-file.js';
-import { type Env, newEnv, newRepo, reviewLog, reviewScript, runCli, temp } from './support/harness.js';
+import { FakeClock, FakeRunner } from './support/auto-checks.js';
+import { type Env, git, newEnv, newRepo, reviewLog, reviewScript, runCli, temp } from './support/harness.js';
 
 const OUTPUT: CheckOutput = {
   paraphrase: 'The Task greets the reader in the README. It changes one line. It is accepted when the README says hello reader.',
@@ -48,6 +51,11 @@ function mergedJob(ticket: string): Job {
     prepared_commit: null, iteration: 1, fixes: 0, gate_fixes: 0, gate_tokens: 0, session_id: null,
     mr: { host: 'github', number: 1, url: 'https://github.com/acme/app/pull/1', state: 'merged' }, target_commit: null, mr_attempts: 1, mr_conflict_turn: false, created_at: at, updated_at: at,
   };
+}
+
+// The job record of a ticket in state, with that prepared commit and no merge request.
+function preparedJob(ticket: string, state: JobState, commit: string | null): Job {
+  return { ...mergedJob(ticket), state, prepared_commit: commit, mr: null };
 }
 
 test('CB-1: without a chain, or with an empty one, the prompt is as before', () => {
@@ -285,4 +293,183 @@ test('CB-10: checkLines prints the Builds on line second when the record has bui
   assert.equal(checkLines({ ...base, builds_on: [{ ticket: 'T-2', sha256: null, how: 'left_out' }] })[1], 'Builds on: T-2 (left out)');
   assert.ok(!checkLines(base).some((line) => line.startsWith('Builds on:')));
   assert.ok(!checkLines({ ...base, status: 'failed', output: null, error: 'x' }).some((line) => line.startsWith('Builds on:')));
+});
+
+test('PC-1: with a prepared commit the prompt has its second line and Builds on line, no <builds_on_task> block and one Task file; without it as before', () => {
+  const task = taskText('T-2', 'T-1');
+  const commit = `1a2b3c4d5e6f${'0'.repeat(28)}`;
+  const chain: CheckChain = [{ ticket: 'T-1', path: '.software-factory/T-1.md', text: taskText('T-1') }];
+  const prompt = checkPrompt('T-2', task, '', '', undefined, chain, { ticket: 'T-1', commit });
+  const lines = prompt.split('\n');
+  assert.equal(lines[1], 'The current directory is a checkout of the repository the Task is about, at the commit the Implementer starts from: the change of T-1, which this Task builds on (`builds_on` in the front matter), as its job prepared it (commit 1a2b3c4d5e6f), on top of the Task\'s base; that change is not merged yet. Your tools are Read, Grep and Glob, inside this directory only; nothing else is available. The Task file below is all you get of the plan.');
+  const codebase = lines.findIndex((line) => line.startsWith('- Codebase:'));
+  assert.equal(lines[codebase + 1], '- Builds on: the code T-1\'s change creates, changes or removes is in this checkout, under the names its job gave it; check this Task\'s claims about that code against the checkout, as its other claims. A `path:line` this Task gives may be where the code was before that change: when the claim holds at another line, report the line as a `nit`, not a `contradiction`.');
+  assert.ok(lines[codebase + 2]!.startsWith('- Zoom out:'));
+  assert.equal(lines.filter((line) => line.startsWith('- Builds on:')).length, 1);
+  assert.ok(!prompt.includes('<builds_on_task'));
+  assert.equal(prompt.split('<task_file').length, 2);
+  assert.equal(checkPrompt('T-2', task, '', '', undefined, [], { ticket: 'T-1', commit }), prompt);
+  // Without the seventh argument: as the six-argument call.
+  assert.equal(checkPrompt('T-2', task, '', '', undefined, chain, undefined), checkPrompt('T-2', task, '', '', undefined, chain));
+  assert.equal(checkPrompt('T-2', task, '', '', undefined, undefined, undefined), checkPrompt('T-2', task));
+});
+
+test('PC-2: preparedPoint is the prepared commit a start of the part takes; none without builds_on, without a job, while it works or once it is merged', async () => {
+  const t2 = taskText('T-2', 'T-1');
+  const { env, workspace, jobs } = await checkEnv('prepared-point', { 'T-1': taskText('T-1'), 'T-2': t2 });
+  const commit = 'a'.repeat(40);
+  assert.equal(await preparedPoint(env.state, workspace, taskText('T-3')), undefined);
+  assert.equal(await preparedPoint(env.state, workspace, taskText('T-3', '../x')), undefined);
+  assert.equal(await preparedPoint(env.state, workspace, t2), undefined);
+  await jobs.write(preparedJob('T-1', 'working', null));
+  assert.equal(await preparedPoint(env.state, workspace, t2), undefined);
+  for (const state of ['ready_for_human_review', 'handed_over', 'pushed'] as const) {
+    await jobs.write(preparedJob('T-1', state, commit));
+    assert.deepEqual(await preparedPoint(env.state, workspace, t2), { ticket: 'T-1', ref: 'sf/T-1', commit }, state);
+  }
+  await jobs.write({ ...preparedJob('T-1', 'pushed', commit), mr: { host: 'github', number: 1, url: 'https://github.com/acme/app/pull/1', state: 'merged' } });
+  assert.equal(await preparedPoint(env.state, workspace, t2), undefined);
+});
+
+test('PC-3: sf check-task on a part whose ticket has a prepared commit reads that commit, sends no Task file of the chain and records it', async () => {
+  const t1 = taskText('T-1');
+  const t2 = taskText('T-2', 'T-1');
+  const { env, repo, workspace, jobs } = await checkEnv('prepared-cli', { 'T-1': t1, 'T-2': t2 });
+  git(repo, 'checkout', '-q', '-b', 'sf/T-1');
+  await writeFile(join(repo, 'greeting.md'), 'Hello reader.\n');
+  git(repo, 'add', 'greeting.md');
+  git(repo, 'commit', '-q', '-m', 'T-1: greet the reader');
+  const prepared = git(repo, 'rev-parse', 'HEAD').trim();
+  git(repo, 'checkout', '-q', 'main');
+  await jobs.write(preparedJob('T-1', 'ready_for_human_review', prepared));
+  await reviewScript(env, [{ output: OUTPUT }]);
+
+  const run = await runCli(env, ['check-task', 'app', 'T-2']);
+  assert.equal(run.code, 0, run.stderr);
+  const [entry] = await reviewLog(env);
+  assert.equal(entry!.prompt, checkPrompt('T-2', t2, '', '', undefined, [], { ticket: 'T-1', commit: prepared }));
+  const stored = await new CheckStore(env.state).read('app', 'T-2', await currentCheckSha256(workspace, 'T-2', t2));
+  assert.equal(stored?.status, 'checked');
+  assert.equal(stored?.commit, prepared);
+  assert.deepEqual(stored?.builds_on, [{ ticket: 'T-1', sha256: taskSha256(t1), how: 'prepared', commit: prepared }]);
+  assert.equal(run.stdout.split('\n')[1], `Builds on: T-1 (prepared ${prepared.slice(0, 12)})`);
+});
+
+test('PC-4: a prepared commit the checkout does not have fails the check; no session runs', async () => {
+  // Two-digit tickets: the message passes the Redactor, which takes "1" for the value of an
+  // environment variable (the Agent SDK sets NoDefaultCurrentDirectoryInExePath=1) and hides it.
+  const t11 = taskText('T-11');
+  const t12 = taskText('T-12', 'T-11');
+  const { env, workspace, jobs } = await checkEnv('prepared-missing', { 'T-11': t11, 'T-12': t12 });
+  const missing = 'f'.repeat(40);
+  await jobs.write(preparedJob('T-11', 'ready_for_human_review', missing));
+  await reviewScript(env, [{ output: OUTPUT }]);
+  const run = await runCli(env, ['check-task', 'app', 'T-12']);
+  assert.equal(run.code, 1);
+  const stored = await new CheckStore(env.state).read('app', 'T-12', await currentCheckSha256(workspace, 'T-12', t12));
+  assert.deepEqual([stored?.status, stored?.error, stored?.commit, stored?.builds_on], [
+    'failed', `The check could not prepare its checkout: The prepared commit ${missing} (sf/T-11) is not in the checkout.`, null,
+    [{ ticket: 'T-11', sha256: taskSha256(t11), how: 'prepared', commit: missing }],
+  ]);
+  assert.equal(existsSync(join(env.home, 'fake-review.log')), false);
+});
+
+test('PC-5: a check that read the prepared commit counts while the job offers that commit and its merge is not recorded', async () => {
+  const t1 = taskText('T-1');
+  const t2 = taskText('T-2', 'T-1');
+  const { env, workspace, jobs } = await checkEnv('prepared-holds', { 'T-1': t1, 'T-2': t2 });
+  const checks = new TaskChecks({
+    resolve: async () => workspace, claudePath: undefined, sandbox: undefined, model: undefined, maxTurns: 1, rulesMaxBytes: 49152, stateDir: env.state, configDir: env.config, worktreeRoot: join(env.state, 'worktrees'),
+  });
+  const p1 = '1'.repeat(40);
+  const p2 = '2'.repeat(40);
+  const sha256 = await currentCheckSha256(workspace, 'T-2', t2);
+  const at = new Date().toISOString();
+  await checks.store.write({
+    workspace: 'app', ticket: 'T-2', sha256, builds_on: [{ ticket: 'T-1', sha256: taskSha256(t1), how: 'prepared', commit: p1 }], commit: p1, status: 'checked', output: OUTPUT, error: null,
+    model: 'fake-model', cost_usd: 0.01, started_at: at, ended_at: at,
+  });
+  const counts = async (expected: boolean, label: string): Promise<void> => {
+    assert.equal((await checks.store.read('app', 'T-2', sha256)) !== undefined, expected, label);
+    assert.equal((await checks.view('app', 'T-2')).stale, !expected, label);
+    assert.equal((await checks.summary('app', 'T-2')).stale, !expected, label);
+    assert.equal((await planCheck(checks, undefined, 'app', 'T-2')).state, expected ? 'ready' : 'none', label);
+  };
+  const open = { host: 'github', number: 1, url: 'https://github.com/acme/app/pull/1', state: 'open' } as const;
+  await counts(false, 'no job');
+  await jobs.write(preparedJob('T-1', 'ready_for_human_review', p1));
+  await counts(true, 'ready_for_human_review at P1');
+  await jobs.write({ ...preparedJob('T-1', 'pushed', p1), mr: open });
+  await counts(true, 'pushed at P1, merge request open');
+  await jobs.write(preparedJob('T-1', 'pushed', p1));
+  await counts(true, 'pushed at P1, no merge request');
+  await jobs.write(preparedJob('T-1', 'ready_for_human_review', p2));
+  await counts(false, 'at P2');
+  await jobs.write(preparedJob('T-1', 'working', p1));
+  await counts(false, 'working');
+  await jobs.write({ ...preparedJob('T-1', 'pushed', p1), mr: { ...open, state: 'merged' } });
+  await counts(false, 'pushed at P1, merge request merged');
+  await jobs.write(preparedJob('T-1', 'pushed', p1));
+  await jobs.appendEvent('app', 'T-1', { ts: new Date().toISOString(), iteration: 1, type: 'merged_on_target', commit: p1, target: 'main' });
+  await counts(false, 'pushed at P1, merged_on_target');
+  // Ready again (the event only counts for a pushed job), then archived.
+  await jobs.write(preparedJob('T-1', 'ready_for_human_review', p1));
+  await counts(true, 'ready_for_human_review at P1 again');
+  await jobs.archive('app', 'T-1');
+  await counts(false, 'archived from ready_for_human_review at P1');
+});
+
+test('PC-6: a check that read the Task file it builds on stops counting once that ticket has a prepared commit', async () => {
+  const t1 = taskText('T-1');
+  const t2 = taskText('T-2', 'T-1');
+  const { env, workspace, jobs } = await checkEnv('prepared-sent', { 'T-1': t1, 'T-2': t2 });
+  const checks = new TaskChecks({
+    resolve: async () => workspace, claudePath: undefined, sandbox: undefined, model: undefined, maxTurns: 1, rulesMaxBytes: 49152, stateDir: env.state, configDir: env.config, worktreeRoot: join(env.state, 'worktrees'),
+  });
+  const sha256 = await currentCheckSha256(workspace, 'T-2', t2);
+  const at = new Date().toISOString();
+  await checks.store.write({
+    workspace: 'app', ticket: 'T-2', sha256, builds_on: [{ ticket: 'T-1', sha256: taskSha256(t1), how: 'sent' }], commit: 'c'.repeat(40), status: 'checked', output: OUTPUT, error: null,
+    model: 'fake-model', cost_usd: 0.01, started_at: at, ended_at: at,
+  });
+  assert.notEqual(await checks.store.read('app', 'T-2', sha256), undefined);
+  assert.equal((await checks.view('app', 'T-2')).stale, false);
+  await jobs.write(preparedJob('T-1', 'ready_for_human_review', 'd'.repeat(40)));
+  assert.equal(await checks.store.read('app', 'T-2', sha256), undefined);
+  assert.equal((await checks.view('app', 'T-2')).stale, true);
+});
+
+test('PC-7: the sweep does not re-check a not-ready check that read a prepared commit while it counts; one that read the Task file is', async (t) => {
+  const t1 = taskText('T-1');
+  const t2 = taskText('T-2', 'T-1');
+  const u1 = taskText('U-1');
+  const u2 = taskText('U-2', 'U-1');
+  const { env, repo, workspace, jobs } = await checkEnv('prepared-sweep', { 'T-1': t1, 'T-2': t2, 'U-1': u1, 'U-2': u2 });
+  const prepared = 'b'.repeat(40);
+  await jobs.write(preparedJob('T-1', 'ready_for_human_review', prepared));
+  const clock = new FakeClock();
+  const runner = new FakeRunner(env.state);
+  const auto = new AutoChecks({
+    checks: runner, jobs, resolve: async () => workspace, workspaces: async () => [], parallel: 1, timers: clock,
+    queued: async () => [{ workspace: 'app', ticket: 'T-2', force: false }, { workspace: 'app', ticket: 'U-2', force: false }], now: () => Date.now(),
+  });
+  await auto.start();
+  t.after(() => auto.close());
+  const at = new Date().toISOString();
+  const notReady: CheckOutput = { ...OUTPUT, findings: [{ kind: 'missing', severity: 'blocker', where: 'w', problem: 'p', expected: 'e' }], verdict: 'not_ready' };
+  const record = { status: 'checked', output: notReady, error: null, model: 'fake-model', cost_usd: 0.01, started_at: at, ended_at: at } as const;
+  await runner.store.write({
+    workspace: 'app', ticket: 'T-2', sha256: await currentCheckSha256(workspace, 'T-2', t2), builds_on: [{ ticket: 'T-1', sha256: taskSha256(t1), how: 'prepared', commit: prepared }], commit: prepared, ...record,
+  });
+  await runner.store.write({
+    workspace: 'app', ticket: 'U-2', sha256: await currentCheckSha256(workspace, 'U-2', u2), builds_on: [{ ticket: 'U-1', sha256: taskSha256(u1), how: 'sent' }], commit: git(repo, 'rev-parse', 'HEAD').trim(), ...record,
+  });
+  await writeFile(join(repo, 'notes.md'), 'A commit on the base.\n');
+  git(repo, 'add', 'notes.md');
+  git(repo, 'commit', '-q', '-m', 'notes');
+  for (let left = SWEEP_MS + AUTO_CHECK_DELAY_MS; left > 0; left -= 60_000) {
+    clock.advance(60_000);
+    await auto.idle();
+  }
+  assert.deepEqual(runner.starts, ['auto app/U-2']);
 });

@@ -1,14 +1,14 @@
 // The Task check: before Start, a fresh, read-only Agent SDK query() reads the Task file, the
 // Task files it builds on (builds_on, src/builds-on.ts) and the repository only, and says whether an
 // Implementer could build it without a design decision of its own. It runs in a temporary detached
-// worktree of the work checkout at the Task's base, which has no .software-factory folder, and a
-// PreToolUse hook refuses every Read, Grep or Glob that reaches outside that worktree and every other
-// tool but the SDK's StructuredOutput. Its prompt holds the repository's and the user's
+// worktree of the work checkout at the Task's base or at the prepared commit of the ticket it builds
+// on, which has no .software-factory folder, and a PreToolUse hook refuses every Read, Grep or Glob
+// that reaches outside that worktree and every other tool but the SDK's StructuredOutput. Its prompt holds the repository's and the user's
 // coding rules read at the checkout's commit (src/rules-docs.ts), the list of the workspace's
 // decision documents in that checkout (src/decisions.ts; prompt: src/prompts.ts), the Task files it builds on
-// that are not merged and the Task file, and nothing of the Context owner's conversation, the jobs or the ledger; its output is a paraphrase first, then
+// that are not merged (none when it reads such a prepared commit) and the Task file, and nothing of the Context owner's conversation, the jobs or the ledger; its output is a paraphrase first, then
 // findings, the files it expects to change and a verdict. A check is stored by the sha256 that folds the Task file's images and
-// chain in (taskCheckSha256), under the state directory, never in the work checkout. It only advises: nothing here starts, refuses or changes
+// chain in (taskCheckSha256), and counts while what it read of the ticket it builds on holds (CheckStore.read), under the state directory, never in the work checkout. It only advises: nothing here starts, refuses or changes
 // a job.
 import { createHash, randomUUID } from 'node:crypto';
 import { renameSync, rmSync } from 'node:fs';
@@ -17,7 +17,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { HookCallback, SandboxSettings, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import * as z from 'zod/v4';
 import { writeFileAtomic } from './atomic.js';
-import { type BuildsOnRecord, buildsOnChain, chainLines, checkChain } from './builds-on.js';
+import { type BuildsOnRecord, buildsOnChain, buildsOnHolds, buildsOnTarget, chainLines, checkChain, type PreparedPoint, preparedPoint } from './builds-on.js';
 import { attachmentReferences, imageHashes, type ImageRef, type ResolvedImage, resolveImages, writeImages } from './attachments.js';
 import type { Config } from './config.js';
 import { taskStartBranch } from './continues.js';
@@ -157,10 +157,12 @@ export async function currentCheckSha256(workspace: Workspace, ticket: string, t
 export const checkId = (sha256: string): string => sha256.slice(0, 16);
 
 // A stored check, by the sha256 that folds the Task file's images and builds_on chain in: the output
-// (null when the check failed) or its redacted error, the base commit
-// it read (null when it failed before), the model, the estimated cost and the times. ok checks
+// (null when the check failed) or its redacted error, the commit it read: the Task's base, or the
+// prepared commit of the ticket it builds on (null when it failed before), the model, the estimated cost and the times. ok checks
 // have a verdict (its session's skills: SkillNames, the task_check role's); a failed one never counts as ready.
-// builds_on: how the session's prompt used each Task file of the chain, when the Task has one.
+// builds_on: how the session's prompt used each Task file of the chain, when the Task has one; for a
+// check that read the prepared commit of the ticket its Task builds on, that one entry (prepared,
+// with the commit), on every record of it.
 export interface CheckRecord extends SkillNames {
   workspace: string;
   ticket: string;
@@ -179,9 +181,11 @@ export interface CheckRecord extends SkillNames {
 // <state>/checks/<ws>/<ticket>/<sha256, first 16 hex>.json.
 export class CheckStore {
   readonly root: string;
+  readonly #stateDir: string;
 
   constructor(stateDir: string) {
     this.root = join(stateDir, 'checks');
+    this.#stateDir = stateDir;
   }
 
   #dir(workspace: string, ticket: string): string {
@@ -232,10 +236,16 @@ export class CheckStore {
     }
   }
 
-  // The check of the Task file with this sha256, or undefined.
+  // The check of the Task file with this sha256 while it counts (holds), or undefined.
   async read(workspace: string, ticket: string, sha256: string): Promise<CheckRecord | undefined> {
     const record = await readRecord(this.path(workspace, ticket, sha256));
-    return record?.sha256 === sha256 ? record : undefined;
+    return record?.sha256 === sha256 && (await this.holds(record)) ? record : undefined;
+  }
+
+  // Whether the record still counts for its Task file's version: what its check read of the ticket
+  // its Task builds on is what a check would read now (buildsOnHolds).
+  holds(record: CheckRecord): Promise<boolean> {
+    return buildsOnHolds(this.#stateDir, record.workspace, record.builds_on);
   }
 
   // The check that ended last, of any version of the Task file, or undefined.
@@ -567,16 +577,17 @@ export async function cutOutsideLinks(root: string): Promise<string[]> {
 }
 
 // The check's checkout: a detached worktree of the work checkout at the Task's base, or its
-// continues (fetched from origin when there is one, as Start does), in a new directory check-*
-// under the Task checks' parent directory (<tmp>/sf-task-checks-<uid>, which every other session
-// denies; an unsafe one fails the check with task_check_dir_unsafe), with its symbolic links out
-// of it cut (cutOutsideLinks). remove() takes it away and prunes its registration.
-async function checkCheckout(checkout: string, task: string): Promise<{ root: string; commit: string; remove: () => Promise<void> }> {
+// continues (fetched from origin when there is one, as Start does), or at the prepared commit,
+// nothing fetched; one the checkout does not have fails (base_not_found). It is made in a new
+// directory check-* under the Task checks' parent directory (<tmp>/sf-task-checks-<uid>, which
+// every other session denies; an unsafe one fails the check with task_check_dir_unsafe), with its
+// symbolic links out of it cut (cutOutsideLinks). remove() takes it away and prunes its registration.
+async function checkCheckout(checkout: string, task: string, prepared?: PreparedPoint): Promise<{ root: string; commit: string; remove: () => Promise<void> }> {
   const base = taskStartBranch(parseFrontMatter(task));
   if (base === '' || base.startsWith('-') || (await runGit(checkout, ['check-ref-format', '--branch', base])).code !== 0) {
     throw new FactoryError('base_not_found', `The base "${base}" is not a valid branch name.`);
   }
-  const { commit } = await resolveTarget(checkout, base);
+  const { commit } = prepared === undefined ? await resolveTarget(checkout, base) : await buildsOnTarget(checkout, prepared);
   const dir = await realpath(await mkdtemp(join(await prepareTaskChecksDir(), 'check-')));
   const root = join(dir, 'repo');
   const remove = async (): Promise<void> => {
@@ -605,6 +616,10 @@ export async function runTaskCheck(workspace: Workspace, ticket: string, task: s
   const startedAt = new Date().toISOString();
   // The chain of Tasks it builds on, read once from the Task files (never throws).
   const chain = await buildsOnChain(workspace, ticket, task);
+  // The prepared commit of the ticket it builds on, which the check reads in place of the chain's
+  // Task files, and its entry on every record of the run (never throws).
+  const prepared = await preparedPoint(options.stateDir, workspace, task);
+  const reading = prepared === undefined ? {} : { builds_on: [{ ticket: prepared.ticket, sha256: chain.tasks[0]?.sha256 ?? null, how: 'prepared', commit: prepared.commit } satisfies BuildsOnRecord] };
   // The referenced images, read by the factory from the work checkout's folder: the
   // session may not read .software-factory/. One that cannot be used fails the check; no session runs.
   const references = attachmentReferences(ticket, task);
@@ -614,14 +629,14 @@ export async function runTaskCheck(workspace: Workspace, ticket: string, task: s
   } catch (error) {
     const message = error instanceof FactoryError ? error.message : 'The Task file\'s images could not be read.';
     return {
-      workspace: workspace.name, ticket, sha256: taskCheckSha256(task, await imageHashes(imagesDir(workspace, ticket), references), chainLines(chain)), commit: null, status: 'failed', output: null,
+      workspace: workspace.name, ticket, sha256: taskCheckSha256(task, await imageHashes(imagesDir(workspace, ticket), references), chainLines(chain)), ...reading, commit: null, status: 'failed', output: null,
       error: message, model: options.model ?? null, cost_usd: null, started_at: startedAt, ended_at: new Date().toISOString(),
     };
   }
-  const record = { workspace: workspace.name, ticket, sha256: taskCheckSha256(task, images, chainLines(chain)) };
+  const record = { workspace: workspace.name, ticket, sha256: taskCheckSha256(task, images, chainLines(chain)), ...reading };
   let checkout: Awaited<ReturnType<typeof checkCheckout>>;
   try {
-    checkout = await checkCheckout(workspace.workCheckout, task);
+    checkout = await checkCheckout(workspace.workCheckout, task, prepared);
   } catch (error) {
     const unsafe = error instanceof FactoryError && error.code === TASK_CHECK_DIR_UNSAFE ? `${TASK_CHECK_DIR_UNSAFE}: ` : '';
     const message = `${unsafe}The check could not prepare its checkout: ${error instanceof Error ? error.message : String(error)}`;
@@ -645,8 +660,8 @@ export async function runTaskCheck(workspace: Workspace, ticket: string, task: s
       ...record, commit: checkout.commit, status: 'failed', output: null, error, model: options.model ?? null, cost_usd: null, started_at: startedAt, ended_at: new Date().toISOString(),
     });
     // The Task files of the chain not merged yet, for the prompt; a chain that cannot be used fails
-    // the check before any session (its message holds ticket keys only).
-    const sent = await checkChain(options.stateDir, workspace, ticket, chain);
+    // the check before any session (its message holds ticket keys only). None at a prepared commit.
+    const sent = prepared === undefined ? await checkChain(options.stateDir, workspace, ticket, chain) : { chain: [], record: [] };
     if ('error' in sent) {
       return failed(sent.error);
     }
@@ -665,7 +680,7 @@ export async function runTaskCheck(workspace: Workspace, ticket: string, task: s
     let outcome: Awaited<ReturnType<typeof runStructuredSession<CheckOutput>>>;
     const skills = await roleSkillBlocks(options.stateDir, 'task_check');
     try {
-      outcome = await runStructuredSession(checkPrompt(ticket, task, rules, skills.text, await workspaceDecisionDocs(workspace.name, cwd, options.configDir), sent.chain), {
+      outcome = await runStructuredSession(checkPrompt(ticket, task, rules, skills.text, await workspaceDecisionDocs(workspace.name, cwd, options.configDir), sent.chain, prepared), {
         cwd, claudePath: options.claudePath, sandbox: options.sandbox, model: options.model, maxTurns: options.maxTurns,
         pathDenials: async (sessionTmp) => ({ ...(await pathDenials({ session: 'task_check', workspace: workspace.name, checkout: workspace.workCheckout, sessionTmp,
           checkFolder: dirname(cwd), stateDir: options.stateDir, worktreeRoot: options.worktreeRoot, configDir: options.configDir })), hooks: undefined }),
@@ -868,7 +883,7 @@ export class TaskChecks {
     const workspace = await this.#options.resolve(name);
     const current = await currentTask(workspace, ticket);
     const check = (await this.store.last(name, ticket)) ?? null;
-    const stale = check !== null && check.sha256 !== current?.sha256;
+    const stale = check !== null && (check.sha256 !== current?.sha256 || !(await this.store.holds(check)));
     let reason: string | null = null;
     if (current !== undefined && (check === null || stale)) {
       const need = checkNeed(current.text, name);
@@ -887,7 +902,8 @@ export class TaskChecks {
       const summary = { state: 'not_needed', check_reason: view.check_reason, stale: false, running: view.running, blockers: 0, majors: 0, nits: 0, ended_at: null } as const;
       return { ...summary, start_note: startNote(summary) };
     }
-    return checkSummary(view.check ?? undefined, view.current_sha256 ?? undefined, view.running);
+    // A stale view's check counts as one of another version.
+    return checkSummary(view.check ?? undefined, view.stale ? undefined : view.current_sha256 ?? undefined, view.running);
   }
 
   // The check sha256 of the current Task file (taskCheckSha256) and its check, for task_check;
@@ -907,7 +923,7 @@ const indent = (text: string, prefix: string): string[] => text.trimEnd().split(
 export function checkLines(record: CheckRecord): string[] {
   const head = [
     `Task check of ${record.workspace}/${record.ticket} (${TASK_DIR}/${record.ticket}.md, sha256 ${checkId(record.sha256)}), model ${record.model ?? 'default'}`,
-    ...(record.builds_on === undefined ? [] : [`Builds on: ${record.builds_on.map((item) => `${item.ticket} (${item.how === 'left_out' ? 'left out' : item.how})`).join(', ')}`]),
+    ...(record.builds_on === undefined ? [] : [`Builds on: ${record.builds_on.map((item) => (item.how === 'prepared' ? `${item.ticket} (prepared ${item.commit.slice(0, 12)})` : `${item.ticket} (${item.how === 'left_out' ? 'left out' : item.how})`)).join(', ')}`]),
   ];
   if (record.status === 'failed' || record.output === null) {
     return [...head, `Check failed: ${record.error ?? 'unknown error'}`, 'Verdict: failed (a failed check never counts as ready)'];

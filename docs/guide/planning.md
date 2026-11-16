@@ -343,7 +343,8 @@ from `base` and must not be `main` or `master`.
 The Task check (`sf check-task`; on the dashboard *Check*, *Check the plan* and the **Plan check**
 card) reads the Task file before Start with a fresh, read-only Claude session that sees only the
 Task file, its images, the Task files of the tickets it builds on (`builds_on`) and the repository
-at the Task's `base`, in a temporary checkout of its own: never your conversation, the jobs or any
+at the Task's `base` (once the ticket it builds on has a prepared commit: at that commit, in place
+of those Task files), in a temporary checkout of its own: never your conversation, the jobs or any
 other Task file. It only advises: Start always works.
 
 **What it checks.** It first paraphrases the Task in its own words (read it: a wrong paraphrase is a
@@ -399,7 +400,8 @@ A workspace whose globs match no file gets none of this: its prompts are as they
 | "check not needed" | the current version has no check, and the Task needs none (below) |
 
 A check belongs to one version of the Task file (with its images and the Task files it builds
-on): once the file changes, the old check is **stale** ("· stale" on the card).
+on) and to the prepared commit it read, if any: once the file changes, or the ticket it builds on
+gets a prepared commit, another one or none, the old check is **stale** ("· stale" on the card).
 
 **Where it pays.** A small, well-scoped Task starts without a check. A Task needs one when its
 front matter says `check: required` (any value but `skip` counts as required), when it has no

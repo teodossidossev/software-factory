@@ -934,7 +934,10 @@ runs it by itself after each change of a Task file (below); the user can always 
       from origin when there is one: the commit a new check would read) is not the record's
       `commit` and `git diff --name-only <commit> <tip>` lists a path the Task's `scope` or
       `may_touch` names (`matchesGlob`); without either, any changed path counts. A `commit` Git no
-      longer knows counts as moved, every path changed. The tip is resolved at most once per
+      longer knows counts as moved, every path changed. A record that read a prepared commit
+      (`builds_on` `prepared`) is not re-checked for a moved base while it counts: a new check would
+      read that same commit. Once it no longer counts (Storage, below), the run queue has the part
+      checked again. The tip is resolved at most once per
       workspace and base in a sweep, only for a workspace with a queued `not_ready` ticket; a fetch
       or Git error skips that workspace for the sweep, logged once on stderr ("warning: the
       re-check of the not-ready Task checks of <ws> skipped this sweep: …"); the next sweep tries
@@ -987,11 +990,12 @@ runs it by itself after each change of a Task file (below); the user can always 
   something of the product no document covers (a concept's name or meaning, a rule of the domain,
   what the user sees or may do) is a `decision`; coding style is not part of this. Without
   documents the prompt is as before, byte for byte.
-- **What it can read** (the repository and, for a Task with `builds_on`, the Task files it builds on):
+- **What it can read** (the repository and, for a Task with `builds_on`, the Task files it builds on, or the prepared commit of the ticket it builds on):
   - It runs in its own checkout: a detached worktree of the workspace's work checkout at the Task's
     `base` (fetched from `origin` when there is one, as Start does: the code the Implementer starts
     from); a Task with `builds_on` starts from the change of the ticket it builds on instead, which
-    the check reads from that ticket's Task file (below), in a new directory `check-*` under `<system temp>/sf-task-checks-<uid>/` (SF-100),
+    the check reads from that ticket's Task file, or, once that ticket's job has a prepared commit to
+    build on, from that commit, its worktree made at it with nothing fetched (below), in a new directory `check-*` under `<system temp>/sf-task-checks-<uid>/` (SF-100),
     removed when the check ends. That parent is made by `sf serve` at its start and by a check when
     it is missing, mode 0700; an existing one must be a real directory (not a link) of the
     factory's user, a wider mode is narrowed to 0700; otherwise `sf serve` logs one warning and
@@ -1020,7 +1024,7 @@ runs it by itself after each change of a Task file (below); the user can always 
   - On top of that, `Read(//<dir>/**)` rules deny the work checkout's `.software-factory/` folder,
     the state directory (jobs, ledgers, requests, checks) and the config directory, and the path
     denials of every session (SF-100, section Jobs) apply too, but the Task checks' parent.
-  - The stored check records the base `commit` it read.
+  - The stored check records the `commit` it read: the base's, or the prepared commit.
 - **A Task that builds on another** (`src/builds-on.ts`): the session cannot read
   `.software-factory/`, so the factory gives it the Task files of the chain in its prompt.
   - The walk, `buildsOnChain`: from the Task file, the Task file of the ticket its `builds_on`
@@ -1050,9 +1054,33 @@ runs it by itself after each change of a Task file (below); the user can always 
     chain read before the repeat) and a chain longer than `MAX_SLICES` ("The builds_on chain of
     T-2 is longer than 20 Tasks."). A merged ticket is not held to these.
   - The record's `builds_on`: one `{ticket, sha256, how}` per Task of the chain, `how` `sent`,
-    `left_out` or `merged`; set when the chain is not empty, on a checked record and on the record
+    `left_out`, `merged` or `prepared` (below); set when the chain is not empty, on a checked record and on the record
     of a session that failed. `sf check-task` prints it as its second line:
     `Builds on: T-2 (sent), T-1 (merged)`.
+  - **The prepared commit** (`preparedPoint`): once the ticket the Task builds on itself has a
+    prepared commit to build on, the check reads that commit, the one a start of the Task's job
+    would take (`buildsOnPoint`): none while that ticket is merged (the check reads the base) or
+    has no prepared commit (the check reads the Task files, as above); otherwise the
+    `prepared_commit` of its job in `ready_for_human_review`, `handed_over` or `pushed`. Only that
+    ticket counts: its prepared commit holds the change of every ticket above it, and a ticket
+    further up with a prepared commit, while the nearer one has none, leaves the Task files read.
+    The check's worktree is made at that commit (`buildsOnTarget`, nothing fetched, as at the job's
+    start). The prompt has no `<builds_on_task>` block, and the chain's problems (a missing, invalid
+    or skeleton Task file, a cycle, a chain too long) do not fail the check. Two lines of the prompt
+    change: its second line says the checkout is at the commit the Implementer starts from, the
+    change of that ticket as its job prepared it (the commit's first 12 hex), on top of the Task's
+    base, not merged yet; and a `- Builds on:` line after the `- Codebase:` one says that code is in
+    the checkout under the names its job gave it, to check this Task's claims about it against the
+    checkout, and that a `path:line` whose claim holds at another line (the code moved with that
+    change) is a `nit`, not a `contradiction`. A prepared commit the checkout does not have fails
+    the check, and no session runs: "The check could not prepare its checkout: The prepared commit
+    <commit> (sf/T-1) is not in the checkout." Every record of such a check, a failed one included,
+    has `builds_on` `[{ticket, sha256, how: 'prepared', commit}]` (`sha256`: that ticket's Task
+    file's, or null), and `sf check-task` prints `Builds on: T-1 (prepared 1a2b3c4d5e6f)`. Such a
+    record counts only while the ticket's job offers that commit and its merge is not recorded
+    (`buildsOnHolds`, Storage below); one difference from the start: a merge that only Git shows,
+    of a job pushed without a merge request the factory knows, counts once the pass of merged jobs
+    records it.
 - **The output** (one zod definition, `checkOutput`, sent as the JSON schema): `paraphrase` first,
   what the Task proposes in the checker's own words (3–8 sentences), written before any finding;
   `findings`, each `{kind, severity, where, problem, expected}` with `kind` `decision` (a choice the
@@ -1075,7 +1103,17 @@ runs it by itself after each change of a Task file (below); the user can always 
 - **Storage**: `<state>/checks/<ws>/<ticket>/<first 16 hex of the Task file's sha256>.json`: the
   output, the model, the estimated cost and the times; never in the work checkout. A later check
   of the same Task file replaces it. A check of another version of the Task file than the current
-  one, or made before a Task file it builds on changed, is **stale**. A failed check (an error, a turn limit, no or an invalid output) is stored as
+  one, or made before a Task file it builds on changed, is **stale**. So is one whose reading of
+  the ticket its Task builds on is no longer the one a check would make (`buildsOnHolds` in
+  `src/builds-on.ts`, by what the job store records): it read that ticket's prepared commit, and the
+  ticket's job no longer offers that commit (another one, none, or no job any more, archived merged
+  or not) or its merge is recorded (`merged_on_target`, or its merge request merged), when a check
+  reads the base; or it read that ticket's Task file, and the job now offers a prepared commit. A
+  merge that only Git shows, of a job pushed without a merge request the factory knows, counts once
+  the pass of merged jobs records it. A record that read the Task file keeps counting once the
+  ticket is merged and its job archived. `CheckStore.read` does not return a record that does not
+  count, to any reader (the run queue then says "plan not checked"); its sha256 does not change,
+  and the next check of the same Task file replaces it. A failed check (an error, a turn limit, no or an invalid output) is stored as
   `failed` with its error, withheld or redacted like a failed review's (SF-045); it never counts
   as ready.
 - **Where it runs and shows**: `sf check-task <workspace> <ticket>` runs one in its own process
@@ -1479,7 +1517,8 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   from `origin/<base>` as any job. The job records `builds_on` and `builds_on_commit` (the commit
   it started from; `null` when it started from its base); both are `null` on every other job, and
   a record written without them reads them as `null`. MR preparation and Approve treat it as section MR preparation says.
-  The Task check reads the chain's Task files (section Task check, A Task that builds on another).
+  The Task check reads the chain's Task files, or the prepared commit of the ticket it builds on (section Task
+  check, A Task that builds on another).
 - When the session is idle (its last queued turn ended), the factory publishes an iteration: the
   Report (the last assistant text, plus `## Changed files` and `## Denied actions`), the Patch
   (`git diff <base commit>` plus untracked files in the worktree, without ignored,

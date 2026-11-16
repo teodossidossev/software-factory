@@ -214,7 +214,7 @@ test('job client: the old MR view is gone; the Merge request screen reads mr-vie
     assert.equal(page.document.getElementById(id), null, id);
   }
   assert.deepEqual(shownScreens(page), ['scrMr']);
-  assert.equal(page.$('scrMr').textContent, 'No MR text yet: written at Clean, when both reviews pass.');
+  assert.equal(page.$('scrMr').textContent, 'No MR text yet: written at Clean, after a clean review or your Accept.');
   await show(page, detail(job('ready_for_human_review'), { mr: true }));
   assert.deepEqual([gets(page, 'api/jobs/app/T-1/mr-view').length, gets(page, 'api/jobs/app/T-1/mr').length], [1, 0]);
 });

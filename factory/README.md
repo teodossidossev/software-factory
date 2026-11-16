@@ -4707,8 +4707,8 @@ a header, then the Stream with the composer pinned at the bottom.
   as IntelliJ shows them; see Changes below.
 - **Merge request** (SF-080): the branch, the base, the MR title and text, editable before the
   push, with the commit message, what the change carries and the checks; see Merge request screen
-  below. Before Clean it says "No MR text yet: written at Clean, when both reviews pass." and the
-  switch's tab is disabled (`m` says why).
+  below. Before Clean it says "No MR text yet: written at Clean, after a clean review or your
+  Accept." and the switch's tab is disabled (`m` says why).
 
 The old job detail of SF-047 is gone: its pipeline, next-action panel, facts, state history and
 Task, Reviews and Live log tabs are covered by the Stream (the state changes, the verdicts, the

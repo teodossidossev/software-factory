@@ -1062,7 +1062,7 @@ async function loadMr(key: string, adopt: 'all' | 'text' | null = null): Promise
 function showMr(): void {
   const key = state.key;
   if (key === null || !mrAvailable()) {
-    byId('scrMr').replaceChildren(el('div', 'dempty', 'No MR text yet: written at Clean, when both reviews pass.'));
+    byId('scrMr').replaceChildren(el('div', 'dempty', 'No MR text yet: written at Clean, after a clean review or your Accept.'));
     return;
   }
   if ($('mrBar') !== null && byId('scrMr').dataset.key === key) {
@@ -1121,7 +1121,7 @@ function renderMr(): void {
     return;
   }
   if (!mrAvailable()) {
-    node.replaceChildren(el('div', 'dempty', 'No MR text yet: written at Clean, when both reviews pass.'));
+    node.replaceChildren(el('div', 'dempty', 'No MR text yet: written at Clean, after a clean review or your Accept.'));
     return;
   }
   const j = detail.job;

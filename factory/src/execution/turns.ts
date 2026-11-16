@@ -327,19 +327,15 @@ export class TurnsPart {
 
   // The ledger after the Report of the job's last iteration: the entries the Fix section it
   // answers listed take the Implementer's answers; returns the entries it escalated. Nothing before
-  // the first Fix section. Only under the lock.
+  // the first Fix section. A contest's §section is checked against the Task file the reviewers read
+  // (readReviewTask). Only under the lock.
   async #answerFix(job: Job, cwd: string, report: string): Promise<LedgerEntry[]> {
     const ledger = await this.#store.jobs.readLedger(job.workspace, job.ticket);
     const fix = job.iteration - 1;
     if (!ledger.some((entry) => entry.asked === fix)) {
       return [];
     }
-    let task = '';
-    try {
-      task = await readFile(join(cwd, TASK_DIR, `${job.ticket}.md`), 'utf8');
-    } catch (error) {
-      console.error(error);
-    }
+    const task = (await this.#store.jobs.readReviewTask(job.workspace, job.ticket)) ?? '';
     const root = resolvePath(cwd);
     const lines = async (path: string): Promise<number | undefined> => {
       const file = resolvePath(root, path);

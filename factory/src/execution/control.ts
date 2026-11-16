@@ -430,9 +430,9 @@ export class ControlPart {
         const blocks = next.session_id === null ? this.#peers.reviews.imageRefs(next, (await this.#store.jobs.readTaskCopy(workspaceName, ticket)) ?? '') : [];
         this.#peers.turns.session(next, workspace).send(factoryPrompt(text, ticket, next.iteration + 1, this.#peers.turns.imagesLine(next), next.base_commit), DENIED_TOOLS, blocks);
       } else {
-        // The reviewers read the new Task file in the worktree and its sha256 is recorded; task.md
-        // keeps what the Implementer was last given, so its next prompt (a Fix section, sf say)
-        // carries the diff. They get the job's images as they are now.
+        // The reviewers read the new Task file (copyTask writes it into the worktree and as their copy,
+        // review-task.md) and its sha256 is recorded; task.md keeps what the Implementer was last given,
+        // so its next prompt (a Fix section, sf say) carries the diff. They get the job's images as they are now.
         const content = await this.#peers.start.copyTask(workspace, current);
         // from: paused, waiting_limit (#checkResume)
         next = await this.#store.transition(content === undefined ? current : await this.#peers.start.recordTask(current, content), 'awaiting_review', 'resume');

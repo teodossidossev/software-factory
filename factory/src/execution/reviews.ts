@@ -3,7 +3,6 @@
 // override of a stopped gate, and the simplification pass after a clean verdict.
 // The gate runs inside the wrapper of the sessions' read denials, and every reviewer's
 // output is redacted (Redactor.output) right after its session ends, before it is stored or used.
-import { readFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { type ImageRef, imageRefs } from '../attachments.js';
@@ -415,13 +414,23 @@ export class ReviewsPart {
     return new Redactor({ cwd: job.worktree ?? '', secrets: await factoryTokens(this.#settings.config) });
   }
 
-  // The material of a review of the job's last iteration, the Task file read in the worktree, and the skills of role by its list the job's start recorded.
+  // The Task file of the job's reviews (readReviewTask): the factory's copy, never the
+  // worktree's. A job with no copy of it fails the round.
+  async #reviewTask(job: Job): Promise<string> {
+    const task = await this.#store.jobs.readReviewTask(job.workspace, job.ticket);
+    if (task === undefined) {
+      throw new Error(`the job has no copy of ${TASK_DIR}/${job.ticket}.md`);
+    }
+    return task;
+  }
+
+  // The material of a review of the job's last iteration, the factory's copy of the Task file, and the skills of role by its list the job's start recorded.
   async #reviewInput(job: Job, worktree: string, role: 'claude_review' | 'codex_gate'): Promise<ReviewInput & { recorded: RecordedSkills }> {
     const { workspace: name, ticket, iteration } = job;
     const [{ report, patch }, meta] = await Promise.all([this.#store.jobs.readIteration(name, ticket, iteration), this.#store.jobs.readMeta(name, ticket, iteration)]);
     return {
       ticket, iteration, report, patch, patchTruncated: meta.patch_truncated, files: meta.files, handbook: this.#settings.handbook,
-      task: await readFile(join(worktree, TASK_DIR, `${ticket}.md`), 'utf8'), ledger: await this.#store.jobs.readLedger(name, ticket),
+      task: await this.#reviewTask(job), ledger: await this.#store.jobs.readLedger(name, ticket),
       rules: await readJobRules(this.#store.jobs.dir(name, ticket)),
       // The workspace's decision documents as they are in the job's worktree.
       decision_docs: await workspaceDecisionDocs(name, worktree),
@@ -722,13 +731,13 @@ export class ReviewsPart {
     this.#runSimplifyPass(job, running, sensitive).catch((error: unknown) => console.error(error));
   }
 
-  // The material of the pass: the Task file in the worktree, the final Patch, the ledger and, per
+  // The material of the pass: the factory's copy of the Task file, the final Patch, the ledger and, per
   // Fix section N, the files iteration N+1 changed against iteration N (their Patches compared).
-  async #simplifyInput(job: Job, worktree: string): Promise<SimplifyInput> {
+  async #simplifyInput(job: Job): Promise<SimplifyInput> {
     const { workspace, ticket, iteration } = job;
     const { patch } = await this.#store.jobs.readIteration(workspace, ticket, iteration);
     const meta = await this.#store.jobs.readMeta(workspace, ticket, iteration);
-    const task = await readFile(join(worktree, TASK_DIR, `${ticket}.md`), 'utf8');
+    const task = await this.#reviewTask(job);
     const fixes: FixFiles[] = [];
     for (const fix of fixNumbers(task)) {
       let files: string[] | undefined;
@@ -758,7 +767,7 @@ export class ReviewsPart {
         throw new Error('the job has no worktree');
       }
       const worktree = job.worktree;
-      const input = await this.#simplifyInput(job, worktree);
+      const input = await this.#simplifyInput(job);
       outcome = await runSimplify(simplifyPrompt(input), {
         cwd: worktree, claudePath: this.#settings.config.claudePath, sandbox: this.#settings.config.sandbox, model: this.#settings.config.reviewModel,
         pathDenials: (sessionTmp) => this.#pathDenials(job, worktree, sessionTmp),

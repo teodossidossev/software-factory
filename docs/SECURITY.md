@@ -103,6 +103,15 @@ refused), and the factory's test command passed in a sandbox without network on 
 - **The Codex gate runs in a read-denying wrapper.** It sees no secrets and no other jobs. Secrets
   in its findings are masked. The wrapper refuses new Unix sockets, so the gate cannot reach your
   X server, session bus or other local services through one.
+- **The reviewers read the factory's copy of the Task file.** The Claude review, the Codex gate and
+  the simplification pass get the Task file, with the factory's Fix sections, from the factory's
+  own copy in the job's directory, written each time the factory puts the Task file into the
+  worktree; a contest's `§section` is checked against the same copy. The worktree's
+  `.software-factory/<ticket>.md`, which the Implementer can write, is not what they read.
+- **The factory writes into the worktree through no link.** The Task file it copies into the
+  worktree's `.software-factory/`, and the ticket's images there, are written by a rename into a
+  folder of its own: a link the Implementer put at `.software-factory/`, at the Task file or at
+  the image folder is removed, never followed.
 - **ChatGPT reads no secret file of a workspace.** `read_file` refuses the files Git ignores
   (outside `.software-factory/`) and credential-like names tracked or not (`.env`, `.envrc`, `*.pem`,
   `*.key`, SSH keys, `credentials*.json`, `*.tfvars`), links resolved, as `search` already skipped
@@ -188,14 +197,5 @@ refused), and the factory's test command passed in a sandbox without network on 
   read (`/etc`, `/opt`).
 - **A phone that is lost unlocked** opens the dashboard. The dangerous actions still need the
   ticket typed. Keep the QR code with the token private.
-- **The reviewers read the Task file in the worktree.** The Claude review, the Codex gate and the
-  simplification pass read `.software-factory/<ticket>.md` from the job's worktree, where the
-  Implementer can write. Only a prompt rule keeps it from editing that file; the factory's own copy
-  of the Task is not what they read.
-- **The factory writes into the worktree's `.software-factory/` without checking for links.** It
-  copies the Task file to `.software-factory/<ticket>.md` in the worktree at every Fix section,
-  `sf say`, Resume and MR preparation, and the ticket's images to `.software-factory/<ticket>/` on
-  a Resume. The Implementer can put a link at either path, or at the folder, while it works; the
-  factory, which runs as you, would then write through it to a file outside the worktree.
 
 The full list of limits is in [The trust model: The limits](guide/trust-model.md#the-limits).

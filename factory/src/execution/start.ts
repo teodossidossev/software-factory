@@ -1,8 +1,10 @@
 // The start of a job and its recovery: start (the record, the fetch, the worktree and the first
 // turn), the Task file's copy in the worktree and its images, restart and the rule for a restart of
 // sf serve (recover).
-import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readlink, rm, symlink } from 'node:fs/promises';
+import type { Stats } from 'node:fs';
+import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readlink, rm, symlink, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { writeFileAtomic } from '../atomic.js';
 import { type ImageRef, jobAttachment, type ResolvedImage, resolveTaskImages, writeImages } from '../attachments.js';
 import { FactoryError } from '../errors.js';
 import { runGit } from '../git.js';
@@ -115,6 +117,34 @@ async function copyKept(kept: Kept, worktree: string): Promise<void> {
       console.error(error);
     }
   }
+}
+
+// lstat of path; undefined when nothing is there, any other error thrown.
+async function lstatOrMissing(path: string): Promise<Stats | undefined> {
+  try {
+    return await lstat(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+// The worktree's .software-factory/ as a folder of its own: anything else in its place (a link the
+// Implementer made, a file) is unlinked, never followed, and the folder made, mode 0o700.
+async function ownTaskDir(worktree: string): Promise<string> {
+  const dir = join(worktree, TASK_DIR);
+  const info = await lstatOrMissing(dir);
+  if (info?.isDirectory() === true) {
+    return dir;
+  }
+  if (info !== undefined) {
+    console.error(`replaced ${dir}: it was not a folder`);
+    await unlink(dir);
+  }
+  await mkdir(dir, { mode: 0o700 });
+  return dir;
 }
 
 // What StartPart calls of the other parts, by just those methods.
@@ -463,17 +493,26 @@ export class StartPart {
     return next;
   }
 
-  // Copies the checkout's Task file into the worktree, for the reviewers only (a review round on
-  // Resume): what the Implementer was last given stays recorded, so its next prompt carries
-  // the change. Returns the text copied; undefined without a worktree.
+  // Copies the checkout's Task file into the worktree, where the Implementer reads it, and the same
+  // bytes into the job directory as the reviewers' copy (review-task.md). Called alone on Resume of
+  // a review round, it leaves task.md, what the Implementer was last given, as it is, so its next
+  // prompt carries the change. Returns the text copied; undefined without a worktree.
   async copyTask(workspace: Workspace, job: Job): Promise<string | undefined> {
     if (job.worktree === null) {
       return undefined;
     }
-    const dir = join(job.worktree, TASK_DIR);
-    await mkdir(dir, { recursive: true, mode: 0o700 });
-    await copyFile(join(workspace.workCheckout, TASK_DIR, `${job.ticket}.md`), join(dir, `${job.ticket}.md`));
-    return readFile(join(dir, `${job.ticket}.md`), 'utf8');
+    const content = await readFile(join(workspace.workCheckout, TASK_DIR, `${job.ticket}.md`));
+    const path = join(await ownTaskDir(job.worktree), `${job.ticket}.md`);
+    const info = await lstatOrMissing(path);
+    if (info !== undefined && !info.isFile()) {
+      console.error(`replaced ${path}: it was not a file`);
+      if (info.isDirectory()) { // the rename cannot replace a folder; a link it replaces
+        await rm(path, { recursive: true, force: true });
+      }
+    }
+    await writeFileAtomic(path, content, 0o644);
+    await this.#store.jobs.writeReviewTask(job.workspace, job.ticket, content);
+    return content.toString('utf8');
   }
 
   // The job's images: copied into its directory (attachments/, the copy its agents are
@@ -485,7 +524,7 @@ export class StartPart {
     if (images.length === 0 && job.attachments === undefined) {
       return job;
     }
-    const dirs = [this.#store.jobs.attachmentsDir(workspace, ticket), ...(job.worktree !== null ? [join(job.worktree, TASK_DIR, ticket)] : [])];
+    const dirs = [this.#store.jobs.attachmentsDir(workspace, ticket), ...(job.worktree !== null ? [join(await ownTaskDir(job.worktree), ticket)] : [])];
     for (const dir of dirs) {
       if (images.length > 0) {
         await writeImages(dir, images);

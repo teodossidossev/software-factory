@@ -136,6 +136,9 @@ export interface Forge {
   // otherwise. GitHub: merge method merge with the host's commit title; GitLab: PUT .../merge.
   // With head (the commit the merge check tested), the host merges only while the branch is there.
   merge(number: number, head?: string): Promise<{ merge_commit: string | null }>;
+  // Deletes the branch on the host, after its merge request was merged: 'deleted', or 'gone' when
+  // the host has no such branch (already deleted). Any other answer throws, as merge does.
+  deleteBranch(branch: string): Promise<'deleted' | 'gone'>;
   // Read only (src/forge-comments.ts): the open merge requests of the project, newest update
   // first, at most 50; the review threads of one, oldest first.
   openRequests(): Promise<OpenRequest[]>;
@@ -294,7 +297,7 @@ export class HostClient {
     return this.clean(parts.join('; '));
   }
 
-  async request(method: 'GET' | 'POST' | 'PUT', path: string, body?: unknown): Promise<Reply> {
+  async request(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown): Promise<Reply> {
     const headers: Record<string, string> = {
       authorization: `Bearer ${this.#token}`,
       accept: this.#kind === 'github' ? 'application/vnd.github+json' : 'application/json',
@@ -476,6 +479,16 @@ function githubForge(client: HostClient, path: string): Forge {
       }
       return { merge_commit: commitOf(data.sha) ?? null };
     },
+    async deleteBranch(branch) {
+      // The ref path keeps the branch's slashes; each part is encoded.
+      const ref = branch.split('/').map(encodeURIComponent).join('/');
+      const reply = await client.request('DELETE', `${base}/git/refs/heads/${ref}`);
+      if (reply.status === 422 && /reference does not exist/i.test(client.hostMessage(reply.data))) {
+        return 'gone';
+      }
+      client.expect(reply, `delete the branch ${branch}`, 204);
+      return 'deleted';
+    },
   };
   return forge;
 }
@@ -585,6 +598,16 @@ function gitlabForge(client: HostClient, path: string): Forge {
       }
       const data = asRecord(client.expect(reply, `merge merge request !${number}`, 200));
       return { merge_commit: commitOf(data.merge_commit_sha) ?? commitOf(data.squash_commit_sha) ?? null };
+    },
+    async deleteBranch(branch) {
+      // The whole name is one path segment: its slashes are encoded too.
+      const reply = await client.request('DELETE', `${project}/repository/branches/${encodeURIComponent(branch)}`);
+      // A missing project answers 404 too, with other words.
+      if (reply.status === 404 && /branch not found/i.test(client.hostMessage(reply.data))) {
+        return 'gone';
+      }
+      client.expect(reply, `delete the branch ${branch}`, 204);
+      return 'deleted';
     },
   };
   return forge;

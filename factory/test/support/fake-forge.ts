@@ -1,8 +1,9 @@
 // A fake Git host on loopback for the merge request tests (SF-048): GitHub's pulls API under
 // /repos/<owner>/<repo>/ and GitLab's merge requests API under /api/v4/projects/<id>/, with the
-// merge requests in memory. Every request is recorded (method, path, headers, body); a test can
-// set what the next merge answers or make a route fail with a status, and give a GET path a list
-// of the host's own entries (lists), answered page by page (page, per_page). How far the branches are
+// merge requests in memory and their branches deleted through each host's DELETE. Every request
+// is recorded (method, path, headers, body); a test can set what the next merge answers or make
+// a route fail with a status, and give a GET path a list of the host's own entries (lists),
+// answered page by page (page, per_page). How far the branches are
 // behind (behind) answers GitHub's compare and GitLab's diverged_commits_count, as the hosts document them.
 import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -48,6 +49,9 @@ export interface FakeForge {
   // The entries a GET of the path answers (the path as the client sends it, without the query):
   // page (default 1) of per_page (default 30) of them.
   lists: Record<string, unknown[]>;
+  // The branches deleted on the host, in order: a branch of a merge request in mrs is deleted once,
+  // and a second deletion answers as the host does for a missing branch.
+  deleted: string[];
   close(): Promise<void>;
 }
 
@@ -55,7 +59,7 @@ const MERGE_SHA = 'c'.repeat(40);
 const HEAD_SHA = 'd'.repeat(40);
 
 export async function startFakeForge(kind: 'github' | 'gitlab', repoPath: string): Promise<FakeForge> {
-  const fake: FakeForge = { url: '', requests: [], mrs: [], fail: [], checkRuns: [], behind: 0, lists: {}, close: async () => undefined };
+  const fake: FakeForge = { url: '', requests: [], mrs: [], fail: [], checkRuns: [], behind: 0, lists: {}, deleted: [], close: async () => undefined };
   const github = `/repos/${repoPath}`;
   const gitlab = `/api/v4/projects/${encodeURIComponent(repoPath)}`;
   const server: Server = createServer((req, res) => {
@@ -88,6 +92,15 @@ export async function startFakeForge(kind: 'github' | 'gitlab', repoPath: string
         send(200, fake.lists[path]!.slice((page - 1) * size, page * size));
         return;
       }
+      // Deletes the branch of a merge request once: true when it did, with a 204 and no body.
+      const deleteBranch = (branch: string): boolean => {
+        if (!fake.mrs.some((mr) => mr.branch === branch) || fake.deleted.includes(branch)) {
+          return false;
+        }
+        fake.deleted.push(branch);
+        res.writeHead(204).end();
+        return true;
+      };
       const input = (body ?? {}) as Record<string, string>;
       const mergedAt = (mr: FakeMr): string | null => (mr.state === 'merged' ? mr.merged_at ?? new Date().toISOString() : null);
       if (kind === 'github') {
@@ -144,6 +157,14 @@ export async function startFakeForge(kind: 'github' | 'gitlab', repoPath: string
           send(200, { status: fake.behind > 0 ? 'diverged' : 'ahead', ahead_by: 1, behind_by: fake.behind, total_commits: 1 });
           return;
         }
+        // DELETE .../git/refs/heads/<branch>: the ref path keeps the branch's slashes.
+        if (req.method === 'DELETE' && path.startsWith(`${github}/git/refs/heads/`)) {
+          const branch = path.slice(`${github}/git/refs/heads/`.length).split('/').map(decodeURIComponent).join('/');
+          if (!deleteBranch(branch)) {
+            send(422, { message: 'Reference does not exist' });
+          }
+          return;
+        }
         send(404, { message: 'Not Found' });
         return;
       }
@@ -184,6 +205,13 @@ export async function startFakeForge(kind: 'github' | 'gitlab', repoPath: string
         mr.merge_commit = MERGE_SHA;
         mr.merged_at = new Date().toISOString();
         send(200, mrJson(mr));
+        return;
+      }
+      // DELETE .../repository/branches/<branch>: the whole name encoded as one segment.
+      if (req.method === 'DELETE' && path.startsWith(`${gitlab}/repository/branches/`)) {
+        if (!deleteBranch(decodeURIComponent(path.slice(`${gitlab}/repository/branches/`.length)))) {
+          send(404, { message: '404 Branch Not Found' });
+        }
         return;
       }
       send(404, { message: '404 Not found' });

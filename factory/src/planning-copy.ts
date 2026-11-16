@@ -8,6 +8,9 @@
 // 3. the clone (into a temporary sibling, then renamed), or for an existing copy a check that it is a
 //    clone of that origin with a .git folder of its own, a fetch (a failure is a warning) and a
 //    fast-forward of the base branch when the copy is on it and has no changes (a note otherwise);
+// 3b. the repository's Claude Code configuration left out of the copy's working tree by a sparse
+//    checkout (src/repository-config.ts), at every run: a failure stops the setup, a path tracked as
+//    .claude itself is refused, a configuration file that stays is a warning;
 // 4. /.claude/ in the copy's .git/info/exclude;
 // 5. .claude and .claude/skills checked without following a link, and the paths written here
 //    refused when the repository tracks them;
@@ -41,6 +44,7 @@ import { loadRegistry, resolveWorkspace } from './registry.js';
 import { absoluteRule, claudeConfigDir, claudeUserSettings, HOME_CREDENTIALS } from './sandbox-denials.js';
 import { DASHBOARD_TOKEN_FILE, MCP_TOKEN_FILE } from './secrets.js';
 import { mcpBaseUrl, redactMcpToken, requireMcpToken, SERVER_NAME } from './server.js';
+import { COPY_SPARSE_PATTERNS, repositoryConfigIn } from './repository-config.js';
 import { requestFile } from './setup.js';
 import { tunnelProfile } from './tunnel.js';
 
@@ -207,6 +211,9 @@ async function prepare(planning: Planning, deps: PlannerDeps): Promise<void> {
   // 3. Clone or refresh.
   const { base, notes } = await cloneOrRefresh(planning);
 
+  // 3b. The repository's Claude Code configuration left out.
+  notes.push(...(await leaveConfigOut(planning)));
+
   // 4. The exclude.
   await excludeClaude(copy);
 
@@ -368,6 +375,24 @@ async function fastForward(copy: string, base: string, relative: (text: string) 
   }
   const merged = await git(copy, ['merge', '--ff-only', '--quiet', `origin/${base}`]);
   return merged.code === 0 ? [] : [`warning: ${base} could not be fast-forwarded (${relative(why(merged))}).`];
+}
+
+// The copy's sparse checkout set to COPY_SPARSE_PATTERNS, so its working tree loses the
+// repository's Claude Code configuration (untracked files, the factory's own, stay). A failure
+// stops the setup; a path tracked as .claude itself is refused; each configuration file the working
+// tree still holds is a warning line.
+async function leaveConfigOut({ name, copy, relative }: Planning): Promise<string[]> {
+  // GIT_TIMEOUT_MS, git's default: 60 s.
+  const set = await git(copy, ['sparse-checkout', 'set', '--no-cone', ...COPY_SPARSE_PATTERNS]);
+  if (set.code !== 0) {
+    throw new FactoryError('planning_copy_unsafe', `The planning copy of ${name} could not leave out the repository's Claude Code configuration: ${relative(why(set))}`);
+  }
+  const left = await repositoryConfigIn(copy);
+  const whole = left.find((path) => path === '.claude' || path.endsWith('/.claude'));
+  if (whole !== undefined) {
+    throw new FactoryError('planning_copy_unsafe', `The repository tracks ${whole} as a link, a file or a submodule, not a folder: the planning copy of ${name} cannot leave its Claude Code configuration out.`);
+  }
+  return left.map((path) => `warning: ${path} stays in the planning copy of ${name}: it has changes of yours, or Git does not track it. Claude Code would load it there: remove it and run sf planner setup ${name} again.`);
 }
 
 // The copy's .git/info/exclude holds the line /.claude/ (appended when missing; the file created).

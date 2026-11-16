@@ -396,6 +396,15 @@ rules. It runs again at any time and refreshes the copy in place. The steps, in 
    only when the copy is on it and has no changes to tracked files; otherwise a note says why
    nothing was fast-forwarded (changes, another branch, a detached HEAD), and a fast-forward that
    fails is a warning. Git never prompts (`GIT_TERMINAL_PROMPT=0`, SSH in batch mode).
+
+   The copy holds the repository's code and instructions, never its Claude Code configuration:
+   every run applies a sparse checkout, `git sparse-checkout set --no-cone '/*' '!**/.claude/*'
+   '**/.claude/CLAUDE.md' '!/.mcp.json'`, so the copy's working tree holds no file the repository
+   tracks under a `.claude/` folder, at any depth, but its `CLAUDE.md` (no settings, hooks, skills,
+   agents, commands or rules), and no `.mcp.json` at its top, also after a fast-forward that adds
+   one; a copy made before loses them at its next run. The factory's own files in `.claude/` are
+   not tracked and stay. A file there with changes of yours, or a `.mcp.json` Git does not track,
+   stays, with a warning; a failed sparse checkout stops the setup (`planning_copy_unsafe`).
 4. **The exclude.** The copy's `.git/info/exclude` gets the line `/.claude/` when it has none, so
    what the factory writes there never shows as a change.
 5. **The `.claude` folder.** `.claude` and `.claude/skills` must each be missing or a folder; a link

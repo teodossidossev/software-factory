@@ -1,6 +1,7 @@
-// The dashboard's pins: numbered marks the user places on an element of the page in point mode
-// (web/pins.ts), each with the page's hash, a selector, the element's text, its position and an
-// optional note, which the coordinator reads with sf pins. In <state dir>/pins.json
+// The dashboard's pins: numbered marks the user places on an element of a page in point mode
+// (web/pins.ts), each with where it was placed (the dashboard's hash, or the address of another
+// page), a selector, the element's text, its position and an optional note, which the coordinator
+// reads with sf pins. In <state dir>/pins.json
 // ({ version: 1, next, pins: [Pin, ...] }), written atomically with mode 0600 by sf serve only: the
 // dashboard's checked POSTs and the sf pins commands, one write at a time per file. A missing file
 // is no pins; a file that is not JSON or not this shape is refused on every read and write
@@ -24,6 +25,7 @@ export const MAX_ROUTE_CHARS = 300;
 export const MAX_SELECTOR_CHARS = 1000;
 export const MAX_TEXT_CHARS = 200;
 export const MAX_NOTE_CHARS = 500;
+export const MAX_URL_CHARS = 2000;
 // A rect's x and y lie within ±MAX_COORDINATE; w, h, vw and vh within 0 and MAX_COORDINATE.
 export const MAX_COORDINATE = 1_000_000;
 // The open pins at most; of the resolved ones only the newest MAX_RESOLVED_PINS are kept.
@@ -42,13 +44,30 @@ const free = (max: number) => bounded(max, CONTROL_BUT_LINES);
 const coordinate = z.number().min(-MAX_COORDINATE).max(MAX_COORDINATE);
 const size = z.number().min(0).max(MAX_COORDINATE);
 const NOTE = free(MAX_NOTE_CHARS);
+// The address of another page: an http: or https: URL as URL writes it (its href), without user
+// name or password, so nothing a link or a terminal acts on otherwise.
+const pageUrl = (value: string): boolean => {
+  const url = URL.parse(value);
+  return url !== null && (url.protocol === 'http:' || url.protocol === 'https:') && url.username === '' && url.password === '' && url.href === value;
+};
+const URL_FIELD = line(MAX_URL_CHARS).refine(pageUrl, 'not an http: or https: address as URL writes it, without user name or password');
 
-// POST api/pins's body: a new open pin, as the page measured it.
-export const PIN_INPUT = z.strictObject({
+// A pin's own fields: where it was placed (the dashboard's hash in route, or another page's
+// address in url with route ''), its element and the note. Plain, so the schemas below extend it
+// before they refine it.
+const PIN_FIELDS = z.strictObject({
   route: line(MAX_ROUTE_CHARS), selector: line(MAX_SELECTOR_CHARS), text: free(MAX_TEXT_CHARS),
   rect: z.strictObject({ x: coordinate, y: coordinate, w: size, h: size, vw: size, vh: size }), note: NOTE,
+  url: URL_FIELD.optional(),
 });
-export const PIN_INPUT_SHAPE = '{"route": string, "selector": string, "text": string, "rect": {"x": number, "y": number, "w": number, "h": number, "vw": number, "vh": number}, "note": string}';
+// A pin of another page belongs to no dashboard route.
+function routeFitsUrl(pin: { route: string; url?: string }): boolean {
+  return pin.url === undefined || pin.route === '';
+}
+
+// POST api/pins's body: a new open pin, as the page measured it.
+export const PIN_INPUT = PIN_FIELDS.refine(routeFitsUrl);
+export const PIN_INPUT_SHAPE = '{"route": string, "selector": string, "text": string, "rect": {"x": number, "y": number, "w": number, "h": number, "vw": number, "vh": number}, "note": string, "url"?: string} ("route" is "" with "url")';
 // POST api/pins/<id>'s body: a new note, resolved or open again; at least one of them.
 export const PIN_CHANGE = z.strictObject({ note: NOTE.optional(), resolved: z.boolean().optional() })
   .refine((change) => change.note !== undefined || change.resolved !== undefined, 'changes nothing');
@@ -56,7 +75,7 @@ export const PIN_CHANGE_SHAPE = '{"note"?: string, "resolved"?: boolean}, at lea
 // POST api/pins/<id>/remove's body.
 export const PIN_REMOVE = z.strictObject({});
 
-const PIN = PIN_INPUT.extend({ id: z.number().int().min(1), at: z.iso.datetime(), resolved: z.boolean() });
+const PIN = PIN_FIELDS.extend({ id: z.number().int().min(1), at: z.iso.datetime(), resolved: z.boolean() }).refine(routeFitsUrl);
 const FILE = z.strictObject({ version: z.literal(1), next: z.number().int().min(1), pins: z.array(PIN) })
   .refine((file) => file.pins.every((pin, index) => pin.id < file.next && file.pins.findIndex((other) => other.id === pin.id) === index), 'an id not below next, or one given twice');
 
@@ -69,6 +88,9 @@ export interface Pin {
   text: string;
   rect: { x: number; y: number; w: number; h: number; vw: number; vh: number };
   note: string;
+  // The address of another page the pin was placed on (route is then ''); absent for a pin of the
+  // dashboard.
+  url?: string;
   at: string;
   resolved: boolean;
 }
@@ -213,8 +235,9 @@ export function pinIdOf(text: string): number {
   return id;
 }
 
-// The open pins as sf pins prints them: '<id>  #<route>  "<text>"', the board's route as board,
-// then the note indented; a \n or \t printed as a space.
+// The open pins as sf pins prints them: '<id>  #<route>  "<text>"', the board's route as board, or
+// '<id>  <url>  "<text>"' for a pin of another page; then the note indented; a \n or \t printed as
+// a space.
 export function pinsLines(pins: readonly Pin[]): string[] {
   const flat = (text: string): string => text.replace(/[\n\t]/g, ' ');
   const open = pins.filter((pin) => !pin.resolved);
@@ -222,7 +245,7 @@ export function pinsLines(pins: readonly Pin[]): string[] {
     return ['No open pins.'];
   }
   return open.flatMap((pin) => [
-    `${pin.id}  #${pin.route === '' ? 'board' : pin.route}  "${flat(pin.text)}"`,
+    `${pin.id}  ${pin.url ?? `#${pin.route === '' ? 'board' : pin.route}`}  "${flat(pin.text)}"`,
     ...(pin.note === '' ? [] : [`  note: ${flat(pin.note)}`]),
   ]);
 }
@@ -233,7 +256,7 @@ export function pinsLines(pins: readonly Pin[]): string[] {
 export const PINS_COMMANDS = {
   pins: {
     name: 'pins', args: [], openWhileUpdating: true,
-    description: 'The open pins the user placed on the dashboard in point mode (Shift+P): id, the page\'s route, the element\'s text and the note',
+    description: 'The open pins the user placed in point mode: id, the dashboard route (#...) or the address of another page, the element\'s text and the note',
     run: () => readPins(serveStateDir()),
   },
   pinsResolve: {

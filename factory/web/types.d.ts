@@ -891,6 +891,9 @@ interface Pin {
   text: string;
   rect: { x: number; y: number; w: number; h: number; vw: number; vh: number };
   note: string;
+  // The address of another page the pin was placed on (route is then ''); absent for a pin of the
+  // dashboard.
+  url?: string;
   at: string;
   resolved: boolean;
 }

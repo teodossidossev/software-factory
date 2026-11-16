@@ -14,7 +14,7 @@ import { type FakeElement, type FetchRequest, loadPage, type Page } from './supp
 const STATIC_DIR = new URL('../../static/', import.meta.url);
 const RECT = { x: 10, y: 20, w: 120, h: 32, vw: 1280, vh: 800 };
 
-interface TestPin { id: number; route: string; selector: string; text: string; note: string; resolved: boolean }
+interface TestPin { id: number; route: string; selector: string; text: string; note: string; resolved: boolean; url?: string }
 const pin = (id: number, route: string, selector: string, text: string, note = '', resolved = false) => ({ id, route, selector, text, rect: RECT, note, at: '2026-11-14T09:00:00.000Z', resolved });
 
 // The board (or the page at hash) with api/pins answering pins, as the test changes them.
@@ -67,6 +67,32 @@ test('the Point button and Shift+P turn the mode on and off (aria-pressed, body.
   page.$('workspace-description').focus();
   const typed = page.key('P', { shiftKey: true });
   assert.deepEqual([pointing(page), typed.defaultPrevented], [['false', false], false]);
+});
+
+test('a pin of another page (with url) is listed after the current route\'s pins, its address a link to a new tab, an http(s) one only; it has no marker and is never gone or hidden; one whose url is not a string is not listed', async () => {
+  const page = await openPage({
+    list: [
+      { ...pin(1, '', '#open-board', 'Orders', 'Wrong total'), url: 'http://localhost:3000/orders' }, pin(2, '', '#open-new-ticket', 'New ticket'),
+      { ...pin(3, '', '#nothing-here', 'Script'), url: 'javascript:alert(1)' }, { ...pin(4, '', '#open-stats', 'Not a string'), url: 5 } as unknown as TestPin,
+      pin(5, 'stats', '#stats', 'Stats page'),
+    ],
+  }, '', (loaded) => {
+    loaded.$('open-new-ticket').rect = { x: 100, y: 10, width: 110, height: 32 };
+    loaded.$('open-board').rect = { x: 5, y: 5, width: 60, height: 30 };
+  });
+  // Only the board's own pin has a marker, though the first page pin's selector finds an element here.
+  assert.deepEqual(markers(page).map(([text]) => text), ['📍2']);
+  assert.equal(page.$('pins-open').textContent, '📍 4');
+  page.$('pins-open').click();
+  assert.deepEqual(rows(page).map(rowText), [
+    ['📍2', 'Board', '-', 'New ticket', '-'], ['📍1', 'http://localhost:3000/orders', '-', 'Orders', 'Wrong total'],
+    ['📍3', 'javascript:alert(1)', '-', 'Script', '-'], ['📍5', 'stats', '-', 'Stats page', '-'],
+  ]);
+  const links = rows(page).map((row) => row.querySelector('a.pin-route') as unknown as { href: string; target: string; rel: string });
+  assert.deepEqual(links.map(({ href, target, rel }) => [href, target, rel]), [
+    ['#', '', ''], ['http://localhost:3000/orders', '_blank', 'noopener noreferrer'], ['', '_blank', 'noopener noreferrer'], ['#stats', '', ''],
+  ]);
+  assert.equal(rows(page)[2]!.querySelector('a.pin-route')!.getAttribute('href'), null, 'not http(s): no href');
 });
 
 test('the pins are read at the start, on every hashchange and when the mode is turned on; the panel lists the open pins, the current route\'s first, the board as Board; element gone and element hidden', async () => {

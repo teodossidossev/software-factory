@@ -51,7 +51,7 @@ bin/sf coordinator status [text...] [--clear]  # what the coordinator does now (
 bin/sf coordinator ask <text...>  # a question that waits for the user's answer (at most 1,000 characters, 10 open: too_many_questions); prints its id, q1, q2, ...; needs sf serve
 bin/sf coordinator answered <id>  # take the answered question off the card (unknown_question for an id not open); needs sf serve
 bin/sf coordinator link <url> | --clear  # the chat's link for Open the chat: an https://claude.ai/ URL only (bad_link otherwise); --clear removes it; needs sf serve
-bin/sf pins                       # the open pins the user placed on the dashboard in point mode (section Pins): <id>  #<route>  "<text>", then the note; "No open pins." without; needs sf serve
+bin/sf pins                       # the open pins the user placed in point mode (section Pins): <id>  #<route>  "<text>" (<id>  <url>  "<text>" for a pin of another page), then the note; "No open pins." without; needs sf serve
 bin/sf pins resolve <id>          # mark a pin resolved (also one resolved already; pin_not_found for an unknown id); it leaves the page at its next read; needs sf serve
 bin/sf pins clear                 # remove every pin, open and resolved, and start the ids at 1 again (also over an unreadable pins.json): "Removed N pins."; needs sf serve
 bin/sf norms [workspace]          # the norms in force (section Norms): each value of norms.json with its source (default, file or workspace), then the file's problems; exit 0 with problems too; needs sf serve
@@ -915,7 +915,7 @@ a new `sf serve` and an old runner.
 ## State format version
 
 The state directory holds `state-version` (SF-101, `src/state-version.ts`), a whole number: the
-format of the state files the factory last wrote. This release writes `6`. `sf serve` and every
+format of the state files the factory last wrote. This release writes `7`. `sf serve` and every
 runner (`sf run`) read it at start: a missing file gets the current version; an equal one goes on;
 a lower one runs the migrations from it to the current one in order (`MIGRATIONS`), then
 writes the new number; a higher one refuses to start with `state_too_new` ("the state
@@ -937,7 +937,8 @@ digest record (`digest/<id>.json`) holds every model text as `{text, en}` and ma
 nothing, since the page still reads a record of plain strings without `in_progress`. Version 5
 (SF-236): a `queue.json` entry may hold `retry_at` and `retries`; its migration from 4 changes
 nothing. Version 6 (SF-291): `job.json` may hold `stalled_fixes`, `least_open`, `gate_stalled`,
-`gate_budget_from` and `important`; its migration from 5 changes nothing.
+`gate_budget_from` and `important`; its migration from 5 changes nothing. Version 7 (SF-264): a
+pin in `pins.json` may hold `url` (a pin of another page); its migration from 6 changes nothing.
 
 A new file or event that no older factory reads, and that changes the meaning of nothing it does
 read, is not a change of the format. So SF-128 kept `STATE_VERSION` at 1: its `tests-<N>.json`
@@ -4842,7 +4843,7 @@ POST (anything else `405` with `Allow: GET, POST`):
 | `api/workspaces/<ws>/merge-requests/<number>/overview` | the overview of one merge request (section Reading the open merge requests and their review comments): `{number, ready, reasons, behind, pipeline: {state, text, url} \| null, sonar: {gate_failed, new_issues, url} \| null, comments: {human, bot}}`; read on the host at each request (its status and threads), nothing written to it; the refusals and empty 404s as for `.../threads` |
 | `api/digests` | `{running, digests: [{id, trigger, period, ended_at, counts: {landed, live_branches, impact}, cost_usd, error}]}`, newest first (SF-103); the counts from the Git data, never from the model; 404 without the digest (in-process dashboards) |
 | `api/digests/<id>` | the stored record `digest/<id>.json` (SF-103); an unknown id or any query is an empty 404 |
-| `api/pins` | the dashboard's pins (section Pins), `pins.json` read as `sf pins` reads it: `{pins: [{id, route, selector, text, rect: {x, y, w, h, vw, vh}, note, at, resolved}]}`, every stored pin in id order, open and resolved; any query is an empty 404; `409 pins_unreadable` for a file that is not JSON or not this shape |
+| `api/pins` | the dashboard's pins (section Pins), `pins.json` read as `sf pins` reads it: `{pins: [{id, route, selector, text, rect: {x, y, w, h, vw, vh}, note, url?, at, resolved}]}` (`url`, with `route` `""`, only on a pin of another page), every stored pin in id order, open and resolved; any query is an empty 404; `409 pins_unreadable` for a file that is not JSON or not this shape |
 | `api/coordinator` | the coordinator's state, `coordinator.json` read as `sf coordinator` reads it (section Coordinator card): `{version, status: {text, at} \| null, questions: [{id, text, at}], link, next_question}`; any query is an empty 404; written only by `sf coordinator` |
 | `vision/<workspace>` | the workspace's vision page (section Vision), `page.html` as `sf vision` stored it, `text/html; charset=utf-8` under its own `content-security-policy` (`VISION_PAGE_CSP`: a sandbox with scripts only, an opaque origin that loads nothing), with `cache-control: no-store`, `nosniff`, `no-referrer` and `x-frame-options: DENY` kept; a name without a page, any query or a longer path is an empty 404; another method `405`; written only by `sf vision` |
 | `api/tickets` | `{tickets: [{workspace, ticket, title, base, draft, request, job, lands_after, attachments, conversation: {message, url}, queue_position, queue_error, queue_reason, queue_force, queue_retry}], archived: [{workspace, ticket, title}], job_lands_after: [{workspace, ticket, lands_after}], queue: {max_running, running, held, hold_reason, next, on_limit, limit_hold}}`: the Task files without a live job; `queue_position` its 1-based place in the run queue or `null`, `queue_error` the queue's failed start `{code, message}` or `null`, `queue_reason` why its plan holds it in the queue ("plan not ready: N blocker, M major", "plan check failed", "plan being checked", "plan not checked") or `null`, `queue_force` whether Start anyway was given (SF-086), `queue_retry` the next try of a queued start that could not fetch `{code: "fetch_failed", at, retries}` or `null` (SF-236), `queue` the run queue (`next`: `{workspace, ticket}` of the first entry that waits for nothing and whose plan does not hold it, or `null`; `on_limit` the rule at a usage limit's reset and `limit_hold` `{parked, resets_at}` while a job is parked, else `null`, SF-072; the whole `queue` is `null` without a run queue) (SF-071, section Run queue); `lands_after` the tickets its Task file waits for, `[{workspace, ticket, state}]` with `state` `merged`, `pushed`, `running`, `planned` or `missing` (SF-084, section Dashboard), and `job_lands_after` the same for the Task files with a live job; `attachments` its images `[{name, bytes, type}]` (SF-064, section Ticket images); `draft` is true for a skeleton; `request` the user's words of New ticket or `null`; `job` is the last job's state or `null`; `url` is `https://chatgpt.com/?q=<message URL-encoded>`, or `null` when too long |
@@ -4920,7 +4921,7 @@ shares; the setup, Task check, task and attachment posts have their own handlers
 | `POST api/tickets/<ws>/<ticket>/archive`, `.../restore`, `.../delete` | `{}` | `Setup.archiveTicket`, `restoreTicket`, `deleteTicket` (SF-027); the ticket's images folder with them (SF-064) |
 | `POST api/tickets/<ws>/<ticket>/attachments?name=<name>` | the image's raw bytes, `Content-Type: application/octet-stream` (not JSON), at most 5 MB | `Setup.addAttachment` (SF-064, section Ticket images): `name` optional (the next number when left out; another query key or a second `name` is an empty 404); result `{name, bytes, type}`; `400 attachment_type`, `400 invalid_name`, `413 attachment_too_large` (also a body over 5 MB, checked against `Content-Length` and while reading), `409 attachment_limit`, `409 job_active`, `404 task_not_found`; every page gets the tickets again |
 | `POST api/tickets/<ws>/<ticket>/attachments/<name>/remove` | `{}` | `Setup.removeAttachment` (SF-064): result `{name}`; `400 attachment_missing`, `400 invalid_name`, `409 job_active`; there is no DELETE method |
-| `POST api/pins` | `{"route": string, "selector": string, "text": string, "rect": {"x", "y", "w", "h", "vw", "vh": number}, "note": string}` | `src/pins.ts` `addPin` (section Pins): a new open pin with the next id; result `{pin, pins}`; `400 invalid_body` beyond a bound or with a control character, `409 too_many_pins` with 50 open, `409 pins_unreadable` |
+| `POST api/pins` | `{"route": string, "selector": string, "text": string, "rect": {"x", "y", "w", "h", "vw", "vh": number}, "note": string, "url"?: string}` (`"route"` is `""` with `"url"`) | `src/pins.ts` `addPin` (section Pins): a new open pin with the next id; `url` is another page's address, `http:` or `https:` as `URL` writes it, without user name or password, at most 2,000 characters; result `{pin, pins}`; `400 invalid_body` beyond a bound, with a control character, with any other `url` or with a `url` beside a route, `409 too_many_pins` with 50 open, `409 pins_unreadable` |
 | `POST api/pins/<id>` | `{"note"?: string, "resolved"?: boolean}`, at least one | `changePin`: the pin's note, resolved or open again (which counts toward the 50 open); result `{pins}`; an id that is not a whole number from 1 without a leading zero is an empty 404, an unknown one `404 pin_not_found`; there is no PATCH method |
 | `POST api/pins/<id>/remove` | `{}` | `removePin`: result `{pins}`; its id is not given again; `404 pin_not_found`; there is no DELETE method |
 | `POST api/workspaces/<ws>/merge-requests/<number>/job` | `{"threads": string[], "instructions": string}` | `src/review-job.ts` (the Merge requests page): the merge request and its threads read on the host again (the comment text never comes from the page), the Task file `<key>-review-<n>` written with `writeTask` and added to the run queue; result `{workspace, ticket, path, position}`; `400 invalid_request` for no thread and blank instructions, instructions over 4,000 characters or a thread id the host does not list; `409 mr_not_open` when the merge request is not among the open ones; the host's reads' refusals; `400 invalid_content` from the Task file writer (a source branch `continues:` refuses); nothing is written to the host; an empty 404 for a bad workspace name or number, or without the run queue; every page gets the tickets again |
@@ -5421,24 +5422,33 @@ screenshot. Nothing leaves the machine.
   marker. They are drawn again on a scroll, a resize, a hashchange, a pins read or write and the
   page's DOM changes (one animation frame for many); no timer.
 - **The panel** (bottom right): *Pins (N open)*, *Refresh*, *Stop pointing (Esc)* while the mode
-  is on, *Close*; the open pins (the current hash's first), each with its route as a link (*Board*
-  for the board), its text, its note, element gone or hidden, *Resolve* and *Delete*; the last
+  is on, *Close*; the open pins (the current hash's first, then the others in id order), each with
+  its route as a link (*Board* for the board), its text, its note, element gone or hidden, *Resolve*
+  and *Delete*. A pin of another page (with `url`) belongs to no route: it has no marker, is never
+  element gone or hidden and is listed among the others; its row shows the address as the text of a
+  link that opens in a new tab (`noopener noreferrer`), with an `href` only for an `http:` or
+  `https:` address. A pin whose `url` is not a string is not listed. Then the last
   refusal under them. With the mode off and open pins, a small *📍 N* button opens it. The page
   reads the pins at its start, on every hashchange, when the mode is turned on and on Refresh; a
   write's answer replaces them. A pin resolved with `sf pins resolve` leaves the page at its next
   read. Every text is set as text, never HTML.
 - **The store.** `<state dir>/pins.json` (mode 0600, written atomically, one write at a time per
   file, by `sf serve` only: the dashboard's checked POSTs and `sf pins`): `{version: 1, next,
-  pins: [{id, route, selector, text, rect: {x, y, w, h, vw, vh}, note, at, resolved}]}`. Ids count
+  pins: [{id, route, selector, text, rect: {x, y, w, h, vw, vh}, note, url?, at, resolved}]}`.
+  `url` is the address of another page the pin was placed on, kept as given, and `route` is then
+  `""`; a dashboard pin has none. Ids count
   up from 1 and are never given again until `sf pins clear`. At most 50 open pins (the 51st is
   `409 too_many_pins`, as is opening a resolved one again then); of the resolved ones the 50 newest
   are kept. Bounds: route 300 characters, selector 1,000, text 200, note 500 (as JavaScript counts
   them); no control character but `\n` and `\t` in text and note, none in route and selector;
-  every position finite, x and y within ±1,000,000, sizes from 0 to 1,000,000; anything else is
-  `400 invalid_body` and never stored. A file that is not JSON or not this shape is refused on
-  every read and write (`409 pins_unreadable`) and only `sf pins clear` replaces it. A new file no
-  older factory reads, so `STATE_VERSION` stays.
-- **`sf pins`** prints the open pins, `<id>  #<route>  "<text>"` (the board as `board`), then
+  `url` an `http:` or `https:` address as `URL` writes it (its `href`), without user name or
+  password, at most 2,000 characters, beside the route `""` only; every position finite, x and y
+  within ±1,000,000, sizes from 0 to 1,000,000; anything else is `400 invalid_body` and never
+  stored. A file that is not JSON or not this shape (a stored `url` beside a route too) is refused
+  on every read and write (`409 pins_unreadable`) and only `sf pins clear` replaces it. A pin may
+  hold `url`, so `pins.json` is part of state format 7 (section State format version).
+- **`sf pins`** prints the open pins, `<id>  #<route>  "<text>"` (the board as `board`), or
+  `<id>  <url>  "<text>"` for a pin of another page (no `#`), then
   `  note: <note>`, with `\n` and `\t` as spaces (`No open pins.` without); `sf pins resolve <id>`
   prints `Resolved pin <id>.`; `sf pins clear` prints `Removed N pins.` The three answer while
   `sf update` drains or builds; they touch no job.

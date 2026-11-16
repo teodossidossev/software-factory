@@ -731,6 +731,19 @@ export class JobStore {
     await writeFileAtomic(join(this.dir(workspace, ticket), 'task.md'), content);
   }
 
+  // The Task file the reviewers read: the bytes the factory last copied into the worktree (copyTask,
+  // src/execution/start.ts), never the worktree's file, which the Implementer can write. A job
+  // directory without review-task.md (a job started before it was kept) reads task.md; undefined
+  // without either.
+  async readReviewTask(workspace: string, ticket: string): Promise<string | undefined> {
+    return (await readOrMissing(join(this.dir(workspace, ticket), 'review-task.md'))) ?? this.readTaskCopy(workspace, ticket);
+  }
+
+  // Replaced atomically, by copyTask (src/execution/start.ts) only.
+  async writeReviewTask(workspace: string, ticket: string, content: Buffer): Promise<void> {
+    await writeFileAtomic(join(this.dir(workspace, ticket), 'review-task.md'), content);
+  }
+
   // The MR text once it exists (copied when the branch is ready, or at a conflict iteration).
   readMrText(workspace: string, ticket: string): Promise<string | undefined> {
     return readOrMissing(join(this.dir(workspace, ticket), 'mr.md'));

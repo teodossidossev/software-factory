@@ -1476,7 +1476,7 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   instructions are ignored. The reviewers' tools and sandbox stay as they are: they get the
   method's text, never the skill to run. Without a skill (`SF_REVIEW_SKILL=` or a file that cannot
   be read) the prompt has neither the block nor its lines. Then the prompt carries the Handbook's
-  `## Review rules` verbatim (they and the Task file win where the method differs), the Task file (with its `## Review brief` when there is one), the
+  `## Review rules` verbatim (they and the Task file win where the method differs), the Task file (with its `## Review brief` when there is one; the factory's copy, `review-task.md`, never the worktree's file: section Pause, Resume and Restart), the
   user's own messages to the job (`<user_decisions>`, SF-112: every message the job's Stream shows
   as the user's up to and including the reviewed iteration, oldest first, each verbatim in a
   `<user_message iteration="N" at="<ts>">`, cut to 4,000 characters, the newest kept while their
@@ -1660,7 +1660,7 @@ ended. A restart of `sf serve` therefore leaves a working job working.
     answers, leniently: a row it cannot read leaves its entry `open`. `contested` needs evidence a
     reviewer can check without the Implementer: a `path:line` of a file in the worktree (the line
     within it), a test file or a quoted test name that a test file of the worktree holds (`git grep
-    --untracked`), a `§section` of the Task file, or the user's own message to the job quoted as
+    --untracked`), a `§section` of the Task file (a heading of `review-task.md`, the copy the reviewers read), or the user's own message to the job quoted as
     `user message "<exact words>"` (SF-112: at least 8 characters in double quotes or backticks,
     found, case and spacing aside, in one of the job's user messages up to the iteration; recorded
     as `user message "<quote>"`, cut to 200 characters); without it the
@@ -2695,11 +2695,17 @@ SF-067. To change course without abort, reset and a branch deleted by hand.
 - **The Task file while paused.** The factory keeps the Task file as the Implementer was last given
   it, `task.md` in the job directory, and the sha256 of the version the job works from as
   `task_sha256` in `job.json`, both written at Start and at every later copy into the worktree (a Fix
-  section, `sf say`, MR preparation). `write_task`
+  section, `sf say`, MR preparation). Every copy into the worktree, on Resume too, also writes the
+  same bytes to `review-task.md` in the job directory: the Task file the Claude review, the gate
+  and the simplification pass read, and the one a contest's `§section` is checked against, never
+  the worktree's file, which the Implementer could change (a job directory without
+  `review-task.md`, of a job started before it existed, reads `task.md`). A link the Implementer put
+  at the worktree's `.software-factory/`, at the Task file there or at the ticket's image folder
+  there is removed, never written through. `write_task`
   is allowed while the job is `paused` (refused, `job_active`, in the other live states). On Resume
   a Task file that differs is copied into the worktree, its sha256 recorded in `job.json` at once
   (a resumed turn and a resumed review round alike) and a `task_changed` event written; the
-  reviewers read the new one from then on. A resumed turn's message carries the unified diff (at
+  reviewers read the new one from then on (`review-task.md`). A resumed turn's message carries the unified diff (at
   most 64 KiB; a longer one asks the Implementer to read the file again); after a resumed review
   round `task.md` keeps the version the Implementer was last given, and the Implementer gets the
   diff with its next prompt (the Fix section or `sf say`), taken before the factory appends its own

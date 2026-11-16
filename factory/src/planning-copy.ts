@@ -14,7 +14,8 @@
 // 6. the factory's planning-tasks skill copied into .claude/skills;
 // 7. .claude/planning-copy.md: where the user's request and rules are;
 // 7b. .claude/settings.local.json: permissions and sandbox replaced with plannerSettings' (read-only
-//    tools, the shell in Claude Code's sandbox, the secrets denied), the file's other keys kept;
+//    tools, the shell in Claude Code's sandbox, the secrets denied), its hooks' Stop and Notification
+//    with sf planner waiting, the file's other keys and hook events kept;
 // 8. the factory's MCP server registered for that folder only (claude mcp, local scope: the token
 //    stays in Claude Code's ~/.claude.json), removed and added again so a rotated token arrives;
 // 9. the result, and what the user does next: accept Claude Code's trust dialog there once.
@@ -35,6 +36,7 @@ import { FactoryError } from './errors.js';
 import { withoutHostTokens } from './forge.js';
 import { type GitResult, runGit } from './git.js';
 import { PACKAGE_ROOT } from './package-root.js';
+import { plannerWaiting } from './planner-waiting.js';
 import { loadRegistry, resolveWorkspace } from './registry.js';
 import { absoluteRule, claudeConfigDir, claudeUserSettings, HOME_CREDENTIALS } from './sandbox-denials.js';
 import { DASHBOARD_TOKEN_FILE, MCP_TOKEN_FILE } from './secrets.js';
@@ -52,6 +54,7 @@ export interface PlannerDeps {
 
 export const PLANNER_USAGE: readonly string[] = [
   "  sf planner setup <workspace>                          Prepare the workspace's planning copy for Claude Code: <SF_PLANNING_DIR or ~/planning>/<workspace>, cloned or fast-forwarded, the factory's MCP server for that folder, the planning skill and .claude/planning-copy.md",
+  "  sf planner waiting <workspace> [permission]           The planning copy's hook (Stop; Notification with permission): tells you that the planner waits for you, through the factory's notifications",
 ];
 
 // Every Git command here: never a prompt (the values of the digest's).
@@ -124,10 +127,35 @@ export function plannerSettings(env: NodeJS.ProcessEnv, stateDir: string): Plann
   };
 }
 
-// sf planner setup <workspace>.
+// The arguments of sf planner waiting: waiting <workspace> [permission].
+export function isPlannerWaiting(args: readonly string[]): boolean {
+  return args[0] === 'waiting' && (args.length === 2 || (args.length === 3 && args[2] === 'permission'));
+}
+
+// sf planner waiting <workspace> [permission] (src/planner-waiting.ts), the planning copy's hook,
+// which exits 0 whatever happens: setup (the CLI's environment file and config folder) that throws,
+// or a name checkName refuses, is one line on stderr and nothing is sent.
+export async function plannerWaitingCommand(args: readonly string[], setup: () => { env: NodeJS.ProcessEnv; configDir: string }): Promise<void> {
+  let deps: { env: NodeJS.ProcessEnv; configDir: string };
+  let workspace: string;
+  try {
+    deps = setup();
+    workspace = checkName(args[1]);
+  } catch (error) {
+    console.error(`sf planner waiting: ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
+  await plannerWaiting(workspace, args.length === 3, { ...deps, stdin: process.stdin });
+}
+
+// sf planner setup <workspace>, and sf planner waiting <workspace> [permission].
 export async function plannerCommand(args: string[], deps: PlannerDeps): Promise<void> {
+  if (isPlannerWaiting(args)) {
+    await plannerWaitingCommand(args, () => ({ env: deps.env, configDir: deps.configDir }));
+    return;
+  }
   if (args.length !== 2 || args[0] !== 'setup') {
-    throw new UsageError('planner needs setup <workspace>.');
+    throw new UsageError('planner needs setup <workspace>, or waiting <workspace> [permission].');
   }
   const name = checkName(args[1]);
   const ws = await resolveWorkspace(name, deps.configDir);
@@ -211,6 +239,7 @@ async function prepare(planning: Planning, deps: PlannerDeps): Promise<void> {
     `Skill ${SKILL}: installed in .claude/skills`,
     `Pointers: ${POINTERS}`,
     "Settings: read-only; shell commands in Claude Code's sandbox (no writes, no network); secrets denied",
+    'Hooks: the phone hears when the planner waits for you (sf planner waiting)',
     `Next: open Claude Code there once and accept its trust dialog: cd ${copy} && claude`,
     `Then plan a ticket: /${SKILL} workspace ${name}, ticket <ticket>`,
   ]) {
@@ -405,9 +434,28 @@ async function pointersText(name: string, base: string, deps: PlannerDeps): Prom
   return `${lines.join('\n')}\n`;
 }
 
+// The factory's sf, which the copy's hooks run.
+const SF_BIN = fileURLToPath(new URL('bin/sf', PACKAGE_ROOT));
+// The hooks' timeout, in seconds.
+const HOOK_TIMEOUT_S = 30;
+
+// text in single quotes for the shell, a ' inside written as '\''.
+const shellQuoted = (text: string): string => `'${text.replaceAll("'", "'\\''")}'`;
+
+// The copy's Stop and Notification (permission prompt) hooks: sf planner waiting tells the user
+// that the planner waits for them (src/planner-waiting.ts). Hooks run outside the sandbox.
+function plannerHooks(name: string): Record<'Stop' | 'Notification', unknown[]> {
+  const command = `${shellQuoted(SF_BIN)} planner waiting ${shellQuoted(name)}`;
+  return {
+    Stop: [{ hooks: [{ type: 'command', command, timeout: HOOK_TIMEOUT_S }] }],
+    Notification: [{ matcher: 'permission_prompt', hooks: [{ type: 'command', command: `${command} permission`, timeout: HOOK_TIMEOUT_S }] }],
+  };
+}
+
 // .claude/settings.local.json, missing or a regular file (never a link), a JSON object: its
-// permissions and sandbox replaced whole with plannerSettings', every other key kept in its place (a
-// new key last); written atomically with the file's mode, else 0600. The checks go by path: the
+// permissions and sandbox replaced whole with plannerSettings', its hooks' Stop and Notification
+// with plannerHooks' (the other hook events kept), every other key kept in its place (a new key
+// last); written atomically with the file's mode, else 0600. The checks go by path: the
 // planner cannot write in the copy and the factory is its only writer, so a link there comes only
 // from the repository or an earlier tool.
 async function writeSettings(copy: string, name: string, deps: PlannerDeps): Promise<void> {
@@ -431,7 +479,8 @@ async function writeSettings(copy: string, name: string, deps: PlannerDeps): Pro
     throw new FactoryError('planning_copy_unusable', `${SETTINGS} in ${name}'s planning copy is not a JSON object: fix or remove it.`);
   }
   const settings = plannerSettings(deps.env, deps.stateDir);
-  const written = { ...data, permissions: settings.permissions, sandbox: settings.sandbox };
+  const hooks = 'hooks' in data && typeof data.hooks === 'object' && data.hooks !== null && !Array.isArray(data.hooks) ? data.hooks : {};
+  const written = { ...data, permissions: settings.permissions, sandbox: settings.sandbox, hooks: { ...hooks, ...plannerHooks(name) } };
   const mode = found === undefined ? 0o600 : found.mode & 0o777;
   await writeFileAtomicWith(path, async (handle) => {
     await handle.chmod(mode);

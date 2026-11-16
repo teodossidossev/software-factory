@@ -43,6 +43,7 @@ export interface Notification {
   // ntfy's Priority: high when the user must act, low when nothing is to do.
   priority: 'high' | 'default' | 'low';
   tags: string;
+  click?: string; // ntfy's Click: the page a tap opens
 }
 
 // The states whose notification is high: the job waits for the user (the waiting trait) or failed.
@@ -68,7 +69,8 @@ export function briefJobBody(job: Job): string {
 }
 
 // The notification as the workspace's setting has it: undefined when off (no channel sends it);
-// brief, ntfy sends the brief body; full, as it is.
+// brief, ntfy sends the brief body (a click is kept: only a planner's has one, its session's opaque
+// claude.ai page); full, as it is.
 export function withNotifyMode(notification: Notification, mode: NotifyMode, brief: string): Notification | undefined {
   if (mode === 'off') {
     return undefined;
@@ -234,6 +236,21 @@ export function healthNotification(check: { label: string; detail: string }, tur
     : { title: `Factory health: ${check.label} is ok again`, body: detail === '' ? `${check.label} is ok again` : detail, priority: 'default', tags: 'white_check_mark' };
 }
 
+// A Claude Code session id that may go into a claude.ai link.
+const SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/;
+
+// The notification of a planner session that waits for the user (or for a permission): the
+// workspace only, and the session's page when its id is known.
+export function plannerNotification(workspace: string, permission: boolean, sessionId: string | undefined): Notification {
+  return {
+    title: permission ? 'Planner waits for a permission' : 'Planner waits for you',
+    body: workspace,
+    priority: 'high',
+    tags: 'speech_balloon',
+    ...(sessionId !== undefined && SESSION_ID.test(sessionId) ? { click: `https://claude.ai/code/${sessionId}` } : {}),
+  };
+}
+
 async function findExecutable(name: string, path: string | undefined): Promise<string | undefined> {
   for (const dir of (path ?? '').split(delimiter).filter((entry) => entry !== '')) {
     try {
@@ -279,6 +296,7 @@ async function ntfyPost(notification: Notification, url: string, token: string |
         Title: notification.title,
         Priority: notification.priority,
         Tags: notification.tags,
+        ...(notification.click !== undefined ? { Click: notification.click } : {}),
         ...(token !== undefined ? { Authorization: `Bearer ${token}` } : {}),
       },
       signal: AbortSignal.timeout(NTFY_TIMEOUT_MS),

@@ -10,7 +10,7 @@ import { after, before, test } from 'node:test';
 import { type Job, type JobMr, type JobState, statesWith } from '../src/jobs.js';
 import {
   briefJobBody, type ChannelResult, digestNotification, healthNotification, jobNotification, jobPriority, limitResetNotification, type Notification, type NotifyConfig, NOTIFIED_STATES,
-  NTFY_RETRY_MS, sendNotification, stateNotifier, taskCheckNotification, testNotification,
+  NTFY_RETRY_MS, plannerNotification, sendNotification, stateNotifier, taskCheckNotification, testNotification,
 } from '../src/notify.js';
 import { type NotifyMode, saveRegistry, workspaceNotifyMode } from '../src/registry.js';
 import type { CheckRecord } from '../src/task-check.js';
@@ -219,4 +219,25 @@ test('ntfy: a send with no HTTP response is tried once more and the result names
   assert.deepEqual([refusedLater.result.status, refusedLater.result.message, refusedLater.requests], ['failed', 'HTTP 500 (after a retry)', 2]);
   const first = await ntfyWith([200]);
   assert.deepEqual([first.result.status, first.result.message, first.requests], ['sent', 'HTTP 200', 1]);
+});
+
+test("PW-4: ntfy sends Click for a notification with a click (a planner's session page), and no Click otherwise", async () => {
+  const config = { ...CONFIG, desktop: false, ntfyUrl };
+  received.length = 0;
+  await sendNotification(plannerNotification('app', false, 'session_01Ab'), config);
+  await sendNotification(plannerNotification('app', true, undefined), config);
+  await sendNotification(digestNotification({ landed: 1, impact: 0 }), config);
+  assert.deepEqual(received.map((entry) => [entry.headers.title, entry.headers.priority, entry.headers.tags, entry.headers.click, entry.body]), [
+    ['Planner waits for you', 'high', 'speech_balloon', 'https://claude.ai/code/session_01Ab', 'app'],
+    ['Planner waits for a permission', 'high', 'speech_balloon', undefined, 'app'],
+    ['Morning digest ready', 'default', 'newspaper', undefined, 'Morning digest ready: 1 landed, 0 of mine need attention'],
+  ]);
+});
+
+test('plannerNotification links the session only for an id of letters, digits, _ and -, at most 128 long', () => {
+  assert.equal(plannerNotification('app', false, 'session_01Ab').click, 'https://claude.ai/code/session_01Ab');
+  assert.equal(plannerNotification('app', false, 'a'.repeat(128)).click, `https://claude.ai/code/${'a'.repeat(128)}`);
+  for (const id of [undefined, '', 'a'.repeat(129), '../x', 'id?x=1', 'a b', 'a/b']) {
+    assert.equal('click' in plannerNotification('app', false, id), false, String(id));
+  }
 });

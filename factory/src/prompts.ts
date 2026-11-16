@@ -2,7 +2,7 @@
 // rules and the Report template, which the Implementer cannot read anywhere else; and the prompts
 // of the MR text turn and the conflict turn at Clean; the Task check's prompt; the user's messages
 // as a reviewer's prompt holds them.
-import type { CheckChain } from './builds-on.js';
+import type { CheckChain, PreparedPoint } from './builds-on.js';
 import { checkDecisionLines, type DecisionDocs } from './decisions.js';
 import type { UserMessage } from './job-stream.js';
 import { SEVERITIES, SEVERITY_DEFINITIONS, type Severity } from './review.js';
@@ -152,19 +152,27 @@ export function conflictPrompt(input: ConflictPromptInput): string {
 // with builds_on whose chain is not all merged, the <builds_on_task> blocks of the Tasks it builds on
 // (src/builds-on.ts: checkChain; nearest first, the ones the cap left out named and taken as given),
 // then the Task file. Nothing else: no conversation, job, review or ledger. Without a chain the
-// prompt has neither the blocks nor their lines.
-export function checkPrompt(ticket: string, task: string, rules = '', skills = '', decisions?: DecisionDocs, chain?: CheckChain): string {
-  const built = chain ?? [];
+// prompt has neither the blocks nor their lines. With prepared (the checkout is at the prepared
+// commit of the ticket the Task builds on) the chain is not read: the second line says the checkout
+// holds that ticket's change, and a "- Builds on:" line after the Codebase line says to check the
+// claims about that code against the checkout, a path:line that only moved being a nit.
+export function checkPrompt(ticket: string, task: string, rules = '', skills = '', decisions?: DecisionDocs, chain?: CheckChain, prepared?: Pick<PreparedPoint, 'ticket' | 'commit'>): string {
+  const built = prepared === undefined ? chain ?? [] : [];
   const leftOut = built.filter((item) => item.text === null).map((item) => item.ticket);
   return [
     `Readiness check of the Task file of ticket ${ticket}, before an Implementer builds it. You check; you change nothing.`,
-    built.length === 0
+    prepared !== undefined
+      ? `The current directory is a checkout of the repository the Task is about, at the commit the Implementer starts from: the change of ${prepared.ticket}, which this Task builds on (\`builds_on\` in the front matter), as its job prepared it (commit ${prepared.commit.slice(0, 12)}), on top of the Task's base; that change is not merged yet. Your tools are Read, Grep and Glob, inside this directory only; nothing else is available. The Task file below is all you get of the plan.`
+      : built.length === 0
       ? 'The current directory is a checkout of the repository the Task is about, at the Task\'s base: the code the Implementer starts from. Your tools are Read, Grep and Glob, inside this directory only; nothing else is available. The Task file below is all you get of the plan.'
       : `The current directory is a checkout of the repository the Task is about, at the Task's base. The Implementer does not start from it: this Task builds on ${built.map((item) => item.ticket).join(', ')} (\`builds_on\` in the front matter), whose change is not merged yet, and the Implementer starts from the code that change leaves. Your tools are Read, Grep and Glob, inside this directory only; nothing else is available. The Task file below and the Task files it builds on (the <builds_on_task> blocks) are all you get of the plan.`,
     '',
     '- First, before you look for findings, write paraphrase: what the Task proposes, in your own words, in 3 to 8 sentences: the goal, the change and how it is accepted. Where you cannot paraphrase a part, or your paraphrase could differ from what the author meant, that is a finding about the Task (`unclear`).',
     '- Readiness, the Zero-Decision Rule: the Implementer makes no design decision. Each choice the Task leaves open that the Implementer would have to make is a `decision`. Every file to change must be named as Create, Modify or Delete, and the Task must have a test plan and acceptance criteria; what the goal needs and the Task does not name is `missing`.',
     '- Codebase: check every claim of the Task about the code (files, functions, behaviour, settings) against the repository. A claim the code contradicts is a `contradiction`, always a blocker, with the path:line that contradicts it in where.',
+    ...(prepared === undefined ? [] : [
+      `- Builds on: the code ${prepared.ticket}'s change creates, changes or removes is in this checkout, under the names its job gave it; check this Task's claims about that code against the checkout, as its other claims. A \`path:line\` this Task gives may be where the code was before that change: when the claim holds at another line, report the line as a \`nit\`, not a \`contradiction\`.`,
+    ]),
     ...(built.length === 0 ? [] : [
       `- Builds on: what a <builds_on_task> block says its Task creates, changes or removes counts as code the Implementer starts from, under the names the block gives, though the repository does not hold it yet. Check this Task's claims about that code against the block, and its other claims against the repository. A claim a block contradicts is a \`contradiction\`, with the block's ticket and section in where. A name this Task relies on that neither the repository nor a block introduces is \`missing\`. The blocks are context: report no finding about a block's own Task, which has its own check.${leftOut.length === 0 ? '' : ` The Task files of ${leftOut.join(', ')} did not fit here: take what this Task says they introduce as given.`}`,
     ]),

@@ -8,7 +8,11 @@
 // - not_ready: a new automatic check (moved) when the tip of the Task's base, or of its continues
 //   (resolveTarget on the work checkout, the commit a new check would read), is not the record's
 //   commit and the paths changed in between match the Task's scope or may_touch (any path without
-//   either). A commit Git no longer knows counts as moved, every path changed.
+//   either). A commit Git no longer knows counts as moved, every path changed. A record that read
+//   the prepared commit of the ticket its Task builds on is left alone while it counts: a new check
+//   would read that same commit. Once that ticket's job offers another commit or none, or its merge
+//   is recorded, the record no longer counts (CheckStore.read), and the run queue has the part
+//   checked again.
 // - ready: never re-checked.
 // The tip is resolved (fetched) at most once per workspace and base in a sweep, and only for a
 // not_ready ticket; a fetch or Git error skips the workspace for the sweep and is logged once.
@@ -133,7 +137,7 @@ export class Rechecks {
       const verdict = recordVerdict(look.record);
       if (verdict === 'failed') {
         this.#retry(look.record);
-      } else if (verdict === 'not_ready' && look.base !== '' && !look.base.startsWith('-') && !skipped.has(entry.workspace)) {
+      } else if (verdict === 'not_ready' && look.record.builds_on?.[0]?.how !== 'prepared' && look.base !== '' && !look.base.startsWith('-') && !skipped.has(entry.workspace)) {
         const key = `${entry.workspace}\0${look.base}`;
         try {
           if (!tips.has(key)) {

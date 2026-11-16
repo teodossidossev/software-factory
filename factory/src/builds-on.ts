@@ -7,8 +7,11 @@
 // that ticket is merged, the job starts from, and is rebased onto, origin/<base> as any job.
 // The Task check of a part reads the chain it builds on from the Task files (buildsOnChain): the
 // texts of the tickets not merged yet go into its prompt (checkChain), and the chain's sha256 lines
-// (chainLines) into the sha256 the check is stored by.
+// (chainLines) into the sha256 the check is stored by. Once the ticket a Task builds on has a
+// prepared commit, its check reads that commit in place of the Task files (preparedPoint), and a
+// check counts only while what it read of that ticket holds (buildsOnHolds).
 import { createHash } from 'node:crypto';
+import { mergedOnTarget } from './digest-jobs.js';
 import { FactoryError } from './errors.js';
 import { runGit } from './git.js';
 import { type Job, type JobState, JobStore } from './jobs.js';
@@ -45,6 +48,49 @@ export async function buildsOnTarget(checkout: string, point: { ref: string; com
     throw new FactoryError('base_not_found', `The prepared commit ${point.commit} (${point.ref}) is not in the checkout.`);
   }
   return point;
+}
+
+// The prepared commit of the ticket a Task builds on, as a start of the Task's job takes it.
+export interface PreparedPoint { ticket: string; ref: string; commit: string }
+
+// The prepared commit of the ticket the Task text task builds on, as buildsOnPoint gives it for a
+// start of the Task's job; undefined without builds_on (or with a value that is no ticket key,
+// nothing read), when that ticket is merged, when it has no prepared commit to build on, or when
+// its job cannot be read. Never throws.
+export async function preparedPoint(stateDir: string, workspace: Workspace, task: string): Promise<PreparedPoint | undefined> {
+  const ticket = textBuildsOn(task);
+  if (ticket === null || !TICKET_PATTERN.test(ticket)) {
+    return undefined;
+  }
+  const point = await buildsOnPoint(new JobStore(stateDir), workspace.name, workspace.workCheckout, ticket).catch(() => undefined);
+  return point === undefined || point === 'merged' ? undefined : { ticket, ref: point.ref, commit: point.commit };
+}
+
+// Whether a check record's reading of the ticket its Task builds on (record: its builds_on) is the
+// one a check would make now, by what the job store of the workspace records. Without builds_on, or
+// with the first entry merged: true, nothing read. A prepared entry holds while the ticket's live
+// job offers that same commit (buildsOnCommit) and its merge is not recorded (pushed with
+// merged_on_target or its merge request merged); no live job (archived, merged or not), another
+// commit or none, or a recorded merge end it. A sent or left_out entry holds while that job offers
+// no prepared commit. The one difference from buildsOnPoint: a merge only Git shows (branchMerged,
+// a job pushed without a merge request the factory knows) counts once the pass of merged jobs
+// records it. Never throws.
+export async function buildsOnHolds(stateDir: string, workspace: string, record: readonly BuildsOnRecord[] | undefined): Promise<boolean> {
+  const first = record?.[0];
+  if (first === undefined || first.how === 'merged') {
+    return true;
+  }
+  const jobs = new JobStore(stateDir);
+  const job = await jobs.read(workspace, first.ticket).catch(() => undefined);
+  const commit = buildsOnCommit(job);
+  if (first.how !== 'prepared') {
+    return commit === null;
+  }
+  if (job === undefined || commit !== first.commit) {
+    return false;
+  }
+  const merged = job.state === 'pushed' && ((await mergedOnTarget(jobs.eventsPath(workspace, first.ticket))) || job.mr?.state === 'merged');
+  return !merged;
 }
 
 // The refusal of a start of ticket while the ticket it builds on has no prepared commit to build on.
@@ -147,8 +193,11 @@ export function chainLines(chain: TaskChain): string[] {
 export const MAX_BUILDS_ON_BYTES = 128 * 1024;
 // A Task of the chain in the check's prompt: text null when the cap left it out.
 export type CheckChain = Array<{ ticket: string; path: string; text: string | null }>;
-// How the check used a Task of the chain, for its record.
-export interface BuildsOnRecord { ticket: string; sha256: string | null; how: 'sent' | 'left_out' | 'merged' }
+// How the check used a Task of the chain, for its record; prepared carries the commit the check read
+// (the prepared commit of the ticket its Task builds on).
+export type BuildsOnRecord =
+  | { ticket: string; sha256: string | null; how: 'sent' | 'left_out' | 'merged' }
+  | { ticket: string; sha256: string | null; how: 'prepared'; commit: string };
 
 // What the Task check of ticket sends of its chain: the Tasks up to the first merged one (it and
 // the ones above it are recorded merged: the repository holds their code), whole, nearest first,

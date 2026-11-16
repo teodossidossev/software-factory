@@ -17,7 +17,7 @@ import type { AddWorkspaceOptions, ArchivedRow, JobDependencies, TicketInput, Ti
 import { type WorkspaceEdit, workspaceColor } from '../../src/registry.js';
 import { taskSha256 } from '../../src/task-file.js';
 
-export const CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:";
+export const CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:; frame-ancestors 'none'";
 
 export interface Reply {
   status: number;

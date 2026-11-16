@@ -70,10 +70,13 @@ const PACKAGE_DIR = new URL('../../', import.meta.url);
 const STATIC_DIR = new URL('static/', PACKAGE_DIR);
 const WEB_SOURCE_DIR = new URL('web/', PACKAGE_DIR);
 const WEB_BUILD_DIR = new URL('dist/web/', PACKAGE_DIR);
+// Set on every answer. frame-ancestors 'none' and X-Frame-Options (for browsers that read only that
+// header) keep any page, of this machine or another, from showing the dashboard in a frame.
 const SECURITY_HEADERS = {
   'cache-control': 'no-store',
   'x-content-type-options': 'nosniff',
-  'content-security-policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:",
+  'content-security-policy': "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' blob:; frame-ancestors 'none'",
+  'x-frame-options': 'DENY',
   'referrer-policy': 'no-referrer',
 };
 // The dashboard's script: classic scripts that share the page's globals, in load order.

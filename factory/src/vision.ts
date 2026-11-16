@@ -34,8 +34,8 @@ export const MAX_VISION_CHAPTERS = 64;
 export const MAX_VISION_FILE_BYTES = 512 * 1024;
 export const MAX_VISION_BYTES = 2 * 1024 * 1024; // one language, its files together
 // The page's own policy: a sandbox with scripts only (an opaque origin, without the dashboard's
-// cookie, storage or API) that loads nothing.
-export const VISION_PAGE_CSP = "sandbox allow-scripts; default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:";
+// cookie, storage or API) that loads nothing and that no page may show in a frame.
+export const VISION_PAGE_CSP = "sandbox allow-scripts; default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; frame-ancestors 'none'";
 
 export interface StoredLanguage { lang: VisionLanguage; files: number; updated: string }
 export interface VisionEntry { workspace: string; languages: StoredLanguage[] }

@@ -4,6 +4,7 @@
 // one checkout: the Implementer works in a worktree of it, so a separate work checkout
 // (`work_checkout`) is read for compatibility and ignored. A workspace's optional `handoff` wins
 // over SF_HANDOFF for its jobs; its optional `color` marks its cards on the board; its optional
+// `label` is what the dashboard's cards call the workspace instead of its name; its optional
 // `rules_skip` names the repository rule files not given to the agents. A workspace has an optional
 // `description`, `app` (workspaces of one app share one daily) and `digest: {track, my_work}`, and
 // the registry an optional top-level `digest` (the morning digest's times, weekdays only, model and
@@ -85,6 +86,8 @@ export function workspaceColor(name: string, color?: WorkspaceColor): WorkspaceC
 // The morning digest: a workspace's description and app, at most this long.
 export const MAX_DESCRIPTION_CHARS = 2000;
 export const MAX_APP_CHARS = 64;
+// A workspace's label: what fits a board card's first line beside a ticket key.
+export const MAX_LABEL_CHARS = 24;
 // "HH:MM", 00:00 to 23:59.
 export const DIGEST_TIME_PATTERN = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 export const MAX_LANGUAGE_CHARS = 40;
@@ -116,11 +119,20 @@ const explainSettingsSchema = z.strictObject({
   model: z.string().min(1).optional(),
 });
 
+// A workspace's label: what the dashboard's cards call it instead of its name; one line, trimmed.
+// The control characters are checked before the trim, so a line break or tab at either end is
+// refused, not trimmed away.
+const workspaceLabel = z.string()
+  // eslint-disable-next-line no-control-regex
+  .refine((label) => !/[\u0000-\u001f\u007f]/.test(label), 'must be one line without control characters')
+  .trim().min(1).max(MAX_LABEL_CHARS);
+
 const registrySchema = z.strictObject({
   workspaces: z.record(
     z.string().regex(WORKSPACE_NAME_PATTERN),
     z.strictObject({
       read_checkout: absolutePath, work_checkout: absolutePath.optional(), handoff: z.enum(HANDOFF_MODES).optional(), color: z.enum(WORKSPACE_COLORS).optional(),
+      label: workspaceLabel.optional(),
       notify: z.enum(NOTIFY_MODES).optional(),
       rules_skip: z.array(z.string().min(1)).optional(),
       description: z.string().max(MAX_DESCRIPTION_CHARS).optional(),

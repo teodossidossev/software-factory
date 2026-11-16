@@ -41,6 +41,8 @@ export interface WorkspaceRow {
   handoff: HandoffMode | null;
   // The workspace's colour on the board: its configured color, else the hash of its name.
   color: WorkspaceColor;
+  // The label its cards show instead of the name (workspaces.json label); absent when it has none.
+  label?: string;
   // The morning digest: its app (its own, else its name), its own description or null, the
   // description derived from the repository (the edit form's placeholder) or null, and its switches.
   app: string;
@@ -309,6 +311,7 @@ export async function defaultBranch(checkout: string): Promise<string> {
 function rowOf(name: string, entry: WorkspaceEntry, liveJobs: number, problem: string | null, derived: string | null): WorkspaceRow {
   return {
     name, path: entry.read_checkout, liveJobs, problem, handoff: entry.handoff ?? null, color: workspaceColor(name, entry.color),
+    ...(entry.label !== undefined ? { label: entry.label } : {}),
     app: workspaceApp(name, entry), description: entry.description ?? null, derived_description: derived, digest: workspaceDigest(entry),
   };
 }

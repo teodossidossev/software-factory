@@ -356,8 +356,6 @@ function toggleFold(name: unknown): void {
 // The workspace palette: the --ws-<name> tokens of app.css. The server sends each workspace's
 // colour (its own, else the one its name picks); the page only reads it.
 const WS_COLORS: readonly string[] = ['blue', 'teal', 'green', 'olive', 'orange', 'red', 'purple', 'grey'];
-// The longest workspace name a chip shows whole; a longer one is shortened in the middle.
-const WS_NAME_CHARS = 16;
 
 // The colour class of a workspace ("ws-teal"), or '' when the registry does not list it.
 function wsClass(name: string): string {
@@ -365,8 +363,11 @@ function wsClass(name: string): string {
   return color !== undefined && WS_COLORS.includes(color) ? `ws-${color}` : '';
 }
 
-// A long workspace name shortened in the middle: "very-long…ace-name"; the full name is the title.
-const shortName = (name: string): string => (name.length <= WS_NAME_CHARS ? name : `${name.slice(0, 7)}…${name.slice(-(WS_NAME_CHARS - 8))}`);
+// What a card calls a workspace: its label (the registry's label), else its whole name.
+function wsLabel(name: string): string {
+  const label = (state.workspaces ?? []).find((row) => row.name === name)?.label;
+  return label !== undefined && label !== '' ? label : name;
+}
 
 // The workspace's colour dot (decoration: the name always goes with it).
 function wsDot(name: string): HTMLElement {
@@ -375,11 +376,11 @@ function wsDot(name: string): HTMLElement {
   return dot;
 }
 
-// The workspace chip of a card's first line and the job page header: the dot and the name.
+// The workspace chip of a card's first line and the page headers: a pill in the workspace's colour
+// with its label or whole name, never shortened; its title gives the name.
 function wsChip(name: string): HTMLElement {
-  const chip = el('span', `wschip ${wsClass(name)}`.trim());
+  const chip = el('span', `wschip ${wsClass(name)}`.trim(), wsLabel(name));
   chip.setAttribute('title', `Workspace ${name}`);
-  chip.append(wsDot(name), el('span', 'wsname', shortName(name)));
   return chip;
 }
 

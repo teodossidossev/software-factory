@@ -522,26 +522,26 @@ button.tag:hover { border-color: var(--accent); }
 }
 
 /* Workspaces and dependencies on the board, and the cards that fit their column (the
-   prototype's .card with min-width: 0, a key that never wraps, the workspace chip and the check note
-   truncated with the full text as their title, the note under the title when the first line has no
-   room). Each workspace's colour: a 4px stripe on its cards, a dot beside its name (never colour
-   alone). A card's ⋯ menu holds Check, Archive and Delete…. Hovering or focusing a card outlines its
-   dependencies and dependents and dims the rest. */
+   prototype's .card with min-width: 0, a key that never wraps, the check note truncated with the
+   full text as its title, the note under the title when the first line has no room). The workspace
+   chip is whole: a pill in the workspace's colour with its label or name, moving to the next row
+   when the first line is full. Each workspace's colour: a 4px stripe and the chip on its cards, a
+   dot beside its name in lists (never colour alone). A card's ⋯ menu holds Check, Archive and
+   Delete…. Hovering or focusing a card outlines its dependencies and dependents and dims the rest. */
 .ws-blue { --ws: var(--ws-blue); } .ws-teal { --ws: var(--ws-teal); } .ws-green { --ws: var(--ws-green); } .ws-olive { --ws: var(--ws-olive); }
 .ws-orange { --ws: var(--ws-orange); } .ws-red { --ws: var(--ws-red); } .ws-purple { --ws: var(--ws-purple); } .ws-grey { --ws: var(--ws-grey); }
 .col ul { grid-template-columns: minmax(0, 1fr); }
 .col ul > li { min-width: 0; }
 .card { min-width: 0; border-left: 4px solid var(--ws, var(--border-strong)); container-type: inline-size; }
 .card:hover, .card:focus-visible, .card.hl { border-left-color: var(--ws, var(--accent)); }
-.card .row1 { min-width: 0; }
+.card .row1 { min-width: 0; flex-wrap: wrap; row-gap: 4px; }
 .card .row1 .key { white-space: nowrap; flex: none; }
 .card .row1 .tag { flex: none; }
-.wschip { display: inline-flex; align-items: center; gap: 4px; min-width: 0; font: 11px var(--mono); color: var(--muted); }
-.card .row1 .wschip { flex: 0 1 auto; overflow: hidden; }
-.wschip .wsname { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wschip { display: inline-block; max-width: 100%; padding: 0 7px; border: 1px solid var(--ws, var(--border-strong)); border-radius: 999px;
+  background: color-mix(in srgb, var(--ws, var(--s-ended)) 20%, var(--panel)); color: var(--fg); font: 600 11px/16px var(--mono); overflow-wrap: anywhere; }
+.card .row1 .wschip, .jhead .t1 .wschip { flex: none; }
 .wsdot { width: 8px; height: 8px; border-radius: 50%; background: var(--ws, var(--s-ended)); display: inline-block; flex: none; }
 .ws-name .wsdot { margin-right: 6px; }
-.jhead .t1 .wschip { flex: 0 1 auto; max-width: 30%; }
 .card .cnote { margin-left: auto; min-width: 0; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; }
 .card .cnote.below { display: none; justify-self: start; max-width: 100%; margin-left: 0; }
 @container (max-width: 340px) {

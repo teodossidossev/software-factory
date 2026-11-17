@@ -285,6 +285,7 @@ const isTicketPage = (data: unknown): data is TicketPage => isRecord(data) && is
 async function loadTicket(key: string, reset: boolean): Promise<void> {
   const load = {};
   state.tk.load = load;
+  const answers = tkPlannerAnswers(key);
   let response: Response | null = null;
   let data: unknown = null;
   let failure: string | null = null;
@@ -313,6 +314,7 @@ async function loadTicket(key: string, reset: boolean): Promise<void> {
   state.tk.error = null;
   state.tk.data = data;
   state.tk.check = data.check ?? null;
+  tkPlannerSeen(key, tkPlannerSession(data.planner_session), answers);
   const s = tkState(key);
   if (reset || !tkDirty(s)) {
     Object.assign(s, { text: data.task.text, saved: data.task.text, sha256: data.task.sha256, conflict: false });
@@ -406,8 +408,9 @@ function tkCheckWord(row: TicketEntry, view: CheckView | null): string {
 }
 
 // The header (the prototype's renderTicket header): ← Board, the key, the workspace, the title and
-// the draft tag; the conversation, Check the plan and Start now; the line with what it waits for,
-// where it starts from and the plan check in words.
+// the draft tag; the ChatGPT conversation's link or the planner session's (planner.js), Check the
+// plan and Start now; the line with what it waits for, where it starts from and the plan check in
+// words.
 function tkHead(key: string, row: TicketEntry, view: CheckView | null): HTMLElement {
   const backButton = button('btn back', '← Board ', { back: '' });
   backButton.append(el('span', 'kbd', 'Esc'));
@@ -423,6 +426,10 @@ function tkHead(key: string, row: TicketEntry, view: CheckView | null): HTMLElem
   const url = tkConversationUrl(row);
   if (url !== null) {
     tools.append(tabLink('btn linkbtn', 'Open the ChatGPT conversation ↗', url));
+  }
+  const planner = tkPlannerHref(tkPlanner.key === key ? tkPlanner.session : null);
+  if (planner !== null) {
+    tools.append(tabLink('btn linkbtn', 'Open the planner session ↗', planner));
   }
   if (view !== null) {
     const checking = tkChecking(key, view);
@@ -666,8 +673,9 @@ function tkCheckCard(key: string, row: TicketEntry, view: CheckView, s: TicketEd
 }
 
 // Planning conversation: "Plan with: ChatGPT · Claude Code" (the one in use pressed, the other
-// switches), then for ChatGPT its link, for Claude Code where to paste; the first message and its
-// Copy; then the ticket's planning chat link, opened and saved here.
+// switches), then the planner session's lines (planner.js: for Claude Code, or a session that runs
+// or starts), for ChatGPT its link, for Claude Code where to paste; the first message and its Copy;
+// then the ticket's planning chat link, opened and saved here.
 function tkConversation(row: TicketEntry): HTMLElement {
   const url = tkConversationUrl(row);
   const message = typeof row.conversation?.message === 'string' ? row.conversation.message : '';
@@ -679,7 +687,7 @@ function tkConversation(row: TicketEntry): HTMLElement {
   };
   const owners = el('div', 'tk-owner');
   owners.append(el('span', 'muted fs12', 'Plan with:'), choice('chatgpt', 'ChatGPT'), el('span', 'muted', '·'), choice('claude_code', 'Claude Code'));
-  const content: HTMLElement[] = [owners];
+  const content: HTMLElement[] = [owners, ...tkPlannerLines(keyOf(row), row)];
   if (row.owner === 'claude_code') {
     content.push(el('span', 'fs13', 'Paste it into a Claude Code session that has the software-factory MCP server (see the planning guide)'));
   } else if (url !== null) {
@@ -774,7 +782,8 @@ function renderTicket(): void {
 }
 
 // The page's actions (the prototype's tkAction): save, check, start, para (the paraphrase whole or
-// clamped), reload (the file as it is now), owner-<owner> (Plan with) and copy (the first message).
+// clamped), reload (the file as it is now), owner-<owner> (Plan with), copy (the first message),
+// planner-start (Start the planner) and planner-stop (End, asked first).
 function tkAction(action: string | undefined): void {
   const key = ui.ticket;
   const row = tkRow();
@@ -803,6 +812,10 @@ function tkAction(action: string | undefined): void {
     state.tk.error = null;
     renderTicket();
     void loadTicket(key, true);
+  } else if (action === 'planner-start') {
+    void tkPlannerStart(key);
+  } else if (action === 'planner-stop') {
+    openTicketConfirm('planner-stop', row);
   } else if (action === 'owner-chatgpt' || action === 'owner-claude_code') {
     void tkOwner(key, action === 'owner-claude_code' ? 'claude_code' : 'chatgpt');
   } else if (action === 'chat-save' || action === 'chat-remove') {

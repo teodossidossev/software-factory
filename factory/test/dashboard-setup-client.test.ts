@@ -4,7 +4,8 @@
 // conversation link (a click, never automatic) and the first message's Copy, an archived Task in
 // the drawer, and the Start of a ticket whose Task file is written, on its Queue card (SF-040);
 // New ticket's images (SF-064): paste and drop, the thumbnails and ×, the uploads after Create and
-// a failed one.
+// a failed one; the planner session of a ticket Claude Code plans (planner.js): Create & plan's
+// start, Start the planner, its lines and link, its read every 10 s, End.
 // Script checks, not browser acceptance: the manual steps are in factory/README.md.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -378,7 +379,8 @@ test('setup client: the new-ticket form posts the exact fields, clears on succes
   assert.deepEqual([card.className, card.scrolledIntoView, page.document.activeElement === card], ['card hl', 1, true]);
   assert.equal(page.location.hash, '');
   assert.deepEqual(page.requests.filter((request) => request.path.startsWith('http')), []);
-  // Claude Code, in your terminal: the choice goes with the request.
+  // Claude Code, in a planner session: the choice goes with the request; Create alone starts no
+  // planner session.
   page.$('open-new-ticket').click();
   page.$('owner-chatgpt').checked = false;
   page.$('owner-claude').checked = true;
@@ -388,17 +390,32 @@ test('setup client: the new-ticket form posts the exact fields, clears on succes
   page.$('ticket-form').dispatch('submit');
   await page.flush();
   assert.deepEqual(JSON.parse(posts(page)[2]!.body!), { workspace: 'web', ticket: 'W-8', title: 'Eight', request: 'Prototype it.', owner: 'claude_code' });
+  posts(page)[2]!.respond(200, created('web', 'W-8'));
+  await page.flush();
+  assert.equal(posts(page).length, 3);
 });
 
+// A ticket's planner session as the server shows it (planner_session, GET .../planner).
+interface SessionView { name: string; started_at: string; link: string | null }
+const SESSION: SessionView = { name: 'Planner app T-5', started_at: '2026-11-16T12:03:00.000Z', link: null };
+// SESSION's start as the page shows it (ticket-page.js day, in this machine's time).
+const SESSION_DAY = new Date(SESSION.started_at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+const HINT = ' Its link shows here once it first waits for you; until then find it under that name in the Claude app or on claude.ai/code.';
+
+// The planned ticket page's payload of a row, its planner session the last key.
+function pagePayload(row: ReturnType<typeof ticket>, session: SessionView | null = null) {
+  const text = `---\nticket: ${row.ticket}\ntitle: ${row.title}\nbase: main\n---\n`;
+  return {
+    ticket: row, task: { text, sha256: 'a'.repeat(64) }, plan: { starts_from: 'main', files: [], scoped: false, waits_for: [] }, check: null, history: [], queue: null, planner_session: session,
+  };
+}
+
 // The planned ticket page of a Queue card (SF-081): a click on the card, its page answered from
-// the card's row.
-async function openTaskOf(page: Page, key: string, row: ReturnType<typeof ticket>): Promise<void> {
+// the card's row (and the planner session, none by default).
+async function openTaskOf(page: Page, key: string, row: ReturnType<typeof ticket>, session: SessionView | null = null): Promise<void> {
   items(page, 'qlist').find((item) => item.dataset.ticket === key)!.click();
   await page.flush();
-  const text = `---\nticket: ${row.ticket}\ntitle: ${row.title}\nbase: main\n---\n`;
-  page.requests.find((request) => request.path === `api/tickets/${key}/page`)!.respond(200, {
-    ticket: row, task: { text, sha256: 'a'.repeat(64) }, plan: { starts_from: 'main', files: [], scoped: false, waits_for: [] }, check: null, history: [], queue: null,
-  });
+  page.requests.find((request) => request.path === `api/tickets/${key}/page`)!.respond(200, pagePayload(row, session));
   await page.flush();
 }
 
@@ -491,6 +508,232 @@ test('setup client: Start posts {} once for its ticket after the confirmation, k
   assert.equal(page.$('toast-text').textContent, 'task_draft: .software-factory/T-6.md is still the skeleton; the conversation writes it first.');
   assert.equal(start('app/T-6').disabled, false);
   assert.equal(posts(page).length, 3);
+});
+
+// The planner session's line in the Planning conversation card (a p), the card's links, the
+// page's header, and the GET reads of app/T-5's session.
+const plannerLine = (page: Page): FakeElement | null => conversationCard(page).querySelector('p');
+const pageLinks = (node: FakeElement): FakeElement[] => node.all().filter((element) => element.tagName === 'A');
+const ticketHead = (page: Page): FakeElement => page.$('ticket').querySelector('header.jhead')!;
+const sessionReads = (page: Page): FetchRequest[] => page.requests.filter((request) => request.method === 'GET' && request.path === 'api/tickets/app/T-5/planner');
+const claudeRow = () => ticket('app/T-5', { owner: 'claude_code', conversation: { message: 'Use the software-factory MCP server.', url: null } });
+
+test('setup client: a ticket Claude Code plans offers Start the planner; Start posts the planner route once and shows Starting… then the session; runs already and a refusal go to the toast', async () => {
+  const row = claudeRow();
+  const page = await openPage([], [workspace('app')], [row]);
+  await openTaskOf(page, 'app/T-5', row);
+  const card = conversationCard(page);
+  assert.deepEqual([plannerLine(page)!.textContent, plannerLine(page)!.getAttribute('role')], ['No planner session runs.', 'status']);
+  const start = named(card, 'Start the planner');
+  assert.equal(start.getAttribute('title'), 'Starts Claude Code with Remote Control in the planning copy of app, with /planning-tasks workspace app, ticket T-5');
+  // The paste line and the first message with its Copy stay.
+  assert.match(card.textContent, /Paste it into a Claude Code session that has the software-factory MCP server \(see the planning guide\)/);
+  assert.equal(card.querySelector('pre.cm')!.textContent, 'Use the software-factory MCP server.');
+  start.click();
+  start.click();
+  await page.flush();
+  assert.equal(posts(page).length, 1);
+  assert.deepEqual([posts(page)[0]!.path, posts(page)[0]!.body], ['api/tickets/app/T-5/planner', '{}']);
+  // While it is out: the line alone, no Start.
+  assert.equal(plannerLine(page)!.textContent, 'Starting the planner in the planning copy of app…');
+  assert.deepEqual(buttons(conversationCard(page)).filter((button) => ['Start the planner', 'End'].includes(button.textContent)), []);
+  posts(page)[0]!.respond(200, { ok: true, result: { started: false, session: SESSION } });
+  await page.flush();
+  assert.equal(page.$('toast-text').textContent, 'The planner of app/T-5 runs already.');
+  assert.equal(plannerLine(page)!.textContent, `Planner session "Planner app T-5" runs since ${SESSION_DAY}.${HINT}`);
+  const end = named(conversationCard(page), 'End');
+  assert.deepEqual([end.className, end.getAttribute('title'), end.disabled], ['btn small', 'End this Claude Code session (asks first)', false]);
+  assert.equal(named(conversationCard(page), 'Start the planner'), undefined);
+  assert.equal(posts(page).length, 1);
+
+  // A refusal: its code and message in the toast; the card offers Start again.
+  const refused = await openPage([], [workspace('app')], [row]);
+  await openTaskOf(refused, 'app/T-5', row);
+  named(conversationCard(refused), 'Start the planner').click();
+  await refused.flush();
+  const message = 'Claude Code does not trust the planning copy of app yet: run sf planner trust app, accept its trust dialog, then start the planner again.';
+  posts(refused)[0]!.respond(409, { ok: false, error: { code: 'planning_copy_untrusted', message } });
+  await refused.flush();
+  assert.equal(refused.$('toast-text').textContent, `planning_copy_untrusted: ${message}`);
+  assert.equal(plannerLine(refused)!.textContent, 'No planner session runs.');
+  assert.equal(named(conversationCard(refused), 'Start the planner').disabled, false);
+  assert.equal(posts(refused).length, 1);
+});
+
+test('setup client: a running planner session: its link in the card and the header, only a claude.ai/code one; its read every 10 s while shown and visible; the end it sees', async () => {
+  const row = claudeRow();
+  const page = await openPage([], [workspace('app')], [row]);
+  await openTaskOf(page, 'app/T-5', row, SESSION);
+  // No link known yet: the hint, nothing linked.
+  assert.equal(plannerLine(page)!.textContent, `Planner session "Planner app T-5" runs since ${SESSION_DAY}.${HINT}`);
+  assert.deepEqual([pageLinks(conversationCard(page)), pageLinks(ticketHead(page))], [[], []]);
+  assert.equal(sessionReads(page).length, 0);
+  // 10 s later the session is read again; its link is shown, in the card and the header.
+  assert.equal(page.tick(10000), 1);
+  await page.flush();
+  assert.equal(sessionReads(page).length, 1);
+  const href = 'https://claude.ai/code/session_01Ab';
+  sessionReads(page)[0]!.respond(200, { session: { ...SESSION, link: href } });
+  await page.flush();
+  assert.equal(plannerLine(page)!.textContent, `Planner session "Planner app T-5" runs since ${SESSION_DAY}.`);
+  const [open] = pageLinks(conversationCard(page));
+  assert.deepEqual([open!.textContent, open!.className, open!.href, open!.target, open!.rel], ['Open the planner session ↗', 'btn small linkbtn', href, '_blank', 'noopener noreferrer']);
+  const [head] = pageLinks(ticketHead(page));
+  assert.deepEqual([head!.textContent, head!.className, head!.href, head!.target, head!.rel], ['Open the planner session ↗', 'btn linkbtn', href, '_blank', 'noopener noreferrer']);
+  assert.equal(named(conversationCard(page), 'End').disabled, false);
+  // A hidden page reads nothing; the timer goes on.
+  page.document.visibilityState = 'hidden';
+  assert.equal(page.tick(10000), 1);
+  await page.flush();
+  assert.equal(sessionReads(page).length, 1);
+  page.document.visibilityState = 'visible';
+  // A failed read keeps the card as it was.
+  assert.equal(page.tick(10000), 1);
+  await page.flush();
+  assert.equal(sessionReads(page).length, 2);
+  sessionReads(page)[1]!.fail();
+  await page.flush();
+  assert.equal(pageLinks(conversationCard(page))[0]!.href, href);
+  assert.equal(plannerLine(page)!.textContent, `Planner session "Planner app T-5" runs since ${SESSION_DAY}.`);
+  // A link that is not a claude.ai/code session page is linked nowhere.
+  assert.equal(page.tick(10000), 1);
+  await page.flush();
+  sessionReads(page)[2]!.respond(200, { session: { ...SESSION, link: 'https://evil.example/x' } });
+  await page.flush();
+  assert.deepEqual([pageLinks(conversationCard(page)), pageLinks(ticketHead(page))], [[], []]);
+  assert.equal(plannerLine(page)!.textContent, `Planner session "Planner app T-5" runs since ${SESSION_DAY}.${HINT}`);
+  // The read that finds none: ended, Start the planner, no further read.
+  assert.equal(page.tick(10000), 1);
+  await page.flush();
+  sessionReads(page)[3]!.respond(200, { session: null });
+  await page.flush();
+  assert.equal(plannerLine(page)!.textContent, 'The planner session ended.');
+  assert.equal(named(conversationCard(page), 'End'), undefined);
+  assert.equal(named(conversationCard(page), 'Start the planner').disabled, false);
+  assert.equal(page.tick(10000), 0);
+  assert.equal(sessionReads(page).length, 4);
+
+  // A page that left the ticket reads nothing.
+  const left = await openPage([], [workspace('app')], [row]);
+  await openTaskOf(left, 'app/T-5', row, SESSION);
+  left.$('ticket').querySelector('[data-back]')!.click();
+  await left.flush();
+  left.tick(10000);
+  await left.flush();
+  assert.equal(sessionReads(left).length, 0);
+});
+
+test('setup client: End asks first, then posts the stop route once and shows the session ended', async () => {
+  const row = claudeRow();
+  const page = await openPage([], [workspace('app')], [row]);
+  await openTaskOf(page, 'app/T-5', row, SESSION);
+  named(conversationCard(page), 'End').click();
+  assert.equal(page.$('ticket-confirm').hidden, false);
+  assert.deepEqual([page.$('ticket-confirm-title').textContent, page.$('ticket-confirm-text').textContent, page.$('ticket-ok').textContent, page.$('ticket-ok').className], [
+    'End the planner of T-5?',
+    'Ends the Claude Code session that plans T-5 in the planning copy of app, even in the middle of an answer. What it already wrote, such as the Task file, stays; Start the planner then begins a new session.',
+    'End the session', 'btn btn-danger',
+  ]);
+  // Cancel posts nothing.
+  page.$('ticket-cancel').click();
+  await page.flush();
+  assert.deepEqual([page.$('ticket-confirm').hidden, posts(page).length], [true, 0]);
+  // The confirmation posts once; End reads Ending… and is off meanwhile.
+  named(conversationCard(page), 'End').click();
+  page.$('ticket-ok').click();
+  page.$('ticket-ok').click();
+  await page.flush();
+  assert.equal(posts(page).length, 1);
+  assert.deepEqual([posts(page)[0]!.path, posts(page)[0]!.body], ['api/tickets/app/T-5/planner/stop', '{}']);
+  const ending = named(conversationCard(page), 'Ending…');
+  assert.equal(ending.disabled, true);
+  posts(page)[0]!.respond(200, { ok: true, result: { stopped: SESSION } });
+  await page.flush();
+  assert.equal(plannerLine(page)!.textContent, 'The planner session ended.');
+  assert.equal(page.$('toast-text').textContent, 'Ended the planner of app/T-5.');
+  assert.equal(named(conversationCard(page), 'Start the planner').disabled, false);
+  // No read is due any more.
+  assert.equal(page.tick(10000), 0);
+  assert.equal(posts(page).length, 1);
+});
+
+test('setup client: an answer of Start the planner for a ticket the page left changes nothing of the ticket it shows: its session and its read every 10 s stay', async () => {
+  const left = claudeRow();
+  const shown = ticket('app/T-6', { owner: 'claude_code', conversation: { message: 'Use the software-factory MCP server.', url: null } });
+  const running = { ...SESSION, name: 'Planner app T-6' };
+  const runningLine = `Planner session "Planner app T-6" runs since ${SESSION_DAY}.${HINT}`;
+  const shownReads = (page: Page): FetchRequest[] => page.requests.filter((request) => request.method === 'GET' && request.path === 'api/tickets/app/T-6/planner');
+
+  // Start on T-5; T-6, whose session runs, opened before the answer.
+  const page = await openPage([], [workspace('app')], [left, shown]);
+  await openTaskOf(page, 'app/T-5', left);
+  named(conversationCard(page), 'Start the planner').click();
+  await page.flush();
+  page.$('ticket').querySelector('[data-back]')!.click();
+  await openTaskOf(page, 'app/T-6', shown, running);
+  posts(page)[0]!.respond(200, { ok: true, result: { started: true, session: SESSION } });
+  await page.flush();
+  assert.equal(page.$('toast-text').textContent, 'The planner of app/T-5 started.');
+  assert.equal(plannerLine(page)!.textContent, runningLine);
+  assert.equal(page.tick(10000), 1);
+  await page.flush();
+  assert.equal(shownReads(page).length, 1);
+  shownReads(page)[0]!.respond(200, { session: running });
+  await page.flush();
+  assert.equal(plannerLine(page)!.textContent, runningLine);
+  assert.equal(page.tick(10000), 1);
+  await page.flush();
+  assert.equal(shownReads(page).length, 2);
+});
+
+test('setup client: a read of a ticket\'s session sent before its End answered, while the page showed another ticket, is not applied once the ticket is open again', async () => {
+  const row = claudeRow();
+  const other = ticket('app/T-6', { owner: 'claude_code', conversation: { message: 'Use the software-factory MCP server.', url: null } });
+  const page = await openPage([], [workspace('app')], [row, other]);
+  await openTaskOf(page, 'app/T-5', row, SESSION);
+  // T-5's read goes out; End is confirmed while it is out.
+  assert.equal(page.tick(10000), 1);
+  await page.flush();
+  assert.equal(sessionReads(page).length, 1);
+  named(conversationCard(page), 'End').click();
+  page.$('ticket-ok').click();
+  await page.flush();
+  // T-6 opened; End answers there.
+  page.$('ticket').querySelector('[data-back]')!.click();
+  await openTaskOf(page, 'app/T-6', other);
+  posts(page)[0]!.respond(200, { ok: true, result: { stopped: SESSION } });
+  await page.flush();
+  assert.equal(page.$('toast-text').textContent, 'Ended the planner of app/T-5.');
+  // T-5 opened again: its payload has no session; then the old read answers with the session before End.
+  page.$('ticket').querySelector('[data-back]')!.click();
+  items(page, 'qlist').find((item) => item.dataset.ticket === 'app/T-5')!.click();
+  await page.flush();
+  page.requests.filter((request) => request.path === 'api/tickets/app/T-5/page').at(-1)!.respond(200, pagePayload(row));
+  await page.flush();
+  assert.equal(plannerLine(page)!.textContent, 'No planner session runs.');
+  sessionReads(page)[0]!.respond(200, { session: SESSION });
+  await page.flush();
+  assert.equal(plannerLine(page)!.textContent, 'No planner session runs.');
+  assert.equal(named(conversationCard(page), 'End'), undefined);
+  assert.equal(page.tick(10000), 0);
+  assert.equal(sessionReads(page).length, 1);
+});
+
+test('setup client: a ticket ChatGPT plans has no planner line unless its session runs', async () => {
+  const row = ticket('app/T-7');
+  const page = await openPage([], [workspace('app')], [row]);
+  await openTaskOf(page, 'app/T-7', row);
+  assert.equal(plannerLine(page), null);
+  assert.deepEqual(buttons(conversationCard(page)).filter((button) => ['Start the planner', 'End'].includes(button.textContent)), []);
+  assert.equal(pageLinks(conversationCard(page))[0]!.textContent, 'Open the ChatGPT conversation ↗');
+
+  // Its session runs: the running line and End, no Start; the ChatGPT link stays.
+  const running = await openPage([], [workspace('app')], [row]);
+  await openTaskOf(running, 'app/T-7', row, { ...SESSION, name: 'Planner app T-7' });
+  assert.equal(plannerLine(running)!.textContent, `Planner session "Planner app T-7" runs since ${SESSION_DAY}.${HINT}`);
+  assert.equal(named(conversationCard(running), 'End').disabled, false);
+  assert.equal(named(conversationCard(running), 'Start the planner'), undefined);
+  assert.equal(pageLinks(conversationCard(running))[0]!.textContent, 'Open the ChatGPT conversation ↗');
 });
 
 // New ticket's images (SF-064): the bytes each type is told by.
@@ -773,7 +1016,8 @@ test('setup client: Create & plan with ChatGPT opens the tab in the click itself
   page.$('open-new-ticket').click();
   // The button sits after Create, off exactly when Create is.
   assert.deepEqual([page.$('ticket-plan').textContent, page.$('ticket-plan').type, page.$('ticket-plan').disabled], ['Create & plan', 'button', false]);
-  assert.equal(page.$('ticket-plan').getAttribute('title'), 'Creates the ticket, then opens its planning conversation in a new tab (ChatGPT) or its page (Claude Code)');
+  assert.equal(page.$('ticket-plan').getAttribute('title'), 'Creates the ticket, then opens its planning conversation in a new tab (ChatGPT), or starts its planner session and opens its page (Claude Code)');
+  assert.equal(page.$('owner-claude').parentNode!.textContent.trim(), 'Claude Code, in a planner session');
 
   // A field missing: no tab, no request, Create's words.
   page.$('ticket-plan').click();
@@ -872,7 +1116,8 @@ test('setup client: Create & plan without a link closes the tab, with a blocked 
   await page.flush();
   assert.equal(page.location.hash, '#web/W-9/ticket');
 
-  // Claude Code: no tab; the ticket's page opens, where the planning card has the message to copy.
+  // Claude Code: no tab; once created, the ticket's planner session starts (one post, {}), and the
+  // ticket's page opens, where the planning card shows it starting, then running.
   page.$('ticket').querySelector('[data-back]')!.click();
   page.$('open-new-ticket').click();
   page.window.blockPopups = false;
@@ -882,12 +1127,24 @@ test('setup client: Create & plan without a link closes the tab, with a blocked 
   page.$('ticket-plan').click();
   await page.flush();
   assert.equal(page.opened.length, 3);
+  assert.equal(posts(page).length, 4);
   posts(page)[3]!.respond(200, created('web', 'W-10'));
   await page.flush();
   assert.deepEqual([pageReads(page, 'web/W-10').length, page.$('toast-text').textContent], [0, createdText('web', 'W-10')]);
-  page.streams.at(-1)!.emit('tickets', { tickets: [ticket('web/W-10', { owner: 'claude_code' })], archived: [] });
+  assert.equal(posts(page).length, 5);
+  assert.deepEqual([posts(page)[4]!.path, posts(page)[4]!.body], ['api/tickets/web/W-10/planner', '{}']);
+  const row = ticket('web/W-10', { owner: 'claude_code' });
+  page.streams.at(-1)!.emit('tickets', { tickets: [row], archived: [] });
   await page.flush();
   assert.equal(page.location.hash, '#web/W-10/ticket');
+  pageReads(page, 'web/W-10')[0]!.respond(200, pagePayload(row));
+  await page.flush();
+  assert.equal(plannerLine(page)!.textContent, 'Starting the planner in the planning copy of web…');
+  posts(page)[4]!.respond(200, { ok: true, result: { started: true, session: { ...SESSION, name: 'Planner web W-10' } } });
+  await page.flush();
+  assert.equal(page.$('toast-text').textContent, 'The planner of web/W-10 started.');
+  assert.equal(plannerLine(page)!.textContent, `Planner session "Planner web W-10" runs since ${SESSION_DAY}.${HINT}`);
+  assert.equal(posts(page).length, 5);
 });
 
 test('setup client: a ticket Create & plan made opens only where the create left the user; Create alone opens nothing', async () => {

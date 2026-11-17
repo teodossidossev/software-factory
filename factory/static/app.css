@@ -475,6 +475,18 @@ textarea.mdedit.fld { font: 12.5px/1.5 var(--mono); padding: 8px; border: 1px so
 .coord { margin: 12px max(16px, env(safe-area-inset-right, 0px)) 0 max(16px, env(safe-area-inset-left, 0px)); padding: 10px 12px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); display: grid; gap: 6px; font-size: 13px; min-width: 0; }
 .coord.asks { border-color: var(--accent); box-shadow: inset 3px 0 var(--accent); }
 .coord-title { margin: 0; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+/* Zen's lights, after the panel of light bars of the ship's computer in Blake's 7: five thin bars
+   after the title, dim at rest; lit (.lit, for 3 s after a job changes state) they take the accent
+   and pulse one after the other. With reduced motion the global rule stops the pulse and they
+   show lit, steady. */
+.coord-zen { display: inline-flex; gap: 2px; margin-left: 8px; vertical-align: -1px; }
+.coord-zen i { width: 3px; height: 12px; border-radius: 1px; background: var(--muted); opacity: .35; transition: background-color .3s, opacity .3s; }
+.coord-zen.lit i { background: var(--accent); opacity: 1; animation: zen .72s ease-in-out infinite; }
+.coord-zen.lit i:nth-child(2) { animation-delay: .12s; }
+.coord-zen.lit i:nth-child(3) { animation-delay: .24s; }
+.coord-zen.lit i:nth-child(4) { animation-delay: .36s; }
+.coord-zen.lit i:nth-child(5) { animation-delay: .48s; }
+@keyframes zen { 50% { opacity: .3; } }
 .coord-box { display: grid; gap: 6px; min-width: 0; }
 .coord-status { display: grid; gap: 6px; line-height: 1.5; overflow-wrap: anywhere; }
 .coord-status p { margin: 0; white-space: pre-line; }

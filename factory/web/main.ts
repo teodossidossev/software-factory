@@ -42,6 +42,8 @@ function openStream(): void {
         state.startHolds.delete(ticket);
       }
     }
+    // The Coordinator card's Zen lights flash when the list changed (coordinator.js).
+    coordZenOnJobs(state.jobs);
     renderJobs();
     if (ui.pending) {
       route();

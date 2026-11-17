@@ -95,7 +95,7 @@ test('skills client: #skills, the Skills tab and the page select open the page a
   reads(page)[0]!.respond(200, payload());
   await page.flush();
 
-  assert.deepEqual(heads(page), ['Skill', 'Implementer · 2', 'Claude review · 1', 'Codex gate · 1', 'Task check · 0', 'Planner (ChatGPT) · 2Applies to the next planning request', 'Coordinator (Claude Code) · 2']);
+  assert.deepEqual(heads(page), ['Skill', 'Implementer · 2', 'Claude review · 1', 'Codex gate · 1', 'Task check · 0', "Planner (ChatGPT or Claude Code) · 2Applies to ChatGPT's next planning request and the next sf planner setup", 'Coordinator (Claude Code) · 2']);
   assert.deepEqual(rows(page).map((row) => row.querySelector('[data-sk-open]')!.textContent), ['code-review', 'grilling', 'implement', 'tdd']);
   assert.deepEqual(rows(page).map(boxes), [
     [false, true, true, false, false, true],
@@ -110,7 +110,7 @@ test('skills client: #skills, the Skills tab and the page select open the page a
   assert.equal(first.querySelector('.sk-meta.muted')!.textContent, 'mattpocock/skills · 2026-11-10');
   assert.equal(rows(page)[2]!.querySelector('.sk-desc'), null);
   assert.equal(box(page, 'tdd for Implementer').checked, true);
-  assert.equal(box(page, 'grilling for Planner (ChatGPT)').checked, true);
+  assert.equal(box(page, 'grilling for Planner (ChatGPT or Claude Code)').checked, true);
   assert.match(root(page).textContent, /Changes apply to jobs started after; running jobs keep their skills\./);
 
   const board = await openPage('');
@@ -233,8 +233,8 @@ test('skills client: the filter hides the rows whose name and description miss i
   assert.deepEqual(rows(page).filter((row) => !row.hidden).map((row) => row.dataset.skRow), ['tdd']);
 
   const missing = root(page).querySelectorAll('.sk-missing li');
-  assert.deepEqual(missing.map((item) => item.querySelector('.sk-missing-text')!.textContent), ['Chosen but not installed: old-skill (Planner (ChatGPT))']);
-  const off = box(page, 'old-skill for Planner (ChatGPT)');
+  assert.deepEqual(missing.map((item) => item.querySelector('.sk-missing-text')!.textContent), ['Chosen but not installed: old-skill (Planner (ChatGPT or Claude Code))']);
+  const off = box(page, 'old-skill for Planner (ChatGPT or Claude Code)');
   assert.equal(off.checked, true);
   click(off);
   await page.flush();
@@ -242,7 +242,7 @@ test('skills client: the filter hides the rows whose name and description miss i
   puts(page)[0]!.respond(200, { ok: true, result: payload({ roles: { ...ROLES, planner: ['grilling'] }, missing: [] }) });
   await page.flush();
   assert.equal(root(page).querySelector('.sk-missing'), null);
-  assert.equal(heads(page)[5], 'Planner (ChatGPT) · 1Applies to the next planning request');
+  assert.equal(heads(page)[5], "Planner (ChatGPT or Claude Code) · 1Applies to ChatGPT's next planning request and the next sf planner setup");
   // The filter stays across the re-render.
   assert.deepEqual(rows(page).filter((row) => !row.hidden).map((row) => row.dataset.skRow), ['tdd']);
 

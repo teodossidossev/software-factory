@@ -25,7 +25,7 @@ const SK_ROLES: readonly SkColumn[] = [
   { role: 'claude_review', head: 'Claude review' },
   { role: 'codex_gate', head: 'Codex gate' },
   { role: 'task_check', head: 'Task check' },
-  { role: 'planner', head: 'Planner (ChatGPT)' },
+  { role: 'planner', head: 'Planner (ChatGPT or Claude Code)' },
 ];
 // The table's columns: the roles', then the coordinator's.
 const SK_COLUMNS: readonly SkColumn[] = [...SK_ROLES, { role: 'coordinator', head: 'Coordinator (Claude Code)' }];
@@ -215,7 +215,7 @@ function skillsTable(data: SkillsPayload): HTMLElement {
   for (const { role, head } of SK_COLUMNS) {
     const th = el('th', 'sk-role', role === 'coordinator' && unread !== null ? head : `${head} · ${shownList(data, role).length}`);
     if (role === 'planner') {
-      th.append(el('span', 'sk-note', 'Applies to the next planning request'));
+      th.append(el('span', 'sk-note', "Applies to ChatGPT's next planning request and the next sf planner setup"));
     }
     if (role === 'coordinator' && unread !== null) {
       th.setAttribute('title', unread);

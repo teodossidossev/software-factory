@@ -469,8 +469,9 @@ change. It exits 0 without hits and 1 with hits. Only `sf guard` and the hook sh
 
 The factory's agents use your installed skills, the ones the `skills` tool keeps in
 `~/.agents/skills` (`SF_SKILLS_DIR`) with its `.skill-lock.json`. You choose which of them each
-agent role uses; the choice is one, shared by all workspaces (no workspace has its own). The factory installs nothing: run `npx skills add
-<source>` in a terminal, then switch the skill on for a role.
+agent role uses; the choice is one, shared by all workspaces (no workspace has its own). The factory installs nothing for you: run `npx skills add
+<source>` in a terminal, then switch the skill on for a role. It copies skills in one place:
+`sf planner setup` puts the `planner` role's skills into the workspace's planning copy (below).
 
 | Role | What it is | Its skills by default | How it gets them |
 | --- | --- | --- | --- |
@@ -478,7 +479,7 @@ agent role uses; the choice is one, shared by all workspaces (no workspace has i
 | `claude_review` | The Claude review | `code-review` | `code-review` is its review method; each other skill is a `<skill>` block in its prompt. |
 | `codex_gate` | The Codex gate | `code-review` | As the Claude review. |
 | `task_check` | The Task check | none | Each skill is a `<skill>` block in its prompt. |
-| `planner` | ChatGPT's planning method | `grilling` | Each skill's `SKILL.md` body, in order, after the Quick start. |
+| `planner` | The planner, ChatGPT or Claude Code | `grilling` | ChatGPT (the MCP server's instructions): each skill's `SKILL.md` body, in order, after the Quick start. Claude Code: `sf planner setup` copies each skill from the snapshot into the planning copy's `.claude/skills/`, beside the factory's `planning-tasks`, and switches your other skills off there (`skillOverrides`; your claude.ai skills with `syncClaudeAiSkills`). |
 
 A role can have no skill at all, `implement` and `code-review` included: it then works without a
 method (the planner with the Quick start alone). The `<skill>` blocks of one prompt take at most
@@ -494,7 +495,7 @@ sf skills set implementer implement off    # take one out
 choice is `skill-roles.json` in the state directory (`{ "version": 1, "roles": { <role>: [...] }
 }`; a role missing from it has its default). A job keeps the choice it started with; a change
 applies to the jobs started after it, to the next Task check and, in `sf serve`, to the next
-planning request. `SF_REVIEW_SKILL` and `SF_PLAN_SKILL`, when set, win over the choice. The
+planning request, and to a planning copy at its next `sf planner setup`. `SF_REVIEW_SKILL` and `SF_PLAN_SKILL`, when set, win over the choice. The
 dashboard reads and changes the same choice through `GET api/skills`, `GET api/skills/<name>`
 and `PUT api/skills/roles/<role>` (factory/README.md, section The agents' skills).
 
@@ -503,14 +504,15 @@ and `PUT api/skills/roles/<role>` (factory/README.md, section The agents' skills
 The dashboard's **Skills** tab (after Workspaces; `#skills`) shows the same choice and changes it
 by clicks, on the local and the remote dashboard alike. Each installed skill is a row (its name,
 the first line of its description, its source and updated date) with one checkbox per role:
-Implementer, Claude review, Codex gate, Task check and Planner (ChatGPT), each head with its
+Implementer, Claude review, Codex gate, Task check and Planner (ChatGPT or Claude Code), each head with its
 count. A click saves the role's new list at once, with no Save button; the boxes stay disabled
 until the factory answers, and a refusal or a lost connection puts it back with the message next
 to the table. A filter above the table finds a skill by name or description. A skill a role chose
 that is not installed is listed below the table ("Chosen but not installed"), with its boxes to
 switch it off. A click on a skill's name shows its `SKILL.md` as plain text in a side panel (Close
 or Esc). As with `sf skills set`, a change applies to the jobs started after it (running jobs keep
-their skills) and, for the Planner column, to the next planning request. The page installs
+their skills) and, for the Planner column, to ChatGPT's next planning request and to a planning
+copy at its next `sf planner setup`. The page installs
 nothing: `npx skills add <source>` in a terminal does.
 
 The last column, **Coordinator (Claude Code)**, is your own Claude Code session in the factory's

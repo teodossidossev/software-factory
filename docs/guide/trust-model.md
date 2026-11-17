@@ -248,7 +248,8 @@ machine through it. Whatever the Implementer or a reviewer quoted from your code
 goes too. `suggest_changes` sends nothing out; it stores a note you send or dismiss.
 
 A Claude Code planner in a planning copy (`sf planner setup`) reads the copy with its own tools
-and the user's request and rules files with the Read tool; the same files go to Anthropic. Its
+(the planner's skills included) and, with the Read tool, the user's request and rules files and
+the English files of the workspace's vision; the same files go to Anthropic. Its
 shell commands run in Claude Code's sandbox; the secret files are denied to every tool (README,
 The planning copy).
 

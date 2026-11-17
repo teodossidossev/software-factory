@@ -13,11 +13,22 @@ import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { FactoryError } from '../src/errors.js';
-import { plannerCommand, plannerSettings } from '../src/planning-copy.js';
-import { type Env, git, newEnv, newRepo, processEnv, runCli, temp } from './support/harness.js';
+import { plannerCommand, plannerSettings, skillsOff } from '../src/planning-copy.js';
+import { rolesOf, writeRoles } from '../src/skill-roles.js';
+import { syncSkills } from '../src/skills.js';
+import { type Env, git, newEnv, newRepo, processEnv, runCli, skillsSourceDir, temp } from './support/harness.js';
 
 const TOKEN = 'ab'.repeat(32);
 const SKILL_SOURCE = fileURLToPath(new URL('../../skills/planning-tasks/', import.meta.url));
+// The pointers' last item without a vision of the workspace.
+const NO_VISION = '- **The product vision:** none is stored for this workspace.';
+
+// The warning for a planner skill the snapshot lacks.
+const missingSkill = (skill: string): string =>
+  `warning: the planner's skill ${skill} is not in the factory's skills snapshot; the copy goes without it (sf skills shows what is installed).`;
+// stdout without those warnings: the tests without a skills snapshot get one for grilling.
+const withoutMissingSkills = (stdout: string): string => stdout.split('\n').filter((line) => !line.startsWith("warning: the planner's skill ")).join('\n');
+const escaped = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 // A fake claude first on PATH: it logs its folder and arguments to claude.log beside it; with fail,
 // `claude mcp add` prints its arguments (the header with the token) to stderr and exits 1.
@@ -110,6 +121,7 @@ test('a first run clones the workspace, installs the skill and the pointers, and
     `  \`${join(env.state, 'requests', 'app', '<ticket>.md')}\``,
     "- **The user's rules for this workspace.** The Task check and the reviewers enforce them. Read",
     `  them before any test plan: \`${join(env.config, 'rules', 'app.md')}\``,
+    NO_VISION,
     '',
   ].join('\n'));
 
@@ -127,10 +139,13 @@ test('a first run clones the workspace, installs the skill and the pointers, and
   }
 
   const short = git(copy, 'rev-parse', '--short', 'HEAD').trim();
+  // No skills snapshot: the default role's grilling is a warning.
   assert.deepEqual(result.stdout.trim().split('\n'), [
+    missingSkill('grilling'),
     `Planning copy of app: ${copy} (main at ${short})`,
     'MCP server software-factory: registered for this folder only (Claude Code local scope)',
     'Skill planning-tasks: installed in .claude/skills',
+    'Skills switched off for the planner: 0 of yours (skillOverrides), and your claude.ai skills (syncClaudeAiSkills false)',
     'Pointers: .claude/planning-copy.md',
     "Settings: read-only; shell commands in Claude Code's sandbox (no writes, no network); secrets denied",
     'Hooks: the phone hears when the planner waits for you (sf planner waiting)',
@@ -148,7 +163,7 @@ test('a second run fast-forwards a clean copy, leaves a changed one, and replace
   const first = pushCommit(repo, 'first.txt');
   const clean = await setup(env);
   assert.equal(git(copy, 'rev-parse', 'HEAD').trim(), first);
-  assert.doesNotMatch(clean.stdout, /^(note|warning):/m);
+  assert.doesNotMatch(withoutMissingSkills(clean.stdout), /^(note|warning):/m);
   assert.equal((await readFile(join(copy, '.git', 'info', 'exclude'), 'utf8')).split('\n').filter((line) => line === '/.claude/').length, 1);
 
   // A copy with changes is left as it is and says so.
@@ -177,7 +192,7 @@ test('a second run fast-forwards a clean copy, leaves a changed one, and replace
   assert.deepEqual(await readdir(outside), ['SKILL.md']);
   assert.equal(await readFile(join(outside, 'SKILL.md'), 'utf8'), 'theirs\n');
   assert.match(await readFile(join(copy, '.claude', 'planning-copy.md'), 'utf8'),
-    new RegExp(`test plan: \`${join(env.config, 'rules', 'app.md')}\` and \`${join(env.config, 'rules', 'global.md')}\`\n$`));
+    new RegExp(`test plan: \`${join(env.config, 'rules', 'app.md')}\` and \`${join(env.config, 'rules', 'global.md')}\`\n${escaped(NO_VISION)}\n$`));
 
   // The registered checkout was never fetched into or moved.
   assert.equal(git(repo, 'rev-parse', 'HEAD'), checkoutHead);
@@ -435,21 +450,23 @@ test("sf planner setup writes the copy's settings and keeps the file's other key
   // A first run: the file made, mode 0600, the token in it nowhere.
   const first = await setup(env);
   assert.match(first.stdout, /^Settings: read-only; shell commands in Claude Code's sandbox \(no writes, no network\); secrets denied$/m);
-  assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), { ...expected, hooks: HOOKS });
+  assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), { ...expected, hooks: HOOKS, skillOverrides: {}, syncClaudeAiSkills: false });
   assert.equal((await stat(file)).mode & 0o777, 0o600);
   assert.equal((await readFile(file, 'utf8')).includes(TOKEN), false);
 
-  // The user's keys kept with their values and in their place, permissions replaced whole, sandbox
-  // last; the hooks' Stop and Notification replaced, PreToolUse kept (PW-6); written in place, the
-  // file keeps its mode 0600.
+  // The user's keys kept with their values and in their place, permissions and skillOverrides
+  // replaced whole, sandbox and syncClaudeAiSkills last; the hooks' Stop and Notification replaced,
+  // PreToolUse kept (PW-6); written in place, the file keeps its mode 0600.
   const preToolUse = [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'echo checked' }] }];
   const hooks = { Stop: [{ hooks: [{ type: 'command', command: 'echo stopped' }] }], PreToolUse: preToolUse };
-  await writeFile(file, `${JSON.stringify({ model: 'opus', permissions: { allow: ['Bash(awk:*)'], defaultMode: 'acceptEdits' }, hooks })}\n`);
+  await writeFile(file, `${JSON.stringify({ model: 'opus', permissions: { allow: ['Bash(awk:*)'], defaultMode: 'acceptEdits' }, skillOverrides: { mine: 'off' }, hooks })}\n`);
   const second = await setup(env);
   assert.match(second.stdout, /^Settings: /m);
   const written = JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>;
-  assert.deepEqual(Object.keys(written), ['model', 'permissions', 'hooks', 'sandbox']);
-  assert.deepEqual(written, { model: 'opus', permissions: expected.permissions, hooks: { PreToolUse: preToolUse, ...HOOKS }, sandbox: expected.sandbox });
+  assert.deepEqual(Object.keys(written), ['model', 'permissions', 'skillOverrides', 'hooks', 'sandbox', 'syncClaudeAiSkills']);
+  assert.deepEqual(written, {
+    model: 'opus', permissions: expected.permissions, skillOverrides: {}, hooks: { PreToolUse: preToolUse, ...HOOKS }, sandbox: expected.sandbox, syncClaudeAiSkills: false,
+  });
   assert.equal(JSON.stringify(written).includes('Bash(awk:*)'), false);
   assert.equal((await stat(file)).mode & 0o777, 0o600);
 
@@ -615,7 +632,7 @@ test("sf planner setup keeps the repository's Claude Code configuration out of t
   // CO-1: a first run.
   const first = await setup(env);
   leftOut();
-  assert.doesNotMatch(first.stdout, /^(note|warning):/m);
+  assert.doesNotMatch(withoutMissingSkills(first.stdout), /^(note|warning):/m);
   assert.equal(await readFile(join(copy, '.claude', 'CLAUDE.md'), 'utf8'), '.claude/CLAUDE.md\n');
 
   // CO-2: a copy made before (its sparse checkout disabled) loses them at its next run.
@@ -646,7 +663,7 @@ test("sf planner setup keeps the repository's Claude Code configuration out of t
   const changed = await runCli(env, ['planner', 'setup', 'app']);
   assert.equal(changed.code, 0, changed.stderr);
   assert.match(changed.stdout, /^warning: \.claude\/agents\/a\.md stays in the planning copy of app: it has changes of yours, or Git does not track it\. Claude Code would load it there: remove it and run sf planner setup app again\.$/m);
-  assert.equal(changed.stdout.match(/^warning:/gm)?.length, 1, changed.stdout);
+  assert.equal(withoutMissingSkills(changed.stdout).match(/^warning:/gm)?.length, 1, changed.stdout);
   assert.equal(await readFile(join(copy, '.claude', 'agents', 'a.md'), 'utf8'), 'mine\n');
   leftOut(['.claude/agents/a.md'], ' M .claude/agents/a.md\n');
 });
@@ -714,4 +731,126 @@ test('a repository that tracks .claude as a link is refused', async () => {
     return true;
   });
   assert.equal(existsSync(join(copy, '.claude', 'planning-copy.md')), false);
+});
+
+// A folder dir/name holding a SKILL.md.
+async function skillFolder(dir: string, name: string): Promise<void> {
+  await mkdir(join(dir, name), { recursive: true });
+  await writeFile(join(dir, name, 'SKILL.md'), `${name}\n`);
+}
+
+// Every file under dir, relative to it, sorted.
+async function filesOf(dir: string): Promise<string[]> {
+  return (await walk(dir)).map((path) => path.slice(dir.length + 1)).sort();
+}
+
+test("sf planner setup installs the planner's skills from the snapshot and switches the others off", async () => {
+  const { env, copy } = await plannerEnv('planner-skills');
+  await writeRoles(env.state, { ...rolesOf(undefined), planner: ['grilling', 'tdd', 'gone'] });
+  await syncSkills(env.state, processEnv(env));
+  const personal = join(env.home, '.claude', 'skills');
+  await skillFolder(personal, 'code-review');
+  await symlink(join(skillsSourceDir(), 'implement'), join(personal, 'implement'));
+  await symlink(join(skillsSourceDir(), 'tdd'), join(personal, 'tdd'));
+  await skillFolder(personal, 'planning-tasks');
+  await skillFolder(join(personal, 'synced', 'b1'), 'pdf');
+  await mkdir(join(personal, 'notes'));
+  await writeFile(join(personal, 'notes', 'readme.md'), 'notes\n');
+  const snapshot = await realpath(join(env.state, 'skills'));
+  const state = await filesOf(env.state);
+  const file = join(copy, '.claude', 'settings.local.json');
+  const skills = join(copy, '.claude', 'skills');
+
+  // SK-1 and SK-2: a first run.
+  const first = await setup(env);
+  for (const skill of ['grilling', 'tdd']) {
+    const files = await filesOf(join(snapshot, skill));
+    assert.ok(files.includes('SKILL.md'), skill);
+    assert.deepEqual(await filesOf(join(skills, skill)), files, skill);
+    for (const path of files) {
+      assert.deepEqual(await readFile(join(skills, skill, path)), await readFile(join(snapshot, skill, path)), `${skill}/${path}`);
+    }
+  }
+  assert.deepEqual(await readFile(join(skills, 'planning-tasks', 'SKILL.md')), await readFile(join(SKILL_SOURCE, 'SKILL.md')));
+  assert.equal(existsSync(join(skills, 'gone')), false);
+  const lines = first.stdout.trim().split('\n');
+  assert.ok(lines.indexOf(missingSkill('gone')) >= 0 && lines.indexOf(missingSkill('gone')) < lines.findIndex((line) => line.startsWith('Planning copy of app: ')), first.stdout);
+  assert.equal(lines.filter((line) => line.startsWith('warning:')).length, 1, first.stdout);
+  const skillsLine = lines.indexOf('Skills planning-tasks, grilling, tdd: installed in .claude/skills');
+  assert.ok(skillsLine > 0, first.stdout);
+  assert.equal(lines[skillsLine + 1], 'Skills switched off for the planner: 2 of yours (skillOverrides), and your claude.ai skills (syncClaudeAiSkills false)');
+  const settings = JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>;
+  assert.deepEqual(settings.skillOverrides, { 'code-review': 'off', implement: 'off' });
+  assert.equal(settings.syncClaudeAiSkills, false);
+  // The snapshot read as it is: nothing written in the state directory.
+  assert.deepEqual(await filesOf(env.state), state);
+  assert.equal(await realpath(join(env.state, 'skills')), snapshot);
+
+  // SK-3: the role drops tdd; the user's skillOverrides replaced whole; CLAUDE_CONFIG_DIR's skills
+  // read instead of ~/.claude/skills.
+  await writeFile(file, `${JSON.stringify({ ...settings, skillOverrides: { grilling: 'off', mine: 'name-only' } }, null, 2)}\n`);
+  await writeRoles(env.state, { ...rolesOf(undefined), planner: ['grilling'] });
+  await skillFolder(join(env.home, 'cc', 'skills'), 'other');
+  env.extra = { ...env.extra, CLAUDE_CONFIG_DIR: join(env.home, 'cc') };
+  const second = await setup(env);
+  assert.equal(await readFile(join(skills, 'tdd', 'SKILL.md'), 'utf8'), await readFile(join(snapshot, 'tdd', 'SKILL.md'), 'utf8'));
+  assert.deepEqual(JSON.parse(await readFile(file, 'utf8')).skillOverrides, { other: 'off', tdd: 'off' });
+  assert.match(second.stdout, /^Skills planning-tasks, grilling: installed in \.claude\/skills$/m);
+  assert.match(second.stdout, /^Skills switched off for the planner: 2 of yours /m);
+  assert.doesNotMatch(second.stdout, /^warning:/m);
+});
+
+test("sf planner setup refuses a repository that tracks a planner skill's folder", async () => {
+  const { env, repo, copy } = await plannerEnv('planner-skill-tracked');
+  await pushFiles(repo, ['.claude/skills/grilling/SKILL.md'], 'a tracked planner skill');
+  const result = await runCli(env, ['planner', 'setup', 'app']);
+  assert.equal(result.code, 1, result.stdout);
+  assert.equal(result.stderr.trim(), 'sf: The repository of app tracks .claude/skills/grilling/SKILL.md, which the planning copy writes.');
+  assert.equal(existsSync(join(copy, '.claude', 'skills', 'planning-tasks')), false);
+  assert.equal(existsSync(join(copy, '.claude', 'skills', 'grilling')), false);
+});
+
+test('the pointers name the workspace\'s English vision, or say there is none', async () => {
+  const { env, copy } = await plannerEnv('planner-vision');
+  const pointers = join(copy, '.claude', 'planning-copy.md');
+  // Another workspace's vision only: none for app.
+  await mkdir(join(env.state, 'vision', 'other', 'en'), { recursive: true });
+  await writeFile(join(env.state, 'vision', 'other', 'en', 'VISION.md'), '# Other\n');
+  await setup(env);
+  assert.ok((await readFile(pointers, 'utf8')).endsWith(`\`\n${NO_VISION}\n`));
+
+  // app's English vision: its folder, after the first put.
+  const dir = join(env.state, 'vision', 'app', 'en');
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, 'VISION.md'), '# App\n');
+  await setup(env);
+  assert.ok((await readFile(pointers, 'utf8')).endsWith([
+    '`',
+    '- **The product vision** of this workspace, in English: the folder below. Read its `VISION.md`',
+    '  first, with the Read tool (the shell does not see the folder), then what the ticket needs of',
+    `  its \`CODEMAP.md\` and \`chapters/\`: \`${dir}\``,
+    '',
+  ].join('\n')), await readFile(pointers, 'utf8'));
+});
+
+test('skillsOff: the skill folders of both folders but the kept ones, once each, by name', async () => {
+  const root = join(temp, 'planner-skills-off');
+  const personal = join(root, 'personal');
+  const own = join(root, 'own');
+  await skillFolder(personal, 'code-review');
+  await skillFolder(join(root, 'linked'), 'tdd');
+  await symlink(join(root, 'linked', 'tdd'), join(personal, 'tdd'));
+  await skillFolder(join(personal, 'synced', 'b1'), 'pdf');
+  await mkdir(join(personal, 'notes'));
+  await writeFile(join(personal, 'notes', 'readme.md'), 'notes\n');
+  await symlink(join(root, 'nowhere'), join(personal, 'dangling'));
+  await skillFolder(personal, 'Bad_Name');
+  await skillFolder(own, 'planning-tasks');
+  await skillFolder(own, 'stale');
+  assert.deepEqual(await skillsOff(personal, own, ['planning-tasks', 'grilling']), ['code-review', 'stale', 'tdd']);
+  // A name in both folders counts once; a kept one in either, never.
+  await skillFolder(own, 'code-review');
+  await skillFolder(personal, 'grilling');
+  assert.deepEqual(await skillsOff(personal, own, ['planning-tasks', 'grilling']), ['code-review', 'stale', 'tdd']);
+  assert.deepEqual(await skillsOff(join(root, 'missing'), join(root, 'missing-too'), []), []);
 });

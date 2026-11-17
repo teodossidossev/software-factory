@@ -256,8 +256,11 @@ workspace with a vision has **Vision ↗**, which opens the page in a new tab. A
 after the dashboard's next update of the workspaces (a reload does it); an open page shows a new
 put when it is reloaded. The page opens in Bulgarian, with a switch to English.
 
-No agent session reads the vision, and it goes to no model: it is in the state directory, which
-every session denies. To move it into the workspace's repository later, copy
+No job's session reads the vision: it is in the state directory, which every one of them denies.
+The Claude Code planner reads its English files when it plans a ticket of that workspace (`sf
+planner setup` names their folder in the planning copy), so they go to Anthropic with the rest of
+the planning; run `sf planner setup <workspace>` again after the first put and after removing the
+vision, so the copy says whether there is one. To move it into the workspace's repository later, copy
 `<state dir>/vision/<workspace>/<lang>/` as it is. More: [Vision](../../factory/README.md#vision).
 
 ## Cleaning old jobs and worktrees

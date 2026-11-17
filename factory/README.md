@@ -1666,9 +1666,13 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   review show this part's change alone. Without such a commit a start (by hand, Restart or the run
   queue's) is refused with `builds_on_not_ready` (409): "<ticket> builds on X, which has no prepared
   commit yet: start it once X is ready, or queue it.". Once that ticket is merged the job starts
-  from `origin/<base>` as any job. The job records `builds_on` and `builds_on_commit` (the commit
-  it started from; `null` when it started from its base); both are `null` on every other job, and
+  from `origin/<base>` as any job. The job records `builds_on` and `builds_on_commit`: the
+  prepared commit of that ticket the job's change sits on, set at the start (`null` when it started
+  from its base) and by every MR preparation (its target when that is the ticket's prepared commit,
+  else `null`); both are `null` on every other job, and
   a record written without them reads them as `null`. MR preparation and Approve treat it as section MR preparation says.
+  Once that ticket is merged, the pass of merged jobs moves a part whose change still sits on it
+  onto its base (section MR preparation, The move onto the base).
   The Task check reads the chain's Task files, or the prepared commit of the ticket it builds on (section Task
   check, A Task that builds on another).
 - When the session is idle (its last queued turn ended), the factory publishes an iteration: the
@@ -2315,8 +2319,16 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   run, logged). Then the job gets `{type: "merged_on_target", commit, target, how, mr?}` in its
   `events.jsonl` (once: a log that has one gets no second), then the Archive above (its active Task
   file too), and every page gets the jobs again. The pass sends the host only `GET` requests and
-  origin only that fetch; it never deletes a branch or a commit. The dependency rule (`lands_after`)
+  origin only that fetch (a move it asks for fetches in the part's runner, as MR preparation
+  does); it never deletes a branch or a commit. The dependency rule (`lands_after`)
   and the morning digest count a job with `merged_on_target` as merged, whatever its `how`.
+  Then the parts phase (`moveParts`): every job in `ready_for_human_review` whose change sits on
+  the prepared commit of the ticket it builds on (`sitsOnPart`, `src/builds-on.ts`), with no
+  hand-over step in progress, whose workspace resolves and whose `builds_on` ticket is merged by
+  the dependency rule, is asked to move onto its base: a `move` request to its runner (section MR
+  preparation, The move onto the base). A refusal or failure is logged once per job, the job stays
+  as it was, and the next pass asks again. Merged — archive runs the parts phase too, after its
+  Archive, unless a pass is under way. While the factory is being updated nothing is asked.
 - The ticket actions Archive and Delete (dashboard start screen) run in one hold of the same lock:
   they check the ticket (a live job refuses with `job_active`), retire its finished job, and only
   then move or delete the Task and MR files (and, for Delete, the stored request). Restore and
@@ -2842,6 +2854,7 @@ any other is refused with `illegal_transition`.
 | `ready_for_human_review` | `needs_human` | `fix` |
 | `ready_for_human_review` | `ready_for_human_review` | `repair_handover` |
 | `ready_for_human_review` | `handed_over` | `hand_over` |
+| `ready_for_human_review` | `preparing_mr` | `move` |
 | `ready_for_human_review` | `pushed` | `push` |
 | `ready_for_human_review` | `aborted` | `abort` |
 | `handed_over` | `working` | `say` |
@@ -2859,6 +2872,7 @@ any other is refused with `illegal_transition`.
 | `preparing_mr` | `needs_human` | `mr_turn_end` |
 | `preparing_mr` | `needs_human` | `tests` |
 | `preparing_mr` | `needs_human` | `ready` |
+| `preparing_mr` | `needs_human` | `move` |
 | `preparing_mr` | `needs_human` | `pause` |
 | `preparing_mr` | `ready_for_human_review` | `repair_handover` |
 | `preparing_mr` | `ready_for_human_review` | `ready` |
@@ -3063,6 +3077,28 @@ whose ticket is not merged yet, `sf approve` and `sf mr create` (and their butto
 with `builds_on_not_merged` (409): "<ticket> builds on X, which is not merged yet: submit X
 first.", so nothing of a part is pushed before the part it builds on is merged; the hand-over to
 the checkout is not affected, and a push the user makes from there is theirs.
+
+**The move onto the base.** Once the ticket a part builds on is merged, the parts phase of the
+pass of merged jobs (and of Merged — archive; section Jobs) asks the part's runner for a `move`
+(`MrPart.moveInRunner`), without a new MR text turn and without a new review: the reviewed commit
+is replayed as MR preparation's own clean rebase is. First the checks, which change nothing: the
+job must be in `ready_for_human_review` with its change on the prepared commit of the ticket it
+builds on (`builds_on_commit` set) and no cut-off hand-over step (`invalid_state`), that ticket
+must be merged by the dependency rule (`builds_on_not_merged`), the worktree must exist
+(`worktree_missing`), the branch must not be checked out in the user's checkout, and
+`git fetch origin <base>` (60 s) must work (`fetch_failed`, `base_not_found`); a refusal leaves the
+job as it was and the next pass asks again. Then the job goes to `preparing_mr` by `move`, without
+its prepared commit, with `target_commit` the commit of `origin/<base>` and `builds_on_commit`
+`null`, and the factory runs `git rebase -q --onto <origin/base> <base commit>` of the part's one
+commit, its message (the MR text) kept. A clean rebase makes `origin/<base>` the job's
+`base_commit`, runs the test step (below) on the moved worktree when the workspace has a test
+command (a failure is a Tests Fix, as in step 2), then step 6's end: the hand-over as configured,
+else `ready_for_human_review`. A conflict is step 4's conflict turn: its resolution is the next
+iteration against `origin/<base>` and goes back to review. A failure is `needs_human` by `move`
+with its code (`mr_rebase_failed`, `mr_failed`, …), and Retry runs MR preparation again. The move
+is not held by the run queue's `max_running`: it is a rebase and the test command, and a conflict
+turn is one turn. Nothing of it is pushed.
+
 The Implementer only writes the MR text. The factory commits and rebases itself, outside the
 sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's placeholders.
 
@@ -3086,7 +3122,8 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    other than `ready_for_human_review`, `handed_over` or `pushed`: the user asked for changes on
    it), MR preparation stops with `builds_on_not_ready` ("<ticket> builds on X, which is being
    changed: Retry once X is ready again."), which `sf retry` takes. Its commit is stored as
-   `target_commit`. A rebase left in progress by a restart of `sf serve` is aborted first.
+   `target_commit`. For a job with `builds_on`, `builds_on_commit` becomes the target commit when
+   the target is that ticket's prepared commit, and `null` when it is the base. A rebase left in progress by a restart of `sf serve` is aborted first.
 2. State `preparing_mr`, `mr_attempts + 1`; with a `test_command` in the workspace's entry of
    `workspaces.json`, the **test step** comes first (SF-128, below), and then the **MR text turn**:
    one turn in the same session

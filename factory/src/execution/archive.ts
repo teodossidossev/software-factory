@@ -4,8 +4,11 @@
 // is Setup's ticket archive (SettingsPort.archiveTicket), which moves the Task file to the archive
 // too. Merged — archive and the pass mark a job merged (merged_on_target) before its Archive; neither
 // deletes a branch or a commit, and the pass sends only GET requests to the Git host and only
-// `git fetch --no-tags origin <base>` to origin.
+// `git fetch --no-tags origin <base>` to origin. Then the parts phase (moveParts): every part waiting
+// for review whose change sits on a ticket now merged is asked to move onto its base, in its runner;
+// the move fetches and rebases as MR preparation does.
 import { join } from 'node:path';
+import { MOVE_STATES, sitsOnPart } from '../builds-on.js';
 import { pushedBranch } from '../continues.js';
 import { FactoryError } from '../errors.js';
 import { chooseForge, type Forge, forgeFor } from '../forge.js';
@@ -14,8 +17,9 @@ import { runGit } from '../git.js';
 import { type Job, type JobState, now } from '../jobs.js';
 import { originUrl } from '../mr.js';
 import type { Workspace } from '../registry.js';
-import { branchMerged } from '../setup.js';
+import { branchMerged, ticketMerged } from '../setup.js';
 import { TASK_DIR } from '../task-file.js';
+import { updateMarked } from '../update.js';
 import type { Retired } from './dto.js';
 import type { JobStorePort, LockPort, SettingsPort } from './ports.js';
 import { exists } from './shared.js';
@@ -47,6 +51,8 @@ export interface MergedPorts {
   settings: SettingsPort;
   archive(workspace: string, ticket: string): Promise<Retired>;
   markHandedDone(workspace: string, ticket: string): Promise<unknown>;
+  // The move of a part onto its base, asked of its runner (ControlPart.request, kind move).
+  move(workspace: string, ticket: string): Promise<unknown>;
 }
 
 // How a merge was found (merged_on_target's how, mr and commit).
@@ -70,7 +76,10 @@ export class MergedPass {
     }
     this.#running = true;
     try {
-      return await archiveMerged(this.#ports(), this.#failures);
+      const ports = this.#ports();
+      const archived = await archiveMerged(ports, this.#failures);
+      await moveParts(ports, this.#failures);
+      return archived;
     } finally {
       this.#running = false;
     }
@@ -80,6 +89,7 @@ export class MergedPass {
   // A handed_over job first goes to pushed through markHandedDone (its refusals too); then the
   // pushed job gets merged_on_target (how user, once) and the Archive. Neither origin nor the host
   // is asked. When the Archive fails, the job stays pushed and marked: a second call archives it.
+  // After the Archive, the parts phase (moveParts), unless a run is under way: the run asks them.
   async markMerged(workspaceName: string, ticket: string): Promise<Retired & { state: JobState }> {
     const ports = this.#ports();
     const job = await ports.store.job(workspaceName, ticket);
@@ -93,7 +103,49 @@ export class MergedPass {
       const current = await ports.store.jobs.read(workspaceName, ticket).catch(() => undefined);
       throw new FactoryError('invalid_state', `The job changed meanwhile; it is ${current?.state ?? 'gone'}. Nothing was archived.`);
     }
-    return { state: marked.state, ...(await ports.archive(workspaceName, ticket)) };
+    const archived = await ports.archive(workspaceName, ticket);
+    if (!this.#running) {
+      await moveParts(ports, this.#failures);
+    }
+    return { state: marked.state, ...archived };
+  }
+}
+
+// The parts phase of the pass of merged jobs and of Merged — archive: every job in MOVE_STATES whose
+// change sits on the prepared commit of the ticket it builds on (sitsOnPart), with no step of the
+// hand-over in progress, whose workspace resolves and whose builds_on ticket is merged (ticketMerged,
+// in the workspace's checkout), is asked to move onto its base (ports.move, in its runner). A refusal
+// or failure is logged once per job until a move of it works; the next job is tried. Nothing is
+// asked while the factory is being updated. Never throws.
+export async function moveParts(ports: MergedPorts, failures: Set<string>): Promise<void> {
+  if (updateMarked(ports.settings.config.stateDir)) {
+    return;
+  }
+  let jobs: Job[];
+  try {
+    jobs = await ports.store.jobs.list();
+  } catch (error) {
+    console.error(`The parts phase of the pass of merged jobs could not list the jobs: ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
+  for (const job of jobs) {
+    if (!MOVE_STATES.includes(job.state) || !sitsOnPart(job) || (job.handover?.step ?? null) !== null) {
+      continue;
+    }
+    const key = `${job.workspace}/${job.ticket} move`;
+    try {
+      const workspace = await ports.settings.resolve(job.workspace).catch(() => undefined);
+      if (workspace === undefined || !(await ticketMerged(ports.store.jobs, { workspace: job.workspace, ticket: job.builds_on! }, workspace.workCheckout))) {
+        continue;
+      }
+      await ports.move(job.workspace, job.ticket);
+      failures.delete(key);
+    } catch (error) {
+      if (!failures.has(key)) {
+        failures.add(key);
+        console.error(`${job.workspace}/${job.ticket}: not moved onto ${job.base}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
   }
 }
 

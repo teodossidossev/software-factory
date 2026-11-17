@@ -6,7 +6,7 @@ import { createReadStream } from 'node:fs';
 import { type FileHandle, realpath } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { resolve as resolvePath } from 'node:path';
-import { buildsOnPoint, buildsOnTarget, notMerged, notReadyAtPreparation } from '../builds-on.js';
+import { buildsOnPoint, buildsOnTarget, MOVE_STATES, notMerged, notReadyAtPreparation, sitsOnPart } from '../builds-on.js';
 import { envFilePath, handoffOffNotice } from '../config.js';
 import { FactoryError } from '../errors.js';
 import { type Forge, type ForgeKind, forgeFor } from '../forge.js';
@@ -16,7 +16,7 @@ import { checkBranchFree, isAncestor, savedRef, settleAfterPush, subjectOf } fro
 import { handoffSensitive } from '../handoff-sensitive.js';
 import { claudeReviews, type FileChange, type Handover, type Job, type JobMr, type JobState, now } from '../jobs.js';
 import { pushedBranch, targetBranch } from '../continues.js';
-import { abortRebase, branchesOnOrigin, commitAndRebase, commitMessage, continueRebase, gitFailure, isUnreviewedReport, MAX_UNREVIEWED_PATHS, mergeRequestLink, messageText, mrMessage, mrProblems, mrTextProblem, originUrl, parseOrigin, PROTECTED_BRANCHES, pushBranch, readMrText, refuseGuardedLfs, rebaseInProgress, resolveTarget, rewriteMessage, sameMessage, unmergedPaths, unreviewedAgainMessage, unreviewedNote, validBranchName, withAccepted, withChecks, withFindings, withNits, withSimplifications, worktreesOn } from '../mr.js';
+import { abortRebase, branchesOnOrigin, commitAndRebase, commitMessage, continueRebase, gitFailure, isUnreviewedReport, MAX_UNREVIEWED_PATHS, mergeRequestLink, messageText, mrMessage, mrProblems, mrTextProblem, originUrl, parseOrigin, PROTECTED_BRANCHES, pushBranch, readMrText, rebaseOnto, refuseGuardedLfs, rebaseInProgress, resolveTarget, rewriteMessage, sameMessage, unmergedPaths, unreviewedAgainMessage, unreviewedNote, validBranchName, withAccepted, withChecks, withFindings, withNits, withSimplifications, worktreesOn } from '../mr.js';
 import { type LedgerEntry, notFixed } from '../ledger.js';
 import { MergeChecks } from '../merge-check.js';
 import { buildPatch, notificationLine, type Patch } from '../patch.js';
@@ -281,7 +281,7 @@ export class MrPart {
         live.session.send(conflictPrompt({ ticket: job.ticket, targetRef, targetCommit, files: prepared.files }), DENIED_TOOLS);
         return;
       }
-      await this.#ready(job, live, mrText.text);
+      await this.#ready(job, live.cwd, live.workspace, mrText.text);
     } catch (error) {
       console.error(error);
       await needsHuman('mr_failed', `MR preparation failed inside the factory: ${(error as Error).message}`.slice(0, 1000));
@@ -382,8 +382,7 @@ export class MrPart {
   // checkout at once (handed_over); a refusal leaves it in ready_for_human_review with the reason
   // (handoff_skipped), and so do hand-over off, naming the setting, and a change to a file the
   // user's IDE or tools run (handoff_sensitive), which a person hands over. The worktree stays.
-  async #ready(job: Job, live: Live, mrText: string): Promise<void> {
-    const cwd = live.cwd;
+  async #ready(job: Job, cwd: string, workspace: Workspace, mrText: string): Promise<void> {
     const tip = (await runGit(cwd, ['rev-parse', '--verify', `refs/heads/${job.branch}`])).stdout.toString('utf8').trim();
     const content = mrMessage(mrText);
     await endSession(this.#sessions.live, `${job.workspace}/${job.ticket}`);
@@ -391,12 +390,12 @@ export class MrPart {
     let ready: Job = { ...job, base_commit: job.target_commit, prepared_commit: tip };
     // The registry as it is now (its handoff may have changed while the job ran); when it cannot be
     // read, the setting from the job's start (the hand-over then answers the checkout's problem).
-    const own = (await this.#settings.resolve(job.workspace).catch(() => live.workspace)).handoff;
+    const own = (await this.#settings.resolve(job.workspace).catch(() => workspace)).handoff;
     const skip = handoffOffNotice(own, this.#settings.config.handoff, job.ticket) ?? (await handoffSensitive(cwd, job.target_commit!, tip, this.#settings.config.sensitivePaths));
     if (skip !== undefined) {
       ready = { ...ready, handoff_skipped: skip };
     } else {
-      const outcome = await this.#peers.handover.handOver(ready, live.workspace, content);
+      const outcome = await this.#peers.handover.handOver(ready, workspace, content);
       if (outcome.ok) {
         // from: preparing_mr (mrIdle; handOver writes the job in the same state)
         await this.#store.transition(outcome.job, 'handed_over', 'ready', undefined, lines);
@@ -508,6 +507,92 @@ export class MrPart {
     });
   }
 
+  // The state check of the move of a part onto its base (sf serve and the runner): a part waiting
+  // for review (MOVE_STATES) whose change sits on the ticket it builds on (sitsOnPart), with no
+  // step of the hand-over cut off.
+  checkMove(job: Job): void {
+    if (job.handover !== undefined && job.handover.step !== null) {
+      throw cutOffError(job, job.handover.step);
+    }
+    if (!MOVE_STATES.includes(job.state) || !sitsOnPart(job)) {
+      throw new FactoryError('invalid_state', `The move onto the base needs ready_for_human_review and a change on the part ${job.ticket} builds on; ${job.workspace}/${job.ticket} is ${job.state}${sitsOnPart(job) ? '' : ', on its base'}.`);
+    }
+  }
+
+  // The move in the runner, once the ticket the part builds on is merged: its one prepared commit
+  // replayed onto origin/<base> (`git rebase -q --onto <target> <base commit>`), without a new MR
+  // text turn and without a new review. The checks, the fetch and the branch in the user's checkout
+  // come first and change nothing. Then the job is preparing_mr (move) without its prepared commit;
+  // a clean rebase runs the workspace's test command on the moved worktree (the test step), then
+  // #ready gives the part back; a conflict takes the conflict turn (its resolution goes back to
+  // review through mrIdle and conflictIdle); any failure stops the job (needs_human, move).
+  moveInRunner(workspaceName: string, ticket: string): Promise<{ state: JobState; iteration: number; branch: string }> {
+    return this.#locks.locked(async () => {
+      const job = await this.#store.job(workspaceName, ticket);
+      this.checkMove(job);
+      const workspace = await this.#settings.resolve(workspaceName);
+      const buildsOn = job.builds_on!;
+      if (!(await ticketMerged(this.#store.jobs, { workspace: workspaceName, ticket: buildsOn }, workspace.workCheckout))) {
+        throw notMerged(job.ticket, buildsOn);
+      }
+      if (job.worktree === null || !(await exists(job.worktree))) {
+        throw new FactoryError('worktree_missing', `The worktree of ${workspaceName}/${ticket} is missing; sf reset the ticket and start again.`);
+      }
+      const cwd = job.worktree;
+      const target = await this.#locks.gitLocked(workspaceName, async () => {
+        // No move while the user's checkout holds the branch.
+        await checkBranchFree(workspace.workCheckout, cwd, job.branch, ticket);
+        return resolveTarget(workspace.workCheckout, targetBranch(job));
+      });
+      // from: ready_for_human_review (checkMove)
+      let current = await this.#store.transition({ ...job, prepared_commit: null, target_commit: target.commit, builds_on_commit: null, mr_conflict_turn: false }, 'preparing_mr', 'move');
+      try {
+        const moved = await this.#locks.gitLocked(workspaceName, () => rebaseOnto(cwd, target.commit, job.base_commit!));
+        if (moved.kind === 'failed') {
+          // from: preparing_mr (the move)
+          current = await this.#store.transition(current, 'needs_human', 'move', moved.failure);
+        } else if (moved.kind === 'conflict') {
+          // From here a stop may leave a resolution no reviewer saw: no Retry.
+          current = { ...current, mr_conflict_turn: true };
+          await this.#store.jobs.write(current);
+          const session = this.#peers.turns.session(current, workspace);
+          this.#sessions.live.get(`${workspaceName}/${ticket}`)!.mr = { targetRef: target.ref, conflicts: moved.files };
+          session.send(conflictPrompt({ ticket, targetRef: target.ref, targetCommit: target.commit, files: moved.files }), DENIED_TOOLS);
+        } else {
+          current = { ...current, base_commit: target.commit };
+          await this.#store.jobs.write(current);
+          // The MR text the prepared commit carries, as the job store keeps it.
+          const mrText = (await this.#store.jobs.readMrText(workspaceName, ticket)) ?? '';
+          const command = workspace.testCommand;
+          if (command !== undefined) {
+            this.#tests.start(current, workspace, command, { attempts: current.mr_attempts, passed: (next, at) => this.#ready(next, cwd, at, mrText) });
+          } else {
+            await this.#ready(current, cwd, workspace, mrText);
+            current = await this.#store.job(workspaceName, ticket);
+          }
+        }
+      } catch (error) {
+        let failure: { code: string; message: string };
+        if (error instanceof FactoryError) {
+          failure = { code: error.code, message: error.message };
+        } else {
+          console.error(error);
+          failure = { code: 'mr_failed', message: `Moving ${ticket} onto ${job.base} failed inside the factory: ${(error as Error).message}`.slice(0, 1000) };
+        }
+        const latest = await this.#store.jobs.read(workspaceName, ticket);
+        if (latest === undefined || latest.state !== 'preparing_mr' || latest.created_at !== job.created_at) {
+          throw error;
+        }
+        // No conflict turn ran (sending it is the last step): a rebase left in progress is aborted,
+        // so the branch holds the part's commit as it was, and Retry runs MR preparation again.
+        await this.#locks.gitLocked(workspaceName, () => abortRebase(cwd)).catch((abortError: unknown) => console.error(abortError));
+        // from: preparing_mr (the move)
+        current = await this.#store.transition({ ...latest, mr_conflict_turn: false }, 'needs_human', 'move', failure);
+      }
+      return { state: current.state, iteration: current.iteration, branch: current.branch };
+    });
+  }
+
   // The work of mark_clean, also run for a clean verdict of the review. Only under the lock.
   // With onAccepted (acceptGate, which checked the state), the user's Accept is recorded by it once
   // every check has passed, before the job moves on: the gate override, or the Skip.
@@ -556,8 +641,10 @@ export class MrPart {
     await onAccepted?.();
     const attempts = job.mr_attempts;
     const attempt = attempts + 1;
+    // A part records the prepared commit its change now sits on, null once it is on its base.
+    const onPart = job.builds_on !== null ? { builds_on_commit: target.onPart ? target.commit : null } : {};
     // from: awaiting_review, or needs_human: the retry and Accept or Skip (checkPrepareMr, checkAcceptGate), the Retry (checkRetryMr)
-    const next = await this.#peers.start.syncTask(workspace, await this.#store.transition({ ...job, target_commit: target.commit, mr_attempts: attempt, mr_conflict_turn: false }, 'preparing_mr', 'prepare_mr'));
+    const next = await this.#peers.start.syncTask(workspace, await this.#store.transition({ ...job, target_commit: target.commit, mr_attempts: attempt, mr_conflict_turn: false, ...onPart }, 'preparing_mr', 'prepare_mr'));
     // A stop of the test step ran no MR text turn: the next turn is not told its error.
     const previousError = afterTextTurn && !TEST_CODES.includes(job.error?.code ?? '') ? job.error?.message : undefined;
     const turn: MrTurn = { targetRef: target.ref, targetCommit: target.commit, attempt, previousError };
@@ -574,8 +661,9 @@ export class MrPart {
 
   // The target of MR preparation, under the workspace's Git lock: for a job that builds on a ticket
   // not merged yet, that ticket's current prepared commit (builds_on_not_ready when it has none: it
-  // is being changed); otherwise targetBranch on origin.
-  async #target(job: Job, checkout: string): Promise<{ ref: string; commit: string }> {
+  // is being changed); otherwise targetBranch on origin. onPart: the target is that ticket's
+  // prepared commit.
+  async #target(job: Job, checkout: string): Promise<{ ref: string; commit: string; onPart: boolean }> {
     const buildsOn = job.builds_on;
     if (buildsOn !== null) {
       const point = await buildsOnPoint(this.#store.jobs, job.workspace, checkout, buildsOn);
@@ -583,10 +671,10 @@ export class MrPart {
         throw notReadyAtPreparation(job.ticket, buildsOn);
       }
       if (point !== 'merged') {
-        return buildsOnTarget(checkout, point);
+        return { ...(await buildsOnTarget(checkout, point)), onPart: true };
       }
     }
-    return resolveTarget(checkout, targetBranch(job));
+    return { ...(await resolveTarget(checkout, targetBranch(job))), onPart: false };
   }
 
   // The MR text turn of MR preparation, in the job's session. Only under the lock.

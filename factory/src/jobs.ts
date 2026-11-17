@@ -84,8 +84,8 @@ export const LIMIT_RETRY_MS = 30 * 60_000;
 export const JOB_ACTIONS = [
   'create', 'launch', 'recover', 'repair_handover', 'publish', 'mr_turn_end', 'review_retry', 'go_on', 'verdict', 'prepare_mr',
   // tests: the end of the run of the workspace's test command, a Tests Fix or a stop. mr_retry: the Retry's own stop when MR
-  // preparation fails again before it began (retryMr).
-  'tests', 'mr_retry', 'ready', 'hand_over', 'take_back', 'push', 'pushed_by_user', 'marked_done', 'abort', 'pause', 'resume', 'park',
+  // preparation fails again before it began (retryMr). move: the move of a part onto its base, and its stop.
+  'tests', 'mr_retry', 'ready', 'move', 'hand_over', 'take_back', 'push', 'pushed_by_user', 'marked_done', 'abort', 'pause', 'resume', 'park',
   'limit_reset', 'fix', 'say', 'ask_for_changes',
 ] as const;
 export type JobAction = (typeof JOB_ACTIONS)[number];
@@ -128,6 +128,9 @@ export const JOB_TRANSITIONS: readonly JobTransition[] = Object.freeze([
   ...rows('tests', ['preparing_mr'], ['working', 'needs_human']),
   ...rows('mr_retry', ['needs_human'], ['needs_human']),
   ...rows('ready', ['preparing_mr'], ['needs_human', 'ready_for_human_review', 'handed_over']),
+  // The move of a part onto its base once the ticket it builds on is merged (src/builds-on.ts), and its stop.
+  ...rows('move', ['ready_for_human_review'], ['preparing_mr']),
+  ...rows('move', ['preparing_mr'], ['needs_human']),
   ...rows('hand_over', ['ready_for_human_review'], ['needs_human', 'handed_over']),
   ...rows('take_back', ['handed_over'], ['ready_for_human_review']),
   ...rows('push', ['needs_human', 'ready_for_human_review', 'handed_over'], ['pushed']),
@@ -213,8 +216,9 @@ const jobSchema = z.strictObject({
   // The source branch of the open merge request the job continues (src/continues.ts); null for most.
   continues: z.string().min(1).nullable().default(null),
   // The ticket of the same workspace whose unmerged change the job builds on (src/builds-on.ts),
-  // and that ticket's prepared commit the job started from (null when it started from its base,
-  // the ticket being merged); null for most.
+  // and the prepared commit of that ticket the job's change sits on: the one it started from, then
+  // each MR preparation's target when it is that ticket's prepared commit; null when the change is
+  // on its base (started, prepared or moved there once that ticket was merged); null for most.
   builds_on: z.string().min(1).nullable().default(null),
   builds_on_commit: commit.nullable().default(null),
   // The commit the branch was created from; the Patch is the difference to it.

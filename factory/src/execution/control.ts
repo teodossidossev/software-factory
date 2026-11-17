@@ -1,6 +1,7 @@
 // The user's control of a job and the runner's requests: pause and Resume, the park on a usage
 // limit and its reset, abort, reset, Archive (retire), Merged — archive and the pass of merged jobs, exclusive (the start
-// screen's section under the lock), and the requests sf serve queues to a job's runner (request, apply, resume, stop).
+// screen's section under the lock), and the requests sf serve queues to a job's runner (request, apply, resume, stop),
+// among them the move of a part onto its base that the pass of merged jobs asks for.
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { changedImages, type ImageRef, jobAttachment, type JobAttachment, type ResolvedImage, resolveTaskImages, sameImages } from '../attachments.js';
@@ -38,6 +39,8 @@ export interface ControlHandover {
 export interface ControlMr {
   checkPrepareMr(job: Job, accepted?: boolean): boolean;
   checkRetryMr(job: Job): void;
+  checkMove(job: Job): void;
+  moveInRunner(workspaceName: string, ticket: string): Promise<{ state: JobState; iteration: number; branch: string }>;
   prepareMr(job: Job, sensitive: string[], options?: { onAccepted?: () => Promise<void>; retry?: boolean }): Promise<{ state: JobState; iteration: number; branch: string }>;
   retryMrInRunner(workspaceName: string, ticket: string): Promise<{ state: JobState; iteration: number; branch: string }>;
   settled(workspaceName: string, ticket: string): Promise<void>;
@@ -94,7 +97,8 @@ export class ControlPart {
   readonly #peers: ControlPeers;
   // The pass of merged jobs (its logged failures, its run under way) and Merged — archive, with this part's ports.
   readonly #mergedPass = new MergedPass(() => ({ store: this.#store, locks: this.#locks, settings: this.#settings,
-    archive: (w, t) => this.archiveFinished(w, t), markHandedDone: (w, t) => this.#peers.handover.markHandedDone(w, t) }));
+    archive: (w, t) => this.archiveFinished(w, t), markHandedDone: (w, t) => this.#peers.handover.markHandedDone(w, t),
+    move: (w, t) => this.request(w, t, { kind: 'move' }) }));
 
   constructor(store: JobStorePort, locks: LockPort, sessions: LivePort, runner: RunnerPort, settings: SettingsPort, stop: StopPort, peers: ControlPeers) {
     this.#store = store;
@@ -597,6 +601,9 @@ export class ControlPart {
       case 'retry':
         this.#peers.mr.checkRetryMr(job);
         break;
+      case 'move':
+        this.#peers.mr.checkMove(job);
+        break;
       case 'accept':
         this.#peers.reviews.checkAcceptGate(job);
         break;
@@ -635,6 +642,8 @@ export class ControlPart {
         return this.#peers.reviews.retryReviewInRunner(workspace, ticket);
       case 'retry':
         return this.#peers.mr.retryMrInRunner(workspace, ticket);
+      case 'move':
+        return this.#peers.mr.moveInRunner(workspace, ticket);
       case 'accept':
         return this.#peers.reviews.acceptGateInRunner(workspace, ticket);
       case 'settle':

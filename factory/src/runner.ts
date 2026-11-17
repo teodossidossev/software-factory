@@ -37,7 +37,10 @@ export type RunnerRequest =
   | { kind: 'resume'; message: string }
   // The user's Retry of a transient MR preparation failure: MR preparation runs again,
   // without a new review.
-  | { kind: 'retry' };
+  | { kind: 'retry' }
+  // The pass of merged jobs (and Merged — archive): the move of a part onto its base once the
+  // ticket it builds on is merged (MrPart.moveInRunner).
+  | { kind: 'move' };
 
 export type RunnerReply = { ok: true; result: unknown } | { ok: false; error: { code: string; message: string } };
 

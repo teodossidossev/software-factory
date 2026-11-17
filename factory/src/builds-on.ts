@@ -4,7 +4,9 @@
 // commit its job prepared, in the workspace's checkout (nothing is fetched or pushed for it), MR
 // preparation replays this part's own commit onto that ticket's current prepared commit, and Approve
 // is refused: the parts are submitted one at a time, each once the one before it is merged. Once
-// that ticket is merged, the job starts from, and is rebased onto, origin/<base> as any job.
+// that ticket is merged, the job starts from, and is rebased onto, origin/<base> as any job, and a
+// part already prepared on it is moved onto origin/<base> by the pass of merged jobs
+// (MrPart.moveInRunner).
 // The Task check of a part reads the chain it builds on from the Task files (buildsOnChain): the
 // texts of the tickets not merged yet go into its prompt (checkChain), and the chain's sha256 lines
 // (chainLines) into the sha256 the check is stored by. Once the ticket a Task builds on has a
@@ -26,6 +28,17 @@ export const BUILDS_ON_STATES: readonly JobState[] = ['ready_for_human_review', 
 // of BUILDS_ON_STATES; null otherwise (no job, another state, or no prepared commit).
 export function buildsOnCommit(job: Pick<Job, 'state' | 'prepared_commit'> | undefined): string | null {
   return job !== undefined && BUILDS_ON_STATES.includes(job.state) ? job.prepared_commit : null;
+}
+
+// The states a part is moved onto its base from: it waits for the user's review.
+export const MOVE_STATES: readonly JobState[] = ['ready_for_human_review'];
+
+// Whether the job's change sits on the prepared commit of the ticket it builds on
+// (builds_on_commit, set at the start and by every MR preparation, null once the change is on
+// its base): such a part is moved onto its base once that ticket is merged
+// (MrPart.moveInRunner).
+export function sitsOnPart(job: Pick<Job, 'builds_on' | 'builds_on_commit'>): boolean {
+  return job.builds_on !== null && job.builds_on_commit !== null;
 }
 
 // Where a part that builds on ticket starts or is rebased onto, in the workspace whose checkout is

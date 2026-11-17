@@ -300,7 +300,7 @@ test('sf planner setup refuses what it cannot use, each with its code', async ()
   for (const args of [['planner'], ['planner', 'setup'], ['planner', 'start', 'app'], ['planner', 'setup', 'app', 'more'], ['planner', 'waiting'], ['planner', 'waiting', 'app', 'other'], ['planner', 'waiting', 'app', 'permission', 'more']]) {
     const usage = await runCli(env, args);
     assert.equal(usage.code, 2, args.join(' '));
-    assert.match(usage.stderr, /^sf: planner needs setup <workspace>, or waiting <workspace> \[permission\]\./);
+    assert.match(usage.stderr, /^sf: planner needs setup <workspace>, waiting <workspace> \[permission\], start <workspace> <ticket> or stop <workspace> <ticket>\./);
   }
   assert.deepEqual(lines.filter((line) => line.includes(TOKEN)), []);
 });

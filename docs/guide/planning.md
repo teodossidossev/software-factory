@@ -214,6 +214,12 @@ is none. To use it by hand:
 2. Start Claude Code there and send `/planning-tasks workspace my-app, ticket APP-12`, followed by
    your words, or the first message the ticket's page offers.
 
+Or let the factory start that session: `sf planner start my-app APP-12` starts Claude Code in the
+copy with Remote Control, as "Planner my-app APP-12", and sends it `/planning-tasks workspace
+my-app, ticket APP-12`; open it in the Claude app or on claude.ai/code. One session runs per ticket,
+it keeps running when `sf serve` restarts, and `sf planner stop my-app APP-12` ends it. The copy
+must be trusted first (step 1), and its planning tools need `sf serve`.
+
 ## 3. New ticket on the dashboard, then plan on its page
 
 New ticket (above, step 2 and 3) always writes the skeleton first. From the planned ticket's page

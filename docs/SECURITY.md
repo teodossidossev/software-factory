@@ -132,14 +132,17 @@ refused), and the factory's test command passed in a sandbox without network on 
   tokens, Claude Code's own configuration and credentials, the tunnel profile, and SSH, cloud, Git
   and package credentials are denied to every tool. The MCP server is registered for the copy's
   folder only (Claude Code's local scope, in `~/.claude.json`, which every session the factory
-  starts is denied).
+  starts is denied). The sessions `sf planner start` starts get no token or setting of the factory
+  in their environment but those that say where its folders are, and no Anthropic or Claude Code
+  variable but `CLAUDE_CONFIG_DIR`: they sign in with your own claude.ai login.
 - **A planning copy holds none of the repository's Claude Code configuration.** `sf planner
   setup` checks the copy out without anything the repository tracks under a `.claude/` folder but
   its `CLAUDE.md` (its settings, hooks, skills, agents, commands and rules) and without its
   `.mcp.json` (its MCP servers), at every run; the copy keeps the code and its instructions. A
   repository that tracks `.claude` itself as a link, a file or a submodule is refused. Only a
   configuration file with changes of yours, or a `.mcp.json` Git does not track, stays in the
-  copy: the setup names it in a warning, and it loads until you remove it.
+  copy: the setup names it in a warning, and it loads until you remove it. `sf planner start`
+  refuses a copy whose working tree holds any of it.
 - **The read-only sessions load no MCP server.** The morning digest, which reads other people's
   commit messages, the reviews and the Task check start without your MCP servers and deny every
   MCP tool, so nothing they read can drive one.
@@ -216,6 +219,9 @@ refused), and the factory's test command passed in a sandbox without network on 
 - **A planner's shell can open Unix sockets** on Linux unless Claude Code's seccomp filter is
   installed (`npm install -g @anthropic-ai/sandbox-runtime`). The factory's own socket is hidden
   from it, with the state folder.
+- **A planner session answers to your Claude account.** `sf planner start` starts it with Remote
+  Control: any device signed in to your Claude account can write to it and answer its permission
+  prompts. It can still only read.
 - **A phone that is lost unlocked** opens the dashboard. The dangerous actions still need the
   ticket typed. Keep the QR code with the token private.
 

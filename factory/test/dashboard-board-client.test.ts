@@ -1731,6 +1731,83 @@ test('board client: the Coordinator card reads api/coordinator on each coordinat
   assert.equal(page.timers.length, timers);
 });
 
+// How long the Zen lights stay lit: their timer's ms.
+const ZEN_MS = 3000;
+// The Zen lights in the Coordinator card's title; undefined when the card draws none.
+const coordZen = (page: Page): FakeElement | undefined => part(page.$('coord'), 'coord-zen');
+const coordLit = (page: Page): boolean | undefined => coordZen(page)?.classList.contains('lit');
+
+test('board client: the Coordinator card\'s Zen lights flash for a job\'s state change, not for the first list; a render keeps them; the timer dims them', async () => {
+  const EMPTY = { version: 1, status: null, questions: [], link: null, next_question: 1 };
+  let shown: unknown = EMPTY;
+  // Its stream already sent the first jobs event, an empty list.
+  const page = await openCoordinator(() => shown);
+  const coord = page.$('coord');
+  const jobs = async (list: Job[]): Promise<void> => {
+    page.streams.at(-1)!.emit('jobs', { jobs: list });
+    await page.flush();
+  };
+  const start = page.timers.length;
+  const zenTimers = () => page.timers.slice(start).filter((timer) => timer.ms === ZEN_MS);
+
+  // ZL-7: the card that shows only "has not reported" has no title and no lights; a job added
+  // (ZL-3) while it shows that sets the timer, and the status read before it fires draws them lit.
+  await coordChanged(page);
+  assert.deepEqual([coord.textContent, coordZen(page)], ['The coordinator has not reported (sf coordinator)', undefined]);
+  await jobs([job('A-1', 'working')]);
+  assert.deepEqual([coordZen(page), zenTimers().length], [undefined, 1]);
+  shown = coordStatus('Planning');
+  await coordChanged(page);
+  assert.equal(coordLit(page), true);
+
+  // ZL-6: five empty bars, hidden from a screen reader, inside the title; no text added.
+  const zen = coordZen(page)!;
+  assert.deepEqual([zen.tagName, zen.getAttribute('aria-hidden'), zen.getAttribute('title'), zen.parentNode, zen.textContent],
+    ['SPAN', 'true', 'Zen: lights up when a job changes state', part(coord, 'coord-title'), '']);
+  assert.deepEqual((zen.children as FakeElement[]).map((bar) => [bar.tagName, bar.children.length, bar.textContent]), Array.from({ length: 5 }, () => ['I', 0, '']));
+  assert.deepEqual((coord.children as FakeElement[]).map((child) => [child.tagName, child.className]), [['H2', 'coord-title'], ['DIV', 'coord-box']]);
+  assert.equal(part(coord, 'coord-title')!.textContent, 'Coordinator');
+  assert.equal(coord.textContent, `Coordinator${part(coord, 'coord-box')!.textContent}`);
+
+  // ZL-4: the timer dims them, the lights still drawn.
+  zenTimers()[0]!.fire();
+  assert.equal(coordLit(page), false);
+
+  // ZL-2: the same list again lights nothing and sets no timer; a state changed lights them.
+  await jobs([job('A-1', 'working')]);
+  assert.deepEqual([coordLit(page), zenTimers().length], [false, 1]);
+  await jobs([job('A-1', 'awaiting_review')]);
+  assert.deepEqual([coordLit(page), zenTimers().length], [true, 2]);
+
+  // ZL-4: a second change while lit (ZL-3: a job gone) clears the first timer and sets a new one.
+  await jobs([]);
+  assert.deepEqual(zenTimers().map((timer) => [timer.cleared, timer.fired]), [[false, true], [true, false], [false, false]]);
+  assert.equal(coordLit(page), true);
+
+  // ZL-5: a fresh read and render while lit draws them lit; the last timer dims them.
+  const before = coordZen(page);
+  await coordChanged(page);
+  assert.deepEqual([coordZen(page) !== before, coordLit(page)], [true, true]);
+  zenTimers()[2]!.fire();
+  assert.equal(coordLit(page), false);
+  // A board render while dim keeps them dim.
+  await jobs([]);
+  assert.deepEqual([coordLit(page), zenTimers().length], [false, 3]);
+
+  // ZL-1: a page whose first jobs event has jobs: nothing lit, no timer.
+  const fresh = await loadPage(STATIC_DIR, (path) => (path === 'api/jobs' ? { jobs: [] } : path === 'api/coordinator' ? coordStatus('Planning') : undefined));
+  fresh.document.dispatch('DOMContentLoaded');
+  await fresh.flush();
+  const stream = fresh.streams.at(-1)!;
+  stream.emit('open');
+  stream.emit('jobs', { jobs: [job('A-1', 'working'), job('A-2', 'paused')] });
+  stream.emit('workspaces', { workspaces: [workspace('app')] });
+  stream.emit('tickets', { tickets: [], archived: [] });
+  stream.emit('coordinator', {});
+  await fresh.flush();
+  assert.deepEqual([coordLit(fresh), fresh.timers.filter((timer) => timer.ms === ZEN_MS).length], [false, 0]);
+});
+
 // The coordinator's state with this status, written a minute ago.
 const coordStatus = (text: string) => ({ version: 1, status: { text, at: minutesAgo(1) }, questions: [], link: null, next_question: 1 });
 // The status's blocks as shown: a paragraph's tag and text, a list's tag and its items' texts.

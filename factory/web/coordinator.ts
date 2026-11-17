@@ -8,7 +8,12 @@
 // the state through sf serve; the page reads GET api/coordinator on each coordinator event of the
 // stream (one on connect, one after each write: main.js), and every board render (renderBoard)
 // renders the card again, so its ages and ticket links follow the board without a timer of its
-// own. Every text goes in through textContent or a text node, never as HTML; a ticket link opens
+// own. The title holds Zen's lights (the ship's computer of Blake's 7): five bars, dim at rest,
+// lit and pulsing for 3 s when a jobs event of the stream (main.js) differs from the last one by a
+// job's state, a job new to the list or a job gone from it, in any workspace; the first list
+// lights nothing. The lit state lives here, not on the element, so a render draws them as they
+// were; one timer dims them, and a card without a title (hidden, or "has not reported") draws
+// none. Every text goes in through textContent or a text node, never as HTML; a ticket link opens
 // only a page of the board's own tickets; the chat link is checked again here, claude.ai only. A
 // classic script, loaded in order with defer, sharing the page's globals with the others. This
 // file has no import or export on purpose: the compiler keeps it a script, so its top-level names
@@ -29,6 +34,53 @@ let coordReads = 0;
 // Whether a long status shows whole: the page's choice, one for the Home and the board (the card
 // is one element), not stored.
 let coordOpen = false;
+
+// How long the Zen lights stay lit after a change of the jobs list.
+const COORD_ZEN_MS = 3000;
+// The Zen lights' bars.
+const COORD_ZEN_BARS = 5;
+// The jobs list as last seen (each job's state by its key, every workspace's); null before the
+// first jobs event.
+let coordJobsSeen: Map<string, string> | null = null;
+// Whether the Zen lights are lit: every render draws them from it.
+let coordZenLit = false;
+// The timer that dims them; null while they are dim.
+let coordZenTimer: ReturnType<typeof setTimeout> | null = null;
+
+// The Zen lights drawn on the card, if any: they light or dim in place, with no render.
+function coordZenShow(): void {
+  byId('coord').querySelector('.coord-zen')?.classList.toggle('lit', coordZenLit);
+}
+
+// Called with each jobs event's list: when it differs from the last list seen by a job's state, a
+// job new to it or a job gone from it, the Zen lights light for COORD_ZEN_MS from now (a change
+// while lit starts the time again). The first list only sets the starting point.
+function coordZenOnJobs(jobs: readonly JobRow[]): void {
+  const seen = new Map(jobs.map((job) => [keyOf(job), job.state]));
+  const last = coordJobsSeen;
+  coordJobsSeen = seen;
+  if (last === null || (last.size === seen.size && [...seen].every(([key, jobState]) => last.get(key) === jobState))) {
+    return;
+  }
+  coordZenLit = true;
+  clearTimeout(coordZenTimer ?? undefined);
+  coordZenTimer = setTimeout(() => {
+    coordZenTimer = null;
+    coordZenLit = false;
+    coordZenShow();
+  }, COORD_ZEN_MS);
+  coordZenShow();
+}
+
+// The Zen lights: five thin bars after the title's text, lit while coordZenLit is set. Decorative,
+// so hidden from a screen reader, with a tooltip for the mouse.
+function coordZen(): HTMLElement {
+  const zen = el('span', coordZenLit ? 'coord-zen lit' : 'coord-zen');
+  zen.setAttribute('aria-hidden', 'true');
+  zen.setAttribute('title', 'Zen: lights up when a job changes state');
+  zen.append(...Array.from({ length: COORD_ZEN_BARS }, () => el('i')));
+  return zen;
+}
 
 // The chat's link when it is one as sf coordinator link takes it (an https URL of the host
 // claude.ai exactly, on the default port, without user or password), else null.
@@ -197,8 +249,8 @@ function coordLine(text: string, tickets: ReadonlyMap<string, { href: string; ti
 }
 
 // The card: hidden before the first read; one muted line when the coordinator never reported;
-// else the title and a box with the status (a p per paragraph, a ul per list; a long one's
-// preview until Show all), Show all or Show less when the preview leaves something out, the
+// else the title (with the Zen lights after its text, lit or dim by coordZenLit) and a box with
+// the status (a p per paragraph, a ul per list; a long one's preview until Show all), Show all or Show less when the preview leaves something out, the
 // footer (the status's age, muted with "quiet since <time>" after two hours, at the left; Open the
 // chat at the right), and the open questions in the order asked, each with its age. An open
 // question gives the card its accent border. Every board render draws it again; the element that
@@ -280,7 +332,9 @@ function renderCoordinator(): void {
     }));
     box.append(list);
   }
-  card.replaceChildren(el('h2', 'coord-title', 'Coordinator'), box);
+  const title = el('h2', 'coord-title', 'Coordinator');
+  title.append(coordZen());
+  card.replaceChildren(title, box);
   if (focused !== null) {
     card.querySelector<HTMLElement>(`[data-coord-focus="${focused}"]`)?.focus();
   }

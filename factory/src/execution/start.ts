@@ -20,7 +20,7 @@ import { configDir, type Workspace } from '../registry.js';
 import { collectRules, writeJobRules } from '../rules-docs.js';
 import { Runners } from '../runner.js';
 import { jobSkills, recordSkills } from '../skills.js';
-import { isDraft, parseFrontMatter, readTask, TASK_DIR, taskBuildsOn, type TaskReview, taskReview, taskSha256, TICKET_DESCRIPTION, TICKET_PATTERN } from '../task-file.js';
+import { isDraft, parseFrontMatter, readTask, TASK_DIR, taskBuildsOn, taskImportant, type TaskReview, taskReview, taskSha256, TICKET_DESCRIPTION, TICKET_PATTERN } from '../task-file.js';
 import { addWorktree, deleteBranch, removeWorktree } from '../worktree.js';
 import type { JobStorePort, LockPort, RunnerPort, SettingsPort } from './ports.js';
 import { checkNotInCheckout } from './errors.js';
@@ -49,7 +49,7 @@ interface BuildsOnStart {
 }
 
 // What a start reads from the Task file: the job's base, continues, builds_on and branch, its
-// review key, and the Task text they were read from.
+// review key, whether it is important, and the Task text they were read from.
 interface Plan {
   base: string;
   continues: string | null;
@@ -57,6 +57,7 @@ interface Plan {
   branch: string;
   content: string;
   review: TaskReview | undefined;
+  important: boolean;
 }
 
 // The files sf restart --keep-files keeps: their paths relative to the worktree, saved
@@ -315,6 +316,7 @@ export class StartPart {
     }
     return {
       base: fields.get('base')!, continues: taskContinues(fields), buildsOn: { ticket: buildsOn, commit }, branch: branchName(ticket, fields.get('title')!), content, review: taskReview(fields),
+      important: taskImportant(fields),
     };
   }
 
@@ -349,7 +351,7 @@ export class StartPart {
     });
   }
 
-  // Writes the record of a new job in starting (the ticket's directory must be free); under the lock. Decided here, once: the job's Claude review (claude_review, its review_setup event) and its skills (synced, its skills event).
+  // Writes the record of a new job in starting (the ticket's directory must be free); under the lock. Decided here, once: the job's Claude review (claude_review, its review_setup event), its skills (synced, its skills event) and whether it is important (important).
   async #claim(workspace: Workspace, ticket: string, plan: Plan, images: ResolvedImage[]): Promise<Claimed> {
     const { base, continues, buildsOn, branch } = plan;
     const created = now();
@@ -358,6 +360,7 @@ export class StartPart {
     const job: Job = {
       workspace: workspace.name, ticket, branch, base, continues, builds_on: buildsOn.ticket, builds_on_commit: buildsOn.commit, base_commit: null, state: 'starting', worktree, prepared_commit: null,
       iteration: 0, fixes: 0, gate_fixes: 0, gate_tokens: 0, session_id: null, mr: null, target_commit: null, mr_attempts: 0, mr_conflict_turn: false, created_at: created, updated_at: created, claude_review: setup.claude_review,
+      ...(plan.important ? { important: true as const } : {}),
     };
     checkTransition(null, 'starting', 'create');
     await this.#store.jobs.write(job);

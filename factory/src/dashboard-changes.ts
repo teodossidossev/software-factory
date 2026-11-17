@@ -16,8 +16,9 @@ export const MAX_STREAMS = 8;
 const KEEP_ALIVE_MS = 15_000;
 
 // A change with one more kind than Change's: coordinator, the coordinator's state changed (an sf
-// coordinator write, src/coordinator.ts); every page gets a coordinator event, on which its
-// Coordinator card reads GET api/coordinator again. The event carries no state of its own.
+// coordinator write, or a request for a status that POST api/coordinator/request opened;
+// src/coordinator.ts); every page gets a coordinator event, on which its Coordinator card reads
+// GET api/coordinator again. The event carries no state of its own.
 export type FeedChange = Change & { coordinator?: true };
 export interface DashboardFeed extends ChangeFeed {
   changed(change: FeedChange): void;

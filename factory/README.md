@@ -55,6 +55,7 @@ bin/sf coordinator status [text...] [--clear]  # what the coordinator does now (
 bin/sf coordinator ask <text...>  # a question that waits for the user's answer (at most 1,000 characters, 10 open: too_many_questions); prints its id, q1, q2, ...; needs sf serve
 bin/sf coordinator answered <id>  # take the answered question off the card (unknown_question for an id not open); needs sf serve
 bin/sf coordinator link <url> | --clear  # the chat's link for Open the chat: an https://claude.ai/ URL only (bad_link otherwise); --clear removes it; needs sf serve
+bin/sf coordinator wait-request [--timeout N]  # wait until the dashboard asks for a status (a click on Zen's screen) and print "status requested at <time>" (exit 0; an open request answers at once, an expired one does not count); --timeout N gives up after N seconds (0 looks once): "no status request before the timeout", exit 3; exit 1 when sf serve is not running, updating or stops while it waits (serve_stopping); for a background task of the coordinator's session; writes nothing; needs sf serve
 bin/sf pins                       # the open pins the user placed in point mode (section Pins): <id>  #<route>  "<text>" (<id>  <url>  "<text>" for a pin of another page), then the note; "No open pins." without; needs sf serve
 bin/sf pins resolve <id>          # mark a pin resolved (also one resolved already; pin_not_found for an unknown id); it leaves the page at its next read; needs sf serve
 bin/sf pins clear                 # remove every pin, open and resolved, and start the ids at 1 again (also over an unreadable pins.json): "Removed N pins."; needs sf serve
@@ -5020,7 +5021,7 @@ naming the type, when a type of `web/types.d.ts` has neither.
 - `header.js`: the top bar of the home and the board: what waits for you, the pages, the workspace
   filter, the pill's running count, the run limit and the reset rule.
 - `board.js`: board, cards, workspaces and dependencies, queue, toast.
-- `coordinator.js`: the Coordinator card (section Coordinator card), read-only.
+- `coordinator.js`: the Coordinator card (section Coordinator card), read-only but for a click on Zen's screen, which asks for a status (`POST api/coordinator/request`).
 - `routing.js`: the view shown, routing, the delegated click, input, change and key handlers.
 - `home.js`: the two main views (`showMain`, `back`) and the home (section Home): Needs you and the
   Coordinator card's place.
@@ -5057,7 +5058,7 @@ POST (anything else `405` with `Allow: GET, POST`):
 | `api/digests` | `{running, digests: [{id, trigger, period, ended_at, counts: {landed, live_branches, impact}, cost_usd, error}]}`, newest first (SF-103); the counts from the Git data, never from the model; 404 without the digest (in-process dashboards) |
 | `api/digests/<id>` | the stored record `digest/<id>.json` (SF-103); an unknown id or any query is an empty 404 |
 | `api/pins` | the dashboard's pins (section Pins), `pins.json` read as `sf pins` reads it: `{pins: [{id, route, selector, text, rect: {x, y, w, h, vw, vh}, note, url?, at, resolved}]}` (`url`, with `route` `""`, only on a pin of another page), every stored pin in id order, open and resolved; any query is an empty 404; `409 pins_unreadable` for a file that is not JSON or not this shape |
-| `api/coordinator` | the coordinator's state, `coordinator.json` read as `sf coordinator` reads it (section Coordinator card): `{version, status: {text, at} \| null, questions: [{id, text, at}], link, next_question}`; any query is an empty 404; written only by `sf coordinator` |
+| `api/coordinator` | the coordinator's state, `coordinator.json` read as `sf coordinator` reads it (section Coordinator card): `{version, status: {text, at} \| null, questions: [{id, text, at}], link, next_question, status_requested_at}`; any query is an empty 404; written by `sf coordinator` and, for `status_requested_at` only, by `POST api/coordinator/request` |
 | `vision/<workspace>` | the workspace's vision page (section Vision), `page.html` as `sf vision` stored it, `text/html; charset=utf-8` under its own `content-security-policy` (`VISION_PAGE_CSP`: a sandbox with scripts only, an opaque origin that loads nothing), with `cache-control: no-store`, `nosniff`, `no-referrer` and `x-frame-options: DENY` kept; a name without a page, any query or a longer path is an empty 404; another method `405`; written only by `sf vision` |
 | `api/tickets` | `{tickets: [{workspace, ticket, title, base, draft, request, job, lands_after, attachments, conversation: {message, url}, queue_position, queue_error, queue_reason, queue_force, queue_retry}], archived: [{workspace, ticket, title}], job_lands_after: [{workspace, ticket, lands_after}], queue: {max_running, running, held, hold_reason, next, on_limit, limit_hold}}`: the Task files without a live job; `queue_position` its 1-based place in the run queue or `null`, `queue_error` the queue's failed start `{code, message}` or `null`, `queue_reason` why its plan holds it in the queue ("plan not ready: N blocker, M major", "plan check failed", "plan being checked", "plan not checked") or `null`, `queue_force` whether Start anyway was given (SF-086), `queue_retry` the next try of a queued start that could not fetch `{code: "fetch_failed", at, retries}` or `null` (SF-236), `queue` the run queue (`next`: `{workspace, ticket}` of the first entry that waits for nothing and whose plan does not hold it, or `null`; `on_limit` the rule at a usage limit's reset and `limit_hold` `{parked, resets_at}` while a job is parked, else `null`, SF-072; the whole `queue` is `null` without a run queue) (SF-071, section Run queue); `lands_after` the tickets its Task file waits for, `[{workspace, ticket, state}]` with `state` `merged`, `pushed`, `running`, `planned` or `missing` (SF-084, section Dashboard), and `job_lands_after` the same for the Task files with a live job; `attachments` its images `[{name, bytes, type}]` (SF-064, section Ticket images); `draft` is true for a skeleton; `request` the user's words of New ticket or `null`; `job` is the last job's state or `null`; `url` is `https://chatgpt.com/?q=<message URL-encoded>`, or `null` when too long |
 | `api/jobs/<ws>/<ticket>/iterations/<n>/report` | the Report, `text/markdown` |
@@ -5071,7 +5072,7 @@ POST (anything else `405` with `Allow: GET, POST`):
 | `api/tickets/<ws>/<ticket>/task` | the ticket's Task file, `text/markdown`, read through the Task file reader (a regular file of valid Task content); `?archived=1` reads `.software-factory/archive/<ticket>.md` instead (any other `archived` value is 404); an unknown workspace or a missing file is an empty 404, a file the reader refuses its refusal (`400 invalid_content`) |
 | `api/tickets/<ws>/<ticket>/attachments/<name>` | one image of the ticket (SF-064), with the content type its bytes tell and `x-content-type-options: nosniff`; a missing workspace, Task file or image (or any query) is an empty 404, a bad name `400 invalid_name`, a file that is not the image its name says `400 attachment_type` |
 | `api/tickets/<ws>/<ticket>/planner` | the ticket's planner session as it runs now (section MCP endpoint, The planner session): `{session}`, `session` `{name, started_at, link}` (its name in Claude Code, when it started, and its `https://claude.ai/code/<id>` link once the session's hook recorded it, else `null`) or `null` when none runs; read through `plannerSession`, which removes the record of a session that ended; `POST` on it starts the session (below; `Allow: GET, POST`); a name that is not a workspace's and a ticket's, or any query, is an empty 404, and so is every planner path without the dashboard's planner (`startDashboard`'s `planner` option) |
-| `api/stream?job=<ws>/<ticket>&from=<line>` | server-sent events: `jobs` (on connect and on every state change), `coordinator` (`{}`, on connect and after each `sf coordinator` write: the Coordinator card reads `api/coordinator` again), `workspaces` and `tickets` (as the two endpoints, at the same times and after every setup action from a page), `job` (the job's detail, on connect and when it changes state), `event` (`{line, ts, iteration, type, text}` for every visible line of `events.jsonl` from the 0-based `from`, as `sf watch` formats it; the page reads `entries` since SF-078), `entries` (`{line, entries}`, the line's entries as `api/jobs/<ws>/<ticket>/stream` gives them, for every line from `from` that has entries, strictly in line order; a line whose build fails is logged and skipped); a comment every 15 s; at most 8 streams, then 503 |
+| `api/stream?job=<ws>/<ticket>&from=<line>` | server-sent events: `jobs` (on connect and on every state change), `coordinator` (`{}`, on connect, after each `sf coordinator` write and after a `POST api/coordinator/request` that opened a request: the Coordinator card reads `api/coordinator` again), `workspaces` and `tickets` (as the two endpoints, at the same times and after every setup action from a page), `job` (the job's detail, on connect and when it changes state), `event` (`{line, ts, iteration, type, text}` for every visible line of `events.jsonl` from the 0-based `from`, as `sf watch` formats it; the page reads `entries` since SF-078), `entries` (`{line, entries}`, the line's entries as `api/jobs/<ws>/<ticket>/stream` gives them, for every line from `from` that has entries, strictly in line order; a line whose build fails is logged and skipped); a comment every 15 s; at most 8 streams, then 503 |
 
 The reads above are one route table in `src/dashboard-reads.ts` (SF-140), matched in order; a path
 no route matches is an empty 404 (`api/stream` is the change feed's, sent there first by
@@ -5141,6 +5142,7 @@ shares; the setup, Task check, task and attachment posts have their own handlers
 | `POST api/pins` | `{"route": string, "selector": string, "text": string, "rect": {"x", "y", "w", "h", "vw", "vh": number}, "note": string, "url"?: string}` (`"route"` is `""` with `"url"`) | `src/pins.ts` `addPin` (section Pins): a new open pin with the next id; `url` is another page's address, `http:` or `https:` as `URL` writes it, without user name or password, at most 2,000 characters; result `{pin, pins}`; `400 invalid_body` beyond a bound, with a control character, with any other `url` or with a `url` beside a route, `400 pin_holds_token` when its route, selector, text, note or `url` contains the dashboard's token, `409 too_many_pins` with 50 open, `409 pins_unreadable` |
 | `POST api/pins/<id>` | `{"note"?: string, "resolved"?: boolean}`, at least one | `changePin`: the pin's note, resolved or open again (which counts toward the 50 open); result `{pins}`; `400 pin_holds_token` for a note that contains the dashboard's token, before the id is looked up; an id that is not a whole number from 1 without a leading zero is an empty 404, an unknown one `404 pin_not_found`; there is no PATCH method |
 | `POST api/pins/<id>/remove` | `{}` | `removePin`: result `{pins}`; its id is not given again; `404 pin_not_found`; there is no DELETE method |
+| `POST api/coordinator/request` | `{}` | `src/coordinator.ts` `requestStatus` (a click on Zen's screen, section Coordinator card, Asking for a status): result `{requested_at, opened}`; while a request younger than 2 minutes is open nothing is written and no page is told (`opened: false`, its time); otherwise `status_requested_at` is set to now, every page gets a `coordinator` event and every `sf coordinator wait-request` wakes (`opened: true`); allowed from another device without `confirm`; `409 update_in_progress` while `sf update` drains or builds; POST only |
 | `POST api/workspaces/<ws>/merge-requests/<number>/job` | `{"threads": string[], "instructions": string}` | `src/review-job.ts` (the Merge requests page): the merge request and its threads read on the host again (the comment text never comes from the page), the Task file `<key>-review-<n>` written with `writeTask` and added to the run queue; result `{workspace, ticket, path, position}`; `400 invalid_request` for no thread and blank instructions, instructions over 4,000 characters or a thread id the host does not list; `409 mr_not_open` when the merge request is not among the open ones; the host's reads' refusals; `400 invalid_content` from the Task file writer (a source branch `continues:` refuses); nothing is written to the host; an empty 404 for a bad workspace name or number, or without the run queue; every page gets the tickets again |
 | `POST api/queue/add` | `{"workspace": string, "ticket": string, "at"?: integer >= 1}` | `RunQueue.add` (`sf queue add`, SF-071): result `{position}`; `404 task_not_found`, `409 task_draft`, `409 job_exists`, `409 already_queued` |
 | `POST api/queue/remove` | `{"workspace": string, "ticket": string}` | `RunQueue.remove` (`sf queue remove`); `409 not_queued` |
@@ -5544,18 +5546,23 @@ The coordinator (the user's Claude Code session in the factory's checkout, `docs
 works out of the dashboard's sight; its chat stays on claude.ai. A compact card **Coordinator**,
 above the columns on the board and under Needs you on the home (`#coord`, `web/coordinator.ts`: one
 card, moved to the main view shown by `placeCoordinator` of `web/home.ts`, SF-226), shows what it does now, the questions that
-wait for the user's answer, and one click to the chat. The card is read-only: nothing on the
-dashboard writes the state, answers go to the chat.
+wait for the user's answer, and one click to the chat. The card is read-only but for one click: a
+click on Zen's screen asks the coordinator for a status (**Asking for a status**, below); nothing
+else on the dashboard writes the state, answers go to the chat.
 
 - **The state**: `${SF_STATE_DIR}/coordinator.json`, mode 0600, written atomically: `{ version: 1,
-  status: { text, at } | null, questions: [{ id, text, at }], link: string | null, next_question }`.
+  status: { text, at } | null, questions: [{ id, text, at }], link: string | null, next_question,
+  status_requested_at: string | null }`.
   A missing file reads as empty, one that is not JSON too (with one warning line). Question ids are
   `q1`, `q2`, ...: `next_question` is the next one's number (a missing or invalid one reads as 1 +
   the highest open id), so an id is never given twice while the file lives. An id has at most 15
   digits: after `q999999999999999` an ask is refused with `ids_exhausted` (removing the file starts
-  again at `q1`).
-- **Writing it**: only the `sf coordinator` commands (section Commands), run by `sf serve` over its
-  socket like the other writing commands, one write at a time; without a running `sf serve` they
+  again at `q1`). `status_requested_at` is the time (ISO) of the open request for a status, null
+  when none was asked or a status answered it; an older file without it, or a value that is not a
+  string `Date.parse` reads, reads as null (`version` stays 1).
+- **Writing it**: the `sf coordinator` commands (section Commands) and, for `status_requested_at`
+  only, `POST api/coordinator/request` (**Asking for a status**), both in `sf serve`, one write at a
+  time. The commands run over its socket like the other writing commands; without a running `sf serve` they
   fail as the others do, and while `sf update` drains or builds the writes are refused
   (`update_in_progress`; the read `sf coordinator` answers). The bounds: a status of at most 2,000
   characters (several lines in one quoted argument, its line breaks kept; no stdin form; a text
@@ -5565,7 +5572,8 @@ dashboard writes the state, answers go to the chat.
   no user or password (`bad_link` otherwise: `http:`, `claude.ai.evil.com`, `user@claude.ai`,
   `javascript:`, ...).
 - **Reading it**: `GET api/coordinator` answers the state as JSON (any query or longer path is an
-  empty 404; no other method or route touches it). After each write `sf serve` marks the change
+  empty 404 but `POST api/coordinator/request`; no other method or route touches it). After each
+  write of `sf coordinator`, and after a `POST api/coordinator/request` that opened a request, `sf serve` marks the change
   feed's `coordinator` kind: every open page gets a `coordinator` event (no data), and the card
   reads `GET api/coordinator` again; the stream sends one on connect too, so the card reads once
   when the board opens. There is no timer of its own: each board render renders the card again,
@@ -5573,7 +5581,9 @@ dashboard writes the state, answers go to the chat.
   its first, indented by 8 spaces (the width of `status: `).
 - **The card**: hidden until its first read. With no state at all one muted line, "The
   coordinator has not reported (sf coordinator)". Otherwise the title *Coordinator* and a box with,
-  in order: the status, *Show all* / *Show less* when it folds, a footer, and the questions. On the
+  in order: the status, *Show all* / *Show less* when it folds, the muted line "The coordinator is
+  not answering (no status in 2 minutes)" when a request for a status went unanswered (section
+  Asking for a status), a footer, and the questions. On the
   board the card has a job card's padding; on the home the title stands above the box, as Needs
   you's heading above its cards, so from 1100 px the two columns' headings and first boxes line up.
   - *The status* reads as the coordinator's answer to "status?". A blank line ends a block; a line
@@ -5607,21 +5617,65 @@ dashboard writes the state, answers go to the chat.
   Every text is set as text or a text node, never HTML. Every board render draws the card again;
   the toggle, a ticket link or *Open the chat* that had the focus has it again after.
 - **Zen lights**: after the title, a small screen drawn after Zen's, the ship's computer of
-  *Blake's 7*: a tall octagon of dark brown (24 × 34 px, the same in both themes, the title's row
-  grows to hold it) with twelve amber lights behind it, one long horizontal bar and eleven small
-  rectangles in rows beside and below it. At rest every light is a faint amber. When a `jobs` event
+  *Blake's 7*: a regular octagon of dark brown (a 30 × 30 px square, its corners cut at 29.29% and
+  70.71%, the same in both themes, the title's row grows to hold it) with ten amber lights behind
+  it, each with slightly rounded corners and a very thin dark outline: the bar in the middle,
+  thicker than the small lights, and nine small lights, mostly square and of slightly different
+  sizes, four down the right, two above the bar with a gap, three below it staggered (positions
+  and rhythms in `static/app.css`; the script only sets classes). At rest every light is a faint
+  amber. Zen thinks while a request for a status is open (**Asking for a status**) and for 3 s
+  after a change or a click: the small lights blink, each on its own rhythm, and the bar glows
+  steady. When a `jobs` event
   of the stream differs from the last one seen by a job's state, a job new to the list or a job
-  gone from it, the bar lights, steady, and the small lights blink, each in its own rhythm, for 3 s,
-  then dim again; jobs of every workspace count, shown by the filter or not. A click (a tap on a
-  phone) on the screen wakes it the same way, with no request sent. The first `jobs` event the
+  gone from it, it thinks for 3 s,
+  then rests again; jobs of every workspace count, shown by the filter or not. A click (a tap on a
+  phone) on the screen wakes it the same way, and asks for a status. Zen speaks when the requested
+  status arrives, only on a page that had the request open: the status shows whole, at once, with
+  no tie between text and lights; the small lights stop, some on and some off; the bar flickers on
+  its own irregular rhythm for min(7 s, 1.5 s + 35 ms per character of the status), and every 1.5
+  to 3 s one, rarely two, small lights switch for under a second and come back; then the screen
+  rests. A page that loads with a status there shows it and speaks nothing; a new status or a
+  click ends a speech at once. The small lights left on while Zen speaks spell a 9-bit number in
+  binary; for now each speech draws a random one from 1 to 511 (the page holds no count of the
+  jobs landed today, which a later ticket gives it). The first `jobs` event the
   page receives only sets the starting list, so opening the dashboard does not flash; after a reconnect the first `jobs`
   event compares with the last list seen, so a change made while away flashes once. Another
-  change while lit starts the 3 s again (one timer at a time; none while nothing changed). The lit
-  state is the script's, so a render of the card draws them lit or dim as they were. They are
+  change while lit starts the 3 s again (one timer at a time; none while nothing changed). The
+  state is the script's, so a render of the card draws the screen as it was. They are
   drawn only with the title (not while the card is hidden or shows only "has not reported"; a card
   that gets its title before the 3 s end shows them lit). Decorative: `aria-hidden="true"`, no
-  focus and no text, a tooltip "Zen: lights up when a job changes state; click to wake it" for the
-  mouse; with reduced motion they show lit and steady, without blinking.
+  focus and no text, a tooltip "Zen: lights up when a job changes state; click to ask the
+  coordinator for a status" for the mouse. With reduced motion nothing blinks or flickers: thinking
+  shows the small lights and the bar lit steady; speaking shows the pattern and the bar lit for 1 s.
+
+  <img src="../docs/guide/img/zen-rest.svg" alt="Zen at rest" width="120"> <img src="../docs/guide/img/zen-thinking.svg" alt="Zen thinking" width="120"> <img src="../docs/guide/img/zen-speaking-6.svg" alt="Zen speaking, the lights spelling 6" width="120"> <img src="../docs/guide/img/zen-speaking-9.svg" alt="Zen speaking, the lights spelling 9" width="120">
+
+  At rest; thinking; speaking. While Zen speaks, the small lights left on spell a number in binary.
+  Read them like a page, left to right and top to bottom: the two above the bar, the four down the
+  right, then below the bar the two upper ones (left, right) and last the lower one between them;
+  the first is the largest bit (256), the last is 1. Lights 000000110 = 4 + 2 = 6;
+  000001001 = 8 + 1 = 9. For now the number is a random one; it will be the jobs landed today.
+- **Asking for a status**: a click on Zen's screen posts `POST api/coordinator/request` with `{}`
+  (strict: anything else is `400 invalid_body`), with the transport checks of every action (the
+  cookie or the `/d/<token>/` path, the exact Origin, `application/json`), allowed from another
+  device without `confirm` (it changes only a time) and refused while `sf update` drains or builds
+  (`409 update_in_progress`). One request is open at a time: open while `status_requested_at` is
+  set and younger than 2 minutes by `sf serve`'s clock. A POST while one is open writes nothing and
+  tells no page (`{requested_at, opened: false}`, the open request's time); otherwise `sf serve`
+  writes the time of now (`opened: true`), marks the feed's `coordinator` kind, and wakes every
+  `sf coordinator wait-request` waiting (section Commands). The coordinator's session keeps that
+  command running in the background and answers with `sf coordinator status <text>`, which sets
+  `status_requested_at` back to null when the request is not after the status
+  (`sf coordinator status --clear` leaves it: it answers nothing). The page learns of a request only
+  from `api/coordinator`: while one is open and younger than 2 minutes by the page's clock, Zen
+  thinks on every page, and the card shows nothing more; one timer per page ends it at the request's
+  time + 2 minutes, after which the screen rests and the card shows the muted line "The
+  coordinator is not answering (no status in 2 minutes)" (a `div.coord-late`, not on the card that
+  shows only "has not reported") until the next status or click. A page whose clock is skewed from
+  `sf serve`'s shows the line early or late; `sf serve`'s own 2 minutes decide whether a new
+  request opens. A click while a request is open, or while this page's last POST waits for its
+  answer, sends nothing and only lights the screen; a refusal shows the error toast `<code>:
+  <message>`, a failure without an answer "The request for a status failed (<message>).".
 
 ### Pins
 

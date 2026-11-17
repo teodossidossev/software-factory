@@ -442,8 +442,9 @@ export function socketCommand(name: string): Command | undefined {
 export type Result = Record<string, unknown>;
 export interface Answer {
   lines: string[];
-  // sf exits 1.
+  // sf exits 1, or exitCode when given (wait-request's timeout: 3).
   failed: boolean;
+  exitCode?: number;
 }
 
 // The answer as key: value lines, objects as JSON.

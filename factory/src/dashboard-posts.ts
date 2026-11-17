@@ -2,15 +2,18 @@
 // the one call it stands for: the job and queue actions of POST_ROUTES (src/dashboard-routes.ts,
 // routePost), the setup actions (setupPost), the Task check's start (checkPost), the planned
 // ticket page's Save (taskPost), a ticket's images (attachmentAddPost, attachmentRemovePost), a
-// ticket's planner session (plannerPost), the pins (through setupPost) and an agent role's skills
-// (skillRolesPost, the one PUT); handlePost runs the transport checks, the call, and tells the
-// open pages through the change feed. Nothing here changes a job by itself.
+// ticket's planner session (plannerPost), the pins and a request for the coordinator's status
+// (through setupPost) and an agent role's skills (skillRolesPost, the one PUT); handlePost runs the
+// transport checks, the call, and tells the open pages through the change feed. Nothing here
+// changes a job by itself.
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import * as z from 'zod/v4';
 import { MAX_ATTACHMENT_BYTES } from './attachments.js';
 import { TICKET_OWNERS } from './conversation.js';
+import { requestStatus } from './coordinator.js';
 import type { DashboardSetup } from './dashboard.js';
-import { type ChangeFeed, type DashboardContext, isJsonContentType, isOctetStream, jobKey, plannerSessionView, type Post, readBody, type Target } from './dashboard-context.js';
+import type { DashboardFeed } from './dashboard-changes.js';
+import { type DashboardContext, isJsonContentType, isOctetStream, jobKey, plannerSessionView, type Post, readBody, type Target } from './dashboard-context.js';
 import { ticketEntry } from './dashboard-payloads.js';
 import { type JobKey, type JobRoute, openWhileUpdating, type PostRoute, type QueueRoute } from './dashboard-routes.js';
 import { FactoryError } from './errors.js';
@@ -89,13 +92,15 @@ const BODIES = {
   'pin-add': { shape: PIN_INPUT_SHAPE, schema: PIN_INPUT },
   'pin-change': { shape: PIN_CHANGE_SHAPE, schema: PIN_CHANGE },
   'pin-remove': { shape: '{}', schema: PIN_REMOVE },
+  // A click on Zen's screen on the Coordinator card: a request for the coordinator's status.
+  'coordinator-request': { shape: '{}', schema: z.strictObject({}) },
 };
 type SetupRoute = keyof typeof BODIES;
 // A setup POST's route and the body as its refusal names it.
 const setupBody = (route: SetupRoute): { route: SetupRoute; shape: string } => ({ route, shape: BODIES[route].shape });
 
 // The posts' handlers, each a Post for handle in startDashboard or undefined (an empty 404).
-export function postHandlers(ctx: DashboardContext, feed: Pick<ChangeFeed, 'changed' | 'jobChanged'>) {
+export function postHandlers(ctx: DashboardContext, feed: Pick<DashboardFeed, 'changed' | 'jobChanged'>) {
   const { stateDir, remoteOrigins, onWorkspacesChanged, jobs, actions, setup, checks, queue, digests, planner, empty, tokenText } = ctx;
   // The workspace change succeeded: the hook hears of it (a failing hook is logged).
   const workspacesChanged = <T>(result: T): T => {
@@ -275,7 +280,25 @@ export function postHandlers(ctx: DashboardContext, feed: Pick<ChangeFeed, 'chan
     };
   }
 
+  // POST api/coordinator/request with {}: a request for the coordinator's status (requestStatus,
+  // src/coordinator.ts), answered {requested_at, opened}. Only a request it opened marks the feed's
+  // coordinator kind, so every page reads api/coordinator again; one open already writes nothing.
+  // Allowed from another device without confirm: it changes only a time.
+  function coordinatorRequestPost(): Post {
+    const run = async (): Promise<{ requested_at: string; opened: boolean }> => {
+      const result = await requestStatus(stateDir);
+      if (result.opened) {
+        feed.changed({ coordinator: true });
+      }
+      return result;
+    };
+    return { ...setupBody('coordinator-request'), call: (data) => (BODIES['coordinator-request'].schema.safeParse(data).success ? run : undefined) };
+  }
+
   function setupPost(target: Exclude<Target, { kind: 'read' | 'action' | 'ticket-check' | 'ticket-task' | 'queue' | 'ticket-attachment-add' | 'ticket-attachment-remove' | 'skill-roles' | 'ticket-planner' }>): Post | undefined {
+    if (target.kind === 'coordinator-request') {
+      return coordinatorRequestPost();
+    }
     if (target.kind === 'pin') {
       return pinPost(target.id, target.remove);
     }

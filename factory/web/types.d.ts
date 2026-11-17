@@ -871,7 +871,7 @@ interface SkillText {
 }
 
 // GET api/coordinator: the coordinator's state for the board's Coordinator card (src/coordinator.ts
-// CoordinatorState, which sf coordinator writes); the card reads only these fields.
+// CoordinatorState, which sf coordinator writes, and POST api/coordinator/request its status_requested_at); the card reads only these fields.
 interface CoordinatorQuestion {
   id: string;
   text: string;
@@ -881,6 +881,8 @@ interface CoordinatorState {
   status: { text: string; at: string } | null;
   questions: CoordinatorQuestion[];
   link: string | null;
+  // The time of the dashboard's last request for a status, until a status answers it.
+  status_requested_at: string | null;
 }
 
 // The job created from review comments: src/review-job.ts ReviewJobResult.

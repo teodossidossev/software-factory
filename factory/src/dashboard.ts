@@ -483,7 +483,7 @@ export async function startDashboard(
       }
     };
     const what = targetOf(path);
-    if (what.kind === 'action' || what.kind === 'workspace-remove' || what.kind === 'ticket-action' || what.kind === 'ticket-owner' || what.kind === 'ticket-chat' || what.kind === 'workspace-edit' || what.kind === 'digest-settings' || what.kind === 'digest-run' || what.kind === 'mr-job' || what.kind === 'pin') {
+    if (what.kind === 'action' || what.kind === 'workspace-remove' || what.kind === 'ticket-action' || what.kind === 'ticket-owner' || what.kind === 'ticket-chat' || what.kind === 'workspace-edit' || what.kind === 'digest-settings' || what.kind === 'digest-run' || what.kind === 'mr-job' || what.kind === 'pin' || what.kind === 'coordinator-request') {
       if (req.method !== 'POST') {
         empty(res, 405, { allow: 'POST' });
         return;

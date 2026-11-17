@@ -179,9 +179,11 @@ refused), and the factory's test command passed in a sandbox without network on 
     (`frame-ancestors 'none'`, `X-Frame-Options: DENY`).
   - No token is written to a log.
   - The coordinator's state (its status, its open questions and its chat link) is a local file
-    in the state directory. Only `sf coordinator`, through `sf serve`, writes it; the dashboard
-    only reads it, and shows every text as text. The chat link is limited to `https://claude.ai/`,
-    checked when it is written and again on the page.
+    in the state directory. `sf coordinator`, through `sf serve`, writes it. The dashboard writes
+    one thing in it, the time of a request for a status (a click on Zen's screen), through
+    `POST api/coordinator/request` with the checks of its other actions; it shows every text as
+    text. The chat link is limited to `https://claude.ai/`, checked when it is written and again
+    on the page.
   - A workspace's vision is local files in the state directory (folders 0700, files 0600), in
     `<state dir>/vision/`, which `sf serve` makes at its start so that no job's session reads it.
     The Claude Code planner reads its English files, which `sf planner setup` names in the

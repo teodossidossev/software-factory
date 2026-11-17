@@ -9,7 +9,9 @@
 // prototype-only part; SF-084: the dependency chips and their states, Needed by, the highlight, the
 // chip's focus, the cycle line, the workspace stripe and chip, the filter chips and the ⋯ menu; SF-226: the home beside the board
 // (#home: the Home and Board tabs, Needs you oldest first with the board's buttons, the Coordinator card moved to the view
-// shown, the home's keys). Script checks, not browser acceptance: the manual steps are in factory/README.md.
+// shown, the home's keys); Zen's screen on the Coordinator card (its lights, the request for a status
+// a click sends, thinking while it is open, the line after 2 minutes, the speech) and its pictures in
+// the docs. Script checks, not browser acceptance: the manual steps are in factory/README.md.
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
@@ -1653,9 +1655,10 @@ test('board client (SF-119): a chip pointing into a folded column unfolds it (st
 });
 
 // The Coordinator card (coordinator.js): the board with api/coordinator answered by the test's
-// current state, and the stream's opening events; hash: the page's address at load.
-async function openCoordinator(answer: () => unknown, hash = ''): Promise<Page> {
-  const page = await loadPage(STATIC_DIR, (path) => (path === 'api/jobs' ? { jobs: [] } : path === 'api/coordinator' ? answer() : undefined));
+// current state, and the stream's opening events; hash: the page's address at load; globals: names
+// added to the page's context (a matchMedia).
+async function openCoordinator(answer: () => unknown, hash = '', globals: Record<string, unknown> = {}): Promise<Page> {
+  const page = await loadPage(STATIC_DIR, (path) => (path === 'api/jobs' ? { jobs: [] } : path === 'api/coordinator' ? answer() : undefined), undefined, globals);
   page.location.hash = hash;
   page.document.dispatch('DOMContentLoaded');
   await page.flush();
@@ -1734,7 +1737,7 @@ test('board client: the Coordinator card reads api/coordinator on each coordinat
 // How long the Zen lights stay lit: their timer's ms.
 const ZEN_MS = 3000;
 // The Zen screen's tooltip.
-const ZEN_TITLE = 'Zen: lights up when a job changes state; click to wake it';
+const ZEN_TITLE = 'Zen: lights up when a job changes state; click to ask the coordinator for a status';
 // The Zen lights in the Coordinator card's title; undefined when the card draws none.
 const coordZen = (page: Page): FakeElement | undefined => part(page.$('coord'), 'coord-zen');
 const coordLit = (page: Page): boolean | undefined => coordZen(page)?.classList.contains('lit');
@@ -1762,20 +1765,22 @@ test('board client: the Coordinator card\'s Zen lights flash for a job\'s state 
   await coordChanged(page);
   assert.equal(coordLit(page), true);
 
-  // ZL-6: twelve empty lights, the first the bar, hidden from a screen reader, inside the title; no
-  // text added.
+  // ZL-6, SR-9: ten empty lights, the first alone the bar, hidden from a screen reader, inside the
+  // title; no text added. SR-10: thinking, the screen is lit, not speaking, the bar without on.
   const zen = coordZen(page)!;
   assert.deepEqual([zen.tagName, zen.getAttribute('aria-hidden'), zen.getAttribute('title'), zen.parentNode, zen.textContent],
     ['SPAN', 'true', ZEN_TITLE, part(coord, 'coord-title'), '']);
   assert.deepEqual((zen.children as FakeElement[]).map((light) => [light.tagName, light.className, light.children.length, light.textContent]),
-    [['I', 'bar', 0, ''], ...Array.from({ length: 11 }, () => ['I', '', 0, ''])]);
+    [['I', 'bar', 0, ''], ...Array.from({ length: 9 }, () => ['I', '', 0, ''])]);
+  assert.deepEqual([zen.classList.contains('lit'), zen.classList.contains('speaking'), (zen.children[0] as FakeElement).classList.contains('on')], [true, false, false]);
   assert.deepEqual((coord.children as FakeElement[]).map((child) => [child.tagName, child.className]), [['H2', 'coord-title'], ['DIV', 'coord-box']]);
   assert.equal(part(coord, 'coord-title')!.textContent, 'Coordinator');
   assert.equal(coord.textContent, `Coordinator${part(coord, 'coord-box')!.textContent}`);
 
-  // ZL-4: the timer dims them, the lights still drawn.
+  // ZL-4: the timer dims them, the lights still drawn; SR-9: at rest no light is on.
   zenTimers()[0]!.fire();
   assert.equal(coordLit(page), false);
+  assert.ok((coordZen(page)!.children as FakeElement[]).every((light) => !light.classList.contains('on')));
 
   // ZL-2: the same list again lights nothing and sets no timer; a state changed lights them.
   await jobs([job('A-1', 'working')]);
@@ -1817,28 +1822,243 @@ test('board client: a click on Zen\'s screen lights it for 3 s; another click re
   await coordChanged(page);
   const start = page.timers.length;
   const zenTimers = () => page.timers.slice(start).filter((timer) => timer.ms === ZEN_MS);
-  // A click on the screen, which sends no request.
-  const click = async (): Promise<void> => {
+  // A click on the screen: the requests it sends.
+  const click = async (sent: number): Promise<void> => {
     const requests = page.requests.length;
     coordZen(page)!.dispatch('click');
     await page.flush();
-    assert.equal(page.requests.length, requests);
+    assert.equal(page.requests.length, requests + sent);
   };
   assert.deepEqual([coordLit(page), zenTimers().length], [false, 0]);
 
-  // ZS-4: a click lights them and sets one 3 s timer.
-  await click();
+  // ZS-4: a click lights them and sets one 3 s timer; it asks for a status (SR-5), the POST left
+  // unanswered.
+  await click(1);
   assert.deepEqual([coordLit(page), zenTimers().length], [true, 1]);
 
-  // A second click (on the screen a render drew again) clears it and sets a new one.
+  // A second click (on the screen a render drew again) clears it and sets a new one; the first
+  // POST still waits, so it sends none.
   await coordChanged(page);
-  await click();
+  await click(0);
   assert.deepEqual(zenTimers().map((timer) => [timer.cleared, timer.fired]), [[true, false], [false, false]]);
   assert.equal(coordLit(page), true);
 
   // The last timer dims them.
   zenTimers()[1]!.fire();
   assert.equal(coordLit(page), false);
+});
+
+// The card's line when a request for a status went unanswered.
+const COORD_LATE = 'The coordinator is not answering (no status in 2 minutes)';
+// A time this many seconds ago, as the server writes it.
+const secondsAgo = (seconds: number): string => new Date(Date.now() - seconds * 1000).toISOString();
+// The page's POSTs of a request for a status.
+const coordPosts = (page: Page) => page.requests.filter((request) => request.path === 'api/coordinator/request');
+// The timers the page set from index start on that are longer than a minute: the open request's.
+const askTimers = (page: Page, start: number) => page.timers.slice(start).filter((timer) => timer.ms > 60_000);
+// Zen's screen's state: its classes, the bar's on, the small lights with on (by index).
+const zenShown = (page: Page) => {
+  const zen = coordZen(page)!;
+  const [bar, ...small] = zen.children as FakeElement[];
+  return {
+    lit: zen.classList.contains('lit'), speaking: zen.classList.contains('speaking'), bar: bar!.classList.contains('on'),
+    on: small.flatMap((light, index) => (light.classList.contains('on') ? [index] : [])),
+  };
+};
+const clickZen = async (page: Page): Promise<void> => {
+  coordZen(page)!.dispatch('click');
+  await page.flush();
+};
+
+test('board client: a click on Zen\'s screen asks for a status once; an open request lights every page until the status comes or 2 minutes end', async () => {
+  const planning = coordStatus('Planning');
+  let shown: unknown = planning;
+  const page = await openCoordinator(() => shown);
+  await coordChanged(page);
+  const coord = page.$('coord');
+  const changed = async (state: unknown): Promise<void> => {
+    shown = state;
+    await coordChanged(page);
+  };
+  const start = page.timers.length;
+  const zenTimers = () => page.timers.slice(start).filter((timer) => timer.ms === ZEN_MS);
+  const late = () => part(coord, 'coord-late');
+
+  // SR-5: a click with no request open sends one POST with {}; a second while it is unanswered none.
+  await clickZen(page);
+  assert.deepEqual(coordPosts(page).map((request) => [request.method, request.body]), [['POST', '{}']]);
+  await clickZen(page);
+  assert.equal(coordPosts(page).length, 1);
+  coordPosts(page)[0]!.respond(200, { ok: true, result: { requested_at: secondsAgo(0), opened: true } });
+  await page.flush();
+  zenTimers().at(-1)!.fire();
+  assert.equal(coordLit(page), false);
+
+  // SR-6 (a): a read with a request 10 s ago lights the screen without a click, no line, one timer.
+  await changed({ ...planning, status_requested_at: secondsAgo(10) });
+  assert.deepEqual([coordLit(page), late()], [true, undefined]);
+  assert.equal(askTimers(page, start).length, 1);
+  const ask = askTimers(page, start)[0]!;
+  assert.ok(ask.ms >= 100_000 && ask.ms <= 110_000, String(ask.ms));
+  // (b) a click sends nothing and starts the 3 s; (c) when they end, still lit.
+  const posted = coordPosts(page).length;
+  const zens = zenTimers().length;
+  await clickZen(page);
+  assert.deepEqual([coordPosts(page).length, zenTimers().length], [posted, zens + 1]);
+  zenTimers().at(-1)!.fire();
+  assert.equal(coordLit(page), true);
+  // (d) a board render keeps it lit and sets no second timer.
+  page.streams.at(-1)!.emit('jobs', { jobs: [] });
+  await page.flush();
+  assert.deepEqual([coordLit(page), askTimers(page, start).length], [true, 1]);
+
+  // SR-7: the status comes: the timer cleared, the new text whole, and this page speaks.
+  const speechStart = page.timers.length;
+  await changed({ ...planning, status: { text: 'Landed SF-301.', at: secondsAgo(1) }, status_requested_at: null });
+  assert.equal(ask.cleared, true);
+  assert.equal(part(coord, 'coord-status')!.textContent, 'Landed SF-301.');
+  assert.deepEqual([zenShown(page).speaking, zenShown(page).lit], [true, false]);
+  for (let fired = 0; fired < 500 && zenShown(page).speaking; fired += 1) {
+    page.timers.slice(speechStart).find((timer) => !timer.fired && !timer.cleared)!.fire();
+  }
+  assert.deepEqual(zenShown(page), { lit: false, speaking: false, bar: false, on: [] });
+
+  // SR-8: a request 10 s ago, then its timer ends it: unlit, the muted line; a status after it
+  // starts no speech and removes the line.
+  const answered = { ...planning, status: { text: 'Landed SF-301.', at: secondsAgo(1) } };
+  await changed({ ...answered, status_requested_at: secondsAgo(10) });
+  assert.equal(coordLit(page), true);
+  askTimers(page, start).at(-1)!.fire();
+  assert.equal(coordLit(page), false);
+  assert.deepEqual([late()?.tagName, late()?.textContent, late()?.classList.contains('muted')], ['DIV', COORD_LATE, true]);
+  await changed({ ...answered, status: { text: 'Idle.', at: secondsAgo(0) }, status_requested_at: null });
+  assert.deepEqual([zenShown(page).speaking, late()], [false, undefined]);
+
+  // A page whose first read has a request 3 minutes old: the line, unlit, no timer; a click posts,
+  // and a refusal shows the error toast.
+  const other = await openCoordinator(() => ({ ...planning, status_requested_at: secondsAgo(180) }));
+  const otherStart = other.timers.length;
+  await coordChanged(other);
+  assert.deepEqual([part(other.$('coord'), 'coord-late')?.textContent, coordLit(other), askTimers(other, otherStart).length], [COORD_LATE, false, 0]);
+  await clickZen(other);
+  assert.equal(coordPosts(other).length, 1);
+  coordPosts(other)[0]!.respond(409, { ok: false, error: { code: 'update_in_progress', message: 'x' } });
+  await other.flush();
+  assert.deepEqual([other.$('toast').hidden, other.$('toast-text').textContent], [false, 'update_in_progress: x']);
+});
+
+test('board client: Zen thinks with its small lights and speaks the requested status with its bar; reduced motion shows it steady', async () => {
+  // The small lights a number spells: reading position k is small light READING[k] and holds bit 8 - k.
+  const READING = [4, 5, 0, 1, 2, 3, 6, 8, 7];
+  const numberOf = (on: number[]): number => READING.reduce((sum, light, position) => sum + (on.includes(light) ? 2 ** (8 - position) : 0), 0);
+  const TEXT = 'Landed SF-301 and 02';
+  assert.equal([...TEXT].length, 20);
+  // A page that had a request open (SR-6 a) and then gets its status (SR-7).
+  const speaking = async (globals: Record<string, unknown> = {}) => {
+    let shown: unknown = { ...coordStatus('Planning'), status_requested_at: secondsAgo(10) };
+    const page = await openCoordinator(() => shown, '', globals);
+    await coordChanged(page);
+    assert.equal(zenShown(page).lit, true);
+    const start = page.timers.length;
+    shown = { ...coordStatus(TEXT), status: { text: TEXT, at: secondsAgo(1) }, status_requested_at: null };
+    await coordChanged(page);
+    return { page, start, change: async (state: unknown) => {
+      shown = state;
+      await coordChanged(page);
+    } };
+  };
+
+  // SR-11: the text whole at once; the small lights a number from 1 to 511 but for at most two
+  // switched; the bar's on alternating step by step; the steps sum to at least 2,200 ms (1.5 s +
+  // 35 ms x 20) before the 300 ms step, and the speech ends.
+  const { page, start } = await speaking();
+  assert.equal(part(page.$('coord'), 'coord-status')!.textContent, TEXT);
+  const first = zenShown(page);
+  assert.deepEqual([first.speaking, first.lit, first.bar], [true, false, true]);
+  const spelled = numberOf(first.on);
+  assert.ok(spelled >= 1 && spelled <= 511, String(spelled));
+  let spent = 0;
+  let last: number | undefined;
+  const bars: boolean[] = [];
+  for (let fired = 0; fired < 500 && zenShown(page).speaking; fired += 1) {
+    const timer = page.timers.slice(start).find((each) => !each.fired && !each.cleared)!;
+    if (timer.ms <= 260) {
+      bars.push(zenShown(page).bar);
+      spent += timer.ms;
+    } else if (timer.ms === 300) {
+      last = spent;
+      assert.equal(zenShown(page).bar, false);
+    } else {
+      assert.ok(timer.ms >= 500 && timer.ms <= 900, String(timer.ms));
+    }
+    timer.fire();
+    const shown = zenShown(page);
+    const switched = [...new Set([...shown.on, ...first.on])].filter((light) => shown.on.includes(light) !== first.on.includes(light));
+    assert.ok(!shown.speaking || switched.length <= 2, `switched ${switched.join(',')}`);
+  }
+  assert.ok(bars.every((bar, index) => bar === (index % 2 === 0)), bars.join(','));
+  assert.ok(last !== undefined && last >= 2200 && last < 2200 + 260, String(last));
+  assert.deepEqual(zenShown(page), { lit: false, speaking: false, bar: false, on: [] });
+
+  // SR-12: a page whose first read has a status speaks nothing.
+  const loaded = await openCoordinator(() => coordStatus(TEXT));
+  await coordChanged(loaded);
+  assert.deepEqual(zenShown(loaded), { lit: false, speaking: false, bar: false, on: [] });
+
+  // SR-14: a read with another status time ends a speech (its timers cleared); a click ends one and
+  // sends one POST.
+  const ended = await speaking();
+  const speechTimers = () => ended.page.timers.slice(ended.start).filter((timer) => timer.ms <= 300);
+  assert.equal(zenShown(ended.page).speaking, true);
+  await ended.change(coordStatus('Another'));
+  assert.deepEqual([zenShown(ended.page).speaking, speechTimers().every((timer) => timer.cleared || timer.fired)], [false, true]);
+  const clicked = await speaking();
+  assert.equal(zenShown(clicked.page).speaking, true);
+  await clickZen(clicked.page);
+  assert.deepEqual([zenShown(clicked.page).speaking, coordPosts(clicked.page).length], [false, 1]);
+
+  // SR-13: reduced motion: speaking, the pattern and the bar on, one 1 s timer and no step; when it
+  // fires, at rest.
+  const reduced = await speaking({ matchMedia: (query: string) => ({ matches: query === '(prefers-reduced-motion: reduce)', media: query, addEventListener: () => undefined }) });
+  const steady = zenShown(reduced.page);
+  assert.deepEqual([steady.speaking, steady.bar, numberOf(steady.on) >= 1], [true, true, true]);
+  const timers = reduced.page.timers.slice(reduced.start).filter((timer) => timer.ms <= 1000);
+  assert.deepEqual(timers.map((timer) => timer.ms), [1000]);
+  timers[0]!.fire();
+  assert.deepEqual(zenShown(reduced.page), { lit: false, speaking: false, bar: false, on: [] });
+});
+
+test('docs: Zen\'s pictures show the lights their captions name', async () => {
+  const IMG = new URL('../../../docs/guide/img/', import.meta.url);
+  const READING = [4, 5, 0, 1, 2, 3, 6, 8, 7];
+  // A-14's x/y/width/height: the bar, then the nine small lights.
+  const PLACES = [[13, 40, 54, 13], [73, 21, 11, 10], [74, 34, 9, 11], [72, 49, 13, 10], [73, 63, 10, 12], [23, 22, 13, 11], [48, 23, 10, 10], [19, 61, 11, 12], [35, 73, 14, 10], [53, 60, 10, 11]];
+  // The lights a number spells while Zen speaks: the bar (0) and the small lights (1 + index).
+  const spelled = (count: number): number[] => [0, ...READING.flatMap((light, position) => (((count >> (8 - position)) & 1) === 1 ? [1 + light] : [])).sort((a, b) => a - b)];
+  const files: Array<[string, number[]]> = [['zen-rest.svg', []], ['zen-thinking.svg', [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]], ['zen-speaking-6.svg', spelled(6)], ['zen-speaking-9.svg', spelled(9)]];
+  assert.deepEqual(spelled(6), [0, 7, 9]);
+  assert.deepEqual(spelled(9), [0, 4, 8]);
+  for (const [name, lit] of files) {
+    const svg = await readFile(new URL(name, IMG), 'utf8');
+    assert.equal(svg.match(/<polygon\b/g)?.length, 1, name);
+    assert.doesNotMatch(svg, /<script|href=|<image|@import|url\(/i, name);
+    const rects = [...svg.matchAll(/<rect\b([^>]*)>/g)].map(([, attributes]) => Object.fromEntries([...attributes!.matchAll(/([\w-]+)="([^"]*)"/g)].map(([, key, value]) => [key, value])));
+    assert.equal(rects.length, 10, name);
+    assert.deepEqual(rects.map((rect) => [rect.x, rect.y, rect.width, rect.height].map(Number)), PLACES, name);
+    assert.deepEqual(rects.map((rect) => (rect.class ?? '').split(' ').includes('bar')), [true, ...Array.from({ length: 9 }, () => false)], name);
+    assert.deepEqual(rects.flatMap((rect, index) => ((rect.class ?? '').split(' ').includes('on') ? [index] : [])), lit, name);
+  }
+  // Both documents show the four pictures, each path resolving, and the caption's worked numbers.
+  const docs: Array<[URL, string]> = [[new URL('../../README.md', import.meta.url), '../docs/guide/img/'], [new URL('../../../docs/guide/ways-of-working.md', import.meta.url), 'img/']];
+  for (const [doc, prefix] of docs) {
+    const text = await readFile(doc, 'utf8');
+    for (const [name] of files) {
+      assert.ok(text.includes(`src="${prefix}${name}"`), `${doc.pathname}: ${name}`);
+      await readFile(new URL(`${prefix}${name}`, doc));
+    }
+    const words = text.replace(/\s+/g, ' ');
+    assert.ok(words.includes('000000110 = 4 + 2 = 6;') && words.includes('000001001 = 8 + 1 = 9.'), doc.pathname);
+  }
 });
 
 // The coordinator's state with this status, written a minute ago.

@@ -87,8 +87,14 @@ rule changes, change it here, through a pull request like any other change.
     `sf coordinator status --clear` when you are idle.
   - Each question you put to the user: `sf coordinator ask "<the question>"` (it prints the id,
     `q1`, `q2`, ...). When the answer comes, `sf coordinator answered <id>`.
-  - `sf coordinator` shows what the card shows. The dashboard never writes it: the answers come in
-    the chat.
+  - `sf coordinator` shows what the card shows. The answers to your questions come in the chat.
+  - A click on Zen's screen on the card asks you for a status. Keep
+    `sf coordinator wait-request` running in the background: start it once per session, after
+    `sf coordinator link`. When it exits 0 (a request), write the status with
+    `sf coordinator status`, in the same plain, short form as a status in the chat (what landed,
+    what waits for the user, what stopped and why), then start it again. When it exits 1 (sf serve
+    stopped, is updating or did not answer), start it again once `sf info` answers. A "status?" in
+    the chat still gets its answer in the chat.
 - At most three jobs run at once (the user's plan allows it since 2026-11-05).
 - The run queue starts tickets by itself (`sf queue add <ws> <ticket>`, `sf queue list`,
   `sf queue limit N`); it starts a ticket only when its plan check says ready or is not needed

@@ -11,7 +11,7 @@ import { callSocket } from '../src/ipc.js';
 import { now } from '../src/jobs.js';
 import { startTime } from '../src/pid-lock.js';
 import { markerPath, writeMarker } from '../src/update.js';
-import { openStream } from './support/dashboard-client.js';
+import { act, openStream } from './support/dashboard-client.js';
 import { newEnv, runCli, serve, stop } from './support/harness.js';
 
 const E2E = { timeout: 120_000 };
@@ -209,6 +209,42 @@ test('sf coordinator: the writes go through sf serve, which tells the open pages
     assert.equal(events(), before + 1, 'only the writes that went through tell the pages');
     // A status of several lines, after -- as it starts with "-": its further lines under its first.
     assert.match(await write(['status', '--', '- SF-210 planned\n- SF-211 queued']), /^status: - SF-210 planned {2}\(.+\)\n {8}- SF-211 queued\nquestions:/);
+  } finally {
+    stream.close();
+    await stop(served);
+  }
+});
+
+test('sf coordinator wait-request: exit 3 on its timeout, 0 with the time of a request the dashboard opened (before or after it started); a status answers the request; no coordinator event; a wrong flag exits 2', E2E, async () => {
+  const env = await newEnv('commands-wait-request');
+  const served = await serve(env);
+  const stream = await openStream(new URL('api/stream', served.dashboard!));
+  try {
+    await stream.next('coordinator');
+    const events = (): number => stream.events.filter((event) => event.event === 'coordinator').length;
+    const before = events();
+    const none = await runCli(env, ['coordinator', 'wait-request', '--timeout', '0']);
+    assert.deepEqual([none.code, none.stdout], [3, 'no status request before the timeout\n']);
+    // Started before the POST: it exits 0 once the request lands.
+    const waiting = runCli(env, ['coordinator', 'wait-request']);
+    await new Promise((done) => setTimeout(done, 300));
+    const posted = await act(new URL(served.dashboard!), 'api/coordinator/request', {});
+    assert.equal(posted.status, 200, posted.body);
+    const woken = await waiting;
+    assert.equal(woken.code, 0, woken.stderr);
+    assert.match(woken.stdout, /^status requested at \d{4}-\d\d-\d\d \d\d:\d\d:\d\d\n$/);
+    await stream.seen('coordinator', () => events() > before);
+    // Open already: at once.
+    const open = await runCli(env, ['coordinator', 'wait-request', '--timeout', '0']);
+    assert.deepEqual([open.code, open.stdout], [0, woken.stdout]);
+    assert.equal(events(), before + 1, 'only the POST told the pages');
+    // A status answers it.
+    assert.equal((await runCli(env, ['coordinator', 'status', 'Done'])).code, 0);
+    const answered = await runCli(env, ['coordinator', 'wait-request', '--timeout', '0']);
+    assert.deepEqual([answered.code, answered.stdout], [3, 'no status request before the timeout\n']);
+    const wrong = await runCli(env, ['coordinator', 'wait-request', '--timeout', 'x']);
+    assert.equal(wrong.code, 2);
+    assert.match(wrong.stderr, /--timeout must be a whole number/);
   } finally {
     stream.close();
     await stop(served);

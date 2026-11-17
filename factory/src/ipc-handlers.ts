@@ -15,7 +15,8 @@ export interface SocketHandlerOptions extends Serve {
   testHooks: TestHooks;
   // After a queue command that changed the queue.
   onQueueChange(): void;
-  // After an sf coordinator command that wrote the coordinator's state (all but the read).
+  // After an sf coordinator command that wrote the coordinator's state (all but the read and
+  // wait-request, which write nothing).
   onCoordinatorChange(): void;
 }
 
@@ -37,7 +38,7 @@ export function socketHandler(options: SocketHandlerOptions): IpcHandler {
     if (command.name.startsWith('queue ') && command !== COMMANDS.queueList) {
       options.onQueueChange();
     }
-    if (command.name.startsWith('coordinator ')) {
+    if (command.name.startsWith('coordinator ') && command !== COMMANDS.coordinatorWaitRequest) {
       options.onCoordinatorChange();
     }
     return result;

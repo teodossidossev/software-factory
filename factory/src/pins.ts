@@ -7,8 +7,9 @@
 // is no pins; a file that is not JSON or not this shape is refused on every read and write
 // (pins_unreadable) and only sf pins clear replaces it. Every string is bounded and holds no control
 // character (text and note: none but \n and \t), so nothing sf pins prints is acted on by a terminal.
-// Below the store, the sf pins commands of src/commands.ts's table (spread into its COMMANDS) and
-// how the CLI prints their answers.
+// No pin holds the dashboard's token: the dashboard's posts refuse a pin or a note with it
+// (pin_holds_token) before the store is read. Below the store, the sf pins commands of
+// src/commands.ts's table (spread into its COMMANDS) and how the CLI prints their answers.
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import * as z from 'zod/v4';
@@ -161,6 +162,17 @@ function update<T extends object>(stateDir: string, change: (file: PinsFile | un
 
 const openCount = (file: PinsFile): number => file.pins.filter((pin) => !pin.resolved).length;
 const tooMany = (): FactoryError => new FactoryError('too_many_pins', `${MAX_OPEN_PINS} pins are open already; resolve or delete one first.`);
+
+// No pin holds the dashboard's token (the secret in its address, /d/<token>/), wherever the pin
+// comes from: a body with the whole token, as the dashboard compares it, in any of its strings
+// (a new pin's route, selector, text, note and url; a change's note) is pin_holds_token. The
+// dashboard's posts call it with the token they know, before the store is read; the store knows
+// none. The message is fixed, so a refusal holds neither the body nor the token.
+export function refusePinToken(body: PinInput | PinChange, token: string): void {
+  if (Object.values(body).some((value) => typeof value === 'string' && value.includes(token))) {
+    throw new FactoryError('pin_holds_token', "A pin cannot hold the dashboard's token (the secret in the dashboard's address); nothing was saved.");
+  }
+}
 
 function pinOf(file: PinsFile, id: number): Pin {
   const pin = file.pins.find((each) => each.id === id);

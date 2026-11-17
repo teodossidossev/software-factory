@@ -93,8 +93,8 @@ export const ERROR_STATUS: Readonly<Record<string, number>> = {
   // that is not a https://chatgpt.com/ one.
   no_suggestion: 409, suggestion_changed: 409, invalid_chat_link: 400,
   // The dashboard's pins (src/pins.ts): no such pin, too many open ones, a pins.json that only
-  // sf pins clear may replace.
-  pin_not_found: 404, too_many_pins: 409, pins_unreadable: 409,
+  // sf pins clear may replace, a pin or a note that holds the dashboard's token.
+  pin_not_found: 404, too_many_pins: 409, pins_unreadable: 409, pin_holds_token: 400,
   // The ticket's planner session (src/planner-session.ts): a start of it under way, and a planning
   // copy that is not set up, holds the repository's Claude Code configuration or is not trusted by
   // Claude Code.

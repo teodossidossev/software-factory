@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import type { GateRecord, ReviewRecord } from '../src/jobs.js';
 import type { LedgerEntry } from '../src/ledger.js';
 import { type ReviewItem, scopeItem, sensitiveItem } from '../src/review.js';
-import { gatePlace, gateRoundsMessage, type RoundInput, roundOutcome, roundRuns } from '../src/round.js';
+import { budgetMessage, gateBudget, gatePlace, gateRoundsMessage, overBudgetMessage, type RoundInput, roundOutcome, roundRuns } from '../src/round.js';
 
 const item = (path: string, problem: string, severity: ReviewItem['severity'] = 'major', extra: Partial<ReviewItem> = {}): ReviewItem => ({ path, problem, expected: 'Better.', severity, ...extra });
 
@@ -30,7 +30,7 @@ const gate = (items: ReviewItem[], accepted: string[] = [], summary = 'Codex say
 function joint(claude: ReviewItem[], codex: ReviewItem[], extra: Partial<RoundInput> = {}): RoundInput {
   return {
     place: 'joint', ledger: [], iteration: 2, claude: { record: review(claude), extra: [] }, gate: { record: gate(codex), extra: [] },
-    gateFixes: 0, gateStalled: 0, least: undefined, gateTokens: 100, maxRounds: 2, maxTokens: 1000, ...extra,
+    gateFixes: 0, gateStalled: 0, least: undefined, gateTokens: 100, maxRounds: 2, maxTokens: 1000, lines: undefined, ...extra,
   };
 }
 
@@ -41,6 +41,25 @@ test('where the gate stands: only without the Claude review; joint when the leve
   assert.equal(at({ tokens: 10 }), 'budget');
   assert.equal(at({ tokens: 10, stored: true }), 'joint');
   assert.equal(at({ levelRuns: false }), 'off');
+});
+
+test('the gate budget: SF_GATE_MAX_TOKENS for every started 2000 changed lines, at least once; its messages name the lines it was built from', () => {
+  assert.equal(gateBudget(5_000_000, undefined), 5_000_000);
+  assert.equal(gateBudget(5_000_000, 0), 5_000_000);
+  assert.equal(gateBudget(5_000_000, 2000), 5_000_000);
+  assert.equal(gateBudget(5_000_000, 2001), 10_000_000);
+  assert.equal(gateBudget(5_000_000, 6000), 15_000_000);
+  assert.equal(gatePlace({ claudeReview: true, levelRuns: true, stored: false, tokens: 1500, maxTokens: gateBudget(1000, 2001) }), 'joint');
+  assert.equal(
+    budgetMessage(2000, 2000, 2003),
+    'The gate\'s tokens counted for this job (2000) reached its budget of 2000: SF_GATE_MAX_TOKENS for every started 2000 changed lines (the change has 2003 lines). The user decides how to go on.',
+  );
+  assert.ok(budgetMessage(5, 10, undefined).includes('(the change has an unknown number of lines)'));
+  assert.ok(budgetMessage(5, 10, 1).includes('(the change has 1 line)'));
+  assert.equal(
+    overBudgetMessage(1500, 1000, 3, 'clean'),
+    'The gate\'s tokens counted for this job (1500) went over its budget of 1000: SF_GATE_MAX_TOKENS for every started 2000 changed lines (the change has 3 lines); the gate\'s verdict (clean) was not applied.',
+  );
 });
 
 test('who still runs: each reviewer of the round without a stored verdict', () => {
@@ -272,7 +291,7 @@ test('the Claude review alone: off decides and goes to Clean; at the budget a cl
   const off = roundOutcome({ ...joint([], [], { ledger, place: 'off' }), gate: undefined });
   assert.ok(off.kind === 'clean' && off.ledger[0]!.status === 'fixed');
   const budget = roundOutcome({ ...joint([], [], { place: 'budget', gateTokens: 1000 }), gate: undefined });
-  assert.ok(budget.kind === 'stop' && budget.code === 'gate_budget' && budget.message.includes('the limit of SF_GATE_MAX_TOKENS (1000)'));
+  assert.ok(budget.kind === 'stop' && budget.code === 'gate_budget' && budget.message === budgetMessage(1000, 1000, undefined));
   const fix = roundOutcome({ ...joint([item('a.ts', 'Broken.')], [], { place: 'budget', gateTokens: 1000 }), gate: undefined });
   assert.ok(fix.kind === 'fix' && fix.content === 'Review by Claude: Claude says so.\n\n1. [R1, major] `a.ts`: Broken. Expected: Better.');
 });

@@ -68,7 +68,7 @@ export interface Config {
   // The gate's fix rounds without progress per job, its first fix not counted; the one that reaches
   // it is not applied (SF_GATE_MAX_ROUNDS).
   gateMaxRounds: number;
-  // Input plus output tokens of the gate per job (SF_GATE_MAX_TOKENS).
+  // The gate's token budget for every started 2000 changed lines of a job's change (SF_GATE_MAX_TOKENS).
   gateMaxTokens: number;
   // How long one gate run may take (SF_GATE_TIMEOUT_MS).
   gateTimeoutMs: number;

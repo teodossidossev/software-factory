@@ -8,13 +8,13 @@ import { join } from 'node:path';
 import { type ImageRef, imageRefs } from '../attachments.js';
 import { workspaceDecisionDocs } from '../decisions.js';
 import { FactoryError } from '../errors.js';
-import { gateDecision } from '../gate-level.js';
+import { changedLines, gateDecision } from '../gate-level.js';
 import { findBwrap, GATE_REVIEWER, type GateOutcome, gatePrompt, noTokens, redactedGateOutcome, runGate } from '../gate.js';
 import { jobUserMessages } from '../job-stream.js';
 import { claudeReviews, type FileChange, type GateOverride, type GateRecord, type IterationMeta, type Job, type JobState, now, type PauseStep, type ReviewRecord, type SimplifyRecord } from '../jobs.js';
 import { entryItem, isSimplification, SIMPLIFIER, type Decision, DECISIONS, LEDGER_ID, type LedgerEntry, FACTORY_PROBLEMS, settle, unappliedEntries, unsettled } from '../ledger.js';
 import { Redactor } from '../redact.js';
-import { budgetMessage, type GatePlace, gatePlace, roundOutcome, roundRuns, type SessionEnd } from '../round.js';
+import { budgetMessage, type GateBudget, gateBudget, type GatePlace, gatePlace, roundOutcome, roundRuns, type SessionEnd } from '../round.js';
 import { readJobRules } from '../rules-docs.js';
 import { actedVerdict, decide, type Verdict, REVIEWER, type ReviewInput, type ReviewItem, type RecordedSkills, reviewerSkills, type ReviewOutcome, type ReviewOutput, reviewPrompt, runReview, type StructuredOutcome, unacceptedItems } from '../review.js';
 import { type DenialScope, gateWrapperFor, type PathDenials, pathDenials, USER_SETTINGS_WEAKEN_SANDBOX } from '../sandbox-denials.js';
@@ -104,7 +104,7 @@ export class ReviewsPart {
   // verdict starts, both together in a joint round, as one RunningReview (one AbortController
   // cancels both); with every verdict stored the outcome applies at once. A job without the Claude
   // review gets the gate alone, which is then its review; one whose gate runs used up
-  // SF_GATE_MAX_TOKENS gets no gate. A review still running for the job is cancelled. Nothing with
+  // the gate budget gets no gate. A review still running for the job is cancelled. Nothing with
   // SF_REVIEW=off. Every caller (the publish, the go-on after a settlement, the end of a conflict
   // turn, the retry, the pick-up of a runner) goes through here. Only under the lock.
   async startReview(job: Job): Promise<void> {
@@ -118,27 +118,29 @@ export class ReviewsPart {
     const gate = await this.#store.jobs.readGate(workspace, ticket, iteration);
     const stored = { claude: review !== undefined && 'verdict' in review, gate: gate !== undefined && 'verdict' in gate };
     const levelRuns = (!claudeReviews(job) || config.gate.on) && (await this.#gateRuns(job));
-    const place = gatePlace({ claudeReview: claudeReviews(job), levelRuns, stored: stored.gate, tokens: job.gate_tokens, maxTokens: config.gateMaxTokens });
-    if (place === 'only' && !stored.gate && job.gate_tokens >= config.gateMaxTokens) {
+    const limit = await this.#gateBudget(job);
+    const { budget, lines } = limit;
+    const place = gatePlace({ claudeReview: claudeReviews(job), levelRuns, stored: stored.gate, tokens: job.gate_tokens, maxTokens: budget });
+    if (place === 'only' && !stored.gate && job.gate_tokens >= budget) {
       // from: awaiting_review (every caller)
-      await this.#store.transition(job, 'needs_human', 'verdict', { code: 'gate_budget', message: budgetMessage(job.gate_tokens, config.gateMaxTokens) });
+      await this.#store.transition(job, 'needs_human', 'verdict', { code: 'gate_budget', message: budgetMessage(job.gate_tokens, budget, lines) });
       return;
     }
     const runs = roundRuns(place, stored);
     if (!runs.claude && !runs.gate) {
-      await this.applying(job, () => this.#applyRound(job, place, {}));
+      await this.applying(job, () => this.#applyRound(job, place, {}, limit));
       return;
     }
     const key = `${workspace}/${ticket}`;
     this.#sessions.reviews.get(key)?.controller.abort();
     const running: RunningReview = { reviewer: runs.claude ? REVIEWER : GATE_REVIEWER, iteration, controller: new AbortController() };
     this.#sessions.reviews.set(key, running);
-    this.#round(job, running, runs, place).catch((error: unknown) => console.error(error));
+    this.#round(job, running, runs, place, limit).catch((error: unknown) => console.error(error));
   }
 
   // Runs the reviewers of a round at the same time; each end keeps its record; once both ended, the
   // round's outcome applies under the lock while the job still awaits review of the same iteration.
-  async #round(job: Job, running: RunningReview, runs: { claude: boolean; gate: boolean }, place: GatePlace): Promise<void> {
+  async #round(job: Job, running: RunningReview, runs: { claude: boolean; gate: boolean }, place: GatePlace, limit: GateBudget): Promise<void> {
     const [claude, gate] = await Promise.all([runs.claude ? this.#review(job, running) : undefined, runs.gate ? this.#gate(job, running) : undefined]);
     await this.#locks.locked(async () => {
       const key = `${job.workspace}/${job.ticket}`;
@@ -149,7 +151,7 @@ export class ReviewsPart {
       const read = await this.#store.jobs.read(job.workspace, job.ticket);
       // Another job of the ticket (after a reset), or one that moved on, is not this round's.
       if (read !== undefined && read.created_at === job.created_at && read.state === 'awaiting_review' && read.iteration === job.iteration) {
-        await this.applying(read, () => this.#applyRound(read, place, { claude, gate }));
+        await this.applying(read, () => this.#applyRound(read, place, { claude, gate }, limit));
       }
     });
   }
@@ -158,7 +160,7 @@ export class ReviewsPart {
   // ended in this round: a usage limit parks the job, a failure or a stop hands it to the user, a fix
   // is the next Fix section, clean goes on to Clean with the paths the verdicts accepted. The items
   // a verdict dropped (they reopened an accepted risk) are marked in its record. Only under the lock.
-  async #applyRound(job: Job, place: GatePlace, ends: { claude?: SessionEnd; gate?: SessionEnd }): Promise<void> {
+  async #applyRound(job: Job, place: GatePlace, ends: { claude?: SessionEnd; gate?: SessionEnd }, limit: GateBudget): Promise<void> {
     const { workspace, ticket, iteration } = job;
     const { config } = this.#settings;
     const review = place !== 'only' ? await this.#store.jobs.readReview(workspace, ticket, iteration) : undefined;
@@ -168,7 +170,8 @@ export class ReviewsPart {
       place, ledger: await this.#store.jobs.readLedger(workspace, ticket), iteration,
       claude: place !== 'only' ? { record: review, extra: await extra(review), ...ends.claude } : undefined,
       gate: place === 'only' || place === 'joint' ? { record: gate, extra: await extra(gate), ...ends.gate } : undefined,
-      gateFixes: job.gate_fixes, least: job.least_open, gateStalled: job.gate_stalled ?? 0, gateTokens: job.gate_tokens, maxRounds: config.gateMaxRounds, maxTokens: config.gateMaxTokens,
+      gateFixes: job.gate_fixes, least: job.least_open, gateStalled: job.gate_stalled ?? 0, gateTokens: job.gate_tokens, maxRounds: config.gateMaxRounds,
+      maxTokens: limit.budget, lines: limit.lines,
     });
     if (review !== undefined && 'verdict' in review && (outcome.dropped.claude?.length ?? 0) > 0) {
       await this.#store.jobs.writeReview(workspace, ticket, iteration, { ...review, dropped: outcome.dropped.claude });
@@ -570,6 +573,22 @@ export class ReviewsPart {
     return decision.ran;
   }
 
+  // The job's gate budget (gateBudget) from the changed lines of its change at the reviewed
+  // iteration (its meta.json files), for every job, with the Claude review or without. The lines
+  // are a lower bound when the Patch was truncated; a meta.json that cannot be read, or holds no
+  // file list, leaves them unknown and the budget SF_GATE_MAX_TOKENS once. It never throws.
+  async #gateBudget(job: Job): Promise<GateBudget> {
+    let lines: number | undefined;
+    try {
+      const meta = await this.#store.jobs.readMeta(job.workspace, job.ticket, job.iteration);
+      const sum = Array.isArray(meta.files) ? changedLines(meta.files) : undefined;
+      lines = sum !== undefined && Number.isFinite(sum) ? sum : undefined;
+    } catch (error) {
+      console.error(error);
+    }
+    return { budget: gateBudget(this.#settings.config.gateMaxTokens, lines), lines };
+  }
+
   // The may_touch of the Task file in the work checkout, as the marks of the job's files read it
   // (never the worktree's copy, which the Implementer could edit); undefined when it cannot be read
   // (the level is then full).
@@ -647,7 +666,7 @@ export class ReviewsPart {
   // and gate.json (with method: the review method's record, the skills' names) and the event (naming
   // a skill left out) are written; the round applies them. A run that hit a usage limit (limit) while
   // the job still awaits review of the same iteration is discarded whole: no gate.json, no event, no
-  // tokens charged, so a parked and rerun round never counts toward SF_GATE_MAX_TOKENS.
+  // tokens charged, so a parked and rerun round never counts toward the gate budget.
   async #gated(gated: Job, running: RunningReview, outcome: GateOutcome, method: RecordedSkills, limit?: UsageLimit): Promise<void> {
     const { workspace: name, ticket, iteration } = gated;
     const read = await this.#ended(gated, running);

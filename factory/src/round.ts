@@ -1,7 +1,7 @@
 // The review round of an iteration. On a job with the Claude review whose gate runs on the
 // iteration, the round is joint: the Claude review and the Codex gate review it at the same time,
 // and their fix items make one Fix section. Without the Claude review the gate is the round's only
-// reviewer; with the gate off, skipped by the iteration's gate level or held by SF_GATE_MAX_TOKENS,
+// reviewer; with the gate off, skipped by the iteration's gate level or held by the gate budget,
 // the Claude review is. This module is pure: who still runs in a round, the order in which the
 // reviewers' ends apply, and the merge of two verdicts' items into one Fix. The Execution
 // (src/execution/reviews.ts) runs the sessions, keeps their records and acts on the outcome.
@@ -12,13 +12,13 @@ import { decide, fixContent, jointFixContent, oneLine, REVIEWER, type ReviewItem
 import type { UsageLimit } from './usage-limit.js';
 
 // Where the gate stands in a round: the only reviewer (a job without the Claude review), joint
-// with the Claude review, held by SF_GATE_MAX_TOKENS (budget: the Claude review runs alone, and its
+// with the Claude review, held by the gate budget (budget: the Claude review runs alone, and its
 // clean verdict ends in gate_budget), or off (the gate off or skipped: the Claude review decides).
 export type GatePlace = 'only' | 'joint' | 'budget' | 'off';
 
 // The gate's place in the round of a job's iteration. levelRuns: the gate on and run by the
-// iteration's gate level; stored: a gate verdict of the iteration is kept. At SF_GATE_MAX_TOKENS no
-// gate starts, but a kept verdict still counts.
+// iteration's gate level; stored: a gate verdict of the iteration is kept; maxTokens: the gate
+// budget. At the gate budget no gate starts, but a kept verdict still counts.
 export function gatePlace(input: { claudeReview: boolean; levelRuns: boolean; stored: boolean; tokens: number; maxTokens: number }): GatePlace {
   if (!input.claudeReview) {
     return 'only';
@@ -35,9 +35,34 @@ export function roundRuns(place: GatePlace, stored: { claude: boolean; gate: boo
   return { claude: place !== 'only' && !stored.claude, gate: (place === 'only' || place === 'joint') && !stored.gate };
 }
 
-// The job's error when the gate runs have used SF_GATE_MAX_TOKENS before a gate starts.
-export function budgetMessage(tokens: number, maxTokens: number): string {
-  return `The gate runs of this job used ${tokens} tokens, the limit of SF_GATE_MAX_TOKENS (${maxTokens}); the user decides how to go on.`;
+// The changed lines one SF_GATE_MAX_TOKENS covers.
+export const GATE_BUDGET_LINES = 2000;
+
+// A job's gate budget and the changed lines it was built from (undefined: not known).
+export interface GateBudget {
+  budget: number;
+  lines: number | undefined;
+}
+
+// The gate budget: maxTokens for every started GATE_BUDGET_LINES changed lines, at least once.
+export function gateBudget(maxTokens: number, lines: number | undefined): number {
+  return maxTokens * Math.max(1, Math.ceil((lines ?? 0) / GATE_BUDGET_LINES));
+}
+
+// The changed lines a budget message names.
+function linesText(lines: number | undefined): string {
+  return lines === undefined ? 'an unknown number of lines' : `${lines} ${lines === 1 ? 'line' : 'lines'}`;
+}
+
+// The job's error when the gate's tokens have reached the gate budget before a gate starts.
+export function budgetMessage(tokens: number, budget: number, lines: number | undefined): string {
+  return `The gate's tokens counted for this job (${tokens}) reached its budget of ${budget}: SF_GATE_MAX_TOKENS for every started ${GATE_BUDGET_LINES} changed lines (the change has ${linesText(lines)}). The user decides how to go on.`;
+}
+
+// The job's error when a gate run took the gate's tokens over the gate budget: its verdict is not
+// applied.
+export function overBudgetMessage(tokens: number, budget: number, lines: number | undefined, verdict: string): string {
+  return `The gate's tokens counted for this job (${tokens}) went over its budget of ${budget}: SF_GATE_MAX_TOKENS for every started ${GATE_BUDGET_LINES} changed lines (the change has ${linesText(lines)}); the gate's verdict (${verdict}) was not applied.`;
 }
 
 // The stop at SF_GATE_MAX_ROUNDS: stalled the gate's fix rounds without progress since its
@@ -79,7 +104,10 @@ export interface RoundInput {
   gateStalled: number;
   gateTokens: number;
   maxRounds: number;
+  // The gate budget (gateBudget).
   maxTokens: number;
+  // The changed lines the budget was built from, for its messages.
+  lines: number | undefined;
 }
 
 // The outcome of a round, and the items each reviewer's verdict dropped (they reopened an accepted
@@ -108,7 +136,7 @@ const NAMES: Record<string, string> = { [REVIEWER]: CLAUDE, [GATE_REVIEWER]: COD
 
 // The round's outcome, in this order: Claude's usage limit (park at review), failure or refusal
 // (review_failed, the refusal's code); the gate's usage limit (park at gate), failure (gate_failed,
-// gate_sandbox_unavailable) or tokens over SF_GATE_MAX_TOKENS (gate_budget); a ledger stop; Clean;
+// gate_sandbox_unavailable) or tokens over the gate budget (gate_budget); a ledger stop; Clean;
 // the gate's fix rounds without progress after its first fix (gate_rounds); else one Fix section.
 // A Claude verdict that is a fix as decide reads it wins over a gate that failed or would stop the
 // job: its Fix section is made as Claude's alone.
@@ -131,10 +159,7 @@ export function roundOutcome(input: RoundInput): RoundOutcome {
     if (!verdictIn(gate.record)) {
       gateStop = { code: gate.code ?? 'gate_failed', message: gate.record?.error ?? 'The gate left no verdict.' };
     } else if (input.gateTokens > input.maxTokens) {
-      gateStop = {
-        code: 'gate_budget',
-        message: `The gate runs of this job used ${input.gateTokens} tokens, over the limit of SF_GATE_MAX_TOKENS (${input.maxTokens}); the gate's verdict (${gate.record.verdict}) was not applied.`,
-      };
+      gateStop = { code: 'gate_budget', message: overBudgetMessage(input.gateTokens, input.maxTokens, input.lines, gate.record.verdict) };
     }
   }
   if (claude === undefined) {
@@ -160,7 +185,7 @@ function gateAlone(input: RoundInput, gate: Verdicted<GateRecord>, extra: Review
 }
 
 // The Claude review without the gate's verdict: the gate off or skipped (Claude decides), held by
-// SF_GATE_MAX_TOKENS (a clean verdict ends in gate_budget), or failed (gateStop: a clean verdict
+// the gate budget (a clean verdict ends in gate_budget), or failed (gateStop: a clean verdict
 // stops the job with it, a fix is the next Fix section and the gate runs again in the next round).
 function claudeAlone(input: RoundInput, review: Verdicted<ReviewRecord>, extra: ReviewItem[], gateStop: Stop | undefined): RoundOutcome {
   const applied = applyVerdict({ ledger: input.ledger, items: review.items, extra, reviewer: REVIEWER, iteration: input.iteration, decides: input.place === 'off' });
@@ -176,7 +201,7 @@ function claudeAlone(input: RoundInput, review: Verdicted<ReviewRecord>, extra: 
     return { kind: 'stop', code: applied.code, message: applied.message, ledger: applied.ledger, dropped };
   }
   if (input.place === 'budget') {
-    return { kind: 'stop', code: 'gate_budget', message: budgetMessage(input.gateTokens, input.maxTokens), ledger: applied.ledger, dropped };
+    return { kind: 'stop', code: 'gate_budget', message: budgetMessage(input.gateTokens, input.maxTokens, input.lines), ledger: applied.ledger, dropped };
   }
   return { kind: 'clean', ledger: applied.ledger, accepted: review.accepted_sensitive, dropped };
 }

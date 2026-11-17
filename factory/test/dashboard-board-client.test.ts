@@ -681,8 +681,10 @@ test('board client: the job page says the sentence of the stop with the numbers 
     [{ error: { code: 'simplify_offered', message: 'x' }, stop: { items: [{}, {}], saves_lines: 15 } }, 'The simplification pass suggests 2 changes (saves about 15 lines). Simplify or skip'],
     [{ error: { code: 'simplify_offered', message: 'x' } }, 'The simplification pass suggests changes. Simplify or skip'],
     [{ error: { code: 'escalated', message: 'x' }, stop: { items: [{}, {}], saves_lines: null } }, 'The Implementer asks you about 2 findings. Answer each: Accept risk or Must fix'],
-    [{ error: { code: 'gate_rounds', message: 'x' }, gate_fixes: 3, stop: { items: [{}, {}], saves_lines: null } }, 'Codex asked for fixes 3 times, the limit. Accept the change without its 2 open findings, or tell the Implementer what to fix'],
-    [{ error: { code: 'iteration_limit', message: 'x' }, fixes: 5 }, 'The reviewers asked for fixes 5 times, the limit. Accept the change with its open findings listed in the MR text, give the Implementer a direction, or abort'],
+    [{ error: { code: 'gate_rounds', message: 'x' }, gate_fixes: 3, stop: { items: [{}, {}], saves_lines: null } }, 'Codex kept asking for fixes that did not bring the open findings down. Tell it to go on (a new count), accept the change without its 2 open findings, or tell the Implementer what to fix'],
+    [{ error: { code: 'gate_budget', message: 'x' } }, "The Codex gate used the token budget of this change. Tell it to go on (a new budget), accept the change with Claude's clean review, or tell the Implementer what to do"],
+    [{ error: { code: 'gate_budget', message: 'x' }, claude_review: false }, 'The Codex gate used the token budget of this change. Tell it to go on (a new budget), accept the change, which no reviewer passed, or tell the Implementer what to do'],
+    [{ error: { code: 'iteration_limit', message: 'x' }, fixes: 5 }, 'The last Fix rounds did not bring the open findings down. Tell it to go on (it gets the held-back findings and a new count), accept the change with its open findings listed in the MR text, or give a direction'],
     [{ error: { code: 'max_turns', message: 'x' }, iteration: 2 }, 'The Implementer used all its turns on iteration 3. Tell it to go on'],
     [{ error: { code: 'review_failed', message: 'x' }, iteration: 2 }, 'The Claude review of iteration 2 could not run. Retry it'],
     [{ error: { code: 'session_failed', message: "You've hit your limit · resets 3am (Europe/Sofia)" } }, 'The Claude usage limit was reached; it resets at 3am (Europe/Sofia). Tell the Implementer to go on after that'],
@@ -2318,7 +2320,7 @@ test('board client (SF-226): a Needs you card: the key, the chip, the code, the 
   assert.equal(part(row, 'tag')!.getAttribute('title'), 'error code');
   assert.match(part(row, 'hm-age')!.getAttribute('title')!, /^Waiting since \d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/);
   assert.equal(part(g, 'title')!.textContent, 'Title of G');
-  assert.deepEqual(say('app/G'), ['hm-say ask', 'Codex asked for fixes 2 times, the limit. Accept the change without its 2 open findings, or tell the Implementer what to fix.']);
+  assert.deepEqual(say('app/G'), ['hm-say ask', 'Codex kept asking for fixes that did not bring the open findings down. Tell it to go on (a new count), accept the change without its 2 open findings, or tell the Implementer what to fix.']);
   assert.deepEqual(buttons(g).filter((element) => element.classList.contains('primary')).map((element) => element.textContent), ['Decide 2 findings']);
 
   // An error: Retry review posts once, as on the board, and opens no page.

@@ -4614,9 +4614,9 @@ confirmation where it has one; *Tell it to go on* is a message, "Go on." when th
 | `escalated` | each escalated finding with the Implementer's question, a note and *Accept risk* / *Must fix* (sent at once) | Send, Abort… |
 | `review_disputed` | each contested finding with the contest, its evidence and the reviewer's reason, a note and *Accept risk* / *Must fix* | Accept and prepare MR (with a clean Claude review), Send, Abort… |
 | `review_churn` | the open findings of the ledger (*Accept risk* / *Must fix* on those to settle: the settlement is only recorded, the job stays `needs_human`) | Accept and prepare MR (with a clean Claude review), Send, Abort… |
-| `gate_rounds` | the last gate's findings (nothing to settle one by one: the API settles only escalated and contested ones) | Accept and prepare MR (with a clean Claude review), Send, Abort… |
-| `gate_budget` | the gate's tokens used | Accept and prepare MR (with a clean Claude review), Send, Abort… |
-| `iteration_limit` | the open blocker and major ledger entries | Accept and prepare MR (whatever the last verdict), Send, Restart…, Abort… |
+| `gate_rounds` | the last gate's findings (nothing to settle one by one: the API settles only escalated and contested ones) | Accept and prepare MR (with a clean Claude review), Tell it to go on (the count starts again), Send, Abort… |
+| `gate_budget` | the gate's tokens used | Accept and prepare MR (with a clean Claude review), Tell it to go on (a new budget from the tokens used), Send, Abort… |
+| `iteration_limit` | the open blocker and major ledger entries | Accept and prepare MR (whatever the last verdict), Tell it to go on (the held-back findings and a new count), Send, Restart…, Abort… |
 | `tests_failed` | the whole message | Accept and prepare MR (with a clean Claude review; without passing tests), Send, Abort… |
 | `tests_unavailable` | the whole message | Retry (the test step again; no Retry after a conflict turn), Accept and prepare MR (with a clean Claude review), Send, Abort… |
 | `max_turns` | nothing | Tell it to go on, Abort… |

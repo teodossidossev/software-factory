@@ -413,7 +413,7 @@ test('stopAnswers: a stop the user settles in (escalated, review_disputed, revie
   assert.deepEqual(commands(stopped('review_churn'), { ledger: [...ledger, contested], review: CLEAN_REVIEW }), [
     ['Accept and prepare MR', 'sf accept app T-1'], ...settles('R1', 'R3', 'R5'), ...ALWAYS,
   ]);
-  assert.deepEqual(commands(stopped('gate_rounds'), { ledger }), ALWAYS);
+  assert.deepEqual(commands(stopped('gate_rounds'), { ledger }), [['Tell it to go on', 'sf say app T-1 "Go on."'], ...ALWAYS]);
   assert.deepEqual(commands(stopped('odd_code')), ALWAYS);
   assert.deepEqual(commands(stopped('mr_push_protected')), ALWAYS);
 });
@@ -423,7 +423,7 @@ test('stopAnswers: Accept only when the gate is acceptable (review_churn, gate s
   assert.deepEqual(commands(stopped('review_churn'), { review: FIX_REVIEW }), ALWAYS);
   assert.deepEqual(commands(stopped('review_churn'), { review: { reviewer: 'claude', error: 'Overloaded.' } }), ALWAYS);
   // A major item the ledger dropped does not count.
-  assert.deepEqual(commands(stopped('gate_budget'), { review: { ...FIX_REVIEW, dropped: FIX_REVIEW.items } }), [['Accept and prepare MR', 'sf accept app T-1'], ...ALWAYS]);
+  assert.deepEqual(commands(stopped('gate_budget'), { review: { ...FIX_REVIEW, dropped: FIX_REVIEW.items } }), [['Accept and prepare MR', 'sf accept app T-1'], ['Tell it to go on', 'sf say app T-1 "Go on."'], ...ALWAYS]);
   assert.deepEqual(commands(stopped('gate_failed'), { review: CLEAN_REVIEW }), [['Accept and prepare MR', 'sf accept app T-1'], ['Tell it to go on', 'sf say app T-1 "Go on."'], ...ALWAYS]);
   assert.deepEqual(commands(stopped('gate_failed')), [['Tell it to go on', 'sf say app T-1 "Go on."'], ...ALWAYS]);
 
@@ -448,7 +448,7 @@ test('stopAnswers: Accept only when the gate is acceptable (review_churn, gate s
 });
 
 test('stopAnswers (SF-131): at iteration_limit Accept whatever the last verdict, in both arms; without the Claude review Accept over every gate and ledger stop with no review; with it, a clean review still needed', () => {
-  const limit = [['Accept and prepare MR', 'sf accept app T-1'], ['Restart', 'sf restart app T-1'], ...ALWAYS];
+  const limit = [['Accept and prepare MR', 'sf accept app T-1'], ['Tell it to go on', 'sf say app T-1 "Go on."'], ['Restart', 'sf restart app T-1'], ...ALWAYS];
   for (const review of [CLEAN_REVIEW, FIX_REVIEW, undefined]) {
     assert.deepEqual(commands(stopped('iteration_limit'), { review }), limit);
     assert.deepEqual(commands(stopped('iteration_limit', { claude_review: false })), limit);

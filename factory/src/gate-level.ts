@@ -121,7 +121,7 @@ export function gateLevel(input: GateLevelInput): { level: GateLevel; reasons: s
 }
 
 // The added plus deleted lines of the change.
-function changedLines(files: FileChange[]): number {
+export function changedLines(files: FileChange[]): number {
   return files.reduce((sum, file) => sum + file.additions + file.deletions, 0);
 }
 

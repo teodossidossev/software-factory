@@ -13,7 +13,7 @@ import { JobStore } from '../src/jobs.js';
 import { PACKAGE_ROOT } from '../src/package-root.js';
 import { handbookSection } from '../src/prompts.js';
 import { reviewPrompt } from '../src/review.js';
-import { gateRoundsMessage } from '../src/round.js';
+import { budgetMessage, gateRoundsMessage } from '../src/round.js';
 import { loadHandbook } from '../src/server.js';
 import { fetchRaw } from './support/dashboard-client.js';
 import { call, codexLog, codexScript, fakeLog, git, newEnv, newRepo, putTask, reviewLog, reviewScript, runCli, script, serve, stop, temp, waitFor } from './support/harness.js';
@@ -111,7 +111,7 @@ test('SF_GATE_MAX_TOKENS in a joint round: at the limit no gate starts and the C
     await call(served, 'start', { workspace: 'app', ticket: 'B-3' });
     const stopped = await waitFor(served, 'B-3', 'needs_human', 3);
     assert.equal(stopped.error.code, 'gate_budget');
-    assert.match(stopped.error.message, /used 1000 tokens, the limit of SF_GATE_MAX_TOKENS \(1000\)/);
+    assert.match(stopped.error.message, /counted for this job \(1000\) reached its budget of 1000/);
     assert.ok((await taskFile(repo, 'B-3')).includes('## Fix 2\n\nReview by Claude: b.txt is missing.\n\n1. [R2, major] `b.txt`: Missing. Expected: A file.\n'));
     assert.deepEqual([(await codexLog(env)).length, (await reviewLog(env)).length], [1, 3]);
   } finally {
@@ -134,7 +134,7 @@ test('SF_GATE_MAX_TOKENS: a run that pushes the job over is not applied, and no 
     await call(served, 'start', { workspace: 'app', ticket: 'B-1' });
     const refused = await waitFor(served, 'B-1', 'needs_human', 2);
     assert.equal(refused.error.code, 'gate_budget');
-    assert.match(refused.error.message, /used 1000 tokens, the limit of SF_GATE_MAX_TOKENS \(1000\)/);
+    assert.match(refused.error.message, /counted for this job \(1000\) reached its budget of 1000/);
     assert.equal((await codexLog(env)).length, 1);
     assert.equal(await exists(join(iterationDir(env, 'B-1', 2), 'gate.json')), false);
 
@@ -143,9 +143,35 @@ test('SF_GATE_MAX_TOKENS: a run that pushes the job over is not applied, and no 
     await call(served, 'start', { workspace: 'app', ticket: 'B-2' });
     const over = await waitFor(served, 'B-2', 'needs_human', 1);
     assert.equal(over.error.code, 'gate_budget');
-    assert.match(over.error.message, /used 1500 tokens, over the limit/);
+    assert.match(over.error.message, /counted for this job \(1500\) went over its budget of 1000/);
     assert.deepEqual(over.review.gate, { status: 'done', verdict: 'clean', summary: GATE_CLEAN.summary });
     assert.equal((await new JobStore(env.state).read('app', 'B-2'))!.gate_tokens, 1500);
+  } finally {
+    await stop(served);
+  }
+});
+
+test('the gate budget grows with the change: SF_GATE_MAX_TOKENS for every started 2000 changed lines, so a change of 2001 lines gets two runs before gate_budget', async () => {
+  const env = await newEnv('gate-budget-lines', gateEnv({ SF_GATE_MAX_TOKENS: '1000' }));
+  const repo = await newRepo(env, 'gate-budget-lines-repo', false);
+  await putTask(env, repo, 'B-4', 'A large change');
+  await script(env, [
+    { write: { 'big.txt': 'x\n'.repeat(2001) } }, { write: { 'a.txt': '1\n' }, text: '| R1 | fixed | Done. |' }, { write: { 'b.txt': '1\n' }, text: '| R2 | fixed | Done. |' },
+  ]);
+  await reviewScript(env, [{ output: CLAUDE_CLEAN }, { output: CLAUDE_CLEAN }, { output: CLAUDE_CLEAN }]);
+  const usage = { input_tokens: 900, cached_input_tokens: 0, output_tokens: 100 };
+  await codexScript(env, [
+    { output: GATE_FIX, usage },
+    { output: { ...GATE_FIX, summary: 'Still wrong.', items: [{ path: 'a.txt', problem: 'Missing.', expected: 'A line.', severity: 'major' }] }, usage },
+  ]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'B-4' });
+    const stopped = await waitFor(served, 'B-4', 'needs_human', 3);
+    assert.equal(stopped.error.code, 'gate_budget');
+    assert.equal(stopped.error.message, budgetMessage(2000, 2000, 2003));
+    assert.equal((await codexLog(env)).length, 2);
+    assert.deepEqual((await taskFile(repo, 'B-4')).match(/^## Fix \d+$/gm), ['## Fix 1', '## Fix 2']);
   } finally {
     await stop(served);
   }

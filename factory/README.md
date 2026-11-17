@@ -641,7 +641,7 @@ environment and folders.
 | `SF_CODEX` | `codex` on `PATH` | Absolute path of the Codex CLI executable. Pointing at nothing turns the gate off; it is not looked for on `PATH` then. |
 | `SF_CODEX_MODEL` | unset | Model of the gate, passed as `--model`; unset uses Codex's default (the user's `~/.codex/config.toml`). |
 | `SF_GATE_MAX_ROUNDS` | `5` | Review rounds without progress (as for `SF_MAX_ITERATIONS`) whose Fix the gate asked for, per job with the Claude review, the gate's first fix never counted (the job's `gate_stalled`; a joint round's Fix counts only when the gate's verdict is a fix); the gate fix of the round that reaches the limit is not applied (`gate_rounds`, job `needs_human`), unless the Claude review of the same round gives a fix, whose Fix section then applies alone. A job that makes no progress so stops after as many gate fixes as before. The job's `gate_fixes` still counts every gate fix (the light gate level reads it). |
-| `SF_GATE_MAX_TOKENS` | `5000000` | Input plus output tokens of all gate runs of a job (the job's `gate_tokens`); a gate does not start at the limit, and a run that goes over it is not applied (`gate_budget`, job `needs_human`). |
+| `SF_GATE_MAX_TOKENS` | `5000000` | The gate's token budget for every started 2,000 changed lines of the job's change at the reviewed iteration (its `meta.json` files; at least once; once when they cannot be read): input plus output tokens of all its gate runs (the job's `gate_tokens`). A change of up to 2,000 lines gets this, one of 2,001 to 4,000 twice this. A gate does not start at the budget, and a run that goes over it is not applied (`gate_budget`, job `needs_human`). |
 | `SF_GATE_TIMEOUT_MS` | `900000` | How long one gate run may take; then SIGTERM, and SIGKILL 5 s later (`gate_failed`). |
 | `SF_TEST_TIMEOUT_MS` | `1800000` (30 min) | How long one run of a workspace's `test_command` may take (SF-128, section MR preparation), 1 to 14400000 (4 h), by the clock, the time the machine sleeps included (SF-152); then its process group is killed with SIGKILL and the run failed (a Tests Fix that names the timeout). |
 | `SF_GATE_LEVEL` | `auto` | The gate level of each iteration (SF-092, section Jobs): `auto` by the risk of the job's change (`full`, `light` or `none`); `full` runs the gate in every round, as before SF-092. Empty is the default; anything else refuses to start (`invalid_config`). |
@@ -2081,7 +2081,7 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   is still `awaiting_review` at the same iteration, by the same rule as Claude's (`decide`,
   SF-051), in this order: Claude's usage limit (park at `review`), its failure or refusal
   (`review_failed`, the refusal's code); the gate's usage limit (park at `gate`), its failure
-  (`gate_failed`, `gate_sandbox_unavailable`) or tokens over `SF_GATE_MAX_TOKENS` (`gate_budget`);
+  (`gate_failed`, `gate_sandbox_unavailable`) or tokens over the gate budget (`gate_budget`);
   a ledger stop; `gate_rounds`; else one Fix section, or Clean. The other reviewer's kept verdict
   stays: Resume, the pick-up of a runner, `sf review` and the go-on after a settlement run only the
   reviewer without one. A Claude verdict that gives a fix wins over a gate that failed
@@ -2102,7 +2102,9 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   `SF_GATE_MAX_ROUNDS` is not applied (`needs_human`, `gate_rounds`; the message names the rounds,
   the open findings raised and carried, and both reviewers' summaries). Every run adds its input
   plus output tokens to the job's `gate_tokens`: a gate does not start once they reach
-  `SF_GATE_MAX_TOKENS` (the Claude review then runs alone: its fix is the next Fix section, its
+  the job's gate budget, `SF_GATE_MAX_TOKENS` for every started 2,000 changed lines of the change
+  at the reviewed iteration (`gateBudget` in `src/round.ts`, SF-294; the lines are a lower bound
+  when the Patch was truncated) (the Claude review then runs alone: its fix is the next Fix section, its
   clean verdict stops with `gate_budget`),
   and a run that takes them over it is recorded but not applied (`needs_human`, `gate_budget`). A
   non-zero exit, a timeout, a missing or invalid output or a Codex `error` event is `gate_failed`

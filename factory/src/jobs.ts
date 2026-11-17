@@ -245,7 +245,8 @@ const jobSchema = z.strictObject({
   // Fix sections the gate asked for (a joint Fix only when the gate's verdict is a fix); the light
   // gate level reads it.
   gate_fixes: z.number().int().min(0).default(0),
-  // Input plus output tokens of every gate run of the job; SF_GATE_MAX_TOKENS limits them.
+  // Input plus output tokens of every gate run of the job; the gate budget limits them
+  // (SF_GATE_MAX_TOKENS for every started 2000 changed lines).
   gate_tokens: z.number().int().min(0).default(0),
   // The job's review rounds without progress: rounds that asked for a Fix while no fewer blocker
   // and major ledger entries were open than after any earlier such round, or that reopened one.

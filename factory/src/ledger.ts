@@ -553,6 +553,18 @@ export function userFixItems(ledger: LedgerEntry[], fix: number): { items: FixIt
   return { items: pending.map(userFixItem), ledger: ledger.map((entry) => (ids.has(entry.id) ? { ...entry, asked: fix } : entry)) };
 }
 
+// The findings a Fix refused at the Fix round limit held back: the open and user_fix entries the
+// refused round asked (asked === fix), each as its Fix item line, with how to answer them; ''
+// when there are none. The user's next message carries it.
+export function heldBackNote(ledger: LedgerEntry[], fix: number): string {
+  const held = ledger.filter((entry) => (entry.status === 'open' || entry.status === 'user_fix') && entry.asked === fix);
+  if (held.length === 0) {
+    return '';
+  }
+  const lead = `The factory held back Fix ${fix} at the Fix round limit. Fix these findings unless the message above says otherwise, and answer each in the Report's \`## Fix ${fix} items\` table, as for a Fix section:`;
+  return [lead, ...held.map((entry) => `- ${fixItemLine(userFixItem(entry))}`)].join('\n');
+}
+
 // What is left for the user to settle: escalated entries and contests a reviewer disputed.
 export function unsettled(ledger: LedgerEntry[]): LedgerEntry[] {
   return ledger.filter((entry) => entry.status === 'escalated' || (entry.status === 'contested' && entry.dispute !== null));

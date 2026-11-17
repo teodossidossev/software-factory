@@ -12,7 +12,7 @@ import { worktreeTree } from '../guard.js';
 import { attachWorktree, checkBranchFree, isAncestor } from '../handoff.js';
 import { jobUserMessages } from '../job-stream.js';
 import { claudeReviews, type FileChange, type Handover, type Job, type JobState, now, type PauseStep, statesWith } from '../jobs.js';
-import { answerFix, escalationMessage, headings, type LedgerEntry, roundProgress, type RoundProgress, userFixItems } from '../ledger.js';
+import { answerFix, escalationMessage, headings, heldBackNote, type LedgerEntry, roundProgress, type RoundProgress, userFixItems } from '../ledger.js';
 import { rebaseInProgress } from '../mr.js';
 import { checkSuggestionSend, removeSuggestion, sendShownSuggestion } from '../planner.js';
 import { buildPatch, changedFilesSection, fileChanges, notificationLine, type Patch } from '../patch.js';
@@ -40,11 +40,14 @@ type Success = Extract<IdleOutcome, { ok: true }>;
 const IMPLEMENT_SKILL = 'implement';
 const SKILL_MISSING = 'skill_missing';
 
+// The stops of the limits: the user's message at one starts their counts again.
+const LIMIT_STOPS: readonly string[] = ['iteration_limit', 'gate_rounds', 'gate_budget'];
+
 // The stop at the Fix round limit: stalled the job's review rounds without progress, max
 // SF_MAX_ITERATIONS, round the judgement of the refused round (its open blocker and major findings,
 // those it raised and reopened), iteration the one an Accept takes.
 export function iterationLimitMessage(stalled: number, max: number, round: RoundProgress, iteration: number): string {
-  return `${stalled} of the job's review rounds made no progress (SF_MAX_ITERATIONS is ${max}): each left no fewer open blocker and major findings than the fewest before, or reopened a fixed or left one. Open blocker or major findings: ${round.open} (${round.raised} raised by the last review, ${round.reopened} of them reopened; ${round.open - round.raised} carried from earlier rounds). The user decides how to go on: sf accept takes iteration ${iteration} as it is (the open findings go unapplied and are listed in the MR text), sf say gives a direction.`;
+  return `${stalled} of the job's review rounds made no progress (SF_MAX_ITERATIONS is ${max}): each left no fewer open blocker and major findings than the fewest before, or reopened a fixed or left one. Open blocker or major findings: ${round.open} (${round.raised} raised by the last review, ${round.reopened} of them reopened; ${round.open - round.raised} carried from earlier rounds). The user decides how to go on: sf accept takes iteration ${iteration} as it is (the open findings go unapplied and are listed in the MR text), sf say goes on: the count starts again, and the held-back findings go with the message.`;
 }
 
 // What TurnsPart calls of the other parts, by just those methods.
@@ -466,7 +469,8 @@ export class TurnsPart {
 
   // The work of request_fix, also run for a fix verdict of the review: appends ## Fix N and starts
   // the next iteration. SF_MAX_ITERATIONS limits the review rounds without progress
-  // (roundProgress): the one that reaches it is refused; an sf say turn does not count.
+  // (roundProgress): the one that reaches it is refused; an sf say turn does not count, and a
+  // message at a limit stop starts the limits' counts again.
   // counts: what else the Fix counts for (the gate's gate_fixes and gate_stalled). Only under the lock.
   // ledger: the findings ledger with the section's items, written once the section is.
   // fromStop: the Fix of the user's settlement or Simplify, from needs_human.
@@ -574,7 +578,10 @@ export class TurnsPart {
     }
   }
 
-  // The message in the runner.
+  // The message in the runner. A message at a limit stop starts the limits' counts again
+  // (stalled_fixes and gate_stalled to 0, the gate budget from the tokens used so far; least_open
+  // stays), written with the turn's transition; after iteration_limit it carries the findings the
+  // refused Fix held back (heldBackNote), which the turn's Report answers as a Fix section's.
   sayInRunner(workspaceName: string, ticket: string, message: string): Promise<{ state: JobState; queued: boolean }> {
     return this.#locks.locked(async () => {
       let job = await this.#store.job(workspaceName, ticket);
@@ -582,6 +589,11 @@ export class TurnsPart {
       // The planner's note a Send is sending goes only while the job still waits for the User at
       // the iteration the Send checked: a message that came first may have moved it on.
       await checkSuggestionSend(this.#store.jobs, job, message);
+      // Read on the job as it stopped, before anything below changes it; an unreadable ledger
+      // refuses the message with nothing written.
+      const atLimit = job.state === 'needs_human' && LIMIT_STOPS.includes(job.error?.code ?? '');
+      const note = job.state === 'needs_human' && job.error?.code === 'iteration_limit' ? heldBackNote(await this.#store.jobs.readLedger(workspaceName, ticket), job.iteration) : '';
+      const restart: Pick<Job, 'stalled_fixes' | 'gate_stalled' | 'gate_budget_from'> = atLimit ? { stalled_fixes: 0, gate_stalled: 0, gate_budget_from: job.gate_tokens } : {};
       const workspace = this.#sessions.live.get(`${workspaceName}/${ticket}`)?.workspace ?? (await this.#settings.resolve(workspaceName));
       if (job.state === 'handed_over') {
         // Ask for changes: the checkout's state back into the job; by hand, so the run queue's
@@ -609,9 +621,9 @@ export class TurnsPart {
       job = await this.#peers.start.syncTask(workspace, job);
       if (job.state !== 'working') {
         // from: awaiting_review, needs_human, ready_for_human_review, handed_over (checkSay; working changes no state)
-        job = await this.#store.transition(job, 'working', 'say');
+        job = await this.#store.transition({ ...job, ...restart }, 'working', 'say');
       }
-      session.send(factoryPrompt(this.withChange(message, ticket, change), ticket, job.iteration + 1, this.imagesLine(job), job.base_commit), DENIED_TOOLS);
+      session.send(factoryPrompt(this.withChange(note === '' ? message : `${message}\n\n${note}`, ticket, change), ticket, job.iteration + 1, this.imagesLine(job), job.base_commit), DENIED_TOOLS);
       return { state: job.state, queued };
     });
   }

@@ -4,7 +4,7 @@
 // what a clean verdict of the reviewer that decides the round settles.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { answerFix, applyVerdict, escalationMessage, type EvidenceContext, findEvidence, headings, type LedgerEntry, ledgerSchema, reportRows, roundProgress, settle, settledLines, unappliedEntries, unsettled, userFixItems } from '../src/ledger.js';
+import { answerFix, applyVerdict, escalationMessage, type EvidenceContext, findEvidence, headings, heldBackNote, type LedgerEntry, ledgerSchema, reportRows, roundProgress, settle, settledLines, unappliedEntries, unsettled, userFixItems } from '../src/ledger.js';
 import { FINDINGS_HEADING, NITS_HEADING, withFindings, withNits } from '../src/mr.js';
 import { GATE_SCHEMA } from '../src/gate.js';
 import { fixContent, REVIEW_SCHEMA, type ReviewItem, reviewOutput, reviewPrompt, scopeItem, sensitiveItem } from '../src/review.js';
@@ -211,6 +211,30 @@ test('settling: only escalated and contested entries; accept is accepted_risk, f
   const open = entry('R5', 'open');
   assert.deepEqual(userFixItems([...fixed, open], 2).items.map((fixItem) => fixItem.id), ['R2', 'R5']);
   assert.deepEqual(userFixItems([accepted[0]!, open], 2), { items: [], ledger: [accepted[0]!, open] });
+});
+
+test('the held-back note lists the open and user_fix entries the refused Fix asked, a nit too, each as its Fix item line; none asked elsewhere or answered', () => {
+  const ledger = [
+    entry('R1', 'open', { asked: 2 }),
+    entry('R2', 'fixed', { asked: 3 }),
+    entry('R3', 'open', { asked: 3, path: 'a.txt', problem: 'Problem 3.', expected: 'Solved 3.' }),
+    entry('R4', 'user_fix', { asked: 3, settled: { decision: 'fix', note: 'Handle null.', at: '2026-11-05T00:00:00.000Z' } }),
+    entry('R5', 'open', { asked: 3, severity: 'nit' }),
+    entry('R6', 'contested', { asked: 3 }),
+    entry('R7', 'left', { asked: 3, severity: 'nit' }),
+  ];
+  const note = heldBackNote(ledger, 3);
+  assert.equal(note, [
+    "The factory held back Fix 3 at the Fix round limit. Fix these findings unless the message above says otherwise, and answer each in the Report's `## Fix 3 items` table, as for a Fix section:",
+    '- [R3, major] `a.txt`: Problem 3. Expected: Solved 3.',
+    '- [R4, major] `a.ts`: Problem of R4. Expected: Better. The user decided: fix. Handle null.',
+    '- [R5, nit] `a.ts`: Problem of R5. Expected: Better.',
+  ].join('\n'));
+  assert.match(note, /## Fix 3 items/);
+  // Rendered for one entry, as the Task states it.
+  assert.equal(heldBackNote([ledger[2]!], 3), "The factory held back Fix 3 at the Fix round limit. Fix these findings unless the message above says otherwise, and answer each in the Report's `## Fix 3 items` table, as for a Fix section:\n- [R3, major] `a.txt`: Problem 3. Expected: Solved 3.");
+  assert.equal(heldBackNote(ledger, 4), '');
+  assert.equal(heldBackNote([], 3), '');
 });
 
 test('the reviewers\' prompt carries the settled findings (every entry not open) and the rules on them', () => {

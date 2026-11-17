@@ -8,16 +8,17 @@
 // the state through sf serve; the page reads GET api/coordinator on each coordinator event of the
 // stream (one on connect, one after each write: main.js), and every board render (renderBoard)
 // renders the card again, so its ages and ticket links follow the board without a timer of its
-// own. The title holds Zen's lights (the ship's computer of Blake's 7): five bars, dim at rest,
-// lit and pulsing for 3 s when a jobs event of the stream (main.js) differs from the last one by a
-// job's state, a job new to the list or a job gone from it, in any workspace; the first list
-// lights nothing. The lit state lives here, not on the element, so a render draws them as they
-// were; one timer dims them, and a card without a title (hidden, or "has not reported") draws
-// none. Every text goes in through textContent or a text node, never as HTML; a ticket link opens
-// only a page of the board's own tickets; the chat link is checked again here, claude.ai only. A
-// classic script, loaded in order with defer, sharing the page's globals with the others. This
-// file has no import or export on purpose: the compiler keeps it a script, so its top-level names
-// stay the page's globals.
+// own. The title holds Zen's lights (the ship's computer of Blake's 7): a small screen of twelve
+// lights, a long bar and eleven small ones, dim at rest, lit for 3 s, the bar steady and the small
+// lights blinking, when a jobs event of the stream (main.js) differs from the last one by a job's
+// state, a job new to the list or a job gone from it, in any workspace, or when the screen is
+// clicked; the first list lights nothing. The lit state lives here, not on the element, so a
+// render draws them as they were; one timer dims them, and a card without a title (hidden, or
+// "has not reported") draws none. Every text goes in through textContent or a text node, never as
+// HTML; a ticket link opens only a page of the board's own tickets; the chat link is checked again
+// here, claude.ai only. A classic script, loaded in order with defer, sharing the page's globals
+// with the others. This file has no import or export on purpose: the compiler keeps it a script,
+// so its top-level names stay the page's globals.
 'use strict';
 
 // A status older than this is muted, with "quiet since <time>".
@@ -35,10 +36,10 @@ let coordReads = 0;
 // is one element), not stored.
 let coordOpen = false;
 
-// How long the Zen lights stay lit after a change of the jobs list.
+// How long the Zen lights stay lit after a change of the jobs list or a click on the screen.
 const COORD_ZEN_MS = 3000;
-// The Zen lights' bars.
-const COORD_ZEN_BARS = 5;
+// The lights on Zen's screen: the long bar, then the small ones (app.css places and times them).
+const COORD_ZEN_LIGHTS = 12;
 // The jobs list as last seen (each job's state by its key, every workspace's); null before the
 // first jobs event.
 let coordJobsSeen: Map<string, string> | null = null;
@@ -53,8 +54,8 @@ function coordZenShow(): void {
 }
 
 // Called with each jobs event's list: when it differs from the last list seen by a job's state, a
-// job new to it or a job gone from it, the Zen lights light for COORD_ZEN_MS from now (a change
-// while lit starts the time again). The first list only sets the starting point.
+// job new to it or a job gone from it, it calls coordZenLight(). The first list only sets the
+// starting point.
 function coordZenOnJobs(jobs: readonly JobRow[]): void {
   const seen = new Map(jobs.map((job) => [keyOf(job), job.state]));
   const last = coordJobsSeen;
@@ -62,6 +63,13 @@ function coordZenOnJobs(jobs: readonly JobRow[]): void {
   if (last === null || (last.size === seen.size && [...seen].every(([key, jobState]) => last.get(key) === jobState))) {
     return;
   }
+  coordZenLight();
+}
+
+// Lights the Zen lights for COORD_ZEN_MS from now (a change of the jobs list or a click on the
+// screen): the flag set, the last timer cleared, so lighting them while lit starts the time again,
+// and a new timer that dims them.
+function coordZenLight(): void {
   coordZenLit = true;
   clearTimeout(coordZenTimer ?? undefined);
   coordZenTimer = setTimeout(() => {
@@ -72,13 +80,15 @@ function coordZenOnJobs(jobs: readonly JobRow[]): void {
   coordZenShow();
 }
 
-// The Zen lights: five thin bars after the title's text, lit while coordZenLit is set. Decorative,
-// so hidden from a screen reader, with a tooltip for the mouse.
+// The Zen lights: Zen's screen after the title's text, holding COORD_ZEN_LIGHTS empty lights, the
+// first the long bar; lit while coordZenLit is set, and a click lights it. Decorative, so hidden
+// from a screen reader, with a tooltip for the mouse.
 function coordZen(): HTMLElement {
   const zen = el('span', coordZenLit ? 'coord-zen lit' : 'coord-zen');
   zen.setAttribute('aria-hidden', 'true');
-  zen.setAttribute('title', 'Zen: lights up when a job changes state');
-  zen.append(...Array.from({ length: COORD_ZEN_BARS }, () => el('i')));
+  zen.setAttribute('title', 'Zen: lights up when a job changes state; click to wake it');
+  zen.append(el('i', 'bar'), ...Array.from({ length: COORD_ZEN_LIGHTS - 1 }, () => el('i')));
+  zen.addEventListener('click', coordZenLight);
   return zen;
 }
 

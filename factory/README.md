@@ -5575,20 +5575,22 @@ dashboard writes the state, answers go to the chat.
 
   Every text is set as text or a text node, never HTML. Every board render draws the card again;
   the toggle, a ticket link or *Open the chat* that had the focus has it again after.
-- **Zen lights**: after the title, five thin vertical bars (3 × 12 px, 2 px apart), after Zen, the
-  ship's computer of *Blake's 7*, whose light bars pulsed while it spoke. At rest they are dim (the
-  muted colour, faint). When a `jobs` event of the stream differs from the last one seen by a job's
-  state, a job new to the list or a job gone from it, they take the accent colour and pulse one
-  after the other (each .12 s after the one before) for 3 s, then dim again; jobs of every
-  workspace count, shown by the filter or not. The first `jobs` event the page receives only sets
-  the starting list, so opening the dashboard does not flash; after a reconnect the first `jobs`
+- **Zen lights**: after the title, a small screen drawn after Zen's, the ship's computer of
+  *Blake's 7*: a tall octagon of dark brown (24 × 34 px, the same in both themes, the title's row
+  grows to hold it) with twelve amber lights behind it, one long horizontal bar and eleven small
+  rectangles in rows beside and below it. At rest every light is a faint amber. When a `jobs` event
+  of the stream differs from the last one seen by a job's state, a job new to the list or a job
+  gone from it, the bar lights, steady, and the small lights blink, each in its own rhythm, for 3 s,
+  then dim again; jobs of every workspace count, shown by the filter or not. A click (a tap on a
+  phone) on the screen wakes it the same way, with no request sent. The first `jobs` event the
+  page receives only sets the starting list, so opening the dashboard does not flash; after a reconnect the first `jobs`
   event compares with the last list seen, so a change made while away flashes once. Another
   change while lit starts the 3 s again (one timer at a time; none while nothing changed). The lit
   state is the script's, so a render of the card draws them lit or dim as they were. They are
   drawn only with the title (not while the card is hidden or shows only "has not reported"; a card
   that gets its title before the 3 s end shows them lit). Decorative: `aria-hidden="true"`, no
-  focus and no text, a tooltip "Zen: lights up when a job changes state" for the mouse; with
-  reduced motion they show lit and steady, without the pulse.
+  focus and no text, a tooltip "Zen: lights up when a job changes state; click to wake it" for the
+  mouse; with reduced motion they show lit and steady, without blinking.
 
 ### Pins
 

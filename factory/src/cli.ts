@@ -83,6 +83,7 @@ import { watchdog } from './watchdog.js';
 import { checkStateVersion } from './state-version.js';
 import { answerLines, checkArgs, checkJob, checkName, cliCommand, type Command, COMMANDS, socketName, UsageError, usageLines } from './commands.js';
 import { socketHandler } from './ipc-handlers.js';
+import { endRequestWaits } from './coordinator.js';
 import {
   MARKER_POLL_MS, markerAtServeStart, markerLines, MarkerWatch, putMarkerBack, readSkippedChecks, recordSkippedCheck, refuseWhileUpdating, removeSkippedChecks, runCommand, runUpdate, updateMarked,
 } from './update.js';
@@ -426,6 +427,8 @@ async function serve(options: { tunnel?: 'off' } = {}): Promise<{ dashboard: URL
     upkept.close();
     keepAwake?.stop();
     mergedTimers.forEach((timer) => clearTimeout(timer));
+    // The waits of sf coordinator wait-request end first: their open connections would hold the socket's close.
+    endRequestWaits();
     Promise.all([server.close(), socket.close(), dashboard?.close(), tunnel?.stop()]).then(
       () => process.exit(0),
       (error: unknown) => {
@@ -605,10 +608,10 @@ async function request(command: string, args: string[]): Promise<Record<string, 
 // serve, which checks them again with the same checkArgs; the answer printed.
 async function viaServer(command: Command, args: string[]): Promise<void> {
   const { flags } = checkArgs(command, args);
-  const { lines, failed } = answerLines(command, await request(socketName(command), args), flags);
+  const { lines, failed, exitCode } = answerLines(command, await request(socketName(command), args), flags);
   console.log(lines.join('\n'));
   if (failed) {
-    process.exitCode = 1;
+    process.exitCode = exitCode ?? 1;
   }
 }
 

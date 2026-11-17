@@ -59,7 +59,7 @@ export function readHandlers(ctx: DashboardContext) {
     { pattern: 'api/stats', handler: ({ res, query }) => statsView(res, query) },
     // The health checks' last result.
     { pattern: 'api/health', when: (query) => health !== undefined && noQuery(query), handler: ({ res }) => sendJson(res, 200, health!.list()) },
-    // The coordinator's state (src/coordinator.ts), which only sf coordinator writes.
+    // The coordinator's state (src/coordinator.ts), which sf coordinator writes; POST api/coordinator/request writes its status_requested_at.
     { pattern: 'api/coordinator', when: noQuery, handler: async ({ res }) => sendJson(res, 200, await readCoordinator(ctx.stateDir)) },
     // A workspace's vision page (src/vision.ts), which only sf vision writes: user content, under
     // its own policy (an opaque origin that loads nothing); the security headers set before stay.

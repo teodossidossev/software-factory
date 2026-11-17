@@ -4,21 +4,27 @@
 // (the user's Claude Code session in the factory's checkout) does now as it answers "status?":
 // paragraphs and "- " lists, each ticket key of the board a link with its title; a long status
 // folds to its first lines behind Show all. Under it a footer with the status's age and Open the
-// chat, and the questions that wait for the user's answer. It is read-only: sf coordinator writes
-// the state through sf serve; the page reads GET api/coordinator on each coordinator event of the
-// stream (one on connect, one after each write: main.js), and every board render (renderBoard)
-// renders the card again, so its ages and ticket links follow the board without a timer of its
-// own. The title holds Zen's lights (the ship's computer of Blake's 7): a small screen of twelve
-// lights, a long bar and eleven small ones, dim at rest, lit for 3 s, the bar steady and the small
-// lights blinking, when a jobs event of the stream (main.js) differs from the last one by a job's
-// state, a job new to the list or a job gone from it, in any workspace, or when the screen is
-// clicked; the first list lights nothing. The lit state lives here, not on the element, so a
-// render draws them as they were; one timer dims them, and a card without a title (hidden, or
-// "has not reported") draws none. Every text goes in through textContent or a text node, never as
-// HTML; a ticket link opens only a page of the board's own tickets; the chat link is checked again
-// here, claude.ai only. A classic script, loaded in order with defer, sharing the page's globals
-// with the others. This file has no import or export on purpose: the compiler keeps it a script,
-// so its top-level names stay the page's globals.
+// chat, and the questions that wait for the user's answer. It is read-only but for one click: sf
+// coordinator writes the state through sf serve, and a click on Zen's screen asks the coordinator
+// for a status (POST api/coordinator/request, which records the request's time in the state). The
+// page reads GET api/coordinator on each coordinator event of the stream (one on connect, one after
+// each write or request: main.js), and every board render (renderBoard) renders the card again, so
+// its ages and ticket links follow the board without a timer of its own. The title holds Zen's
+// lights (the ship's computer of Blake's 7): a small octagonal screen of ten lights, the bar in the
+// middle and nine small ones, faint at rest. Zen thinks (the small lights blink, the bar glows) for
+// 3 s when a jobs event of the stream (main.js) differs from the last one by a job's state, a job
+// new to the list or a job gone from it, in any workspace, or when the screen is clicked (the first
+// list lights nothing); and on every page while a request for a status is open (younger than 2
+// minutes; one timer ends it, and the card then says the coordinator is not answering). Zen speaks
+// when the requested status arrives on a page that had the request open: the status shows whole at
+// once, the small lights stand still spelling a number in binary, and the bar flickers for a time
+// that grows with the status's length (with reduced motion: the pattern and the bar lit for 1 s).
+// The state lives here, not on the element, so a render draws the screen as it was (coordZenPaint),
+// and a card without a title (hidden, or "has not reported") draws none. Every text goes in through
+// textContent or a text node, never as HTML; a ticket link opens only a page of the board's own
+// tickets; the chat link is checked again here, claude.ai only. A classic script, loaded in order
+// with defer, sharing the page's globals with the others. This file has no import or export on
+// purpose: the compiler keeps it a script, so its top-level names stay the page's globals.
 'use strict';
 
 // A status older than this is muted, with "quiet since <time>".
@@ -38,19 +44,211 @@ let coordOpen = false;
 
 // How long the Zen lights stay lit after a change of the jobs list or a click on the screen.
 const COORD_ZEN_MS = 3000;
-// The lights on Zen's screen: the long bar, then the small ones (app.css places and times them).
-const COORD_ZEN_LIGHTS = 12;
+// The lights on Zen's screen: the bar, then the nine small ones (app.css places and times them).
+const COORD_ZEN_LIGHTS = 10;
+// The small lights in reading order, as a page is read: the two above the bar, the four down the
+// right, then below the bar the two upper ones (left, right) and last the lower one between them.
+// Reading position k (0 first) is small light COORD_ZEN_READING[k] (in child order after the bar)
+// and holds bit 8 - k of the number they spell.
+const COORD_ZEN_READING = [4, 5, 0, 1, 2, 3, 6, 8, 7];
 // The jobs list as last seen (each job's state by its key, every workspace's); null before the
 // first jobs event.
 let coordJobsSeen: Map<string, string> | null = null;
-// Whether the Zen lights are lit: every render draws them from it.
+// Whether the Zen lights are lit for COORD_ZEN_MS: every render draws them from it.
 let coordZenLit = false;
 // The timer that dims them; null while they are dim.
 let coordZenTimer: ReturnType<typeof setTimeout> | null = null;
 
-// The Zen lights drawn on the card, if any: they light or dim in place, with no render.
+// How long a request for a status stays open on the page (sf serve's STATUS_REQUEST_MS).
+const COORD_ASK_MS = 2 * 60 * 1000;
+// Whether this page's POST api/coordinator/request waits for its answer: a click then sends no other.
+let coordAsking = false;
+// The timer that ends an open request at its time + COORD_ASK_MS, and the request's time it was
+// set for; null when none is set.
+let coordAskTimer: ReturnType<typeof setTimeout> | null = null;
+let coordAskTimerFor: string | null = null;
+// The request's time the timer saw end: from then on that request reads as late, whatever the
+// page's clock says.
+let coordAskEnded: string | null = null;
+
+// The request for a status of the state read: 'open' while it is younger than COORD_ASK_MS by the
+// page's clock and its timer has not ended it, 'late' after, null when none is open.
+function coordAsked(): 'open' | 'late' | null {
+  const at = coordState?.status_requested_at ?? null;
+  if (at === null) {
+    return null;
+  }
+  return at !== coordAskEnded && Date.now() - Date.parse(at) < COORD_ASK_MS ? 'open' : 'late';
+}
+
+// The timer of the open request (called by each render): set once for a request whose timer is not
+// set yet, at its time + COORD_ASK_MS, then the request is late and the card renders; cleared when
+// no request is open.
+function coordAskWatch(): void {
+  const at = coordState?.status_requested_at ?? null;
+  if (at === null || coordAsked() !== 'open') {
+    clearTimeout(coordAskTimer ?? undefined);
+    coordAskTimer = null;
+    coordAskTimerFor = null;
+    return;
+  }
+  if (coordAskTimer !== null && coordAskTimerFor === at) {
+    return;
+  }
+  clearTimeout(coordAskTimer ?? undefined);
+  coordAskTimerFor = at;
+  coordAskTimer = setTimeout(() => {
+    coordAskTimer = null;
+    coordAskTimerFor = null;
+    coordAskEnded = at;
+    renderCoordinator();
+  }, Date.parse(at) + COORD_ASK_MS - Date.now());
+}
+
+// A speech of Zen (one at a time): the small lights' pattern, the bar on or off, the small lights
+// switched now (by their index), the time its steps spent, how long the bar flickers, when the next
+// switch comes (in the steps' time), and its timers. Time is counted by adding the steps' lengths,
+// never by the clock.
+interface CoordSpeech {
+  pattern: boolean[];
+  bar: boolean;
+  switched: Set<number>;
+  spent: number;
+  length: number;
+  nextSwitch: number;
+  timers: Set<ReturnType<typeof setTimeout>>;
+}
+let coordSpeech: CoordSpeech | null = null;
+
+// The nine small lights (in child order) from the 9 low bits of count, read in COORD_ZEN_READING's
+// order, the first the largest bit.
+function coordZenPattern(count: number): boolean[] {
+  const pattern = Array.from({ length: COORD_ZEN_READING.length }, () => false);
+  COORD_ZEN_READING.forEach((light, position) => {
+    pattern[light] = ((count >> (8 - position)) & 1) === 1;
+  });
+  return pattern;
+}
+
+// Paints Zen's screen from the script's state: thinking (lit) while lit for COORD_ZEN_MS or a
+// request for a status is open, and no speech; speaking during one, with the bar's on and each
+// small light's on (its pattern bit, the opposite while switched); at rest no on anywhere.
+function coordZenPaint(zen: HTMLElement): void {
+  const speech = coordSpeech;
+  zen.classList.toggle('lit', speech === null && (coordZenLit || coordAsked() === 'open'));
+  zen.classList.toggle('speaking', speech !== null);
+  const [bar, ...small] = Array.from(zen.children);
+  bar?.classList.toggle('on', speech?.bar === true);
+  small.forEach((light, index) => light.classList.toggle('on', speech !== null && speech.pattern[index] !== speech.switched.has(index)));
+}
+
+// The Zen lights drawn on the card, if any: painted in place, with no render.
 function coordZenShow(): void {
-  byId('coord').querySelector('.coord-zen')?.classList.toggle('lit', coordZenLit);
+  const zen = byId('coord').querySelector<HTMLElement>('.coord-zen');
+  if (zen !== null) {
+    coordZenPaint(zen);
+  }
+}
+
+// A whole number from low to high, both included, drawn with Math.random.
+const coordDraw = (low: number, high: number): number => low + Math.floor(Math.random() * (high - low + 1));
+
+// A timer of the speech, forgotten once it fires; the speech's end clears the others.
+function coordSpeechTimer(speech: CoordSpeech, ms: number, then: () => void): void {
+  const timer = setTimeout(() => {
+    speech.timers.delete(timer);
+    then();
+  }, ms);
+  speech.timers.add(timer);
+}
+
+// Zen speaks the status of text (the last speech ended first): the small lights spell a random
+// number from 1 to 511 (the page holds no count of the jobs landed today), and the bar flickers for
+// min(7 s, 1.5 s + 35 ms per character), then is off for one 300 ms step, and the speech ends. With
+// reduced motion: the pattern and the bar on for one 1 s step.
+function coordSpeak(text: string): void {
+  coordSpeechEnd();
+  const speech: CoordSpeech = {
+    pattern: coordZenPattern(coordDraw(1, 511)), bar: true, switched: new Set(), spent: 0,
+    length: Math.min(7000, 1500 + 35 * [...text].length), nextSwitch: coordDraw(1500, 3000), timers: new Set(),
+  };
+  coordSpeech = speech;
+  if (media('(prefers-reduced-motion: reduce)')) {
+    coordSpeechTimer(speech, 1000, coordSpeechEnd);
+    coordZenShow();
+    return;
+  }
+  coordSpeechStep(speech, true);
+}
+
+// One step of the speech: the bar on for 70 to 260 ms or off for 40 to 170 ms, then the next one,
+// until the steps' time reaches the speech's length. After an off step past the next switch time,
+// one or two small lights switch.
+function coordSpeechStep(speech: CoordSpeech, on: boolean): void {
+  speech.bar = on;
+  coordZenShow();
+  const ms = on ? coordDraw(70, 260) : coordDraw(40, 170);
+  coordSpeechTimer(speech, ms, () => {
+    speech.spent += ms;
+    if (!on && speech.spent >= speech.nextSwitch) {
+      coordSpeechSwitch(speech);
+      speech.nextSwitch = speech.spent + coordDraw(1500, 3000);
+    }
+    if (speech.spent < speech.length) {
+      coordSpeechStep(speech, !on);
+      return;
+    }
+    speech.bar = false;
+    coordZenShow();
+    coordSpeechTimer(speech, 300, coordSpeechEnd);
+  });
+}
+
+// One small light (two when a draw is .7 or more), drawn at random, shows the opposite of its
+// pattern bit until a timer of its own, 500 to 900 ms, puts it back.
+function coordSpeechSwitch(speech: CoordSpeech): void {
+  const free = speech.pattern.map((_bit, index) => index).filter((index) => !speech.switched.has(index));
+  const count = Math.random() >= 0.7 ? 2 : 1;
+  for (let drawn = 0; drawn < count && free.length > 0; drawn += 1) {
+    const [light] = free.splice(Math.floor(Math.random() * free.length), 1);
+    if (light === undefined) {
+      break;
+    }
+    speech.switched.add(light);
+    coordSpeechTimer(speech, coordDraw(500, 900), () => {
+      speech.switched.delete(light);
+      coordZenShow();
+    });
+  }
+  coordZenShow();
+}
+
+// Ends the speech, if any, at once: its timers cleared, the screen painted at rest (or thinking).
+function coordSpeechEnd(): void {
+  const speech = coordSpeech;
+  if (speech === null) {
+    return;
+  }
+  speech.timers.forEach((timer) => clearTimeout(timer));
+  coordSpeech = null;
+  coordZenShow();
+}
+
+// A click on Zen's screen: a speech ends, the screen lights for COORD_ZEN_MS as on a change, and,
+// when no request is open and this page's last one is answered, the page asks the coordinator for
+// a status. A refusal shows its code and message, a failure without an answer its message.
+function coordZenClick(): void {
+  coordSpeechEnd();
+  coordZenLight();
+  if (coordAsked() === 'open' || coordAsking) {
+    return;
+  }
+  coordAsking = true;
+  post('api/coordinator/request', {}).catch((error: unknown) => {
+    toast({ level: 'error', text: error instanceof ActionError ? `${error.code}: ${error.message}` : `The request for a status failed (${errorMessage(error)}).` });
+  }).finally(() => {
+    coordAsking = false;
+  });
 }
 
 // Called with each jobs event's list: when it differs from the last list seen by a job's state, a
@@ -81,14 +279,16 @@ function coordZenLight(): void {
 }
 
 // The Zen lights: Zen's screen after the title's text, holding COORD_ZEN_LIGHTS empty lights, the
-// first the long bar; lit while coordZenLit is set, and a click lights it. Decorative, so hidden
+// first the bar, then the nine small ones; painted from the script's state (coordZenPaint):
+// thinking, speaking or at rest. A click asks for a status (coordZenClick). Decorative, so hidden
 // from a screen reader, with a tooltip for the mouse.
 function coordZen(): HTMLElement {
-  const zen = el('span', coordZenLit ? 'coord-zen lit' : 'coord-zen');
+  const zen = el('span', 'coord-zen');
   zen.setAttribute('aria-hidden', 'true');
-  zen.setAttribute('title', 'Zen: lights up when a job changes state; click to wake it');
+  zen.setAttribute('title', 'Zen: lights up when a job changes state; click to ask the coordinator for a status');
   zen.append(el('i', 'bar'), ...Array.from({ length: COORD_ZEN_LIGHTS - 1 }, () => el('i')));
-  zen.addEventListener('click', coordZenLight);
+  coordZenPaint(zen);
+  zen.addEventListener('click', coordZenClick);
   return zen;
 }
 
@@ -108,25 +308,38 @@ function chatHref(link: unknown): string | null {
 }
 
 // The state of an answer, each part checked: a status or a question not of its form is left out,
-// a link not of claude.ai is none.
+// a link not of claude.ai is none, a request's time that is not a string Date.parse reads is none.
 function coordStateOf(data: unknown): CoordinatorState {
   const file: Readonly<Record<string, unknown>> = isRecord(data) ? data : {};
   const status = isRecord(file.status) && typeof file.status.text === 'string' && typeof file.status.at === 'string' ? { text: file.status.text, at: file.status.at } : null;
   const questions = (Array.isArray(file.questions) ? file.questions : [])
     .filter((entry: unknown): entry is CoordinatorQuestion => isRecord(entry) && typeof entry.id === 'string' && typeof entry.text === 'string' && typeof entry.at === 'string')
     .map(({ id, text, at }) => ({ id, text, at }));
-  return { status, questions, link: chatHref(file.link) };
+  const requested = file.status_requested_at;
+  const statusRequestedAt = typeof requested === 'string' && Number.isFinite(Date.parse(requested)) ? requested : null;
+  return { status, questions, link: chatHref(file.link), status_requested_at: statusRequestedAt };
 }
 
 // Reads the state and renders the card; a read that fails keeps the card as it was (the next
-// coordinator event reads again), and an answer that comes after a later read's is dropped.
+// coordinator event reads again), and an answer that comes after a later read's is dropped. A
+// status with another time than the last state's ends a speech; when it answers the request this
+// page had open (no request left, the last state's request open), Zen speaks it.
 async function readCoordinatorCard(): Promise<void> {
   coordReads += 1;
   const read = coordReads;
   try {
     const data = await getJson('api/coordinator');
     if (read === coordReads) {
-      coordState = coordStateOf(data);
+      const next = coordStateOf(data);
+      const asked = coordAsked();
+      const statusChanged = (next.status?.at ?? null) !== (coordState?.status?.at ?? null);
+      if (statusChanged) {
+        coordSpeechEnd();
+      }
+      coordState = next;
+      if (statusChanged && next.status !== null && asked === 'open' && next.status_requested_at === null) {
+        coordSpeak(next.status.text);
+      }
       renderCoordinator();
     }
   } catch { // sf serve did not answer: the card keeps the last state read
@@ -259,11 +472,13 @@ function coordLine(text: string, tickets: ReadonlyMap<string, { href: string; ti
 }
 
 // The card: hidden before the first read; one muted line when the coordinator never reported;
-// else the title (with the Zen lights after its text, lit or dim by coordZenLit) and a box with
-// the status (a p per paragraph, a ul per list; a long one's preview until Show all), Show all or Show less when the preview leaves something out, the
-// footer (the status's age, muted with "quiet since <time>" after two hours, at the left; Open the
-// chat at the right), and the open questions in the order asked, each with its age. An open
-// question gives the card its accent border. Every board render draws it again; the element that
+// else the title (with the Zen lights after its text, lit while coordZenLit is set or a request
+// for a status is open) and a box with the status (a p per paragraph, a ul per list; a long one's
+// preview until Show all), Show all or Show less when the preview leaves something out, the muted
+// line "The coordinator is not answering (no status in 2 minutes)" when a request for a status went
+// unanswered, the footer (the status's age, muted with "quiet since <time>" after two hours, at the
+// left; Open the chat at the right), and the open questions in the order asked, each with its age.
+// An open question gives the card its accent border. Every board render draws it again; the element that
 // had the focus inside it (by its data-coord-focus) has it again after.
 function renderCoordinator(): void {
   const card = byId('coord');
@@ -271,6 +486,7 @@ function renderCoordinator(): void {
   if (coordState === null) {
     return;
   }
+  coordAskWatch();
   // The link was checked when it was read (coordStateOf).
   const { status, questions, link: href } = coordState;
   card.classList.toggle('asks', questions.length > 0);
@@ -328,6 +544,9 @@ function renderCoordinator(): void {
     const chat = tabLink('btn linkbtn coord-chat', 'Open the chat', href);
     chat.dataset.coordFocus = 'chat';
     foot.append(chat);
+  }
+  if (coordAsked() === 'late') {
+    box.append(el('div', 'coord-late muted', 'The coordinator is not answering (no status in 2 minutes)'));
   }
   if (foot.children.length > 0) {
     box.append(foot);

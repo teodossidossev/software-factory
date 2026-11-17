@@ -114,6 +114,20 @@ reviewing, each with a fresh context.
 Give a coordinator only what it needs: it may run `sf` commands and read the job states, but your
 tokens and `auth.env` values are never printed, and the dashboard URL is shown as `/d/<token>/`.
 
+### Zen: asking the coordinator for a status
+
+A click on Zen's screen on the board's Coordinator card asks the coordinator for a status. The
+small lights blink while it thinks. The bar flickers while the new status shows. After 2 minutes
+without one the card says the coordinator is not answering.
+
+<img src="img/zen-rest.svg" alt="Zen at rest" width="120"> <img src="img/zen-thinking.svg" alt="Zen thinking" width="120"> <img src="img/zen-speaking-6.svg" alt="Zen speaking, the lights spelling 6" width="120"> <img src="img/zen-speaking-9.svg" alt="Zen speaking, the lights spelling 9" width="120">
+
+At rest; thinking; speaking. While Zen speaks, the small lights left on spell a number in binary.
+Read them like a page, left to right and top to bottom: the two above the bar, the four down the
+right, then below the bar the two upper ones (left, right) and last the lower one between them;
+the first is the largest bit (256), the last is 1. Lights 000000110 = 4 + 2 = 6;
+000001001 = 8 + 1 = 9. For now the number is a random one; it will be the jobs landed today.
+
 ## 4. Planning with ChatGPT and running locally
 
 You like to think a ticket through in ChatGPT; the factory runs locally.

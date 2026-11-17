@@ -6,14 +6,16 @@ import { mkdtemp, readdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mock, test } from 'node:test';
+import { answerLines, COMMANDS } from '../src/commands.js';
 import {
-  answerQuestion, askQuestion, chatLink, coordinatorFile, coordinatorLines, MAX_QUESTION_CHARS, MAX_QUESTION_NUMBER, MAX_QUESTIONS, MAX_STATUS_CHARS, readCoordinator, setLink, setStatus, stateOf,
+  answerQuestion, askQuestion, chatLink, coordinatorFile, coordinatorLines, endRequestWaits, MAX_QUESTION_CHARS, MAX_QUESTION_NUMBER, MAX_QUESTIONS, MAX_STATUS_CHARS, readCoordinator,
+  requestOpen, requestStatus, setLink, setStatus, stateOf, STATUS_REQUEST_MS, waitRequest,
 } from '../src/coordinator.js';
 import { FactoryError } from '../src/errors.js';
 import { localTime } from '../src/local-time.js';
 
 const state = (name: string): Promise<string> => mkdtemp(join(tmpdir(), `sf-coordinator-${name}-`));
-const EMPTY = { version: 1, status: null, questions: [], link: null, next_question: 1 };
+const EMPTY = { version: 1, status: null, questions: [], link: null, next_question: 1, status_requested_at: null };
 const refused = (code: string) => (error: unknown): boolean => error instanceof FactoryError && error.code === code;
 const AT = new Date('2026-11-13T09:30:00.000Z');
 
@@ -44,6 +46,66 @@ test('the status: set with its time, replaced, cleared; written atomically with 
   assert.equal((await readCoordinator(dir)).status?.text, 'Reviewing SF-205');
   assert.deepEqual(await setStatus(dir, null), EMPTY);
   assert.equal(JSON.parse(await readFile(coordinatorFile(dir), 'utf8')).version, 1);
+});
+
+test('a request for a status: opened once while open, again 2 minutes on; a status answers it, --clear does not; a missing or invalid time reads as none', async () => {
+  const dir = await state('request');
+  const at = (ms: number): Date => new Date(AT.getTime() + ms);
+  assert.equal(STATUS_REQUEST_MS, 120_000);
+  assert.deepEqual(await requestStatus(dir, AT), { requested_at: AT.toISOString(), opened: true });
+  assert.equal((await readCoordinator(dir)).status_requested_at, AT.toISOString());
+  // Open: nothing is written, the open request's time is answered.
+  const written = await readFile(coordinatorFile(dir), 'utf8');
+  await writeFile(coordinatorFile(dir), written.replace('"version": 1', '"version": 1, "mark": true'));
+  assert.deepEqual(await requestStatus(dir, at(STATUS_REQUEST_MS - 1)), { requested_at: AT.toISOString(), opened: false });
+  assert.match(await readFile(coordinatorFile(dir), 'utf8'), /"mark": true/);
+  assert.equal(requestOpen(await readCoordinator(dir), at(STATUS_REQUEST_MS - 1)), true);
+  assert.equal(requestOpen(await readCoordinator(dir), at(STATUS_REQUEST_MS)), false);
+  // 2 minutes on: a new one opens.
+  assert.deepEqual(await requestStatus(dir, at(STATUS_REQUEST_MS)), { requested_at: at(STATUS_REQUEST_MS).toISOString(), opened: true });
+  // --clear answers nothing; a status before the request neither; a status at or after it does.
+  assert.equal((await setStatus(dir, null, at(STATUS_REQUEST_MS + 1))).status_requested_at, at(STATUS_REQUEST_MS).toISOString());
+  assert.equal((await setStatus(dir, 'Earlier', at(STATUS_REQUEST_MS - 1))).status_requested_at, at(STATUS_REQUEST_MS).toISOString());
+  assert.equal((await setStatus(dir, 'Done', at(STATUS_REQUEST_MS + 5))).status_requested_at, null);
+  assert.equal((await readCoordinator(dir)).status_requested_at, null);
+  // The read: a missing, not a string or not a time reads as none.
+  assert.equal(stateOf({}).status_requested_at, null);
+  for (const bad of [7, 'yesterday', '', null, { at: AT.toISOString() }]) {
+    assert.equal(stateOf({ status_requested_at: bad }).status_requested_at, null, String(bad));
+  }
+  assert.equal(stateOf({ status_requested_at: AT.toISOString() }).status_requested_at, AT.toISOString());
+});
+
+test('waitRequest: an open request answers at once; an expired one is waited past until a new one; a timeout answers none (exit 3); sf serve\'s stop ends a wait with serve_stopping', async () => {
+  const dir = await state('wait');
+  const answer = (result: { requested_at: string | null }) => answerLines(COMMANDS.coordinatorWaitRequest, result, {});
+  // No request: --timeout 0 looks once.
+  const none = await waitRequest(dir, 0, () => AT);
+  assert.deepEqual(none, { requested_at: null });
+  assert.deepEqual(answer(none), { lines: ['no status request before the timeout'], failed: true, exitCode: 3 });
+  await requestStatus(dir, AT);
+  const open = await waitRequest(dir, 0, () => AT);
+  assert.deepEqual(open, { requested_at: AT.toISOString() });
+  assert.deepEqual(answer(open), { lines: [`status requested at ${localTime(AT.toISOString())}`], failed: false });
+  // Expired (2 minutes on): it waits, and the next request wakes it.
+  const later = new Date(AT.getTime() + STATUS_REQUEST_MS);
+  const waiting = waitRequest(dir, null, () => later);
+  let settled = false;
+  void waiting.finally(() => {
+    settled = true;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(settled, false);
+  await requestStatus(dir, later);
+  assert.deepEqual(await waiting, { requested_at: later.toISOString() });
+  // A short timeout with no new request answers none.
+  await setStatus(dir, 'Done', later);
+  assert.deepEqual(await waitRequest(dir, 10, () => later), { requested_at: null });
+  // The stop ends a pending wait.
+  const stopped = waitRequest(dir, null, () => later);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  endRequestWaits();
+  await assert.rejects(stopped, refused('serve_stopping'));
 });
 
 test('the bounds: a status of 2,000 characters, a question of 1,000, 10 open; more is refused and nothing changes; a status keeps its line breaks', async () => {

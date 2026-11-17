@@ -143,6 +143,9 @@ export type Target =
   // The ticket's planner session: GET api/tickets/<ws>/<ticket>/planner reads it, POST starts it;
   // POST .../planner/stop (stop) ends it, POST only.
   | { kind: 'ticket-planner'; workspace: string | undefined; ticket: string | undefined; stop: boolean }
+  // A request for the coordinator's status (a click on Zen's screen): POST
+  // api/coordinator/request, POST only.
+  | { kind: 'coordinator-request' }
   | { kind: 'read' };
 
 export function targetOf(path: string[]): Target {
@@ -201,6 +204,9 @@ export function targetOf(path: string[]): Target {
   }
   if (kind === 'skills' && path.length === 4 && a === 'roles' && b !== undefined) {
     return { kind: 'skill-roles', role: b };
+  }
+  if (kind === 'coordinator' && path.length === 3 && a === 'request') {
+    return { kind: 'coordinator-request' };
   }
   if (kind === 'pins' && path.length === 2) {
     return { kind: 'both', route: 'pin-add' };

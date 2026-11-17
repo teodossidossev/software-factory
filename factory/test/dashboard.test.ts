@@ -18,6 +18,7 @@ import { POST_ROUTES, type RouteName } from '../src/dashboard-routes.js';
 import { FactoryError } from '../src/errors.js';
 import { explanationPath } from '../src/explain.js';
 import { askQuestion, readCoordinator, setLink, setStatus } from '../src/coordinator.js';
+import { markerPath } from '../src/update.js';
 import { type EventRecord, type Job, JobStore } from '../src/jobs.js';
 import { buildPatch, fileChanges } from '../src/patch.js';
 import { readPins } from '../src/pins.js';
@@ -216,7 +217,7 @@ test('dashboard (SF-153): GET api/health is the checks\' last result; the stream
   });
 });
 
-test('dashboard: GET api/coordinator answers the coordinator\'s file (empty without); no write route; the stream sends coordinator on connect and on coordinatorChanged', async () => {
+test('dashboard: GET api/coordinator answers the coordinator\'s file (empty without); no write route but POST api/coordinator/request; the stream sends coordinator on connect and on coordinatorChanged', async () => {
   await withDashboard('dash-coordinator', fakeActions(), async (dashboard, { state }) => {
     const base = dashboard.url;
     const read = async (): Promise<unknown> => {
@@ -224,15 +225,16 @@ test('dashboard: GET api/coordinator answers the coordinator\'s file (empty with
       assert.deepEqual([reply.status, reply.headers['content-type'], reply.headers['content-security-policy']], [200, 'application/json; charset=utf-8', CSP]);
       return JSON.parse(reply.body);
     };
-    assert.deepEqual(await read(), { version: 1, status: null, questions: [], link: null, next_question: 1 });
+    assert.deepEqual(await read(), { version: 1, status: null, questions: [], link: null, next_question: 1, status_requested_at: null });
     await setStatus(state, 'Planning SF-210', new Date('2026-11-13T09:00:00.000Z'));
     await askQuestion(state, 'Merge <b>SF-204</b> first?', new Date('2026-11-13T09:01:00.000Z'));
     await setLink(state, 'https://claude.ai/chat/abc');
     assert.deepEqual(await read(), {
       version: 1, status: { text: 'Planning SF-210', at: '2026-11-13T09:00:00.000Z' },
       questions: [{ id: 'q1', text: 'Merge <b>SF-204</b> first?', at: '2026-11-13T09:01:00.000Z' }], link: 'https://claude.ai/chat/abc', next_question: 2,
+      status_requested_at: null,
     });
-    // Nothing on the dashboard writes it.
+    // No route but POST api/coordinator/request writes it (its test follows).
     for (const path of ['api/coordinator', 'api/coordinator/status', 'api/coordinator/ask', 'api/coordinator/link']) {
       for (const method of ['POST', 'PUT', 'DELETE'] as const) {
         const reply = await fetchRaw(new URL(path, base), { method, headers: { origin: `http://127.0.0.1:${base.port}`, 'content-type': 'application/json' }, body: '{"text":"x"}' });
@@ -254,6 +256,45 @@ test('dashboard: GET api/coordinator answers the coordinator\'s file (empty with
     } finally {
       stream.close();
     }
+  });
+});
+
+test('dashboard: POST api/coordinator/request records a request once while it is open, tells the pages, and is checked as every action', async () => {
+  await withDashboard('dash-coordinator-request', fakeActions(), async (dashboard, { state }) => {
+    const base = dashboard.url;
+    const stream = await openStream(new URL('api/stream', base));
+    try {
+      await stream.next('coordinator');
+      await stream.next('tickets');
+      const opening = stream.events.length;
+      const first = await act(base, 'api/coordinator/request', {});
+      assert.equal(first.status, 200, first.body);
+      const answer = JSON.parse(first.body) as { ok: true; result: { requested_at: string; opened: boolean } };
+      assert.deepEqual([answer.ok, answer.result.opened, Number.isFinite(Date.parse(answer.result.requested_at))], [true, true, true]);
+      assert.equal(JSON.parse((await fetchRaw(new URL('api/coordinator', base))).body).status_requested_at, answer.result.requested_at);
+      assert.deepEqual(await stream.next('coordinator'), {});
+      // Open: the same time, nothing written, no event.
+      const written = await readFile(join(state, 'coordinator.json'), 'utf8');
+      const second = await act(base, 'api/coordinator/request', {});
+      assert.deepEqual([second.status, JSON.parse(second.body)], [200, { ok: true, result: { requested_at: answer.result.requested_at, opened: false } }]);
+      assert.equal(await readFile(join(state, 'coordinator.json'), 'utf8'), written);
+      await new Promise((done) => setTimeout(done, 100));
+      assert.deepEqual(stream.events.slice(opening).map((event) => event.event), ['coordinator'], 'one event, for the request that opened');
+    } finally {
+      stream.close();
+    }
+    // The checks of every action: the body, the Origin, the method, the update.
+    for (const body of ['{"x":1}', 'null', '[]', '"x"']) {
+      const reply = await act(base, 'api/coordinator/request', undefined, { body });
+      assert.deepEqual([reply.status, JSON.parse(reply.body).error.code], [400, 'invalid_body'], body);
+    }
+    const wrongOrigin = await act(base, 'api/coordinator/request', {}, { headers: { origin: 'http://localhost:3000' } });
+    assert.deepEqual([wrongOrigin.status, JSON.parse(wrongOrigin.body).error.code], [403, 'invalid_origin']);
+    const get = await fetchRaw(new URL('api/coordinator/request', base));
+    assert.deepEqual([get.status, get.headers.allow], [405, 'POST']);
+    await writeFile(markerPath(state), '{}');
+    const updating = await act(base, 'api/coordinator/request', {});
+    assert.deepEqual([updating.status, JSON.parse(updating.body).error.code], [409, 'update_in_progress']);
   });
 });
 

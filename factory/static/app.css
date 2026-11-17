@@ -610,20 +610,32 @@ button.tag:hover { border-color: var(--accent); }
 .handover .ho-ask textarea { width: 100%; }
 .handover .ho-askrow { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .handover .ho-askrow .muted { font-size: 12px; }
-.handover .ho-more { position: relative; flex: none; }
-.handover .ho-menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 12; width: min(300px, calc(100vw - 32px)); display: grid; gap: 2px; padding: 6px; background: var(--panel); border: 1px solid var(--border-strong); border-radius: var(--radius); box-shadow: 0 12px 40px rgba(0,0,0,.2); }
-.handover .ho-item { all: unset; box-sizing: border-box; display: grid; gap: 2px; padding: 6px 8px; border-radius: var(--radius-sm); cursor: pointer; font-size: 13px; color: var(--fg); }
-.handover .ho-item .muted { font-size: 12px; }
-.handover .ho-item:hover, .handover .ho-item:focus-visible { background: var(--selected); }
-.handover .ho-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-.handover .ho-item.danger { color: var(--del); }
-.handover .ho-item[disabled] { opacity: .5; cursor: not-allowed; }
-.handover .ho-sep { height: 1px; margin: 4px 0; background: var(--border); }
+:is(.handover, .ready) .ho-more { position: relative; flex: none; }
+:is(.handover, .ready) .ho-menu { position: absolute; right: 0; top: calc(100% + 4px); z-index: 12; width: min(300px, calc(100vw - 32px)); display: grid; gap: 2px; padding: 6px; background: var(--panel); border: 1px solid var(--border-strong); border-radius: var(--radius); box-shadow: 0 12px 40px rgba(0,0,0,.2); }
+:is(.handover, .ready) .ho-item { all: unset; box-sizing: border-box; display: grid; gap: 2px; padding: 6px 8px; border-radius: var(--radius-sm); cursor: pointer; font-size: 13px; color: var(--fg); }
+:is(.handover, .ready) .ho-item .muted { font-size: 12px; }
+:is(.handover, .ready) .ho-item:hover, :is(.handover, .ready) .ho-item:focus-visible { background: var(--selected); }
+:is(.handover, .ready) .ho-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+:is(.handover, .ready) .ho-item.danger { color: var(--del); }
+:is(.handover, .ready) .ho-item[disabled] { opacity: .5; cursor: not-allowed; }
+:is(.handover, .ready) .ho-sep { height: 1px; margin: 4px 0; background: var(--border); }
 .handover .status.dismissable, .handover .status.earlier { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
 .handover .status.earlier { background: var(--panel); border: 1px dashed var(--border-strong); }
 .handover .ho-x { all: unset; flex: none; width: 22px; height: 22px; line-height: 22px; text-align: center; border-radius: 4px; cursor: pointer; font-size: 16px; color: inherit; }
 .handover .ho-x:hover { background: var(--panel); }
 .handover .ho-x:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* The ready panel of a job ready to push (variant A of its prototype): one row with the primary
+   action, Ask for a change, More ▾ (opening upward: the composer is pinned at the bottom) and
+   Abort…, quiet at the far right; the chip "Ready to push" in the sentence above it. */
+.composer .ready { display: grid; gap: 8px; min-width: 0; }
+.ready .rd-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; min-width: 0; }
+.ready .rd-abort { margin-left: auto; border-color: transparent; background: transparent; }
+.ready .rd-abort:hover { border-color: var(--del); }
+.ready .ho-menu { top: auto; bottom: calc(100% + 4px); left: 0; right: auto; }
+.composer .cs .ready-status { display: inline-flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+.composer .cs .ready-chip { display: inline-flex; align-items: center; gap: 6px; padding: 1px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; color: var(--add); background: var(--add-bg); }
+.composer .cs .ready-chip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.composer .cs .ready-note { flex-basis: 100%; }
 .finding .decide input.note { flex: 1 1 180px; min-width: 0; height: 26px; padding: 0 8px; font: 12px var(--sans); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--bg); color: var(--fg); }
 pre.raw.doc .heading { font-weight: 700; }
 #stream .task-check { margin: 6px 0; font-size: 13px; }
@@ -962,6 +974,8 @@ a.mq-badge:hover { text-decoration: underline; }
   .e > .who.cont { display: none; }
   .e > .body { grid-column: 1 / -1; grid-row: 2; }
   .composer { max-height: 60vh; overflow-y: auto; }
+  /* The composer scrolls inside itself here, which would cut a menu off: a sheet instead. */
+  .ready .ho-menu { position: fixed; top: auto; left: max(16px, env(safe-area-inset-left, 0px)); right: max(16px, env(safe-area-inset-right, 0px)); bottom: max(16px, env(safe-area-inset-bottom, 0px)); width: auto; max-height: 70vh; overflow-y: auto; }
   .composer textarea { flex: 1 1 100%; }
   .tree { max-height: 45vh; border-right: 0; border-bottom: 1px solid var(--border); }
   .tree.folded :is(.ffq, .tb .row, .tlist) { display: none; }
@@ -973,7 +987,7 @@ a.mq-badge:hover { text-decoration: underline; }
   .btn, .btn.small, :is(#drawer, #ticket-confirm) .btn { min-height: 44px; min-width: 44px; height: auto; white-space: normal; max-width: 100%; }
   .switch button, .seg2 button { display: inline-flex; align-items: center; min-height: 44px; }
   .stepper button { width: 44px; line-height: 44px; }
-  .colfold, .trow, .handover .ho-item { min-height: 44px; }
+  .colfold, .trow, :is(.handover, .ready) .ho-item { min-height: 44px; }
   .handover .ho-x, .toast-x { width: 44px; height: 44px; line-height: 44px; text-align: center; }
   .ffq, .dtool select, .dg-pick, .finding .decide input.note, .hselect, .needs, .hlight { min-height: 44px; }
   .coord-more { min-height: 44px; }

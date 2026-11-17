@@ -530,11 +530,12 @@ test('mr screen (SF-080): read-only when pushed (the time, Back to the stream), 
   assert.deepEqual(kept.page.$('scrMr').querySelectorAll('.dfile .r.del, .dfile .r.add').map((row) => row.querySelector('.c')!.textContent), ['feat(T-1): The factory again', TITLE]);
 });
 
-test('mr screen (SF-080): the composer\'s primary in ready_for_human_review opens the screen (Approve… stays second); the draft is kept across screens; leaving the page with it unsaved asks first', async () => {
+test('mr screen (SF-080): the ready panel\'s primary in ready_for_human_review opens the screen (Ask for a change second, Hand over and Approve without review… first in More); the draft is kept across screens; leaving the page with it unsaved asks first', async () => {
   const { page } = await openMr(job('T-1', 'ready_for_human_review'), mrView(), '#app/T-1');
-  const acts = page.$('acts').children as FakeElement[];
-  assert.deepEqual(acts.slice(0, 2).map((node) => [node.textContent, node.className]), [['Review the MR and push', 'btn primary'], ['Approve…', 'btn']]);
-  acts[0]!.click();
+  const row = page.$('ready-panel').querySelector('.rd-row')!.children as FakeElement[];
+  assert.deepEqual(row.slice(0, 2).map((node) => [node.textContent, node.className]), [['Review the MR and push', 'btn primary'], ['Ask for a change', 'btn']]);
+  assert.deepEqual(page.$('ready-panel').querySelectorAll('.ho-menu [role="menuitem"]').slice(0, 2).map((node) => node.id), ['handover-button', 'approve-button']);
+  row[0]!.click();
   await page.flush();
   assert.deepEqual([page.location.hash, page.$('scrMr').hidden, page.$('confirm').hidden], ['#app/T-1/mr', false, true]);
   assert.equal((page.window.dispatch('beforeunload', {}) as { returnValue?: unknown }).returnValue, undefined);

@@ -19,9 +19,22 @@ const PLACEHOLDER: Readonly<Partial<Record<JobState, string>>> = {
   preparing_mr: 'The factory takes no message while it writes the MR text',
 };
 
+// The keys of the ready jobs whose Ask for a change (readyAsk) and whose planning chat link field
+// (readyChat) are open, while the page is open; a job shown in another state leaves both.
+const readyAsk = new Set<string>();
+const readyChat = new Set<string>();
+
+// The second line of a ready panel's menu item, by action, while it is on.
+const READY_NOTES: Readonly<Record<string, string>> = {
+  'review-mr': 'Push from here instead of your checkout.',
+  approve: 'Push the prepared branch, without the Merge request screen.',
+};
+
 // The composer: the sentence in bold (and the merge request of a pushed job), the inline
 // confirmation, the message box and the actions; a disabled action has its reason as its title. A
-// handed-over job has its hand-over panel instead of the message box and the actions.
+// handed-over job has its hand-over panel instead of the message box and the actions; a job ready
+// for review the chip "Ready to push" in place of the bold sentence and the ready panel, its
+// message box and Send shown only while Ask for a change is open.
 function renderComposer(): void {
   const job = state.detail?.job ?? null;
   // A confirmation opened before the doubt is not one the user could open now.
@@ -32,7 +45,9 @@ function renderComposer(): void {
   const msg = byIdAs('msg', 'textarea');
   byId('refresh-button').hidden = state.key === null || state.unresolved.get(state.key)?.failed !== true;
   if (job === null) {
+    renderReadyPanel(null);
     placeHandoverPanel(null);
+    composerRow().hidden = false;
     renderPlanner(null);
     byId('composer-sentence').replaceChildren(el('span', 'muted', 'Loading the job…'));
     byId('acts').replaceChildren();
@@ -40,14 +55,16 @@ function renderComposer(): void {
     msg.disabled = true;
     return;
   }
-  // The detail's job, with what only the jobs payload has (the stop's numbers).
-  const cs = [el('b', '', `${headSentence({ ...(shownJob() ?? {}), ...job })}.`)];
+  const ready = job.state === 'ready_for_human_review';
+  // The detail's job, with what only the jobs payload has (the stop's numbers). A ready job: its
+  // status chip and what it means instead; the primary action says what comes next.
+  const cs = [ready ? readyStatus() : el('b', '', `${headSentence({ ...(shownJob() ?? {}), ...job })}.`)];
   if (job.state === 'paused' && job.task_changed === true) {
     cs.push(el('span', 'muted', TASK_CHANGED));
   }
   // The hand-over: why a job ready for review was not handed over; what a handed-over one takes.
-  if (job.state === 'ready_for_human_review' && skippedNote(job) !== '') {
-    cs.push(el('span', 'muted', skippedNote(job).trim()));
+  if (ready && skippedNote(job) !== '') {
+    cs.push(el('span', 'muted ready-note', skippedNote(job).trim()));
   }
   if (hasMr(job)) {
     const line = el('span', 'mr-line');
@@ -72,14 +89,20 @@ function renderComposer(): void {
   const resumeWord = job.state === 'waiting_limit' ? 'Resume now' : 'Resume';
   msg.placeholder = job.availability?.resume === '' ? (pausedTurn(job) ? `${resumeWord} sends this to the Implementer, if you write one` : `${resumeWord}, then message the Implementer`)
     : PLACEHOLDER[job.state] ?? 'Message';
-  // The actions the server lists for the job, in its order.
-  const buttons = (Array.isArray(job.actions) ? job.actions : []).map((shown) => actionButton(job, shown.action, shown.label, `btn${shown.primary ? ' primary' : ''}${shown.danger ? ' danger' : ''}`));
+  // The actions the server lists for the job, in its order; a ready job's are in its panel, Send
+  // aside.
+  const buttons = listedActions(job).filter((shown) => !ready || shown.action === 'say')
+    .map((shown) => actionButton(job, shown.action, shown.label, `btn${shown.primary ? ' primary' : ''}${shown.danger ? ' danger' : ''}`));
   keepFocus(byId('acts'), () => byId('acts').replaceChildren(...buttons));
+  // The ready panel first: the More ▾ menu of a panel it removes is closed before a hand-over
+  // panel draws its own.
+  renderReadyPanel(job);
   if (job.state === 'handed_over') {
     renderHandoverPanel(job, state.detail);
   } else {
     placeHandoverPanel(null);
   }
+  composerRow().hidden = job.state === 'handed_over' || (ready && !readyAsk.has(keyOf(job)));
   const confirm = byId('confirm');
   byId('acts-why').replaceChildren(...whyLines([...byId('composer').querySelectorAll('button')].filter((node) => !confirm.contains(node))));
 }
@@ -98,7 +121,8 @@ function plannerAvailability(action: 'suggestion-send' | 'suggestion-dismiss', j
 // The planner block, right after the composer's sentence: the planner's suggestion while it
 // is shown, as plain text, with Send (the note as the user's message) and Dismiss; Discuss the result
 // (the ChatGPT link, or the message to copy) while the job waits for the user; Open the planning chat
-// and its field. Every href is checked against its fixed prefix.
+// and its field. A ready job's Discuss and field are in its ready panel instead. Every href is
+// checked against its fixed prefix.
 function renderPlanner(job: JobRow | null): void {
   const block = byId('planner');
   const planner = job?.planner;
@@ -135,7 +159,9 @@ function renderPlanner(job: JobRow | null): void {
   }
   const links = el('div', 'planner-links');
   const discuss = planner.discuss;
-  if (discuss !== null && typeof discuss.message === 'string') {
+  // A ready job's Discuss and field are in its panel's More ▾.
+  const ready = job.state === 'ready_for_human_review';
+  if (!ready && discuss !== null && typeof discuss.message === 'string') {
     if (typeof discuss.url === 'string' && discuss.url.startsWith(CHATGPT_PREFILL_URL)) {
       links.append(tabLink('fs13', 'Discuss the result ↗', discuss.url));
     } else {
@@ -149,7 +175,9 @@ function renderPlanner(job: JobRow | null): void {
   if (links.children.length > 0) {
     content.push(links);
   }
-  content.push(chatLinkField('job', key, typeof planner.chat === 'string' ? planner.chat : null, (what) => ({ act: `chat-${what}` })));
+  if (!ready) {
+    content.push(chatLinkField('job', key, typeof planner.chat === 'string' ? planner.chat : null, (what) => ({ act: `chat-${what}` })));
+  }
   withChatFocus(() => keepFocus(block, () => block.replaceChildren(...content)));
   block.hidden = content.length === 0;
 }
@@ -168,6 +196,19 @@ function whyLines(buttons: readonly HTMLElement[]): HTMLElement[] {
   }
   return [...byReason].map(([reason, labels]) => el('div', '', `Off: ${labels.join(', ')} (${reason})`));
 }
+
+// The composer's row of the message box and the actions (#msg, #acts).
+function composerRow(): HTMLElement {
+  // dashboard.html's composer has its .crow row.
+  const crow = byId('composer').querySelector<HTMLElement>('.crow');
+  if (crow === null) {
+    throw new Error('The composer has no .crow row');
+  }
+  return crow;
+}
+
+// The actions the server lists for the job, in its order.
+const listedActions = (job: JobRow): readonly ShownAction[] => (Array.isArray(job.actions) ? job.actions : []);
 
 // One action's button of the composer, disabled with its reason as its title: the action's
 // availability, an open confirmation, an empty message box for a message.
@@ -198,12 +239,7 @@ function actionButton(job: JobRow, action: string, label: string, className: str
 function placeHandoverPanel(key: string): HTMLElement;
 function placeHandoverPanel(key: null): null;
 function placeHandoverPanel(key: string | null): HTMLElement | null {
-  const composer = byId('composer');
-  // dashboard.html's composer has its .crow row.
-  const crow = composer.querySelector<HTMLElement>('.crow');
-  if (crow === null) {
-    throw new Error('The composer has no .crow row');
-  }
+  const crow = composerRow();
   const msg = byId('msg');
   const status = byId('action-status');
   let panel = $('handover-panel');
@@ -313,11 +349,11 @@ function handoverFacts(job: JobRow, detail: JobDetail | null): HTMLElement {
   return facts;
 }
 
-// The composer's More ▾ menu around its items: the toggle (More ▾) and the menu, open while
-// state.moreMenu is; every item but a separator is a menuitem.
-function moreMenu(items: readonly HTMLElement[]): HTMLElement {
+// The composer's More ▾ menu around its items: the toggle (More ▾, of the class toggleClass) and
+// the menu, open while state.moreMenu is; every item but a separator is a menuitem.
+function moreMenu(items: readonly HTMLElement[], toggleClass = 'btn small'): HTMLElement {
   const wrap = el('div', 'ho-more');
-  const toggle = button('btn small', 'More ▾', { homenu: '' });
+  const toggle = button(toggleClass, 'More ▾', { homenu: '' });
   toggle.setAttribute('aria-haspopup', 'menu');
   toggle.setAttribute('aria-expanded', String(state.moreMenu));
   const menu = el('div', 'ho-menu');
@@ -373,17 +409,143 @@ function moreMenuKey(event: KeyboardEvent): void {
   items[at < 0 ? (step === 1 ? 0 : items.length - 1) : (at + step + items.length) % items.length]?.focus();
 }
 
-// The composer's own buttons, which composerAct handles: the planner block's and the planning
-// chat link's.
-const COMPOSER_ACTS: readonly string[] = ['suggestion-send', 'suggestion-dismiss', 'planner-copy', 'chat-save', 'chat-remove'];
+// ---------- The ready panel (the ways to finish a job ready for review) ----------
+
+// A ready job's status, in place of the bold sentence: the chip and what it means.
+function readyStatus(): HTMLElement {
+  const status = el('span', 'ready-status');
+  status.append(el('span', 'ready-chip', 'Ready to push'), el('span', '', 'Reviews are clean and the MR text is written.'));
+  return status;
+}
+
+// The ChatGPT link of the job's result, or null: the server builds it only when ChatGPT plans the
+// ticket (the link of a waiting job always fits).
+function chatGptLink(job: JobRow): string | null {
+  const url = job.planner?.discuss?.url;
+  return typeof url === 'string' && url.startsWith(CHATGPT_PREFILL_URL) ? url : null;
+}
+
+// Whether the job's ticket takes a planning chat link from the ready panel: ChatGPT plans it and it
+// has none stored.
+const takesChatLink = (job: JobRow): boolean => chatGptLink(job) !== null && job.planner?.chat === null;
+
+// The ready panel of a job ready for review, right after #confirm, drawn again on each call (the
+// focus kept): one row with the listed primary action, Ask for a change (which shows .crow), More ▾
+// and the listed dangerous one (Abort…), and under it the planning chat link field while it is
+// open. Any other job, or none, has no panel; a job shown in another state leaves readyAsk and
+// readyChat. While a card's button wants the focus in the box (state.wantFocus 'composer'), Ask
+// for a change opens, for the box to take it.
+function renderReadyPanel(job: JobRow | null): void {
+  const key = job === null ? null : keyOf(job);
+  const ready = job !== null && job.state === 'ready_for_human_review';
+  if (key !== null && !ready) {
+    readyAsk.delete(key);
+    readyChat.delete(key);
+  }
+  let panel = $('ready-panel');
+  if (panel !== null && (!ready || panel.dataset.key !== key)) {
+    panel.remove();
+    panel = null;
+    state.moreMenu = false;
+  }
+  if (!ready || key === null) {
+    return;
+  }
+  if (panel === null) {
+    panel = el('div', 'ready');
+    panel.id = 'ready-panel';
+    panel.dataset.key = key;
+    panel.setAttribute('role', 'group');
+    panel.setAttribute('aria-label', 'Ready to push');
+    byId('confirm').after(panel);
+  }
+  if (state.wantFocus === 'composer') {
+    readyAsk.add(key);
+  }
+  const listed = listedActions(job);
+  const row = el('div', 'rd-row');
+  const primary = listed.find((shown) => shown.primary);
+  if (primary !== undefined) {
+    row.append(actionButton(job, primary.action, primary.label, 'btn primary'));
+  }
+  const ask = button('btn', 'Ask for a change', { act: 'ask' });
+  ask.id = 'ask-button';
+  ask.setAttribute('aria-expanded', String(readyAsk.has(key)));
+  row.append(ask, moreMenu(readyMenuItems(job), 'btn'));
+  const danger = listed.find((shown) => shown.danger);
+  if (danger !== undefined) {
+    row.append(actionButton(job, danger.action, danger.label, 'btn danger rd-abort'));
+  }
+  const parts: HTMLElement[] = [row];
+  if (readyChat.has(key) && takesChatLink(job)) {
+    const chat = el('div', 'rd-chat');
+    chat.append(chatLinkField('job', key, null, (what) => ({ act: `chat-${what}` })));
+    parts.push(chat);
+  } else {
+    readyChat.delete(key);
+  }
+  const drawn = panel;
+  withChatFocus(() => keepFocus(drawn, () => drawn.replaceChildren(...parts)));
+}
+
+// The ready panel's More ▾ items: each listed action but the primary, Send and the dangerous one,
+// in the server's order, with its second line (why it is off, else READY_NOTES'), a separator
+// before Refresh MR status; then Discuss the result ↗ (the ChatGPT link, else Copy the message for
+// the planner) while the job has a message for the planner, and Planning chat link… for a ticket
+// ChatGPT plans without a stored link.
+function readyMenuItems(job: JobRow): HTMLElement[] {
+  const items: HTMLElement[] = [];
+  for (const shown of listedActions(job)) {
+    if (shown.primary || shown.danger || shown.action === 'say') {
+      continue;
+    }
+    if (shown.action === 'mr-status') {
+      const separator = el('div', 'ho-sep');
+      separator.setAttribute('role', 'separator');
+      items.push(separator);
+    }
+    const item = actionButton(job, shown.action, shown.label, 'ho-item');
+    const note = item.disabled ? item.getAttribute('title') ?? '' : READY_NOTES[shown.action] ?? '';
+    if (note !== '') {
+      item.append(el('span', 'muted', note));
+    }
+    items.push(item);
+  }
+  if (typeof job.planner?.discuss?.message === 'string') {
+    const url = chatGptLink(job);
+    items.push(url !== null ? tabLink('ho-item', 'Discuss the result ↗', url) : button('ho-item', 'Copy the message for the planner', { act: 'planner-copy' }));
+  }
+  if (takesChatLink(job)) {
+    const open = button('ho-item', 'Planning chat link…', { act: 'chat-open' });
+    open.id = 'chat-open-button';
+    items.push(open);
+  }
+  return items;
+}
+
+// The composer's own buttons, which composerAct handles: the planner block's, the planning chat
+// link's and the ready panel's toggles.
+const COMPOSER_ACTS: readonly string[] = ['suggestion-send', 'suggestion-dismiss', 'planner-copy', 'chat-save', 'chat-remove', 'ask', 'chat-open'];
 
 // The planner block's buttons: Send posts the sha256 of the suggestion the page shows (the server
 // sends its stored note only while it is that one), Dismiss removes it; Copy puts the message for
-// the planner on the clipboard; Save and Remove of the planning chat link.
+// the planner on the clipboard; Save and Remove of the planning chat link. The ready panel's Ask
+// for a change and Planning chat link… open and close the box and the field, the focus in what
+// opened or back on what opened it.
 function composerAct(action: string, job: JobRow): void {
   const key = keyOf(job);
   const planner = job.planner;
-  if (action === 'suggestion-send' || action === 'suggestion-dismiss') {
+  if (action === 'ask' || action === 'chat-open') {
+    const open = action === 'ask' ? readyAsk : readyChat;
+    const opened = !open.delete(key);
+    if (opened) {
+      open.add(key);
+    }
+    renderComposer();
+    const focus = action === 'ask' ? $(opened ? 'msg' : 'ask-button')
+      : opened ? $('job-chat-input') : document.querySelector<HTMLElement>('#ready-panel [data-homenu]');
+    focus?.focus();
+  } else if (action === 'suggestion-send' || action === 'suggestion-dismiss') {
     const suggestion = planner?.suggestion ?? null;
     if (suggestion === null || plannerAvailability(action, job) !== '') {
       return;

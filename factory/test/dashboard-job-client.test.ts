@@ -251,6 +251,13 @@ const typeMessage = (page: Page, text: string): void => {
   page.$('msg').value = text;
   page.$('msg').dispatch('input');
 };
+// The ready panel (SF-286): its row's labels (More ▾ by its toggle), its menu, its toggle, .crow.
+const readyOf = (page: Page): FakeElement => page.$('ready-panel');
+const rowLabels = (page: Page): string[] => (readyOf(page).querySelector('.rd-row')!.children as FakeElement[])
+  .map((node) => (node.classList.contains('ho-more') ? (node.children[0] as FakeElement).textContent : node.textContent));
+const readyMenu = (page: Page): FakeElement => readyOf(page).querySelector('.ho-menu')!;
+const moreOf = (page: Page): FakeElement => readyOf(page).querySelector('[data-homenu]')!;
+const crowOf = (page: Page): FakeElement => page.$('composer').querySelector('.crow')!;
 
 // The hand-over (SF-073) in the composer: a handed-over job's hand-over panel (SF-107) and a ready
 // one the hand-over skipped, each action posted at once.
@@ -258,7 +265,6 @@ test('job client (SF-073): a handed-over job says "In your checkout on <branch>"
   const handed = handedOver();
   const page = await openJob(detail(handed, { mr: true, mr_title: 'feat(T-1): Demo' } as Partial<Omit<Detail, 'job'>>));
   const acts = (): FakeElement[] => page.$('acts').children as FakeElement[];
-  const act = (label: string): FakeElement => acts().find((node) => node.textContent === label)!;
   const posted = (action: string): FetchRequest[] => page.requests.filter((request) => request.method === 'POST' && request.path === `api/jobs/app/T-1/${action}`);
   assert.equal(facts(page)[0], 'In your checkout on T-1-demo');
   // Only the bold sentence stays above the panel; the bar's row is empty.
@@ -280,9 +286,12 @@ test('job client (SF-073): a handed-over job says "In your checkout on <branch>"
   const skipped = job('ready_for_human_review', { worktree: '/wt/T-1', handoff_skipped: { code: 'checkout_dirty', message: 'T-1: ready, but your checkout has changes; hand it over when you are ready' }, handover: null, mr_host: { host: 'github', reason: null } });
   page.streams.at(-1)!.emit('jobs', { jobs: [skipped] });
   await show(page, detail(skipped));
-  assert.equal(page.$('composer-sentence').children[1]!.textContent, 'Not handed over to your checkout: T-1: ready, but your checkout has changes; hand it over when you are ready');
-  assert.deepEqual(acts().map((node) => node.textContent), ['Review the MR and push', 'Approve…', 'Hand over to my checkout', 'Create merge request', 'Refresh MR status', 'Send', 'Abort…']);
-  act('Hand over to my checkout').click();
+  const note = page.$('composer-sentence').children[1] as FakeElement;
+  assert.deepEqual([note.textContent, note.className], ['Not handed over to your checkout: T-1: ready, but your checkout has changes; hand it over when you are ready', 'muted ready-note']);
+  // The workspace does not hand over: Review the MR and push leads the ready panel's row, Hand over is in More.
+  assert.deepEqual(rowLabels(page), ['Review the MR and push', 'Ask for a change', 'More ▾', 'Abort…']);
+  assert.equal(page.$('handover-button').getAttribute('role'), 'menuitem');
+  page.$('handover-button').click();
   await page.flush();
   assert.deepEqual(posted('handover').map((request) => request.body), ['{}']);
 });
@@ -524,6 +533,9 @@ test('job client (SF-107): an outcome from before the hand-over is the "Earlier,
   const composer = page.$('composer');
   const crow = composer.querySelector('.crow')!;
   assert.equal(page.document.getElementById('handover-panel'), null);
+  // A ready job: .crow hidden until Ask for a change.
+  assert.equal(crow.hidden, true);
+  page.$('ask-button').click();
   assert.deepEqual([crow.hidden, crow.children.indexOf(page.$('msg')), crow.children.indexOf(page.$('acts'))], [false, 0, 1]);
   assert.equal(composer.children.indexOf(page.$('action-status')), composer.children.indexOf(crow) + 1);
   assert.equal((composer.children[composer.children.indexOf(crow) + 2] as FakeElement).className, 'doubt');
@@ -554,6 +566,146 @@ test('job client (SF-107): a handed-over job with an error shows its code and me
   assert.deepEqual([(top.children[0] as FakeElement).className, top.children[0]!.textContent], ['ho-error', 'handover_restore_failed: git checkout main failed.']);
   assert.equal((top.children[1] as FakeElement).className, 'ho-head');
   assert.deepEqual(texts(page.$('composer-sentence')), ['In your checkout on T-1-demo.']);
+});
+
+// The ready panel (SF-286): a job ready for review, its workspace not handing over unless said.
+const readyJob = (extra: Record<string, unknown> = {}) => job('ready_for_human_review', { worktree: '/wt/T-1', mr_host: { host: 'github', reason: null }, ...extra });
+
+test('job client (SF-286): a ready job shows the chip and the ready panel in place of the box and the row; Ask for a change opens the box with Send and closes it, the draft and its state kept per job; another state takes the panel away', async () => {
+  const other = { ...job('working'), ticket: 'T-2', branch: 'T-2-demo', title: 'Other' };
+  const page = await openJob(detail(readyJob(), { mr: true }), () => undefined, undefined, [other]);
+  // The chip and its line in place of the bold sentence; no hand-over note without handoff_skipped.
+  const status = page.$('composer-sentence').children[0] as FakeElement;
+  assert.deepEqual([status.className, texts(status)], ['ready-status', ['Ready to push', 'Reviews are clean and the MR text is written.']]);
+  assert.equal(page.$('composer-sentence').querySelector('.ready-note'), null);
+  // The panel right after #confirm; the row's primary first, Abort… last; .crow hidden with Send alone in #acts.
+  const composer = page.$('composer');
+  const panel = readyOf(page);
+  assert.equal(composer.children.indexOf(panel), composer.children.indexOf(page.$('confirm')) + 1);
+  assert.deepEqual([panel.getAttribute('role'), panel.getAttribute('aria-label'), panel.dataset.key], ['group', 'Ready to push', 'app/T-1']);
+  assert.deepEqual(rowLabels(page), ['Review the MR and push', 'Ask for a change', 'More ▾', 'Abort…']);
+  assert.deepEqual(panel.all().filter((node) => node.classList.contains('primary')).map((node) => node.id), ['review-mr-button']);
+  assert.equal(page.$('abort-button').className, 'btn danger rd-abort');
+  assert.deepEqual([crowOf(page).hidden, texts(page.$('acts'))], [true, ['Send']]);
+
+  // Ask for a change opens .crow with the focus in the box; Send is off while it is empty.
+  assert.equal(page.$('ask-button').getAttribute('aria-expanded'), 'false');
+  page.$('ask-button').click();
+  assert.deepEqual([crowOf(page).hidden, page.$('ask-button').getAttribute('aria-expanded'), page.document.activeElement], [false, 'true', page.$('msg')]);
+  assert.deepEqual([page.$('say-button').disabled, page.$('say-button').getAttribute('title')], [true, 'write a message first.']);
+  typeMessage(page, 'Rename the helper.');
+  // Again: closed, the focus back on it, the draft kept.
+  page.$('ask-button').click();
+  assert.deepEqual([crowOf(page).hidden, page.$('ask-button').getAttribute('aria-expanded'), page.document.activeElement], [true, 'false', page.$('ask-button')]);
+  page.$('ask-button').click();
+  assert.equal(page.$('msg').value, 'Rename the helper.');
+
+  // Another job and back: the box open again, with its draft.
+  page.location.hash = '#app/T-2';
+  page.window.dispatch('hashchange');
+  await page.flush();
+  page.streams.at(-1)!.emit('job', detail(other as Job));
+  await page.flush();
+  assert.deepEqual([page.document.getElementById('ready-panel'), crowOf(page).hidden], [null, false]);
+  page.location.hash = '#app/T-1';
+  page.window.dispatch('hashchange');
+  await page.flush();
+  page.streams.at(-1)!.emit('job', detail(readyJob(), { mr: true }));
+  await page.flush();
+  assert.deepEqual([crowOf(page).hidden, page.$('ask-button').getAttribute('aria-expanded'), page.$('msg').value], [false, 'true', 'Rename the helper.']);
+  // Send posts the message as before.
+  page.$('say-button').click();
+  await page.flush();
+  assert.deepEqual(posts(page, 'say').map((request) => request.body), ['{"message":"Rename the helper."}']);
+  posts(page, 'say')[0]!.respond(200, { ok: true, result: { state: 'working' } });
+  await page.flush();
+
+  // Another state: no panel; .crow shown with #msg and #acts in place.
+  await show(page, detail(job('working')));
+  assert.equal(page.document.getElementById('ready-panel'), null);
+  assert.deepEqual([crowOf(page).hidden, crowOf(page).children.indexOf(page.$('msg')), crowOf(page).children.indexOf(page.$('acts'))], [false, 0, 1]);
+  assert.deepEqual(texts(page.$('acts')), ['Send', 'Pause', 'Abort…']);
+  assert.equal((page.$('composer-sentence').children[0] as FakeElement).tagName, 'B');
+  // Ready again: Ask for a change comes back closed.
+  await show(page, detail(readyJob(), { mr: true }));
+  assert.deepEqual([crowOf(page).hidden, page.$('ask-button').getAttribute('aria-expanded')], [true, 'false']);
+});
+
+test('job client (SF-286): with the hand-over on, Hand over to my checkout leads the row; More ▾ holds the rest with their second lines, moves with the arrows, closes on Escape, a click outside and a choice; each item runs its action as before', async () => {
+  const shown = detail(readyJob(), { mr: true });
+  shown.job = served(readyJob(), { handsOver: true });
+  const page = await openJob(shown);
+  assert.deepEqual(rowLabels(page), ['Hand over to my checkout', 'Ask for a change', 'More ▾', 'Abort…']);
+  assert.equal(page.$('handover-button').className, 'btn primary');
+  const more = moreOf(page);
+  assert.deepEqual([more.className, more.getAttribute('aria-haspopup'), more.getAttribute('aria-expanded'), readyMenu(page).hidden], ['btn', 'menu', 'false', true]);
+  more.click();
+  assert.deepEqual([readyMenu(page).hidden, moreOf(page).getAttribute('aria-expanded')], [false, 'true']);
+  const items = (): FakeElement[] => readyMenu(page).children as FakeElement[];
+  assert.deepEqual(items().map((node) => [node.getAttribute('role'), node.textContent]), [
+    ['menuitem', 'Review the MR and pushPush from here instead of your checkout.'],
+    ['menuitem', 'Approve without review…Push the prepared branch, without the Merge request screen.'],
+    ['menuitem', 'Create merge request'],
+    ['separator', ''],
+    ['menuitem', 'Refresh MR status'],
+  ]);
+  assert.equal(page.document.activeElement, items()[0]);
+  page.key('ArrowDown');
+  assert.equal(page.document.activeElement, items()[1]);
+  page.key('ArrowUp');
+  page.key('ArrowUp');
+  assert.equal(page.document.activeElement, items()[4]);
+  // Escape closes the menu only: the page stays, the focus on More ▾.
+  page.key('Escape');
+  assert.deepEqual([readyMenu(page).hidden, page.$('job').hidden, page.document.activeElement, moreOf(page).getAttribute('aria-expanded')], [true, false, moreOf(page), 'false']);
+  // A click outside closes it.
+  moreOf(page).click();
+  page.$('composer-sentence').click();
+  assert.equal(readyMenu(page).hidden, true);
+
+  // Approve without review… opens the approve confirmation and closes the menu; while it is open the
+  // row's and the menu's actions are off with the reason, Ask for a change and More ▾ aside.
+  moreOf(page).click();
+  page.$('approve-button').click();
+  assert.deepEqual([readyMenu(page).hidden, page.$('confirm-title').textContent, page.$('confirm-ok').textContent], [true, 'Approve app/T-1?', 'Approve: push the branch']);
+  const actions = readyOf(page).all().filter((node) => node.tagName === 'BUTTON' && node.dataset.act !== undefined && node.dataset.act !== 'ask');
+  assert.deepEqual([...new Set(actions.map((node) => `${node.disabled} ${node.getAttribute('title')}`))], ['true a confirmation is open: confirm or cancel it first.']);
+  assert.equal(actions.length, 6);
+  assert.deepEqual([page.$('ask-button').disabled, moreOf(page).disabled], [false, false]);
+  // An item that is off says why as its second line.
+  moreOf(page).click();
+  assert.equal(page.$('mr-create-button').textContent, 'Create merge requesta confirmation is open: confirm or cancel it first.');
+  page.key('Escape');
+  page.$('confirm-cancel').click();
+  // Create merge request opens its confirmation.
+  page.$('mr-create-button').click();
+  assert.equal(page.$('confirm-title').textContent, 'Create merge request app/T-1?');
+  page.$('confirm-cancel').click();
+  // Refresh MR status and Hand over post at once.
+  moreOf(page).click();
+  page.$('mr-status-button').click();
+  await page.flush();
+  assert.deepEqual([readyMenu(page).hidden, posts(page, 'mr-status').length], [true, 1]);
+  page.$('handover-button').click();
+  await page.flush();
+  assert.deepEqual(posts(page, 'handover').map((request) => request.body), ['{}']);
+  // Abort… its confirmation.
+  page.$('abort-button').click();
+  assert.equal(page.$('confirm-title').textContent, 'Abort app/T-1?');
+  page.$('confirm-cancel').click();
+  // Review the MR and push opens the Merge request screen.
+  moreOf(page).click();
+  page.$('review-mr-button').click();
+  await page.flush();
+  assert.deepEqual([readyMenu(page).hidden, page.location.hash], [true, '#app/T-1/mr']);
+});
+
+test('job client (SF-286): a ready panel\'s item that is off says why under its label: Create merge request without a token', async () => {
+  const page = await openJob(detail(readyJob({ mr_host: { host: 'github', reason: 'SF_GITHUB_TOKEN is not set' } })));
+  const create = page.$('mr-create-button');
+  assert.deepEqual([create.disabled, create.textContent, create.querySelector('.muted')!.textContent], [true, 'Create merge requestSF_GITHUB_TOKEN is not set.', 'SF_GITHUB_TOKEN is not set.']);
+  // Without the MR text, Review the MR and push (the primary here) is off with its reason as its title.
+  assert.deepEqual([page.$('review-mr-button').disabled, page.$('review-mr-button').getAttribute('title')], [true, 'no MR text yet: written at Clean.']);
 });
 
 test('job client (SF-072): a job waiting for limits offers Resume now and Abort…; from a turn Resume now carries the message box\'s text, from a review round none; after a reset under wait it says so', async () => {
@@ -825,15 +977,17 @@ test('job client: Send is off when the job takes no message; no suggestion, no S
   const page = await openJob(detail(planned('ready_for_human_review', { chat: 'https://evil.example/c/abc', discuss: { message: 'Use the software-factory MCP server.', url: null } })), () => undefined, { writeText: async (text) => void written.push(text) });
   const block = page.$('planner');
   assert.equal(page.document.getElementById('planner-suggestion'), null);
-  assert.deepEqual(links(block), []);
-  const copy = block.querySelector('[data-act="planner-copy"]')!;
+  assert.deepEqual([links(block), links(readyOf(page))], [[], []]);
+  // A ready job's Copy is in its panel's More ▾; no ChatGPT link, no Planning chat link….
+  const copy = readyOf(page).querySelector('[data-act="planner-copy"]')!;
   assert.equal(copy.textContent, 'Copy the message for the planner');
+  assert.equal(page.document.getElementById('chat-open-button'), null);
   copy.click();
   await page.flush();
   assert.deepEqual(written, ['Use the software-factory MCP server.']);
   // A discuss URL that is not ChatGPT's prefill is not linked either.
   await show(page, detail(planned('ready_for_human_review', { discuss: { message: 'm', url: 'https://evil.example/?q=m' } })));
-  assert.deepEqual(links(page.$('planner')), []);
+  assert.deepEqual([links(page.$('planner')), links(readyOf(page)), page.document.getElementById('chat-open-button')], [[], [], null]);
   // A job that does not wait for the user: no Discuss, the field only.
   await show(page, detail(planned('working', {})));
   assert.deepEqual([page.$('planner').hidden, links(page.$('planner')), page.$('planner').querySelector('[data-act="planner-copy"]')], [false, [], null]);
@@ -869,4 +1023,70 @@ test('job client: the planning chat link field saves, removes and shows a refusa
   page.requests.filter((request) => request.method === 'POST')[2]!.respond(200, { ok: true, result: { workspace: 'app', ticket: 'T-1', planning_chat: null } });
   await page.flush();
   assert.deepEqual([page.$('job-chat-input').value, page.$('planner').querySelector('[data-act="chat-remove"]')], ['', null]);
+});
+
+test('job client (SF-286): a ready job ChatGPT plans: More ▾ ends with Discuss the result ↗ and Planning chat link…, which opens the field under the row; Save posts, a refusal shows next to it, a saved link closes it and shows in the planner block', async () => {
+  const shown = detail(planned('ready_for_human_review', { discuss: DISCUSS }, { worktree: '/wt/T-1', mr_host: { host: 'github', reason: null } }), { mr: true });
+  shown.job = served(shown.job, { handsOver: true });
+  const page = await openJob(shown);
+  // The planner block holds neither Discuss nor the field: they are in the panel.
+  assert.deepEqual([links(page.$('planner')), page.$('planner').querySelector('.chat-field')], [[], null]);
+  moreOf(page).click();
+  assert.deepEqual(readyMenu(page).children.map((node) => [(node as FakeElement).getAttribute('role'), (node as FakeElement).textContent]), [
+    ['menuitem', 'Review the MR and pushPush from here instead of your checkout.'],
+    ['menuitem', 'Approve without review…Push the prepared branch, without the Merge request screen.'],
+    ['menuitem', 'Create merge request'],
+    ['separator', ''],
+    ['menuitem', 'Refresh MR status'],
+    ['menuitem', 'Discuss the result ↗'],
+    ['menuitem', 'Planning chat link…'],
+  ]);
+  assert.deepEqual(links(readyMenu(page)), [['Discuss the result ↗', DISCUSS.url, '_blank', 'noopener noreferrer']]);
+
+  // Planning chat link… opens the field under the row, the focus in its box; again, it closes, the focus on More ▾.
+  page.$('chat-open-button').click();
+  const chat = readyOf(page).querySelector('.rd-chat')!;
+  assert.deepEqual([readyOf(page).children.indexOf(chat), readyMenu(page).hidden, page.document.activeElement], [1, true, page.$('job-chat-input')]);
+  moreOf(page).click();
+  page.$('chat-open-button').click();
+  assert.deepEqual([readyOf(page).querySelector('.rd-chat'), page.document.activeElement], [null, moreOf(page)]);
+  moreOf(page).click();
+  page.$('chat-open-button').click();
+
+  // Save posts; a refusal shows next to the field, which stays open with what was typed.
+  page.$('job-chat-input').value = 'https://evil.example/c/1';
+  readyOf(page).querySelector('[data-act="chat-save"]')!.click();
+  await page.flush();
+  assert.deepEqual(posted(page), [['api/tickets/app/T-1/chat', { url: 'https://evil.example/c/1' }]]);
+  page.requests.filter((request) => request.method === 'POST')[0]!.respond(400, { ok: false, error: { code: 'invalid_chat_link', message: 'Only a https://chatgpt.com/ conversation link can be saved.' } });
+  await page.flush();
+  assert.deepEqual([readyOf(page).querySelector('.rd-chat .err-text')!.textContent, page.$('job-chat-input').value], ['Only a https://chatgpt.com/ conversation link can be saved.', 'https://evil.example/c/1']);
+  // A saved link closes the field and the item; Open the planning chat ↗ shows in the planner block.
+  page.$('job-chat-input').value = 'https://chatgpt.com/c/ok';
+  readyOf(page).querySelector('[data-act="chat-save"]')!.click();
+  await page.flush();
+  page.requests.filter((request) => request.method === 'POST')[1]!.respond(200, { ok: true, result: { workspace: 'app', ticket: 'T-1', planning_chat: 'https://chatgpt.com/c/ok' } });
+  await page.flush();
+  assert.deepEqual([readyOf(page).querySelector('.rd-chat'), page.document.getElementById('chat-open-button')], [null, null]);
+  assert.deepEqual(links(page.$('planner')), [['Open the planning chat ↗', 'https://chatgpt.com/c/ok', '_blank', 'noopener noreferrer']]);
+  // Shown again with the stored link: still no item, Discuss stays in More.
+  const stored = detail(planned('ready_for_human_review', { discuss: DISCUSS, chat: 'https://chatgpt.com/c/abc' }));
+  await show(page, stored);
+  assert.deepEqual([page.document.getElementById('chat-open-button'), links(readyMenu(page)).map(([text]) => text)], [null, ['Discuss the result ↗']]);
+  assert.deepEqual(links(page.$('planner')).map(([text, href]) => [text, href]), [['Open the planning chat ↗', 'https://chatgpt.com/c/abc']]);
+});
+
+test('job client (SF-286): a card\'s Review the suggestion of a ready job opens Ask for a change, the focus in the box, once the job\'s detail is shown', async () => {
+  const ready = planned('ready_for_human_review', { suggestion: SUGGESTION, discuss: DISCUSS });
+  const page = await openJob(detail(ready));
+  assert.equal(crowOf(page).hidden, true);
+  (page.$('jhead').children[0] as FakeElement).click();
+  await page.flush();
+  const review = page.$('board').all().find((node) => node.dataset.open === 'app/T-1' && node.dataset.focus === 'composer')!;
+  assert.equal(review.textContent, 'Review the suggestion');
+  review.click();
+  await page.flush();
+  page.streams.at(-1)!.emit('job', detail(ready));
+  await page.flush();
+  assert.deepEqual([crowOf(page).hidden, page.$('ask-button').getAttribute('aria-expanded'), page.document.activeElement], [false, 'true', page.$('msg')]);
 });

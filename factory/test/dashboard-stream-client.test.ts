@@ -141,7 +141,12 @@ const entryOf = (page: Page, k: string): FakeElement => nodes(page).find((node) 
 const sel = (page: Page): string[] => nodes(page).filter((node) => node.classList.contains('sel')).map((node) => node.dataset.k!);
 const acts = (page: Page): FakeElement[] => page.$('acts').children as FakeElement[];
 const labels = (page: Page): string[] => acts(page).map((node) => node.textContent);
-const act = (page: Page, label: string): FakeElement => acts(page).find((node) => node.textContent === label)!;
+// An action's button: in #acts by its exact text, else in the ready panel by the start of its text
+// (a menu item's text holds its second line).
+const act = (page: Page, label: string): FakeElement => acts(page).find((node) => node.textContent === label)
+  ?? page.document.getElementById('ready-panel')!.all().find((node) => node.tagName === 'BUTTON' && node.textContent.startsWith(label))!;
+// The ready panel's buttons with an action, Ask for a change aside.
+const readyActions = (page: Page): FakeElement[] => page.$('ready-panel').all().filter((node) => node.tagName === 'BUTTON' && node.dataset.act !== undefined && node.dataset.act !== 'ask');
 const posts = (page: Page): FetchRequest[] => page.requests.filter((request) => request.method === 'POST');
 const sent = (page: Page): Array<[string, unknown]> => posts(page).map((request) => [request.path.replace('api/jobs/app/T-1/', ''), JSON.parse(request.body!)]);
 const byClass = (node: FakeElement, className: string): FakeElement[] => node.all().filter((element) => element.classList.contains(className));
@@ -688,7 +693,6 @@ test('stream client: the composer per state: its sentence, its message box and i
       'Paused by you during iteration 2. Resume continues the same session (with your message, if you write one below); Restart starts the ticket again from its current Task file.'],
     [job('paused', { paused: { from: 'awaiting_review', step: 'review', at: at(5) } }), ['Resume', 'Restart…', 'Abort…'], 'disabled',
       'Paused by you during iteration 1. Resume runs it again; Restart starts the ticket again from its current Task file.'],
-    [job('ready_for_human_review'), ['Review the MR and push', 'Approve…', 'Hand over to my checkout', 'Create merge request', 'Refresh MR status', 'Send', 'Abort…'], 'shown', 'Reviews are clean and the MR text is written. Push when you are happy.'],
     [job('pushed'), ['Create merge request', 'Refresh MR status', 'Merged — archive', 'Archive'], 'hidden', 'Pushed at 12:05.'],
     [job('pushed', { mr: mr('closed') }), ['Create merge request', 'Refresh MR status', 'Merged — archive', 'Archive'], 'hidden', 'Pushed at 12:05.'],
     [job('pushed', { mr: mr('open') }), ['Merge…', 'Refresh MR status', 'Merged — archive', 'Archive'], 'hidden', 'Pushed at 12:05.'],
@@ -709,6 +713,17 @@ test('stream client: the composer per state: its sentence, its message box and i
     assert.equal(acts(page).filter((node) => node.className.includes('primary')).length, primary ? 1 : 0, name);
     assert.equal(acts(page)[0]!.className, primary ? 'btn primary' : buttons[0] === 'Abort…' ? 'btn danger' : 'btn', name);
   }
+  // A job ready for review: the chip and its line in place of the bold sentence; #acts holds Send
+  // only, in .crow, hidden until Ask for a change; the ready panel's row, its one primary first.
+  await update(page, job('ready_for_human_review'));
+  assert.deepEqual(acts(page).map((node) => [node.textContent, node.className]), [['Send', 'btn']]);
+  const status = page.$('composer-sentence').children[0] as FakeElement;
+  assert.deepEqual([status.className, (status.children as FakeElement[]).map((node) => [node.className, node.textContent])],
+    ['ready-status', [['ready-chip', 'Ready to push'], ['', 'Reviews are clean and the MR text is written.']]]);
+  assert.deepEqual([page.$('msg').hidden, page.$('msg').disabled, page.$('composer').querySelector('.crow')!.hidden], [false, false, true]);
+  const row = page.$('ready-panel').querySelector('.rd-row')!.children as FakeElement[];
+  assert.deepEqual([row[0]!.textContent, row[0]!.className], ['Review the MR and push', 'btn primary']);
+  assert.equal(page.$('ready-panel').all().filter((node) => node.classList.contains('primary')).length, 1);
   // SF-107: a handed-over job's actions are in its hand-over panel; the bar's row is empty and hidden.
   await update(page, job('handed_over', { prepared_commit: 'a'.repeat(40), worktree: null }));
   assert.equal(page.$('composer-sentence').children[0]!.textContent, 'In your checkout on T-1-demo.');
@@ -758,7 +773,7 @@ test('stream client: each confirmation opens inline in the composer before it po
       page.$('keep-files').checked = true;
       page.$('keep-files').dispatch('change');
     }],
-    [job('ready_for_human_review'), {}, 'Approve…', 'Approve app/T-1?', 'Approve: push as it is', [['approve', { as_is: true }]], (page) => {
+    [job('ready_for_human_review'), {}, 'Approve without review…', 'Approve app/T-1?', 'Approve: push as it is', [['approve', { as_is: true }]], (page) => {
       page.$('as-is').checked = true;
       page.$('as-is').dispatch('change');
     }],
@@ -800,6 +815,10 @@ test('stream client: each confirmation opens inline in the composer before it po
     assert.equal(page.$('confirm').parentNode, page.$('composer'), name);
     // While it is open, the other actions wait.
     assert.ok(acts(page).every((node) => node.disabled), name);
+    // A ready job's actions in its panel too, each with its reason (Ask for a change aside).
+    if (row.state === 'ready_for_human_review') {
+      assert.ok(readyActions(page).length > 0 && readyActions(page).every((node) => node.disabled && node.getAttribute('title') !== null), name);
+    }
     page.$('confirm-cancel').click();
     assert.deepEqual([page.$('confirm').hidden, posts(page).length], [true, 0], name);
     act(page, button).click();

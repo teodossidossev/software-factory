@@ -507,6 +507,38 @@ export function pendingEntries(ledger: LedgerEntry[], fix: number): LedgerEntry[
   return ledger.filter((entry) => (entry.status === 'open' || entry.status === 'user_fix') && entry.asked < fix);
 }
 
+// How a review round that asks for a Fix compares with the job's earlier ones: before, the ledger
+// as the round found it; after, the ledger with the round's verdicts applied; least, the fewest
+// open blocker and major entries after any earlier such round (undefined before the first).
+export interface RoundProgress {
+  // The open blocker and major entries of after.
+  open: number;
+  // Of those, the ones the round raised: absent from before, or reopened by it.
+  raised: number;
+  // The entries the round reopened: their reopened count is above before's.
+  reopened: number;
+  // A new low and nothing reopened; always true when least is undefined.
+  progress: boolean;
+  // The least to keep: open when least is undefined, else the lower of the two.
+  least: number;
+}
+
+// The judgement of such a round, entries matched by id; pure.
+export function roundProgress(before: LedgerEntry[], after: LedgerEntry[], least: number | undefined): RoundProgress {
+  const earlier = new Map(before.map((entry) => [entry.id, entry]));
+  const reopenedBy = (entry: LedgerEntry): boolean => {
+    const was = earlier.get(entry.id);
+    return was !== undefined && entry.reopened > was.reopened;
+  };
+  const open = after.filter((entry) => entry.status === 'open' && blocks(entry));
+  const raised = open.filter((entry) => !earlier.has(entry.id) || reopenedBy(entry)).length;
+  const reopened = after.filter(reopenedBy).length;
+  if (least === undefined) {
+    return { open: open.length, raised, reopened, progress: true, least: open.length };
+  }
+  return { open: open.length, raised, reopened, progress: open.length < least && reopened === 0, least: Math.min(least, open.length) };
+}
+
 // The Fix items after the user settled the stop: the fixes the user decided and, with them, the open
 // blocker and major entries; the ledger with each of them asked in Fix fix. None (and the ledger as
 // it is) when the user decided no fix.

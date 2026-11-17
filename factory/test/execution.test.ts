@@ -436,12 +436,12 @@ test('queue and limits: say during a turn, iteration_limit, base_not_found, bran
   assert.ok(log[1]!.prompt.includes(FACTORY_PROMPT_RULES.split('\n')[1]!));
   assert.ok(log[1]!.argv.includes(`--resume=${log[0]!.sessionId}`));
 
-  // SF_MAX_ITERATIONS=1 counts Fix sections: the say turn did not use it up, the second Fix is refused.
+  // SF_MAX_ITERATIONS=1: the say turn did not count; the second sf fix is a round without progress and is refused.
   await call(served, 'request_fix', { workspace: 'app', ticket: 'Q-1', content: 'first' });
   const fixed = await waitFor(served, 'Q-1', 'awaiting_review', 2);
   const limit = await refused(served, 'request_fix', { workspace: 'app', ticket: 'Q-1', content: 'more' });
   assert.equal(limit.code, 'iteration_limit');
-  assert.equal(limit.message, '1 Fix sections were written, the limit of SF_MAX_ITERATIONS; the job needs the user.');
+  assert.equal(limit.message, "1 of the job's review rounds made no progress (SF_MAX_ITERATIONS is 1); the job needs the user.");
   const human = await call(served, 'check', { workspace: 'app', ticket: 'Q-1' });
   assert.deepEqual([human.state, human.error?.code], ['needs_human', 'iteration_limit']);
   // needs_human still returns the last Report and Patch.

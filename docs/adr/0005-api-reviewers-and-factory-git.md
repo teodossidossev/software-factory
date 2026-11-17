@@ -164,3 +164,23 @@ major items (58 fixed), the Claude review 20 (6 fixed) for 18% of the cost, and 
 iterations were 36% of the cost. The user agreed to a two-week experiment.
 
 The rest of this ADR stands, read with this amendment.
+
+## Amendment 2026-11-16 (SF-292): the iteration limit counts rounds without progress
+
+What changes: `SF_MAX_ITERATIONS` no longer counts Fix sections. It counts review rounds without
+progress: a round that asks for a Fix section while the ledger holds no fewer open blocker and
+major entries than after any earlier such round of the job, or that reopens a fixed or left
+entry. The first such round only sets the low, and the round that reaches the limit has its Fix
+refused. This supersedes "The iteration limit counts Fix sections" in Consequences, and "Fix
+sections are capped at 3 (`SF_MAX_ITERATIONS`)" in the SF-131 amendment: the cap is on the
+rounds without progress. What stays: at the cap Accept takes the iteration whatever the last
+verdict, with its open findings listed in the MR text; a message of the user does not use the
+limit up, nor do the user's Must fix, Simplify and the Tests Fix; the job's `fixes` still counts
+every Fix section.
+
+Why: the user's decision of 2026-11-16 (SF-290, limits stop loops, not hard work), after a large
+change that was still converging stopped at three Fix sections. A job that never makes progress
+stops where it stopped before; one whose reviews keep finding less goes on. Churn and disputes
+stay the brakes for real loops.
+
+The rest of this ADR stands.

@@ -7,6 +7,7 @@ import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { iterationLimitMessage } from '../src/execution/turns.js';
 import { GATE_OUTPUT_FILE, GATE_SANDBOX_UNAVAILABLE, gateArgs, gateEnvironment, type GateOptions, gatePrompt, runGate } from '../src/gate.js';
 import { JobStore } from '../src/jobs.js';
 import { PACKAGE_ROOT } from '../src/package-root.js';
@@ -361,7 +362,7 @@ test('sf accept (SF-115, SF-131): at iteration_limit the job goes on to MR prepa
     const limited = await waitFor(served, 'G-15', 'needs_human', 2);
     assert.deepEqual(limited.error, {
       code: 'iteration_limit',
-      message: '1 Fix sections were written, the limit of SF_MAX_ITERATIONS; 1 open blocker or major findings; the user decides how to go on: sf accept takes iteration 2 as it is (the open findings go unapplied and are listed in the MR text), sf say gives a direction.',
+      message: iterationLimitMessage(1, 1, { open: 1, raised: 1, reopened: 0, progress: false, least: 1 }, 2),
     });
     // The refused verdict's item is an open ledger entry with its id.
     const ledger = JSON.parse(await readFile(join(env.state, 'jobs', 'app', 'G-15', 'ledger.json'), 'utf8')) as Array<{ id: string; status: string; problem: string }>;

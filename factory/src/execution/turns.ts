@@ -12,7 +12,7 @@ import { worktreeTree } from '../guard.js';
 import { attachWorktree, checkBranchFree, isAncestor } from '../handoff.js';
 import { jobUserMessages } from '../job-stream.js';
 import { claudeReviews, type FileChange, type Handover, type Job, type JobState, now, type PauseStep, statesWith } from '../jobs.js';
-import { answerFix, escalationMessage, headings, type LedgerEntry, userFixItems } from '../ledger.js';
+import { answerFix, escalationMessage, headings, type LedgerEntry, roundProgress, type RoundProgress, userFixItems } from '../ledger.js';
 import { rebaseInProgress } from '../mr.js';
 import { checkSuggestionSend, removeSuggestion, sendShownSuggestion } from '../planner.js';
 import { buildPatch, changedFilesSection, fileChanges, notificationLine, type Patch } from '../patch.js';
@@ -40,10 +40,11 @@ type Success = Extract<IdleOutcome, { ok: true }>;
 const IMPLEMENT_SKILL = 'implement';
 const SKILL_MISSING = 'skill_missing';
 
-// The stop at the Fix round limit: fixes Fix sections written, open the open
-// blocker and major findings, iteration the one an Accept takes.
-export function iterationLimitMessage(fixes: number, open: number, iteration: number): string {
-  return `${fixes} Fix sections were written, the limit of SF_MAX_ITERATIONS; ${open} open blocker or major findings; the user decides how to go on: sf accept takes iteration ${iteration} as it is (the open findings go unapplied and are listed in the MR text), sf say gives a direction.`;
+// The stop at the Fix round limit: stalled the job's review rounds without progress, max
+// SF_MAX_ITERATIONS, round the judgement of the refused round (its open blocker and major findings,
+// those it raised and reopened), iteration the one an Accept takes.
+export function iterationLimitMessage(stalled: number, max: number, round: RoundProgress, iteration: number): string {
+  return `${stalled} of the job's review rounds made no progress (SF_MAX_ITERATIONS is ${max}): each left no fewer open blocker and major findings than the fewest before, or reopened a fixed or left one. Open blocker or major findings: ${round.open} (${round.raised} raised by the last review, ${round.reopened} of them reopened; ${round.open - round.raised} carried from earlier rounds). The user decides how to go on: sf accept takes iteration ${iteration} as it is (the open findings go unapplied and are listed in the MR text), sf say gives a direction.`;
 }
 
 // What TurnsPart calls of the other parts, by just those methods.
@@ -464,14 +465,15 @@ export class TurnsPart {
   }
 
   // The work of request_fix, also run for a fix verdict of the review: appends ## Fix N and starts
-  // the next iteration. SF_MAX_ITERATIONS limits the Fix sections; an sf say turn does not count.
+  // the next iteration. SF_MAX_ITERATIONS limits the review rounds without progress
+  // (roundProgress): the one that reaches it is refused; an sf say turn does not count.
   // counts: what else the Fix counts for (the gate's gate_fixes). Only under the lock.
   // ledger: the findings ledger with the section's items, written once the section is.
   // fromStop: the Fix of the user's settlement or Simplify, from needs_human.
   // title: the section's title after its number (## Fix N: Simplify).
-  // overLimit: written even at SF_MAX_ITERATIONS (Simplify, once per job).
+  // overLimit: never judged, so never refused (Simplify, once per job).
   // fromTests: the Tests Fix of a failed test run, from preparing_mr.
-  // byUser: the Fix of the user's Must fix on a resuming settle, written even at SF_MAX_ITERATIONS.
+  // byUser: the Fix of the user's Must fix on a resuming settle, never judged, so never refused.
   async fix(current: Job, content: string, options: FixOptions = {}): Promise<{ iteration: number; check_after_minutes: number }> {
     const { counts = {}, ledger, fromStop = false, title, fromTests = false, byUser = false } = options;
     const overLimit = options.overLimit === true || fromTests || byUser;
@@ -484,17 +486,25 @@ export class TurnsPart {
     } else if (!(fromStop && job.state === 'needs_human')) {
       this.checkFix(job);
     }
-    if (!overLimit && job.fixes >= this.#settings.config.maxIterations) {
-      // The refused verdict's items become open ledger entries with ids: the stop lists
-      // them, and an Accept leaves them unapplied in the MR text.
-      if (ledger !== undefined) {
-        await this.#store.jobs.writeLedger(workspaceName, ticket, ledger);
+    // The judgement of a round that may be refused: the job's new count and low, written with the Fix.
+    let judged: Pick<Job, 'stalled_fixes' | 'least_open'> = {};
+    if (!overLimit) {
+      // Nothing is written before: an unreadable ledger refuses the Fix with nothing written.
+      const before = await this.#store.jobs.readLedger(workspaceName, ticket);
+      const round = roundProgress(before, ledger ?? before, job.least_open);
+      const stalled = (job.stalled_fixes ?? 0) + (round.progress ? 0 : 1);
+      const { maxIterations } = this.#settings.config;
+      judged = { stalled_fixes: stalled, least_open: round.least };
+      if (!round.progress && stalled >= maxIterations) {
+        // The refused verdict's items become open ledger entries with ids: the stop lists
+        // them, and an Accept leaves them unapplied in the MR text.
+        if (ledger !== undefined) {
+          await this.#store.jobs.writeLedger(workspaceName, ticket, ledger);
+        }
+        // from: awaiting_review, ready_for_human_review (checkFix), needs_human (fromStop)
+        await this.#store.transition({ ...job, ...judged }, 'needs_human', 'fix', { code: 'iteration_limit', message: iterationLimitMessage(stalled, maxIterations, round, job.iteration) });
+        throw new FactoryError('iteration_limit', `${stalled} of the job's review rounds made no progress (SF_MAX_ITERATIONS is ${maxIterations}); the job needs the user.`);
       }
-      const open = (ledger ?? (await this.#store.jobs.readLedger(workspaceName, ticket))).filter((entry) => entry.status === 'open' && entry.severity !== 'nit').length;
-      const message = `${job.fixes} Fix sections were written, the limit of SF_MAX_ITERATIONS`;
-      // from: awaiting_review, ready_for_human_review (checkFix), needs_human (fromStop)
-      await this.#store.transition(job, 'needs_human', 'fix', { code: 'iteration_limit', message: iterationLimitMessage(job.fixes, open, job.iteration) });
-      throw new FactoryError('iteration_limit', `${message}; the job needs the user.`);
     }
     const workspace = await this.#settings.resolve(workspaceName);
     // No turn while the user's checkout holds the branch; nothing is written before.
@@ -516,7 +526,7 @@ export class TurnsPart {
       // from: preparing_mr (fromTests)
       ? await this.#store.transition({ ...job, ...counts, prepared_commit: null }, 'working', 'tests')
       // from: awaiting_review, ready_for_human_review (checkFix), needs_human (fromStop)
-      : await this.#store.transition({ ...job, ...counts, fixes: job.fixes + 1, prepared_commit: null }, 'working', 'fix');
+      : await this.#store.transition({ ...job, ...counts, ...judged, fixes: job.fixes + 1, prepared_commit: null }, 'working', 'fix');
     this.session(job, workspace).send(factoryPrompt(this.withChange(implementCommand(ticket, (await jobSkills(this.#settings.config.stateDir, this.#store.jobs.eventsPath(workspaceName, ticket))).roles.implementer, fix), ticket, change), ticket, job.iteration + 1, this.imagesLine(job), job.base_commit), DENIED_TOOLS);
     return { iteration: job.iteration + 1, check_after_minutes: this.#settings.config.checkAfterFixMin };
   }

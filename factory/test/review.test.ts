@@ -11,6 +11,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
+import { iterationLimitMessage } from '../src/execution/turns.js';
 import { gatePrompt } from '../src/gate.js';
 import { JobStore } from '../src/jobs.js';
 import { handbookSection, MAX_USER_DECISIONS_CHARS, MAX_USER_MESSAGE_CHARS, userDecisionLines } from '../src/prompts.js';
@@ -791,7 +792,7 @@ test('abort during a running review: the review is cancelled, its outcome never 
   }
 });
 
-test('SF_MAX_ITERATIONS=1 counts Fix sections: an sf say turn and one Fix are allowed, the second Fix is refused; a review the job outran is not applied', async () => {
+test('SF_MAX_ITERATIONS=1 counts rounds without progress: an sf say turn and one Fix are allowed, the round after it, with no fewer open findings, is refused; a review the job outran is not applied', async () => {
   const env = await newEnv('review-limit', { SF_REVIEW: 'on', SF_MAX_ITERATIONS: '1' });
   const repo = await newRepo(env, 'review-limit-repo', false);
   await putTask(env, repo, 'L-1', 'Limit');
@@ -805,8 +806,9 @@ test('SF_MAX_ITERATIONS=1 counts Fix sections: an sf say turn and one Fix are al
     const said = await runCli(env, ['say', 'app', 'L-1', 'also', 'this']);
     assert.equal(said.code, 0, said.stderr);
     const limited = await waitFor(served, 'L-1', 'needs_human', 3);
-    // The new message (SF-131): the open blocker and major findings counted, the refused Fix's among them.
-    assert.deepEqual(limited.error, { code: 'iteration_limit', message: '1 Fix sections were written, the limit of SF_MAX_ITERATIONS; 2 open blocker or major findings; the user decides how to go on: sf accept takes iteration 3 as it is (the open findings go unapplied and are listed in the MR text), sf say gives a direction.' });
+    // The open blocker and major findings: the refused Fix's new one, raised by the last review, and
+    // R1 of Fix 2, carried (its Report answered nothing).
+    assert.deepEqual(limited.error, { code: 'iteration_limit', message: iterationLimitMessage(1, 1, { open: 2, raised: 1, reopened: 0, progress: false, least: 1 }, 3) });
     const text = await taskFile(repo, 'L-1');
     assert.deepEqual(text.match(/^## Fix \d+$/gm), ['## Fix 2']);
     assert.equal((await new JobStore(env.state).read('app', 'L-1'))!.fixes, 1);

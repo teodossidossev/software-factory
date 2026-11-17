@@ -284,3 +284,53 @@ for (const width of [360, 390] as const) {
     assert.deepEqual(await sideScroll(fx, ['#job', '#jhead', '#composer', '#handover-panel']), []);
   });
 }
+
+// The ready panel (SF-286) of the ready job, its workspace's hand-over off (the fixture's
+// handoff_default) or on (its own handoff checkout): the row with its first action, More ▾ a sheet
+// across the bottom of a phone's screen and above its toggle from 768 px; Escape closes it.
+for (const width of [360, 390, 768, 1200] as const) {
+  for (const handoff of ['off', 'checkout'] as const) {
+    browserTest(`phone (SF-286): at ${width} px with the hand-over ${handoff} the ready panel's row fits the screen, Abort… at the right end of its last line, and More ▾ opens inside the screen`, async (fx) => {
+      if (handoff === 'checkout') {
+        const listed = (await fx.setup.workspaces())[0]!;
+        fx.setup.workspace = { path: listed.path, description: listed.description, app: listed.app, handoff: 'checkout', color: null, digest: listed.digest };
+      }
+      const height = 800;
+      await fx.page.setViewportSize({ width, height });
+      await fx.open(`${WS}/${JOBS.ready}`);
+      await fx.page.locator('#ready-panel .rd-row').waitFor();
+      const buttons = await fx.page.locator('#ready-panel .rd-row > .btn, #ready-panel .rd-row > .ho-more > .btn').evaluateAll((nodes) => nodes
+        .map((node) => {
+          const rect = node.getBoundingClientRect();
+          return { text: (node as HTMLElement).innerText.trim(), x: rect.x, y: rect.y, right: rect.right, height: rect.height };
+        }));
+      const first = handoff === 'checkout' ? 'Hand over to my checkout' : 'Review the MR and push';
+      assert.deepEqual(buttons.map((button) => button.text), [first, 'Ask for a change', 'More ▾', 'Abort…']);
+      assert.deepEqual(buttons.filter((button) => button.x < 0 || button.right > width || (width < 768 && button.height < 44)), [], JSON.stringify(buttons));
+      // Abort… on the last line, at its right end.
+      const row = await box(fx, '#ready-panel .rd-row');
+      const abort = buttons.at(-1)!;
+      assert.ok(buttons.every((button) => button.y <= abort.y) && Math.abs(abort.right - (row.x + row.width)) < 1, JSON.stringify({ row, buttons }));
+      assert.deepEqual(await sideScroll(fx, ['#job', '#composer', '#ready-panel']), []);
+
+      const more = fx.page.locator('#ready-panel [data-homenu]');
+      await more.click();
+      const menu = await box(fx, '#ready-panel .ho-menu');
+      assert.ok(menu.x >= 0 && menu.x + menu.width <= width && menu.y >= 0 && menu.y + menu.height <= height, JSON.stringify(menu));
+      if (width < 768) {
+        // A sheet across the bottom of the screen, with 44 px items.
+        assert.ok(menu.x <= 16 && menu.x + menu.width >= width - 16 && menu.y + menu.height >= height - 16, JSON.stringify(menu));
+        const low = await fx.page.locator('#ready-panel .ho-item').evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect().height).filter((each) => each < 44));
+        assert.deepEqual(low, []);
+      } else {
+        const toggle = await box(fx, '#ready-panel [data-homenu]');
+        assert.ok(menu.y + menu.height <= toggle.y, JSON.stringify({ menu, toggle }));
+      }
+      assert.equal(await fx.page.evaluate(() => document.activeElement?.getAttribute('role')), 'menuitem');
+      await fx.page.keyboard.press('Escape');
+      assert.equal(await fx.page.locator('#ready-panel .ho-menu').isVisible(), false);
+      assert.deepEqual(await fx.page.evaluate(() => [document.activeElement?.hasAttribute('data-homenu'), document.activeElement?.getAttribute('aria-expanded')]), [true, 'false']);
+      assert.equal(await fx.page.locator('#job').isVisible(), true);
+    });
+  }
+}

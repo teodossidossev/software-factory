@@ -351,12 +351,16 @@ function shownActions(job: Job, facts: JobFacts, now: Date): { list: Listed[]; p
     case 'waiting_limit':
       // No message waits for a parked job; Resume now carries it (from a turn).
       return { list: [listed('resume', 'Resume now'), toListed(ABORT)], primary: true };
-    case 'ready_for_human_review':
-      // The Merge request screen first; Approve… stays.
+    case 'ready_for_human_review': {
+      // The workspace's way to finish first: a workspace that hands over, Hand over to my checkout;
+      // any other, the Merge request screen. Approve without review… stays.
+      const handover = listed('handover', 'Hand over to my checkout');
+      const review = listed('review-mr', 'Review the MR and push');
       return {
-        list: [listed('review-mr', 'Review the MR and push'), listed('approve', 'Approve…'), listed('handover', 'Hand over to my checkout'), ...mrCreate, MR_STATUS, toListed(SEND), toListed(ABORT)],
+        list: [...(facts.handsOver === true ? [handover, review] : [review, handover]), listed('approve', 'Approve without review…'), ...mrCreate, MR_STATUS, toListed(SEND), toListed(ABORT)],
         primary: true,
       };
+    }
     case 'handed_over':
       // Its actions are in the hand-over panel; the composer's row stays empty.
       return { list: [], primary: false };

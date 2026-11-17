@@ -3867,7 +3867,9 @@ an edit applies to running jobs too. Hand-over off leaves the job in `ready_for_
 `handoff_skipped` code `handoff_off`, whose message names the setting that decided: "hand-over off
 for this workspace (handoff "off" in workspaces.json)" or "hand-over off (SF_HANDOFF=off)".
 `sf status` and the board show it; the notification leaves it out (a setting is not news) and keeps
-the MR title and the file lines. `sf handover` still hands the job over by hand. Use `off` for a
+the MR title and the file lines. `sf handover` still hands the job over by hand. On the job's page
+the setting also picks a ready job's first action (SF-286): *Hand over to my checkout* when it is
+on, *Review the MR and push* when it is off. Use `off` for a
 workspace whose checkout must not be switched to every job's branch, such as the factory's own,
 where a coordinating session opens and merges the merge requests with `sf mr create` and
 `sf mr merge`.
@@ -4826,10 +4828,18 @@ a header, then the Stream with the composer pinned at the bottom.
   (with the box's text when the Implementer's turn was paused), Restart…, Abort…; `waiting_limit`
   (SF-072): *Resume now* (with the box's text when the job was parked in a turn; no message waits for
   a parked job), Abort…;
-  `ready_for_human_review`: *Review the MR and push* (primary, SF-080: it opens the Merge request
-  screen), Approve…, *Hand over to my checkout* (SF-073; the composer
-  says why the automatic hand-over did not happen, when it was refused), Create merge request (when
-  it can be created), Refresh MR status (SF-200), Send, Abort…; `handed_over` (SF-073): Approve… (primary), *Ask for changes*
+  `ready_for_human_review` (SF-286): the ready panel instead of the box and the row: the chip
+  *Ready to push* with "Reviews are clean and the MR text is written." and, on a line under it, why
+  the automatic hand-over did not happen, when it did not; then one row: *Hand over to my checkout*
+  (SF-073) first when the workspace's hand-over is on (its `handoff`, else `SF_HANDOFF`), else
+  *Review the MR and push* (SF-080: the Merge request screen); *Ask for a change*, which opens the
+  message box with Send under the row and closes it again; *More ▾*; and *Abort…*, quiet, at the
+  far right. More ▾ holds the other of the two, *Approve without review…*, Create merge request
+  (when it can be created), Refresh MR status (SF-200), *Discuss the result ↗* (or *Copy the
+  message for the planner*) and, for a ticket ChatGPT plans without a stored link, *Planning chat
+  link…*, which opens the field under the row; an item that is off says why under its label. It
+  opens upward, below 768 px as a sheet across the bottom of the screen; the arrows move through
+  it and Esc closes it, the focus back on More ▾; `handed_over` (SF-073): Approve… (primary), *Ask for changes*
   (the message, with the edits in the user's checkout), *I opened the MR myself*, *Merged — archive* (confirmed in place by a second click), *Take it back*,
   Refresh MR status (in the hand-over panel's More ▾, SF-200), Create merge request, Abort…;
   `needs_human`: the stop table; `pushed`: no message box, the merge request (`#N`, its
@@ -4852,7 +4862,9 @@ a header, then the Stream with the composer pinned at the bottom.
   the message of `resultConversation` (read the Task file and the Report with `read_job`, sum up,
   discuss, propose with `suggest_changes`), or *Copy the message for the planner* when Claude Code
   plans the ticket or the link would be too long; *Open the planning chat ↗* with a stored link,
-  and the field *Planning chat link*. The job's board card shows, in a waiting state, *Planner
+  and the field *Planning chat link*. On a ready job, Discuss and the field are in the ready panel's
+  More ▾; the block keeps the suggestion and *Open the planning chat ↗*. The job's board card
+  shows, in a waiting state, *Planner
   suggests changes* with the note clamped to three lines (the whole note in its title) and *Review
   the suggestion*, which opens this page with the composer focused (no Send on the card), and the
   same two links.
@@ -5656,7 +5668,9 @@ and the other pages keep their desktop layout, which fits there; from 1024 px no
   request switch across the row (the key hints are hidden on a phone; the keys work). A Stream
   row's time and actor sit above its text, which takes the whole width (a stop panel and its
   explanation too). The composer's message box is the row's full width with the buttons under it,
-  primary first; the composer scrolls inside itself (at most 60 % of the screen's height).
+  primary first; the composer scrolls inside itself (at most 60 % of the screen's height). A ready
+  job's row wraps, *Abort…* at the right end of its last line, and More ▾ opens as a sheet across
+  the bottom of the screen.
 - **Changes.** Below 768 px the diff is unified, whatever layout was chosen (the stored choice,
   `sf-diff-mode`, stays for a wider window, and the layout switch is hidden); the file tree sits
   above the diff and folds behind its *▾ Files* button. Choosing a file folds it so the diff is in
@@ -5700,7 +5714,10 @@ Edit and Save, Ctrl+S, the history), the Stats page (its chart boxes side by sid
 least 4.5:1, and a 390 x 844 window, and the job page's Stream at 600, 1200 and 2000 px (full
 width, long tool rows cut with an ellipsis, long outputs wrapped, no sideways scroll), and the phone
 and tablet layout at 360, 390 and 768 px (no sideways scroll on any screen, the board as one list,
-44 px buttons, Changes unified, SF-119), and point mode (section Pins, SF-211: a click on a card's
+44 px buttons, Changes unified, SF-119), the ready panel at 360 and 390 px (its row wraps with 44 px
+buttons and no sideways scroll; More ▾ a sheet inside the screen that Escape closes) and at 768 and
+1200 px (More ▾ above its toggle), with the hand-over off and on, and point mode (section Pins,
+SF-211: a click on a card's
 button and on a link runs neither and places 📍1 over it with the note field, whose Save stores the
 note; the outline follows the pointer; the selectors of an element with an id, with a data-
 attribute and with neither find it again after the board redraws (an ancestor's unique id wins over
@@ -5793,8 +5810,8 @@ end), in a browser:
    the card moves to Done.
 8. Approve: on a Your turn card in `ready_for_human_review` click *Review the MR and push*: the
    job's Merge request screen opens (no dialog); *Push branch only*: "Pushed …" with the title and
-   the merge request link (or the note to open it by hand); the card moves to Done. In the
-   composer *Approve…* still opens the approve dialog; on a `handed_over` card *Review the MR and
+   the merge request link (or the note to open it by hand); the card moves to Done. In the ready
+   panel's More ▾ *Approve without review…* still opens the approve dialog; on a `handed_over` card *Review the MR and
    push* opens the job's page with it.
 9. Retry review (a fake review scripted to fail): the job is under Your turn with "Claude review
    could not run" in red and *Retry review* on its card; click it: the card moves to Reviewing.
@@ -5853,7 +5870,8 @@ end), in a browser:
 16. Layout: Tab reaches each card, its buttons, the job page's *← Board*, the switch, the Stream's
    toggles and path links, the composer's message box and buttons and a confirmation's buttons.
    On a phone the header wraps and the composer's buttons go under the message box, each at
-   least 44 px high.
+   least 44 px high. On a phone a ready job's row wraps with *Abort…* at the right end of its last
+   line; More ▾ opens as a sheet and Esc closes it.
 17. Accept and prepare MR (a fake Codex scripted to ask for fixes past `SF_GATE_MAX_ROUNDS=1`): the
    job is under Your turn with "Codex round limit reached", `gate_rounds` and *Decide N findings*;
    its page's stop block says "Your decision" (never red) with the last gate's findings, and the

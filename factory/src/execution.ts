@@ -25,6 +25,8 @@
 // - execution/errors.ts: the codes sf accept and sf retry take on, and the shared refusals.
 // - execution/prompts.ts: the first prompt and the notes the Implementer is given.
 // - execution/events.ts: the tests event of the job's stream.
+// - execution/test-step.ts: MR preparation's test step (MrPart's): the run of the workspace's
+//   test command and its end.
 // - execution/shared.ts: the helpers and runtime types more than one part uses.
 // The Implementer session of each job works in the job's own worktree and publishes an iteration
 // (Report, Patch and the file list) when the session goes idle; then the Claude review of that

@@ -1,12 +1,13 @@
 // MR preparation and the push: Clean (markClean, the commit and rebase, the conflict turn and the
 // MR text turn), the Retry of a transient failure, approve (the push), the merge request on the Git
-// host and the Merge request screen (the MR text, the branch and the base the user edits).
+// host and the Merge request screen (the MR text, the branch and the base the user edits); its test
+// step is TestStep (src/execution/test-step.ts).
 import { createReadStream } from 'node:fs';
 import { type FileHandle, realpath } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { resolve as resolvePath } from 'node:path';
 import { buildsOnPoint, buildsOnTarget, notMerged, notReadyAtPreparation } from '../builds-on.js';
-import { DEFAULT_TEST_TIMEOUT_MS, envFilePath, handoffOffNotice } from '../config.js';
+import { envFilePath, handoffOffNotice } from '../config.js';
 import { FactoryError } from '../errors.js';
 import { type Forge, type ForgeKind, forgeFor } from '../forge.js';
 import { runGit } from '../git.js';
@@ -25,11 +26,10 @@ import { configDir, type Workspace } from '../registry.js';
 import { ticketMerged } from '../setup.js';
 import { actedVerdict, type ReviewItem, uniqueNits } from '../review.js';
 import { endSession, type IdleOutcome, type ImplementerSession } from '../session.js';
-import { pathDenials } from '../sandbox-denials.js';
 import { withoutDropped } from '../stops.js';
 import { implementerQuestion } from '../question-stop.js';
 import { readTask } from '../task-file.js';
-import { checksLine, failureText, inlineCommand, runTestCommand, TEST_CODES, TEST_FIX_ROUNDS, testsFixContent, TESTS_FAILED, type TestsRecord, type TestsResult, TESTS_UNAVAILABLE } from '../test-command.js';
+import { checksLine, TEST_CODES } from '../test-command.js';
 import { removeWorktree } from '../worktree.js';
 import type { RunnerRequest } from '../runner.js';
 import type { Suggestion } from '../simplify.js';
@@ -37,9 +37,9 @@ import type { JobStorePort, LivePort, LockPort, NoticePort, RunnerPort, Settings
 import type { MrContent, MrInput, MrOutcome, MrSaved, MrStatusOutcome, MrView } from './dto.js';
 import { MrHostReads } from './mr-host.js';
 import { cutOffError, MR_RETRY_CODES, mrFailure } from './errors.js';
-import { TESTS_RUNNER, testsEvent } from './events.js';
 import { markedGroups } from './prompts.js';
-import { exists, type FixOptions, type Live, type RunningReview } from './shared.js';
+import { exists, type FixOptions, type Live } from './shared.js';
+import { TestStep } from './test-step.js';
 
 // The Merge request screen: the needs_human codes of a push that failed or was refused,
 // in which the MR text stays editable (the prepared commit and its worktree are kept until the push).
@@ -93,32 +93,6 @@ interface MrTurn {
   previousError: string | undefined;
 }
 
-// What the end of a test run needs of the preparation that started it: mr_attempts before
-// it, and its MR text turn.
-interface TestsContext {
-  attempts: number;
-  turn: MrTurn;
-}
-
-// The title of the Fix section of a failed test run: ## Fix N: Tests.
-const TESTS_TITLE = 'Tests';
-
-// A command in a stop's message: inline code, cut to 200 characters.
-function commandInMessage(command: string): string {
-  return inlineCommand(command.length > 200 ? `${command.slice(0, 199)}…` : command);
-}
-
-// The stop of a test run that could not happen (tests_unavailable): its reason first, on a line of
-// its own (the dashboard's sentence quotes the first line).
-function unavailableMessage(record: TestsRecord, iteration: number): string {
-  return `${record.reason ?? 'the command could not run'}.\nThe workspace's test command ${commandInMessage(record.command)} could not run on iteration ${iteration}. Fix it on this machine and run sf retry, or accept the iteration without tests (sf accept).`;
-}
-
-// The stop at the bound of the Tests Fix rounds (tests_failed): the command and how it ended.
-function failedMessage(record: TestsRecord, iteration: number): string {
-  return `The workspace's tests still fail after ${TEST_FIX_ROUNDS} Tests Fix rounds: ${commandInMessage(record.command)} (${failureText(record)}) on iteration ${iteration}. Accept the iteration without passing tests (sf accept), or tell the Implementer what to do (sf say).`;
-}
-
 // What MrPart calls of the other parts, by just those methods.
 export interface MrControl {
   request(workspaceName: string, ticket: string, request: Exclude<RunnerRequest, { kind: 'turn' }>): Promise<unknown>;
@@ -170,11 +144,12 @@ export class MrPart {
   readonly #runner: RunnerPort;
   readonly #notice: NoticePort;
   readonly #settings: SettingsPort;
-  readonly #stop: StopPort;
   // The parts it calls (src/execution.ts wires them).
   readonly #peers: MrPeers;
   readonly #mergeChecks: MergeChecks;
   readonly #hostReads: MrHostReads;
+  // MR preparation's test step (src/execution/test-step.ts).
+  readonly #tests: TestStep;
 
   constructor(store: JobStorePort, locks: LockPort, sessions: LivePort, runner: RunnerPort, notice: NoticePort, settings: SettingsPort, stop: StopPort, peers: MrPeers) {
     this.#store = store;
@@ -183,10 +158,10 @@ export class MrPart {
     this.#runner = runner;
     this.#notice = notice;
     this.#settings = settings;
-    this.#stop = stop;
     this.#peers = peers;
     this.#mergeChecks = new MergeChecks({ store, locks, sessions, settings, stop });
     this.#hostReads = new MrHostReads({ store, locks, settings, forge: (job) => this.#forge(job), event: (job, action) => this.#mrEvent(job, action) });
+    this.#tests = new TestStep({ store, locks, sessions, runner, settings, stop, fix: (current, content, options) => this.#peers.turns.fix(current, content, options) });
   }
 
   // The end of a turn of MR preparation (mark_clean). After the MR text turn: validate the text,
@@ -589,8 +564,8 @@ export class MrPart {
     // The workspace's test command as the registry holds it now (when it cannot be read, as
     // in hand): its run comes first, outside the lock, unless this iteration passed or was accepted.
     const command = (await this.#settings.resolve(workspaceName).catch(() => workspace)).testCommand;
-    if (command !== undefined && !(await this.#testsSettled(next))) {
-      this.#startTests(next, workspace, command, { attempts, turn });
+    if (command !== undefined && !(await this.#tests.settled(next))) {
+      this.#tests.start(next, workspace, command, { attempts, passed: (job, at) => this.#mrTextTurn(job, at, turn) });
       return { state: next.state, iteration: next.iteration, branch: next.branch };
     }
     this.#mrTextTurn(next, workspace, turn);
@@ -623,106 +598,6 @@ export class MrPart {
     const session = this.#peers.turns.session(job, workspace);
     this.#sessions.live.get(`${job.workspace}/${job.ticket}`)!.mr = { targetRef: turn.targetRef };
     session.send(prompt, DENIED_TOOLS);
-  }
-
-  // Whether the test step of the job's iteration is done: its record passed, or the user accepted
-  // it without passing tests. A record that cannot be read counts as none: the tests run again.
-  async #testsSettled(job: Job): Promise<boolean> {
-    const record = await this.#store.jobs.readTests(job.workspace, job.ticket, job.iteration).catch((error: unknown) => (console.error(error), undefined));
-    return record?.outcome === 'passed' || record?.outcome === 'accepted_failing';
-  }
-
-  // Starts the run of the workspace's test command on the job's worktree, registered as the
-  // job's running review, so abort and stop() cancel it and the runner waits for it. It runs outside
-  // the lock; its end applies under it (#tested). Only under the lock, in the runner.
-  #startTests(job: Job, workspace: Workspace, command: string, context: TestsContext): void {
-    this.#runner.runnerJob();
-    if (this.#stop.isStopping()) {
-      throw new FactoryError('runner_stopping', 'The runner of the job is stopping; no test run starts.');
-    }
-    const key = `${job.workspace}/${job.ticket}`;
-    this.#sessions.reviews.get(key)?.controller.abort();
-    const running: RunningReview = { reviewer: TESTS_RUNNER, iteration: job.iteration, controller: new AbortController() };
-    this.#sessions.reviews.set(key, running);
-    this.#runTests(job, workspace, command, running, context).catch((error: unknown) => console.error(error));
-  }
-
-  // The run itself: the tests_started event, the sandbox built from the job's path denials (session
-  // job, as the Implementer's), the command, then its end under the lock, whatever fails.
-  async #runTests(job: Job, workspace: Workspace, command: string, running: RunningReview, context: TestsContext): Promise<void> {
-    const run = now();
-    let result: TestsResult;
-    // An abort (stop() too) queues the run's end on the lock at once, so stop() waits for it.
-    let ended: (value: TestsResult) => void = () => undefined;
-    const end = new Promise<TestsResult>((resolve) => (ended = resolve));
-    let queued: Promise<void> | undefined;
-    running.controller.signal.addEventListener('abort', () => (queued = this.#locks.locked(async () => this.#tested(job, running, run, await end, context))), { once: true });
-    try {
-      await this.#store.jobs.appendEvent(job.workspace, job.ticket, { ts: run, iteration: job.iteration, type: 'tests_started', run, command });
-      const denials = await pathDenials({ session: 'job', workspace: job.workspace, checkout: workspace.workCheckout, worktree: job.worktree!, stateDir: this.#settings.config.stateDir, worktreeRoot: this.#settings.config.worktreeRoot });
-      result = await runTestCommand({
-        command, cwd: job.worktree!, hidden: denials.sandbox.denyRead, timeoutMs: this.#settings.config.testTimeoutMs ?? DEFAULT_TEST_TIMEOUT_MS, signal: running.controller.signal,
-      });
-    } catch (error) {
-      // The path denials could not be built (or the event written): no run without them.
-      const at = now();
-      const reason = `the sandbox could not be built: ${error instanceof FactoryError ? error.message : (error as Error).message}`.slice(0, 300);
-      result = { aborted: false, record: { command, started_at: run, ended_at: at, duration_ms: Date.parse(at) - Date.parse(run), exit_code: null, timed_out: false, outcome: 'unavailable', reason, output: '', output_truncated: false } };
-    }
-    ended(result);
-    await (queued ?? this.#locks.locked(() => this.#tested(job, running, run, result, context)));
-  }
-
-  // The end of a test run. A cancelled one (abort, stop(); its result is aborted only then) leaves no
-  // trace, but one that changed a watched path stops its job still in this step (tests_failed: no
-  // turn starts on that worktree). Otherwise, for the job's step, the record and the tests event are
-  // written; a pass goes on to the MR text turn; one that could not run stops the job
-  // (tests_unavailable); a failure is a Tests Fix, or past TEST_FIX_ROUNDS a stop (tests_failed).
-  async #tested(job: Job, running: RunningReview, run: string, result: TestsResult, context: TestsContext): Promise<void> {
-    const { workspace: name, ticket, iteration } = job;
-    const key = `${name}/${ticket}`;
-    const latest = result.aborted && result.changed !== undefined ? await this.#store.jobs.read(name, ticket) : undefined;
-    if (latest?.created_at === job.created_at && latest.state === 'preparing_mr' && result.aborted) {
-      // from: preparing_mr (the test step)
-      await this.#store.transition({ ...latest, mr_attempts: context.attempts }, 'needs_human', 'tests', { code: TESTS_FAILED, message: `an aborted test run changed ${result.changed}` });
-    }
-    if (this.#sessions.reviews.get(key) !== running || running.controller.signal.aborted || result.aborted) {
-      return;
-    }
-    this.#sessions.reviews.delete(key);
-    const current = await this.#store.jobs.read(name, ticket);
-    if (current === undefined || current.created_at !== job.created_at || current.state !== 'preparing_mr' || current.iteration !== iteration) {
-      return;
-    }
-    const { record } = result;
-    const back: Job = { ...current, mr_attempts: context.attempts };
-    try {
-      await this.#store.jobs.writeTests(name, ticket, iteration, record);
-      await this.#store.jobs.appendEvent(name, ticket, testsEvent(iteration, run, record));
-      if (record.outcome === 'passed') {
-        this.#mrTextTurn(current, this.#sessions.live.get(key)?.workspace ?? (await this.#settings.resolve(name)), context.turn);
-        return;
-      }
-      if (record.outcome === 'unavailable') {
-        // from: preparing_mr (the test step)
-        await this.#store.transition(back, 'needs_human', 'tests', { code: TESTS_UNAVAILABLE, message: unavailableMessage(record, iteration) });
-        return;
-      }
-      const failed = await this.#store.jobs.failedTests(name, ticket);
-      if (failed > TEST_FIX_ROUNDS) {
-        // from: preparing_mr (the test step)
-        await this.#store.transition(back, 'needs_human', 'tests', { code: TESTS_FAILED, message: failedMessage(record, iteration) });
-        return;
-      }
-      await this.#peers.turns.fix(back, testsFixContent(record), { title: TESTS_TITLE, fromTests: true });
-    } catch (error) {
-      console.error(error);
-      const latest = await this.#store.jobs.read(name, ticket);
-      if (latest?.state === 'preparing_mr') {
-        // from: preparing_mr (the test step)
-        await this.#store.transition({ ...latest, mr_attempts: context.attempts }, 'needs_human', 'tests', { code: 'mr_failed', message: `MR preparation failed inside the factory: ${(error as Error).message}`.slice(0, 1000) });
-      }
-    }
   }
 
   // The terms of a check of the guard: the secrets, and the names of the user's other

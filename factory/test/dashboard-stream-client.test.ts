@@ -384,7 +384,7 @@ test("stream client: the implement prompt's Task toggle shows the Task text and 
 
 // For every needs_human code: the job, its detail, the stop block's label, the sentence, what it
 // shows inline, and the composer's buttons in order.
-// The messages of the test step's stops (SF-128), as src/execution/mr-steps.ts writes them.
+// The messages of the test step's stops (SF-128), as src/execution/test-step.ts writes them.
 const TESTS_FAILED_MESSAGE = "The workspace's tests still fail after 2 Tests Fix rounds: `npm test` (exit 1) on iteration 1. Accept the iteration without passing tests (sf accept), or tell the Implementer what to do (sf say).";
 const TESTS_UNAVAILABLE_MESSAGE = "bwrap is not installed.\nThe workspace's test command `npm test` could not run on iteration 1. Fix it on this machine and run sf retry, or accept the iteration without tests (sf accept).";
 

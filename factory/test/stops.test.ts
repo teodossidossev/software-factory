@@ -95,17 +95,25 @@ test('jobActions per row: each stop shows its row\'s actions in order, each prec
   const goOn = 'goon:Tell it to go on';
   // clean_review: Accept with a clean Claude review, the dropped items aside; without the Claude
   // review none is needed; at the Fix round limit whatever the last verdict.
-  for (const code of ['gate_rounds', 'gate_budget', 'review_churn', 'review_disputed', 'tests_failed']) {
+  for (const code of ['review_churn', 'review_disputed', 'tests_failed']) {
     assert.deepEqual(shown(stopped(code), clean), ['*accept:Accept and prepare MR', send, abort], code);
     assert.deepEqual(shown(stopped(code), { review: FIX }), [`*${send}`, abort], code);
     assert.deepEqual(shown(stopped(code)), [`*${send}`, abort], code);
     assert.deepEqual(shown(stopped(code), { review: { ...FIX, dropped: FIX.items } })[0], '*accept:Accept and prepare MR', code);
     assert.deepEqual(shown(stopped(code, { claude_review: false }))[0], '*accept:Accept and prepare MR', code);
   }
+  // The gate's limit stops offer Tell it to go on right after Accept; without Accept it is the primary action.
+  for (const code of ['gate_rounds', 'gate_budget']) {
+    assert.deepEqual(shown(stopped(code), clean), ['*accept:Accept and prepare MR', goOn, send, abort], code);
+    assert.deepEqual(shown(stopped(code), { review: FIX }), [`*${goOn}`, send, abort], code);
+    assert.deepEqual(shown(stopped(code)), [`*${goOn}`, send, abort], code);
+    assert.deepEqual(shown(stopped(code), { review: { ...FIX, dropped: FIX.items } })[0], '*accept:Accept and prepare MR', code);
+    assert.deepEqual(shown(stopped(code, { claude_review: false })), ['*accept:Accept and prepare MR', goOn, send, abort], code);
+  }
   assert.deepEqual(shown(stopped('gate_failed'), clean), ['*accept:Accept and prepare MR', goOn, abort]);
   assert.deepEqual(shown(stopped('gate_failed'), { review: { reviewer: 'claude', error: 'Overloaded.' } }), [`*${goOn}`, abort]);
   for (const review of [CLEAN, FIX, undefined]) {
-    assert.deepEqual(shown(stopped('iteration_limit'), { review }), ['*accept:Accept and prepare MR', send, 'restart:Restart…', abort]);
+    assert.deepEqual(shown(stopped('iteration_limit'), { review }), ['*accept:Accept and prepare MR', goOn, send, 'restart:Restart…', abort]);
   }
   assert.deepEqual(shown(stopped('simplify_offered')), ['*simplify:Simplify', 'accept:Skip', send, abort]);
   assert.deepEqual(shown(stopped('escalated')), [`*${send}`, abort]);

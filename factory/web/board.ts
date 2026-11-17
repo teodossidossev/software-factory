@@ -119,15 +119,15 @@ const STOPS = {
   gate_rounds: {
     reason: 'Codex round limit reached',
     button: (job: JobRow) => (stopCount(job) ? `Decide ${counted(stopCount(job) ?? 0, 'finding')}` : 'Decide the findings'),
-    sentence: (job: JobRow) => `${typeof job.gate_fixes === 'number' ? `Codex asked for fixes ${counted(job.gate_fixes, 'time')}, the limit.` : 'Codex asked for fixes as often as the limit allows.'} Accept the change without its ${stopCount(job) !== null ? counted(stopCount(job) ?? 0, 'open finding') : 'open findings'}, or tell the Implementer what to fix.`,
+    sentence: (job: JobRow) => `Codex kept asking for fixes that did not bring the open findings down. Tell it to go on (a new count), accept the change without its ${stopCount(job) !== null ? counted(stopCount(job) ?? 0, 'open finding') : 'open findings'}, or tell the Implementer what to fix.`,
   },
   gate_budget: {
     reason: 'Codex token budget used up', button: () => 'Decide',
-    sentence: (job: JobRow) => `The Codex gate used its token budget for this job. ${claudeOn(job) ? "Accept the change with Claude's clean review" : 'Accept the change, which no reviewer passed'}, or tell the Implementer what to do.`,
+    sentence: (job: JobRow) => `The Codex gate used the token budget of this change. Tell it to go on (a new budget), ${claudeOn(job) ? "accept the change with Claude's clean review" : 'accept the change, which no reviewer passed'}, or tell the Implementer what to do.`,
   },
   iteration_limit: {
     reason: 'Fix round limit reached', button: () => 'Give a direction',
-    sentence: (job: JobRow) => `${typeof job.fixes === 'number' ? `The reviewers asked for fixes ${counted(job.fixes, 'time')}, the limit.` : 'The reviewers asked for fixes as often as the limit allows.'} Accept the change with its open findings listed in the MR text, give the Implementer a direction, or abort.`,
+    sentence: () => 'The last Fix rounds did not bring the open findings down. Tell it to go on (it gets the held-back findings and a new count), accept the change with its open findings listed in the MR text, or give a direction.',
   },
   tests_failed: {
     reason: 'Tests keep failing', button: () => 'Decide',

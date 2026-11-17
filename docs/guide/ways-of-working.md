@@ -176,8 +176,8 @@ factory (`npm run setup`), and, if they plan with ChatGPT, their own tunnel and 
 - **The coding rules in the repository**: `AGENTS.md` and the Markdown files it links to reach
   every colleague's agents the same way; put the team's rules there, not in personal files.
 - **The agents' skills, by installing the same ones**: they come from each user's
-  `~/.agents/skills` (`implement`, `tdd`, `code-review`, `grilling`, installed with the `skills`
-  tool), copied verbatim at each job's start ([The agents' skills](../../factory/README.md#the-agents-skills));
+  `~/.agents/skills` (`implement`, `tdd`, `code-review`, `grilling`, `prototype`, installed with
+  the `skills` tool), copied verbatim at each job's start ([The agents' skills](../../factory/README.md#the-agents-skills));
   the factory does not take them from the repository. A repository's own `.claude/skills` are not
   hidden: they still load in the Implementer's session as its project skills, read-only.
 - **Task files**: they are plain Markdown. `.software-factory/` is excluded from Git in each

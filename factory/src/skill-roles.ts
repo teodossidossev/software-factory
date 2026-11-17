@@ -17,9 +17,10 @@ export type Role = (typeof ROLES)[number];
 export type RoleSkills = Record<Role, string[]>;
 
 // Each role's set without a choice: the Implementer has implement, tdd, code-review and grilling,
-// both reviewers follow code-review, the Task check has none, the planner grills.
+// both reviewers follow code-review, the Task check has none, the planner grills,
+// then prototypes.
 export const DEFAULT_ROLES: Readonly<Record<Role, readonly string[]>> = {
-  implementer: ['implement', 'tdd', 'code-review', 'grilling'], claude_review: ['code-review'], codex_gate: ['code-review'], task_check: [], planner: ['grilling'],
+  implementer: ['implement', 'tdd', 'code-review', 'grilling'], claude_review: ['code-review'], codex_gate: ['code-review'], task_check: [], planner: ['grilling', 'prototype'],
 };
 
 // An installed skill's folder name, as the skills tool writes it.

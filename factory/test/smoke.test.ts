@@ -16,8 +16,8 @@ import { checkChildren, isServe, REFUSAL_MS, removeOnExit, stopChild, trackChild
 
 const CLI = fileURLToPath(new URL('../src/cli.js', import.meta.url));
 const HANDBOOK = fileURLToPath(new URL('../../HANDBOOK.md', import.meta.url));
-// The two lines of the Planning method before the skill's body.
-const PLANNING = 'Plan every ticket by the method below (the user\'s grilling skill). You have no sub-agents: look facts up yourself with read_file, search and read_attachment, and ask only the questions only the user can decide.\n\n' +
+// The two lines of the Planning method before the skills' bodies.
+const PLANNING = 'Plan every ticket by the method below (the skills the user chose for the planner). You have no sub-agents: look facts up yourself with read_file, search and read_attachment, and ask only the questions only the user can decide.\n\n' +
   'The plan is done when the user confirms you agree; then write the Task file.';
 const READY = /listening on (http:\/\/127\.0\.0\.1:(\d+)\/mcp)\/<token>$/m;
 const TASK = '---\nticket: DEMO-1\ntitle: Demo task\nbase: main\n---\n\n# DEMO-1: Demo task\n\nПроверка ✓\n';
@@ -148,10 +148,12 @@ before(async () => {
   temp = await realpath(await mkdtemp(join(tmpdir(), 'sf-smoke-')));
   removeOnExit(temp);
   configDir = join(temp, 'config');
-  // The installed skills sf serve syncs at its start: grilling alone, at one hash.
+  // The installed skills sf serve syncs at its start: grilling and prototype, each at one hash.
   await mkdir(join(temp, 'agents', 'skills', 'grilling'), { recursive: true });
   await writeFile(join(temp, 'agents', 'skills', 'grilling', 'SKILL.md'), '---\nname: grilling\ndescription: Grill the user\n---\n\nInterview the user relentlessly about every aspect of the plan.\n');
-  await writeFile(join(temp, 'agents', '.skill-lock.json'), JSON.stringify({ skills: { grilling: { skillFolderHash: 'f551b6e' } } }));
+  await mkdir(join(temp, 'agents', 'skills', 'prototype'), { recursive: true });
+  await writeFile(join(temp, 'agents', 'skills', 'prototype', 'SKILL.md'), '---\nname: prototype\ndescription: Build a throwaway prototype\n---\n\nBuild a throwaway prototype that answers one question.\n');
+  await writeFile(join(temp, 'agents', '.skill-lock.json'), JSON.stringify({ skills: { grilling: { skillFolderHash: 'f551b6e' }, prototype: { skillFolderHash: 'a1b2c3d' } } }));
   repo = join(temp, 'repo');
   await mkdir(join(repo, 'src'), { recursive: true });
   await mkdir(join(repo, 'docs'));
@@ -331,13 +333,18 @@ test('sf serve on a fresh state directory syncs the skills and gives the Quick s
   const client = await connect(served);
   const handbook = await readFile(HANDBOOK, 'utf8');
   const instructions = client.getInstructions() ?? '';
-  // SF-191: the Quick start, then the Planning method: its two lines and the grilling skill's body
-  // without its front matter, as the file has it, read from the skills snapshot sf serve made at its start.
+  // SF-191: the Quick start, then the Planning method: its two lines, the grilling skill's body, then
+  // the prototype skill's, each without its front matter, as the file has it, read from the skills
+  // snapshot sf serve made at its start.
   const skill = await readFile(join(state, 'skills', 'grilling', 'SKILL.md'), 'utf8');
   assert.equal(skill, await readFile(join(temp, 'agents', 'skills', 'grilling', 'SKILL.md'), 'utf8'));
   assert.match(skill, /^---\nname: grilling\n/);
   const body = skill.slice(skill.indexOf('\n---\n', 3) + 5).trim();
-  const method = `## Planning method\n\n${PLANNING}\n\n${body}`;
+  const prototype = await readFile(join(state, 'skills', 'prototype', 'SKILL.md'), 'utf8');
+  assert.equal(prototype, await readFile(join(temp, 'agents', 'skills', 'prototype', 'SKILL.md'), 'utf8'));
+  assert.match(prototype, /^---\nname: prototype\n/);
+  const prototypeBody = prototype.slice(prototype.indexOf('\n---\n', 3) + 5).trim();
+  const method = `## Planning method\n\n${PLANNING}\n\n${body}\n\n${prototypeBody}`;
   assert.equal(instructions, `${handbookSection(handbook, '## Quick start')}\n\n${method}`);
   assert.match(instructions, /^## Quick start\n/);
   assert.match(instructions, /^Interview the user relentlessly/m);

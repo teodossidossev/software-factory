@@ -3,9 +3,9 @@
 How to work with the factory, for whichever model is the Context owner. This file is the single
 source: its "Quick start" section is sent as MCP server instructions when you connect, the `guide`
 tool returns the whole file, and it can be pasted into any chat. Both end with a "Planning method"
-section: the planning skills the user chose (by default the installed grilling skill), as the
-factory's skills snapshot copied them verbatim. It
-describes how we work, never a particular ticket. Vocabulary: `CONTEXT.md` in the repository.
+section: the planning skills the user chose (by default the installed grilling and prototype
+skills, in that order), as the factory's skills snapshot copied them verbatim. It describes how we
+work, never a particular ticket. Vocabulary: `CONTEXT.md` in the repository.
 
 ## Quick start
 

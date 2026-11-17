@@ -481,7 +481,7 @@ agent role uses; the choice is one, shared by all workspaces (no workspace has i
 | `claude_review` | The Claude review | `code-review` | `code-review` is its review method; each other skill is a `<skill>` block in its prompt. |
 | `codex_gate` | The Codex gate | `code-review` | As the Claude review. |
 | `task_check` | The Task check | none | Each skill is a `<skill>` block in its prompt. |
-| `planner` | The planner, ChatGPT or Claude Code | `grilling` | ChatGPT (the MCP server's instructions): each skill's `SKILL.md` body, in order, after the Quick start. Claude Code: `sf planner setup` copies each skill from the snapshot into the planning copy's `.claude/skills/`, beside the factory's `planning-tasks`, and switches your other skills off there (`skillOverrides`; your claude.ai skills with `syncClaudeAiSkills`). |
+| `planner` | The planner, ChatGPT or Claude Code | `grilling`, `prototype` | ChatGPT (the MCP server's instructions): each skill's `SKILL.md` body, in order, after the Quick start. Claude Code: `sf planner setup` copies each skill from the snapshot into the planning copy's `.claude/skills/`, beside the factory's `planning-tasks`, and switches your other skills off there (`skillOverrides`; your claude.ai skills with `syncClaudeAiSkills`). |
 
 A role can have no skill at all, `implement` and `code-review` included: it then works without a
 method (the planner with the Quick start alone). The `<skill>` blocks of one prompt take at most
@@ -495,7 +495,10 @@ sf skills set implementer implement off    # take one out
 
 `sf skills set` refuses an unknown role or a skill that is not installed, with the list. The
 choice is `skill-roles.json` in the state directory (`{ "version": 1, "roles": { <role>: [...] }
-}`; a role missing from it has its default). A job keeps the choice it started with; a change
+}`; a role missing from it has its default). Every change, through `sf skills set` or the Skills
+page, writes every role's list, so a file saved before a default changed keeps the old list for
+that role: switch the new skill on yourself (`sf skills set planner prototype on`, or its box in
+the Planner column). A job keeps the choice it started with; a change
 applies to the jobs started after it, to the next Task check and, in `sf serve`, to the next
 planning request, and to a planning copy at its next `sf planner setup`. `SF_REVIEW_SKILL` and `SF_PLAN_SKILL`, when set, win over the choice. The
 dashboard reads and changes the same choice through `GET api/skills`, `GET api/skills/<name>`

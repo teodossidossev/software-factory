@@ -207,13 +207,13 @@ test('a job started with no skills source: its one skills event names every skil
   await call(served, 'start', { workspace: 'app', ticket: 'M-1' });
   await waitFor(served, 'M-1', 'awaiting_review', 1);
   await stop(served);
-  const line = `warning: app/M-1: skills missing in ${none} or its lock file: implement, tdd, code-review, grilling; the snapshot keeps the copies it has`;
+  const line = `warning: app/M-1: skills missing in ${none} or its lock file: implement, tdd, code-review, grilling, prototype; the snapshot keeps the copies it has`;
   assert.equal(log.split('\n').filter((entry) => entry === line).length, 1, log);
   // The job's runner.log has it too, once (the runner appends its own output after it).
   const runnerLog = await readFile(join(new JobStore(env.state).dir('app', 'M-1'), 'runner.log'), 'utf8');
   assert.equal(runnerLog.split('\n').filter((entry) => entry === line).length, 1, runnerLog);
   const events = (await readFile(new JobStore(env.state).eventsPath('app', 'M-1'), 'utf8')).trim().split('\n').map((entry) => JSON.parse(entry) as Record<string, unknown>);
-  assert.deepEqual(events.filter((record) => record.type === 'skills').map(({ ts: _ts, ...rest }) => rest), [{ iteration: 0, type: 'skills', versions: {}, missing: ['implement', 'tdd', 'code-review', 'grilling'], roles: DEFAULT_ROLES }]);
+  assert.deepEqual(events.filter((record) => record.type === 'skills').map(({ ts: _ts, ...rest }) => rest), [{ iteration: 0, type: 'skills', versions: {}, missing: ['implement', 'tdd', 'code-review', 'grilling', 'prototype'], roles: DEFAULT_ROLES }]);
 });
 
 test('the skills event: one per job, at its start before its first prompt, with the snapshot\'s versions and folder; a later turn adds none; a later job takes a changed skill, and the first job\'s next turn still binds its own folder', async () => {

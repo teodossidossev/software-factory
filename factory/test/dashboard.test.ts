@@ -392,7 +392,7 @@ test('dashboard: GET api/skills, the installed skills and the roles\' lists; GET
   await withCoordinatorEnv('dash-skills-config', () => withDashboard('dash-skills', fakeActions(), async (dashboard, store) => {
     const base = dashboard.url;
     const view = JSON.parse((await fetchRaw(new URL('api/skills', base))).body) as { skills: Array<{ name: string; description: string | null }>; roles: Record<string, string[]>; missing: string[] };
-    assert.deepEqual(view.skills.map((skill) => [skill.name, skill.description]), [['code-review', 'The fake code-review skill'], ['grilling', 'The fake grilling skill'], ['implement', 'The fake implement skill'], ['tdd', 'The fake tdd skill']]);
+    assert.deepEqual(view.skills.map((skill) => [skill.name, skill.description]), [['code-review', 'The fake code-review skill'], ['grilling', 'The fake grilling skill'], ['implement', 'The fake implement skill'], ['prototype', 'The fake prototype skill'], ['tdd', 'The fake tdd skill']]);
     assert.deepEqual([view.roles.codex_gate, view.roles.task_check, view.missing], [['code-review'], [], []]);
     const text = JSON.parse((await fetchRaw(new URL('api/skills/tdd', base))).body) as { text: string; truncated: boolean };
     assert.deepEqual(text, { name: 'tdd', text: '---\nname: tdd\ndescription: The fake tdd skill\n---\n\nTest-driven development: red, then green.\n', truncated: false });
@@ -457,12 +457,12 @@ test('dashboard: GET api/skills has the coordinator\'s column (or why not), neve
       const settings = join(repo, '.claude', 'settings.local.json');
       await writeFile(settings, JSON.stringify({ permissions: { allow: [] }, skillOverrides: { grilling: 'name-only', 'plugin:x': 'off' } }));
       const read = await fetchRaw(new URL('api/skills', base));
-      assert.deepEqual(JSON.parse(read.body).coordinator, { workspace: 'sf', skills: { 'code-review': 'on', grilling: 'name-only', implement: 'on', tdd: 'on' } });
+      assert.deepEqual(JSON.parse(read.body).coordinator, { workspace: 'sf', skills: { 'code-review': 'on', grilling: 'name-only', implement: 'on', prototype: 'on', tdd: 'on' } });
       assert.ok(!read.body.includes(repo), 'no checkout path reaches the page');
       // The list of skills on: implement off; grilling (not in it, name-only) left as it is.
-      const put = await act(base, 'api/skills/roles/coordinator', { skills: ['code-review', 'tdd'] }, { method: 'PUT' });
+      const put = await act(base, 'api/skills/roles/coordinator', { skills: ['code-review', 'tdd', 'prototype'] }, { method: 'PUT' });
       assert.equal(put.status, 200, put.body);
-      assert.deepEqual(JSON.parse(put.body).result.coordinator, { workspace: 'sf', skills: { 'code-review': 'on', grilling: 'name-only', implement: 'off', tdd: 'on' } });
+      assert.deepEqual(JSON.parse(put.body).result.coordinator, { workspace: 'sf', skills: { 'code-review': 'on', grilling: 'name-only', implement: 'off', prototype: 'on', tdd: 'on' } });
       assert.ok(!put.body.includes(repo));
       assert.deepEqual(JSON.parse(await readFile(settings, 'utf8')), { permissions: { allow: [] }, skillOverrides: { grilling: 'name-only', 'plugin:x': 'off', implement: 'off' } });
       // The job roles' storage is not touched.

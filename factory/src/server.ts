@@ -384,12 +384,12 @@ export async function loadHandbook(path = process.env.SF_HANDBOOK || fileURLToPa
 }
 
 const PLANNING_LINES = [
-  'Plan every ticket by the method below (the user\'s grilling skill). You have no sub-agents: look facts up yourself with read_file, search and read_attachment, and ask only the questions only the user can decide.',
+  'Plan every ticket by the method below (the skills the user chose for the planner). You have no sub-agents: look facts up yourself with read_file, search and read_attachment, and ask only the questions only the user can decide.',
   'The plan is done when the user confirms you agree; then write the Task file.',
 ];
 
 // The server's instructions (the "## Quick start" section) and guide's answer (the whole file),
-// each followed by the "## Planning method" (PLANNING_LINES, the skill's body) when there is a skill.
+// each followed by the "## Planning method" (PLANNING_LINES, the skills' bodies) when there is a skill.
 export function servedHandbook({ text, quickStart, planSkill }: Handbook): { instructions: string; guide: string } {
   const method = planSkill === undefined ? '' : ['## Planning method', ...PLANNING_LINES, planSkill].join('\n\n');
   return method === '' ? { instructions: quickStart, guide: text } : { instructions: `${quickStart}\n\n${method}`, guide: `${text.trimEnd()}\n\n${method}\n` };

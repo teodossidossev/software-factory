@@ -12,9 +12,9 @@ const state = (name: string): Promise<string> => mkdtemp(join(tmpdir(), `sf-skil
 test('no skill-roles.json: every role has today\'s set', async () => {
   assert.deepEqual(ROLES, ['implementer', 'claude_review', 'codex_gate', 'task_check', 'planner']);
   const roles = await readRoles(await state('none'));
-  assert.deepEqual(roles, { implementer: ['implement', 'tdd', 'code-review', 'grilling'], claude_review: ['code-review'], codex_gate: ['code-review'], task_check: [], planner: ['grilling'] });
+  assert.deepEqual(roles, { implementer: ['implement', 'tdd', 'code-review', 'grilling'], claude_review: ['code-review'], codex_gate: ['code-review'], task_check: [], planner: ['grilling', 'prototype'] });
   assert.deepEqual(roles, { ...DEFAULT_ROLES });
-  assert.deepEqual(chosenSkills(roles), ['implement', 'tdd', 'code-review', 'grilling']);
+  assert.deepEqual(chosenSkills(roles), ['implement', 'tdd', 'code-review', 'grilling', 'prototype']);
 });
 
 test('the file: a role\'s own list, [] for none, its default when missing or not a list; only names of a skill folder\'s form, once each', async () => {
@@ -22,8 +22,10 @@ test('the file: a role\'s own list, [] for none, its default when missing or not
   await writeFile(rolesFile(dir), JSON.stringify({
     version: 1, roles: { implementer: ['tdd', 'tdd', '../x', 'a/b', '..', 'Up', 7, 'gone'], codex_gate: [], task_check: 'grilling', unknown: ['tdd'] },
   }));
-  assert.deepEqual(await readRoles(dir), { implementer: ['tdd', 'gone'], claude_review: ['code-review'], codex_gate: [], task_check: [], planner: ['grilling'] });
+  assert.deepEqual(await readRoles(dir), { implementer: ['tdd', 'gone'], claude_review: ['code-review'], codex_gate: [], task_check: [], planner: ['grilling', 'prototype'] });
   assert.deepEqual(rolesOf({ roles: null }), rolesOf(undefined));
+  // A saved planner list keeps its value: the default reaches only a file without one.
+  assert.deepEqual(rolesOf({ version: 1, roles: { planner: ['grilling'] } }).planner, ['grilling']);
 });
 
 test('a file that is not JSON: every role\'s default, said in one warning line', async () => {

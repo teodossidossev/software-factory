@@ -4,7 +4,7 @@
 // what a clean verdict of the reviewer that decides the round settles.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { answerFix, applyVerdict, escalationMessage, type EvidenceContext, findEvidence, headings, type LedgerEntry, ledgerSchema, reportRows, settle, settledLines, unappliedEntries, unsettled, userFixItems } from '../src/ledger.js';
+import { answerFix, applyVerdict, escalationMessage, type EvidenceContext, findEvidence, headings, type LedgerEntry, ledgerSchema, reportRows, roundProgress, settle, settledLines, unappliedEntries, unsettled, userFixItems } from '../src/ledger.js';
 import { FINDINGS_HEADING, NITS_HEADING, withFindings, withNits } from '../src/mr.js';
 import { GATE_SCHEMA } from '../src/gate.js';
 import { fixContent, REVIEW_SCHEMA, type ReviewItem, reviewOutput, reviewPrompt, scopeItem, sensitiveItem } from '../src/review.js';
@@ -449,4 +449,17 @@ test('a clean verdict settles nothing from a reviewer that does not decide the r
   // ledger.json of an earlier version (no fixed_by_clean) reads, and so does the new field.
   assert.equal(ledgerSchema.safeParse(open).success, true);
   assert.equal(ledgerSchema.safeParse(settled).success, true);
+});
+
+test('a round that asks for a Fix made progress with a new low of open blocker and major entries and no reopen; the first only sets the low', () => {
+  // The first round: two open majors and an open nit, no low yet.
+  assert.deepEqual(roundProgress([], [entry('R1', 'open'), entry('R2', 'open'), entry('R3', 'open', { severity: 'nit' })], undefined), { open: 2, raised: 2, reopened: 0, progress: true, least: 2 });
+  // A new low: one carried open major against a low of 2.
+  assert.deepEqual(roundProgress([entry('R1', 'open')], [entry('R1', 'open')], 2), { open: 1, raised: 0, reopened: 0, progress: true, least: 1 });
+  // No new low: the carried R1 and a new R2 against a low of 1.
+  assert.deepEqual(roundProgress([entry('R1', 'open')], [entry('R1', 'open'), entry('R2', 'open')], 1), { open: 2, raised: 1, reopened: 0, progress: false, least: 1 });
+  // A reopen: below the low, but R1 was fixed and is open again.
+  assert.deepEqual(roundProgress([entry('R1', 'fixed', { reopened: 0 })], [entry('R1', 'open', { reopened: 1 })], 3), { open: 1, raised: 1, reopened: 1, progress: false, least: 1 });
+  // Entries that are not open blocker or major: a fix the user decided, a contest, an open nit.
+  assert.deepEqual(roundProgress([], [entry('R1', 'user_fix'), entry('R2', 'contested'), entry('R3', 'open', { severity: 'nit' })], 2), { open: 0, raised: 0, reopened: 0, progress: true, least: 0 });
 });

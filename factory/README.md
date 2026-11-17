@@ -601,7 +601,7 @@ ends the session at once, or the session ended within 3 s), and
 | `SF_CHECK_AFTER_FIX_MIN` | `5` | `check_after_minutes` in the job's status during later iterations. |
 | `SF_MAX_TURNS` | `150` | `maxTurns` of every Implementer turn. |
 | `SF_TURN_LIMIT_CONTINUES` | `1` | Continuations the factory sends by itself, per chain of Implementer turns, after a turn that reached `SF_MAX_TURNS` while making progress (SF-069, below); `0` to `10`, `0` stops at the first limit. |
-| `SF_MAX_ITERATIONS` | `3` | Fix sections a job may get (the reviewers', counted in the job's `fixes`); the next Fix is refused (`iteration_limit`, job `needs_human`): its items become open ledger entries, and the stop can be accepted whatever the last verdict (SF-131), with the open findings listed in the MR text. An `sf say` turn does not count, nor a Tests Fix (SF-128, section MR preparation: `TEST_FIX_ROUNDS` bounds those). |
+| `SF_MAX_ITERATIONS` | `3` | Review rounds without progress a job may have (the job's `stalled_fixes`): a round that asks for a Fix while no fewer blocker and major ledger entries are open than after any earlier such round (the job's `least_open`), or that reopens a fixed or left entry. The round that reaches the limit has its Fix refused (`iteration_limit`, job `needs_human`): its items become open ledger entries, and the stop can be accepted whatever the last verdict (SF-131), with the open findings listed in the MR text. A round that lowers the open findings does not count; the first round that asks for a Fix sets the low. An `sf say` turn does not count, nor a Tests Fix (SF-128, section MR preparation: `TEST_FIX_ROUNDS` bounds those). The job's `fixes` still counts every Fix section. |
 | `SF_CLAUDE` | bundled binary | Absolute path of the Claude Code executable (`pathToClaudeCodeExecutable`). |
 | `SF_MODEL` | unset | Model of every Implementer turn, passed as is as the `model` option of `query()`; unset uses the user's Claude Code default. |
 | `SF_REVIEW` | on | `off` runs no Claude review (nor the gate): a published iteration stays in `awaiting_review` until the user goes on with `sf say` or aborts. |
@@ -2128,18 +2128,25 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   only with `SF_CODEX_MODEL`); both with `review_method` as in `review.json`. Its event lines are the review's, with `reviewer: "codex"`: `review
   by codex: clean`, `review by codex: fix (2 items)`, `review by codex: fix (2 items), acted on as
   clean`, `review by codex failed: <error>`.
-- The job counts its Fix sections in `fixes` (the reviewers'). Once it reaches
-  `SF_MAX_ITERATIONS` (default 3, SF-131), the next Fix is refused: `needs_human` with
-  `iteration_limit`. The ledger it was given is written first, so the refused verdict's items are
-  open entries with ids; the stop's message counts the open blocker and major findings, and the
-  stop panel lists them (`ledgerStopEntries`). The stop can be accepted whatever the last verdict
+- The job counts its Fix sections in `fixes`, and judges each Fix it writes but the user's Must
+  fix, Simplify and the Tests Fix (`roundProgress` in `src/ledger.ts`, SF-292): the round made
+  progress when the ledger then holds fewer open blocker and major entries than `least_open`, the
+  fewest after any earlier such round, and it reopened none; the first such round only sets
+  `least_open`. Each round without progress adds one to `stalled_fixes`; the one that brings it to
+  `SF_MAX_ITERATIONS` (default 3) has its Fix refused: `needs_human` with `iteration_limit`. A job
+  that never makes progress so stops after three Fix sections, as before; one that keeps lowering
+  its findings goes on. A job that started before has no `least_open`: its next judged Fix only
+  sets it. The ledger it was given is written first, so the refused verdict's items are open
+  entries with ids; the stop's message counts the rounds without progress and the open blocker and
+  major findings, those the last review raised apart from those carried from earlier rounds, and
+  the stop panel lists them (`ledgerStopEntries`). The stop can be accepted whatever the last verdict
   (`sf accept`, SF-115, SF-131). An `sf say` turn publishes an iteration but writes no Fix section,
   so it does not count. The Fix of your *Must fix* on a stop that resumes (`escalated`,
   `review_disputed`) is written even at the limit (SF-203): the limit stops the factory's own rounds,
   not one you decided. It counts in `fixes`, its section's lead line names the settlement ("The
   user settled the stop (escalated): R5 to fix."), the ticket's history records it `by: "you"`
-  ("Fix N added by the factory for your Must fix"), and the next reviewer fix after it stops with
-  `iteration_limit` as usual. Each such settle waives the limit for its one Fix.
+  ("Fix N added by the factory for your Must fix"), and the next review round without progress
+  after it stops with `iteration_limit` as usual. Each such settle waives the limit for its one Fix.
 - The fix path appends `## Fix N` to the Task file of the checkout, copies it into the worktree
   and runs `/implement .software-factory/<ticket>.md Fix N` in the same session (`resume`). From
   `ready_for_human_review` it first reopens a worktree from the branch (`git worktree add <path>
@@ -2200,9 +2207,9 @@ ended. A restart of `sf serve` therefore leaves a working job working.
       api/jobs/<ws>/<ticket>/simplify`), writes one Fix section `## Fix N: Simplify` with the
       suggestions and runs the normal pipeline (the Implementer, the Claude review, the gate). It
       counts in `fixes`, and it is written even at `SF_MAX_ITERATIONS` (the one Fix that may go
-      over the limit; the next reviewer fix after it stops with `iteration_limit` as usual). Each
-      suggestion becomes a ledger entry of reviewer `simplify`, `accepted_risk` with the note
-      "removed by the user's choice", asked in that Fix: the reviewers see it as the user's choice,
+      over the limit; the next review round without progress after it stops with `iteration_limit`
+      as usual). Each suggestion becomes a ledger entry of reviewer `simplify`, `accepted_risk` with
+      the note "removed by the user's choice", asked in that Fix: the reviewers see it as the user's choice,
       an item that reopens it, by its id or the same path and problem text, is dropped whatever its
       severity (SF-052 rule 1), a defect the removal causes is a new item reviewed as usual, and the
       MR's `### Review findings not fixed` leaves it out. An item the Implementer answers other than `fixed` becomes `left` with its note

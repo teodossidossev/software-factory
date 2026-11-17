@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { addAttachment } from '../src/attachments.js';
 import { firstPrompt } from '../src/execution.js';
+import { iterationLimitMessage } from '../src/execution/turns.js';
 import { JobStore } from '../src/jobs.js';
 import type { SandboxSettings } from '@anthropic-ai/claude-agent-sdk';
 import { sandboxSettings } from '../src/config.js';
@@ -271,7 +272,7 @@ test('images (SF-065): Start refuses an unusable image; the job copies the refer
 });
 
 test('the Fix round limit by default (SF-131): the fourth Fix is refused; its items are open ledger entries with ids; Accept after Claude\'s fix verdict prepares the MR with the open entries alone unapplied and listed, never a fix the user decided or a disputed contest', async () => {
-  // SF_MAX_ITERATIONS empty: the default, 3 Fix sections.
+  // SF_MAX_ITERATIONS empty: the default, 3 rounds without progress.
   const env = await newEnv('limit-default', { SF_REVIEW: 'on', SF_MAX_ITERATIONS: '' });
   const repo = await newRepo(env, 'limit-default-repo', false);
   await putTask(env, repo, 'LIM-1', 'Round limit');
@@ -290,7 +291,7 @@ test('the Fix round limit by default (SF-131): the fourth Fix is refused; its it
     const limited = await waitFor(served, 'LIM-1', 'needs_human', 4);
     assert.deepEqual(limited.error, {
       code: 'iteration_limit',
-      message: '3 Fix sections were written, the limit of SF_MAX_ITERATIONS; 1 open blocker or major findings; the user decides how to go on: sf accept takes iteration 4 as it is (the open findings go unapplied and are listed in the MR text), sf say gives a direction.',
+      message: "3 of the job's review rounds made no progress (SF_MAX_ITERATIONS is 3): each left no fewer open blocker and major findings than the fewest before, or reopened a fixed or left one. Open blocker or major findings: 1 (1 raised by the last review, 0 of them reopened; 0 carried from earlier rounds). The user decides how to go on: sf accept takes iteration 4 as it is (the open findings go unapplied and are listed in the MR text), sf say gives a direction.",
     });
     assert.deepEqual((await readFile(join(repo, '.software-factory', 'LIM-1.md'), 'utf8')).match(/^## Fix \d+$/gm), ['## Fix 1', '## Fix 2', '## Fix 3']);
     const jobs = new JobStore(env.state);
@@ -313,6 +314,40 @@ test('the Fix round limit by default (SF-131): the fourth Fix is refused; its it
     assert.deepEqual(override?.unapplied, [{ id: 'R4', path: 'a.txt', problem: 'Problem 4.', expected: 'Solved 4.', severity: 'major' }]);
     assert.doesNotMatch((await jobs.readMrText('app', 'LIM-1'))!, /### Accepted over a stop\n(- .*\n)*- R[56] /);
     assert.match((await jobs.readMrText('app', 'LIM-1'))!, /### Accepted over a stop\n- The user accepted iteration 4 over iteration_limit\.\n- R4 \[major\] `a\.txt`: Problem 4\. Expected: Solved 4\./);
+  } finally {
+    await stop(served);
+  }
+});
+
+test('the Fix round limit counts rounds without progress: a round that lowers the open findings is not counted, one that reopens a fixed entry is, though below the low', async () => {
+  const env = await newEnv('limit-progress', { SF_REVIEW: 'on', SF_MAX_ITERATIONS: '1' });
+  const repo = await newRepo(env, 'limit-progress-repo', false);
+  await putTask(env, repo, 'LIM-2', 'Round progress');
+  const major = (path: string, n: number, extra: Record<string, string> = {}) => ({ path, problem: `Problem ${n}.`, expected: `Solved ${n}.`, severity: 'major', ...extra });
+  const fix = (...items: ReturnType<typeof major>[]) => ({ verdict: 'fix', summary: 'Problems.', items, accepted_sensitive: [] });
+  await script(env, [
+    { write: { 'a.txt': '1\n' } },
+    { write: { 'a.txt': '2\n' }, text: '| R1 | fixed | Done. |\n| R2 | fixed | Done. |' },
+    { write: { 'a.txt': '3\n' }, text: '| R3 | fixed | Done. |\n| R4 | fixed | Done. |' },
+  ]);
+  // Three majors (the first Fix sets the low, 3); R4 beside the carried R3 (2 open: a new low); R1
+  // reopened (1 open, below the low, but reopened: no progress).
+  await reviewScript(env, [
+    { output: fix(major('a.txt', 1), major('b.txt', 2), major('c.txt', 3)) },
+    { output: fix(major('d.txt', 4)) },
+    { output: fix(major('a.txt', 1, { reopens: 'R1' })) },
+  ]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'LIM-2' });
+    const limited = await waitFor(served, 'LIM-2', 'needs_human', 3);
+    assert.deepEqual(limited.error, { code: 'iteration_limit', message: iterationLimitMessage(1, 1, { open: 1, raised: 1, reopened: 1, progress: false, least: 1 }, 3) });
+    assert.deepEqual((await readFile(join(repo, '.software-factory', 'LIM-2.md'), 'utf8')).match(/^## Fix \d+$/gm), ['## Fix 1', '## Fix 2']);
+    const jobs = new JobStore(env.state);
+    const job = await jobs.read('app', 'LIM-2');
+    assert.deepEqual([job?.fixes, job?.stalled_fixes, job?.least_open], [2, 1, 1]);
+    const r1 = (await jobs.readLedger('app', 'LIM-2')).find((entry) => entry.id === 'R1');
+    assert.deepEqual([r1?.status, r1?.reopened], ['open', 1]);
   } finally {
     await stop(served);
   }

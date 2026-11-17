@@ -9,6 +9,7 @@ import { createServer, type IncomingHttpHeaders } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { join, resolve } from 'node:path';
 import { test } from 'node:test';
+import { iterationLimitMessage } from '../src/execution/turns.js';
 import { DENIED_TOOLS } from '../src/rules.js';
 import { assertPathDenials, call, fakeBwrapBin, fakeLog, git, newEnv, newRepo, putTask, refused, runCli, script, serve, stop, temp, turnsStarted, waitFor } from './support/harness.js';
 
@@ -208,7 +209,7 @@ test('notifications: desktop and ntfy for the user\'s states, silent iterations,
   assert.equal((await refused(served, 'request_fix', { workspace: 'app', ticket: 'N-1', content: 'more' })).code, 'iteration_limit');
   await until(async () => received.length === 1 && (await desktop()).length === 1);
   // The message of the Fix round limit (SF-131): no open finding, since request_fix writes no ledger.
-  const body = 'branch: N-1-notify-me\niteration_limit: 1 Fix sections were written, the limit of SF_MAX_ITERATIONS; 0 open blocker or major findings; the user decides how to go on: sf accept takes iteration 2 as it is (the open findings go unapplied and are listed in the MR text), sf say gives a direction.';
+  const body = `branch: N-1-notify-me\niteration_limit: ${iterationLimitMessage(1, 1, { open: 0, raised: 0, reopened: 0, progress: false, least: 0 }, 2)}`;
   assert.equal(received[0]!.body, body);
   assert.deepEqual(
     [received[0]!.headers.title, received[0]!.headers.priority, received[0]!.headers.tags, received[0]!.headers.authorization],

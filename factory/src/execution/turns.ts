@@ -467,7 +467,7 @@ export class TurnsPart {
   // The work of request_fix, also run for a fix verdict of the review: appends ## Fix N and starts
   // the next iteration. SF_MAX_ITERATIONS limits the review rounds without progress
   // (roundProgress): the one that reaches it is refused; an sf say turn does not count.
-  // counts: what else the Fix counts for (the gate's gate_fixes). Only under the lock.
+  // counts: what else the Fix counts for (the gate's gate_fixes and gate_stalled). Only under the lock.
   // ledger: the findings ledger with the section's items, written once the section is.
   // fromStop: the Fix of the user's settlement or Simplify, from needs_human.
   // title: the section's title after its number (## Fix N: Simplify).

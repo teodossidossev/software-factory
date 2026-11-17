@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import type { GateRecord, ReviewRecord } from '../src/jobs.js';
 import type { LedgerEntry } from '../src/ledger.js';
 import { type ReviewItem, scopeItem, sensitiveItem } from '../src/review.js';
-import { gatePlace, type RoundInput, roundOutcome, roundRuns } from '../src/round.js';
+import { gatePlace, gateRoundsMessage, type RoundInput, roundOutcome, roundRuns } from '../src/round.js';
 
 const item = (path: string, problem: string, severity: ReviewItem['severity'] = 'major', extra: Partial<ReviewItem> = {}): ReviewItem => ({ path, problem, expected: 'Better.', severity, ...extra });
 
@@ -30,7 +30,7 @@ const gate = (items: ReviewItem[], accepted: string[] = [], summary = 'Codex say
 function joint(claude: ReviewItem[], codex: ReviewItem[], extra: Partial<RoundInput> = {}): RoundInput {
   return {
     place: 'joint', ledger: [], iteration: 2, claude: { record: review(claude), extra: [] }, gate: { record: gate(codex), extra: [] },
-    gateFixes: 0, gateTokens: 100, maxRounds: 2, maxTokens: 1000, ...extra,
+    gateFixes: 0, gateStalled: 0, least: undefined, gateTokens: 100, maxRounds: 2, maxTokens: 1000, ...extra,
   };
 }
 
@@ -109,7 +109,7 @@ test('a nit of Claude\'s the gate raises as a major: one entry, a major, and the
 });
 
 test('a Claude nit the gate raises as a major does not make Claude\'s fix: at SF_GATE_MAX_ROUNDS the round stops with gate_rounds; beside a failed gate, open entries alone do not go on', () => {
-  const stopped = roundOutcome(joint([item('a.ts', 'Slow.', 'nit')], [item('a.ts', 'Slow.', 'major')], { gateFixes: 2 }));
+  const stopped = roundOutcome(joint([item('a.ts', 'Slow.', 'nit')], [item('a.ts', 'Slow.', 'major')], { gateFixes: 2, gateStalled: 1, least: 1 }));
   assert.ok(stopped.kind === 'stop' && stopped.code === 'gate_rounds');
   const failed: GateRecord = { reviewer: 'codex', error: 'Codex broke.', tokens: { input: 0, cached_input: 0, output: 0 }, started_at: 'x', ended_at: 'x' };
   const carried = roundOutcome({ ...joint([], [], { ledger: [entry('R1', 'open', { asked: 1 })] }), gate: { record: failed, extra: [] } });
@@ -128,7 +128,7 @@ test('a gate ledger stop beside a Claude pass that is a fix only by carried entr
 });
 
 test('Claude\'s fix that wins over a gate stop is Claude\'s own: its severity and text, not the shared merge', () => {
-  const outcome = roundOutcome(joint([item('a.ts', 'Broken.')], [item('a.ts', 'Broken.', 'blocker', { reopens: 'R9' })], { gateFixes: 2 }));
+  const outcome = roundOutcome(joint([item('a.ts', 'Broken.')], [item('a.ts', 'Broken.', 'blocker', { reopens: 'R9' })], { gateFixes: 2, gateStalled: 1, least: 1 }));
   assert.ok(outcome.kind === 'fix' && !outcome.gateFix);
   assert.ok(outcome.kind === 'fix' && outcome.content === 'Review by Claude: Claude says so.\n\n1. [R1, major] `a.ts`: Broken. Expected: Better.', outcome.kind === 'fix' ? outcome.content : '');
   assert.ok(outcome.kind === 'fix' && outcome.ledger.length === 1 && outcome.ledger[0]!.severity === 'major');
@@ -226,12 +226,35 @@ test('a ledger stop of the gate\'s verdict: it stops a clean Claude round; with 
 });
 
 test('gate_rounds: the gate\'s fix at SF_GATE_MAX_ROUNDS stops a clean Claude round with nothing applied; with Claude\'s fix, Claude\'s alone', () => {
-  const stopped = roundOutcome(joint([], [item('b.ts', 'Unsafe.')], { gateFixes: 2 }));
+  const stopped = roundOutcome(joint([], [item('b.ts', 'Unsafe.')], { gateFixes: 2, gateStalled: 1, least: 1 }));
   assert.ok(stopped.kind === 'stop' && stopped.code === 'gate_rounds' && stopped.ledger === undefined);
-  assert.ok(stopped.kind === 'stop' && stopped.message.startsWith('The gate asked for a fix 3 times, over the limit of SF_GATE_MAX_ROUNDS (2); the fix was not applied. Claude: Claude says so. Codex: Codex says so.'));
-  const fixed = roundOutcome(joint([item('a.ts', 'Broken.')], [item('b.ts', 'Unsafe.')], { gateFixes: 2 }));
+  assert.ok(stopped.kind === 'stop');
+  assert.equal(stopped.message, gateRoundsMessage(2, 2, { open: 1, raised: 1, reopened: 0, progress: false, least: 1 }, 'Claude says so.', 'Codex says so.'));
+  const fixed = roundOutcome(joint([item('a.ts', 'Broken.')], [item('b.ts', 'Unsafe.')], { gateFixes: 2, gateStalled: 1, least: 2 }));
   assert.ok(fixed.kind === 'fix' && !fixed.gateFix && fixed.content === 'Review by Claude: Claude says so.\n\n1. [R1, major] `a.ts`: Broken. Expected: Better.');
   assert.ok(fixed.kind === 'fix' && fixed.ledger.length === 1);
+});
+
+test('gate_rounds counts the gate\'s fix rounds without progress on the merged ledger, never its first fix: a new low applies at the limit, a reopen never is progress', () => {
+  const unsafe = [item('b.ts', 'Unsafe.')];
+  const low = roundOutcome(joint([], unsafe, { gateFixes: 1, gateStalled: 1, least: 2 }));
+  assert.ok(low.kind === 'fix' && low.gateFix);
+  assert.deepEqual(low.kind === 'fix' ? low.progress : undefined, { open: 1, raised: 1, reopened: 0, progress: true, least: 1 });
+  const below = roundOutcome(joint([], unsafe, { gateFixes: 1, gateStalled: 0, least: 1 }));
+  assert.ok(below.kind === 'fix' && below.gateFix && !below.progress.progress);
+  const firstJudged = roundOutcome(joint([], unsafe, { gateFixes: 1, gateStalled: 1 }));
+  assert.ok(firstJudged.kind === 'fix' && firstJudged.gateFix && firstJudged.progress.progress);
+  const firstFix = roundOutcome(joint([], unsafe, { gateFixes: 0, gateStalled: 0, least: 1, maxRounds: 1 }));
+  assert.ok(firstFix.kind === 'fix' && firstFix.gateFix && !firstFix.progress.progress);
+  const secondFix = roundOutcome(joint([], unsafe, { gateFixes: 1, gateStalled: 0, least: 1, maxRounds: 1 }));
+  assert.ok(secondFix.kind === 'stop' && secondFix.code === 'gate_rounds');
+  const reopen = roundOutcome(joint([], [item('a.ts', 'Again.', 'major', { reopens: 'R1' })], { ledger: [entry('R1', 'fixed')], gateFixes: 1, gateStalled: 1, least: 3 }));
+  assert.ok(reopen.kind === 'stop' && reopen.code === 'gate_rounds');
+  assert.equal(reopen.kind === 'stop' ? reopen.message : '', gateRoundsMessage(2, 2, { open: 1, raised: 1, reopened: 1, progress: false, least: 1 }, 'Claude says so.', 'Codex says so.'));
+  assert.equal(
+    gateRoundsMessage(1, 1, { open: 1, raised: 1, reopened: 0, progress: false, least: 1 }, 'Claude found it right.', 'Still wrong.'),
+    'The gate\'s fix rounds without progress since its first fix reached 1, the limit of SF_GATE_MAX_ROUNDS (1); the fix was not applied. Open blocker or major findings: 1 (1 raised by the last review, 0 of them reopened; 0 carried from earlier rounds). Claude: Claude found it right. Codex: Still wrong.',
+  );
 });
 
 test('a gate that failed: Claude\'s fix is its Fix section as Claude alone makes it; a clean Claude verdict stops with the gate\'s code', () => {

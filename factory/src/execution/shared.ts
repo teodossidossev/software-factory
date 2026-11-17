@@ -90,8 +90,8 @@ export interface ExecutionOptions {
 
 // The options of a Fix section (fix).
 export interface FixOptions {
-  // What else the Fix counts for (the gate's gate_fixes).
-  counts?: Partial<Pick<Job, 'gate_fixes'>>;
+  // What else the Fix counts for (the gate's gate_fixes and gate_stalled).
+  counts?: Partial<Pick<Job, 'gate_fixes' | 'gate_stalled'>>;
   ledger?: LedgerEntry[];
   fromStop?: boolean;
   title?: string;

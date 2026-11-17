@@ -65,7 +65,8 @@ export interface Config {
   gate: Gate;
   // The model of the gate (SF_CODEX_MODEL, passed as --model); undefined uses Codex's default.
   codexModel: string | undefined;
-  // Fix verdicts of the gate per job before the next one goes to the user (SF_GATE_MAX_ROUNDS).
+  // The gate's fix rounds without progress per job, its first fix not counted; the one that reaches
+  // it is not applied (SF_GATE_MAX_ROUNDS).
   gateMaxRounds: number;
   // Input plus output tokens of the gate per job (SF_GATE_MAX_TOKENS).
   gateMaxTokens: number;

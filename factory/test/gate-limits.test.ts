@@ -13,6 +13,7 @@ import { JobStore } from '../src/jobs.js';
 import { PACKAGE_ROOT } from '../src/package-root.js';
 import { handbookSection } from '../src/prompts.js';
 import { reviewPrompt } from '../src/review.js';
+import { gateRoundsMessage } from '../src/round.js';
 import { loadHandbook } from '../src/server.js';
 import { fetchRaw } from './support/dashboard-client.js';
 import { call, codexLog, codexScript, fakeLog, git, newEnv, newRepo, putTask, reviewLog, reviewScript, runCli, script, serve, stop, temp, waitFor } from './support/harness.js';
@@ -36,6 +37,36 @@ test('SF_GATE_MAX_ROUNDS=1: the second fix of the gate is not applied; needs_hum
     assert.deepEqual((await taskFile(repo, 'G-3')).match(/^## Fix \d+$/gm), ['## Fix 1']);
     assert.equal((await new JobStore(env.state).read('app', 'G-3'))!.gate_fixes, 1);
     assert.equal((await fakeLog(env)).length, 2);
+  } finally {
+    await stop(served);
+  }
+});
+
+test('SF_GATE_MAX_ROUNDS=2 counts the gate\'s fix rounds without progress: a new low goes on, the second round without progress stops with gate_rounds', async () => {
+  const env = await newEnv('gate-rounds-progress', gateEnv({ SF_GATE_MAX_ROUNDS: '2' }));
+  const repo = await newRepo(env, 'gate-rounds-progress-repo', false);
+  await putTask(env, repo, 'G-21', 'Rounds');
+  await script(env, [
+    { write: { 'a.txt': '1\n' } }, { write: { 'a.txt': '2\n' }, text: '| R1 | fixed | Done. |\n| R2 | fixed | Done. |' },
+    { write: { 'c.txt': '1\n' }, text: '| R3 | fixed | Done. |' }, { write: { 'c.txt': '2\n' }, text: '| R4 | fixed | Done. |' },
+  ]);
+  await reviewScript(env, [{ output: CLAUDE_CLEAN }, { output: CLAUDE_CLEAN }, { output: CLAUDE_CLEAN }, { output: CLAUDE_CLEAN }]);
+  const missing = { path: 'c.txt', problem: 'Missing.', expected: 'A file.', severity: 'major' };
+  await codexScript(env, [
+    { output: { ...GATE_FIX, items: [{ path: 'a.txt', problem: 'Wrong.', expected: 'Right.', severity: 'major' }, { path: 'b.txt', problem: 'Wrong.', expected: 'Right.', severity: 'major' }] } },
+    { output: { ...GATE_FIX, items: [missing] } },
+    { output: { ...GATE_FIX, summary: 'Still wrong.', items: [missing] } },
+    { output: { ...GATE_FIX, summary: 'Still wrong.', items: [missing] } },
+  ]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'G-21' });
+    const limited = await waitFor(served, 'G-21', 'needs_human', 4);
+    assert.equal(limited.error.code, 'gate_rounds');
+    assert.equal(limited.error.message, gateRoundsMessage(2, 2, { open: 1, raised: 1, reopened: 0, progress: false, least: 1 }, CLAUDE_CLEAN.summary, 'Still wrong.'));
+    assert.deepEqual((await taskFile(repo, 'G-21')).match(/^## Fix \d+$/gm), ['## Fix 1', '## Fix 2', '## Fix 3']);
+    const job = (await new JobStore(env.state).read('app', 'G-21'))!;
+    assert.deepEqual([job.gate_fixes, job.gate_stalled], [3, 1]);
   } finally {
     await stop(served);
   }

@@ -168,7 +168,7 @@ export class ReviewsPart {
       place, ledger: await this.#store.jobs.readLedger(workspace, ticket), iteration,
       claude: place !== 'only' ? { record: review, extra: await extra(review), ...ends.claude } : undefined,
       gate: place === 'only' || place === 'joint' ? { record: gate, extra: await extra(gate), ...ends.gate } : undefined,
-      gateFixes: job.gate_fixes, gateTokens: job.gate_tokens, maxRounds: config.gateMaxRounds, maxTokens: config.gateMaxTokens,
+      gateFixes: job.gate_fixes, least: job.least_open, gateStalled: job.gate_stalled ?? 0, gateTokens: job.gate_tokens, maxRounds: config.gateMaxRounds, maxTokens: config.gateMaxTokens,
     });
     if (review !== undefined && 'verdict' in review && (outcome.dropped.claude?.length ?? 0) > 0) {
       await this.#store.jobs.writeReview(workspace, ticket, iteration, { ...review, dropped: outcome.dropped.claude });
@@ -179,7 +179,10 @@ export class ReviewsPart {
     if (outcome.kind === 'park') {
       await this.#peers.control.park(job, outcome.step, outcome.limit);
     } else if (outcome.kind === 'fix') {
-      await this.#peers.turns.fix(job, outcome.content, { ledger: outcome.ledger, ...(outcome.gateFix ? { counts: { gate_fixes: job.gate_fixes + 1 } } : {}) });
+      // A gate fix counts in gate_fixes and, after the gate's first, in gate_stalled when its round
+      // made no progress; a gate_rounds stop writes no count.
+      const stalled = !outcome.progress.progress && job.gate_fixes > 0 ? { gate_stalled: (job.gate_stalled ?? 0) + 1 } : {};
+      await this.#peers.turns.fix(job, outcome.content, { ledger: outcome.ledger, ...(outcome.gateFix ? { counts: { gate_fixes: job.gate_fixes + 1, ...stalled } } : {}) });
     } else {
       if (outcome.ledger !== undefined) {
         await this.#store.jobs.writeLedger(workspace, ticket, outcome.ledger);

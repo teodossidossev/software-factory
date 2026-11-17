@@ -177,6 +177,7 @@ export const FAKE_SKILLS: Record<string, string> = {
   tdd: 'Test-driven development: red, then green.',
   'code-review': 'Two-axis review of the diff: Standards and Spec.',
   grilling: 'Interview the user relentlessly about every aspect of the plan.',
+  prototype: 'Build a throwaway prototype that answers one question.',
 };
 export const skillsSourceDir = (): string => join(temp, 'agents', 'skills');
 async function writeFakeSkills(): Promise<void> {

@@ -27,7 +27,7 @@ const NO_VISION = '- **The product vision:** none is stored for this workspace.'
 // The warning for a planner skill the snapshot lacks.
 const missingSkill = (skill: string): string =>
   `warning: the planner's skill ${skill} is not in the factory's skills snapshot; the copy goes without it (sf skills shows what is installed).`;
-// stdout without those warnings: the tests without a skills snapshot get one for grilling.
+// stdout without those warnings: the tests without a skills snapshot get one for grilling and one for prototype.
 const withoutMissingSkills = (stdout: string): string => stdout.split('\n').filter((line) => !line.startsWith("warning: the planner's skill ")).join('\n');
 const escaped = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -140,9 +140,10 @@ test('a first run clones the workspace, installs the skill and the pointers, and
   }
 
   const short = git(copy, 'rev-parse', '--short', 'HEAD').trim();
-  // No skills snapshot: the default role's grilling is a warning.
+  // No skills snapshot: the default role's grilling and prototype are a warning each.
   assert.deepEqual(result.stdout.trim().split('\n'), [
     missingSkill('grilling'),
+    missingSkill('prototype'),
     `Planning copy of app: ${copy} (main at ${short})`,
     'MCP server software-factory: registered for this folder only (Claude Code local scope)',
     'Skill planning-tasks: installed in .claude/skills',

@@ -43,8 +43,8 @@ async function synced(state: string, env: NodeJS.ProcessEnv): Promise<{ versions
 }
 
 test('the source: ~/.agents/skills and ~/.agents/.skill-lock.json; SF_SKILLS_DIR overrides the folder, the lock file next to it', () => {
-  assert.deepEqual(AGENT_SKILLS, ['implement', 'tdd', 'code-review', 'grilling']);
-  assert.deepEqual(DEFAULT_ROLES, { implementer: ['implement', 'tdd', 'code-review', 'grilling'], claude_review: ['code-review'], codex_gate: ['code-review'], task_check: [], planner: ['grilling'] });
+  assert.deepEqual(AGENT_SKILLS, ['implement', 'tdd', 'code-review', 'grilling', 'prototype']);
+  assert.deepEqual(DEFAULT_ROLES, { implementer: ['implement', 'tdd', 'code-review', 'grilling'], claude_review: ['code-review'], codex_gate: ['code-review'], task_check: [], planner: ['grilling', 'prototype'] });
   assert.deepEqual(skillsSource({ HOME: '/h' }), { dir: '/h/.agents/skills', lock: '/h/.agents/.skill-lock.json' });
   assert.deepEqual(skillsSource({ HOME: '/h', SF_SKILLS_DIR: '/srv/mine/skills' }), { dir: '/srv/mine/skills', lock: '/srv/mine/.skill-lock.json' });
   assert.equal(skillsSnapshot('/state'), '/state/skills');
@@ -117,15 +117,15 @@ test('a missing source or lock file keeps the snapshot as it is and names every 
 test('a skill missing from the lock or the source blocks only itself: the others update, it keeps its copy, or has none', async () => {
   const { root, source, env, lock } = await fixture('partial');
   const state = join(root, 'state');
-  await lock({ implement: 'implement-1', tdd: 'tdd-1', 'code-review': 'code-review-1' });
-  assert.deepEqual(await synced(state, env), { versions: { implement: 'implement-1', tdd: 'tdd-1', 'code-review': 'code-review-1' }, missing: ['grilling'] });
+  await lock({ implement: 'implement-1', tdd: 'tdd-1', 'code-review': 'code-review-1', prototype: 'prototype-1' });
+  assert.deepEqual(await synced(state, env), { versions: { implement: 'implement-1', tdd: 'tdd-1', 'code-review': 'code-review-1', prototype: 'prototype-1' }, missing: ['grilling'] });
   await assert.rejects(stat(join(skillsSnapshot(state), 'grilling')), { code: 'ENOENT' });
   await lock(allAt(1));
   await syncSkills(state, env);
   // implement gone from the source, though the lock lists a new hash; tdd gone from the lock; code-review updated.
   await rm(join(source, 'implement'), { recursive: true });
   await writeFile(join(source, 'code-review', 'SKILL.md'), 'review v2\n');
-  await lock({ implement: 'implement-2', 'code-review': 'code-review-2', grilling: 'grilling-1' });
+  await lock({ implement: 'implement-2', 'code-review': 'code-review-2', grilling: 'grilling-1', prototype: 'prototype-1' });
   assert.deepEqual(await synced(state, env), { versions: { ...allAt(1), 'code-review': 'code-review-2' }, missing: ['implement', 'tdd'] });
   // The next sync: implement's new hash with no folder in the source is still missing, and no new folder is built.
   const link = await readlink(skillsSnapshot(state));
@@ -148,7 +148,7 @@ test('a skill whose source folder is gone while its lock hash is unchanged is mi
   const records: unknown[] = [];
   await recordSkills(state, async (record) => void records.push(record), { env });
   assert.deepEqual(records, [{ type: 'skills', versions: allAt(1), missing: ['grilling'], folder: link, roles: DEFAULT_ROLES }]);
-  assert.match(skillsText(records[0] as SkillsEvent), /; missing in the source: grilling \(kept the copy\); by role: implementer implement, tdd, code-review, grilling; claude_review code-review; codex_gate code-review; task_check none; planner grilling\.$/);
+  assert.match(skillsText(records[0] as SkillsEvent), /; missing in the source: grilling \(kept the copy\); by role: implementer implement, tdd, code-review, grilling; claude_review code-review; codex_gate code-review; task_check none; planner grilling, prototype\.$/);
 });
 
 test('two syncs at once each build a complete folder; the link names one of them; a later one removes the folders a week old but the current one and the one it replaced', async () => {
@@ -186,7 +186,7 @@ test('recordSkills syncs and appends one skills event: the versions, the missing
   await recordSkills(join(state, 'other'), async (record) => void records.push(record), { env });
   assert.deepEqual(records, [
     { type: 'skills', versions: allAt(1), folder: await readlink(skillsSnapshot(state)), roles: DEFAULT_ROLES },
-    { type: 'skills', versions: { implement: 'implement-1', tdd: 'tdd-1', 'code-review': 'code-review-1' }, missing: ['grilling'], folder: await readlink(skillsSnapshot(join(state, 'other'))), roles: DEFAULT_ROLES },
+    { type: 'skills', versions: { implement: 'implement-1', tdd: 'tdd-1', 'code-review': 'code-review-1', prototype: 'prototype-1' }, missing: ['grilling'], folder: await readlink(skillsSnapshot(join(state, 'other'))), roles: DEFAULT_ROLES },
   ]);
   assert.match(String((records[0] as SkillsEvent).folder), /^skills\.d\/[\w-]+$/);
 });
@@ -209,8 +209,8 @@ test('a job start with skills missing in the source writes one warning line nami
     errorMock.mock.restore();
   }
   assert.deepEqual(lines, [
-    `warning: app/W-2: skills missing in ${source} or its lock file: implement, tdd, code-review, grilling; the snapshot keeps the copies it has`,
-    `warning: app/W-3: skills missing in ${source} or its lock file: implement, tdd, code-review, grilling; the snapshot keeps the copies it has`,
+    `warning: app/W-2: skills missing in ${source} or its lock file: implement, tdd, code-review, grilling, prototype; the snapshot keeps the copies it has`,
+    `warning: app/W-3: skills missing in ${source} or its lock file: implement, tdd, code-review, grilling, prototype; the snapshot keeps the copies it has`,
   ]);
   // The job's runner.log: the line of W-2, the only start with that log and something missing.
   assert.equal(await readFile(join(root, 'runner.log'), 'utf8'), `${lines[0]}\n`);
@@ -341,7 +341,7 @@ test('the union snapshot: a skill chosen by the Task check only is copied, one n
   await writeRoles(state, { implementer: [], claude_review: [], codex_gate: [], task_check: ['extra'], planner: [] });
   assert.deepEqual(await synced(state, env), { versions: { extra: 'extra-1' }, missing: [] });
   assert.deepEqual((await readdir(skillsSnapshot(state))).sort(), ['extra', 'versions.json']);
-  // Back to every default: the four are copied, extra (chosen by no role now) is left out of the new folder.
+  // Back to every default: the five are copied, extra (chosen by no role now) is left out of the new folder.
   await rm(join(state, 'skill-roles.json'));
   assert.deepEqual(await synced(state, env), { versions: allAt(1), missing: [] });
   assert.deepEqual((await readdir(skillsSnapshot(state))).sort(), [...AGENT_SKILLS, 'versions.json'].sort());
@@ -391,7 +391,7 @@ test('the roles change between two jobs\' syncs: each job records the pair its o
   }
   // The first job binds its own folder, with its own lists, after the swaps.
   const events = await jobEvents(state, 'app', 'P-1', first);
-  assert.deepEqual(await implementerSkills(state, events), AGENT_SKILLS.map((name) => join(state, first!.folder!, name)));
+  assert.deepEqual(await implementerSkills(state, events), DEFAULT_ROLES.implementer.map((name) => join(state, first!.folder!, name)));
 });
 
 test('a running job keeps the lists its start recorded after a change; a job started afterwards has the new ones, its Implementer only its own skills', async () => {
@@ -421,7 +421,7 @@ test('sf skills: the installed skills with source, updated and description, each
   await mkdir(state, { recursive: true });
   await writeRoles(state, { ...DEFAULT_ROLES, planner: ['grilling', 'gone'] });
   const view = await skillsView(state, env);
-  assert.deepEqual(view.skills.map((skill) => skill.name), ['code-review', 'extra', 'grilling', 'implement', 'tdd', 'unused']);
+  assert.deepEqual(view.skills.map((skill) => skill.name), ['code-review', 'extra', 'grilling', 'implement', 'prototype', 'tdd', 'unused']);
   assert.deepEqual(view.skills.find((skill) => skill.name === 'extra'), { name: 'extra', source: 'owner/extra', updated: '2026-11-10T08:00:00.000Z', description: 'The extra skill' });
   assert.deepEqual(view.missing, ['gone']);
   const lines = skillsLines(view);
@@ -441,7 +441,7 @@ test('sf skills: the installed skills with source, updated and description, each
   // A name the role has though it is not installed may go.
   assert.deepEqual((await switchSkill(state, 'planner', 'gone', false, env)).roles.planner, ['grilling']);
   await assert.rejects(switchSkill(state, 'reviewer', 'tdd', true, env), { code: 'unknown_role', message: /the roles are implementer, claude_review, codex_gate, task_check, planner/ });
-  await assert.rejects(switchSkill(state, 'planner', 'nope', true, env), { code: 'skill_not_installed', message: /Not an installed skill: nope; installed: code-review, extra, grilling, implement, tdd, unused/ });
+  await assert.rejects(switchSkill(state, 'planner', 'nope', true, env), { code: 'skill_not_installed', message: /Not an installed skill: nope; installed: code-review, extra, grilling, implement, prototype, tdd, unused/ });
   await assert.rejects(switchSkill(state, 'planner', 'nope', false, env), { code: 'skill_not_installed' });
   await assert.rejects(setRoleSkills(state, 'codex_gate', ['../agents'], env), { code: 'skill_not_installed' });
 });
@@ -461,18 +461,18 @@ test('sf skills: the coordinator column after the roles (on, -, the override), i
   assert.match(lines.find((line) => line.startsWith('grilling'))!, /^grilling +x +- +on +- +- +- +on +name-only$/);
   assert.equal(lines.at(-1), `coordinator: Claude Code's skillOverrides in ${settings}; it applies to the next Claude Code session there (or after /skills).`);
   const view = await switchSkill(state, 'coordinator', 'tdd', false, env);
-  assert.deepEqual(view.coordinator, { workspace: 'software-factory', checkout: repo, settings, skills: { 'code-review': 'on', grilling: 'name-only', implement: 'on', tdd: 'off' } });
+  assert.deepEqual(view.coordinator, { workspace: 'software-factory', checkout: repo, settings, skills: { 'code-review': 'on', grilling: 'name-only', implement: 'on', prototype: 'on', tdd: 'off' } });
   assert.match(skillsLines(view).find((line) => line.startsWith('tdd'))!, /^tdd +x +- +on +- +- +- +- +-$/);
   assert.deepEqual(JSON.parse(await readFile(settings, 'utf8')), { env: { A: '1' }, skillOverrides: { grilling: 'name-only', tdd: 'off' } });
   // The job roles' choice is not touched: no skill-roles.json, every role its default.
   await assert.rejects(stat(join(state, 'skill-roles.json')), { code: 'ENOENT' });
   assert.deepEqual(view.roles, DEFAULT_ROLES);
   // The list form (PUT): grilling stays name-only; tdd on again.
-  assert.deepEqual(((await setRoleSkills(state, 'coordinator', ['tdd', 'implement', 'code-review'], env)).coordinator as { skills: unknown }).skills, { 'code-review': 'on', grilling: 'name-only', implement: 'on', tdd: 'on' });
+  assert.deepEqual(((await setRoleSkills(state, 'coordinator', ['tdd', 'implement', 'code-review', 'prototype'], env)).coordinator as { skills: unknown }).skills, { 'code-review': 'on', grilling: 'name-only', implement: 'on', prototype: 'on', tdd: 'on' });
   assert.deepEqual(JSON.parse(await readFile(settings, 'utf8')), { env: { A: '1' }, skillOverrides: { grilling: 'name-only' } });
   await assert.rejects(switchSkill(state, 'coordinator', 'nope', true, env), { code: 'skill_not_installed' });
   // The dashboard's form: no absolute path.
-  assert.deepEqual(skillsForClients(view).coordinator, { workspace: 'software-factory', skills: { 'code-review': 'on', grilling: 'name-only', implement: 'on', tdd: 'off' } });
+  assert.deepEqual(skillsForClients(view).coordinator, { workspace: 'software-factory', skills: { 'code-review': 'on', grilling: 'name-only', implement: 'on', prototype: 'on', tdd: 'off' } });
 });
 
 test('a skill\'s SKILL.md for the API: an installed skill\'s text; a path, .. or a name not installed is refused before anything is read', async () => {

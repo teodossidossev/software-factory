@@ -16,7 +16,7 @@ lock check and the process checks read `/proc`). Other systems are not tested.
 | **Git identity** | `user.name` and `user.email` set | the one commit at Clean (else `mr_commit_failed`) | `git config user.email` |
 | **Git push access** | an SSH key or credential helper that can push to your repository's `origin` | Approve and the merge request actions; the factory runs `git push origin <branch>` with your own Git setup | `git push --dry-run` in your checkout |
 | **Claude Code and its login** | the Agent SDK pinned in `factory/package.json` (`@anthropic-ai/claude-agent-sdk`) brings its own Claude Code binary; install the `claude` CLI to log in | the Implementer, the Claude review, the Task check | `claude` starts and is logged in (`/login` once) |
-| **The agents' skills** | `implement`, `tdd`, `code-review` and `grilling`, installed with the `skills` tool | the Implementer's `/implement`, the reviewers' and the planning method (below) | `ls ~/.agents/skills ~/.agents/.skill-lock.json` |
+| **The agents' skills** | `implement`, `tdd`, `code-review`, `grilling` and `prototype`, installed with the `skills` tool | the Implementer's `/implement`, the reviewers' and the planning method (below) | `ls ~/.agents/skills ~/.agents/.skill-lock.json` |
 | **The sandbox's tools** | bubblewrap and socat (what Claude Code's sandbox needs on Linux) | every agent session (else `sandbox_unavailable`) | `bwrap --version`, `socat -V` |
 | **Codex CLI and its login** | a current Codex CLI (`codex exec` with `--output-schema`) signed in with your ChatGPT account (`codex login`); no API key | the Codex gate; without it the gate is off and the Claude review decides | `codex --version`, `codex login status` |
 | **GitHub or GitLab token** | optional | the factory opening and merging merge requests (`sf mr …`); not needed to push | [Configuration](configuration.md#push-and-merge-request-providers) |
@@ -28,11 +28,11 @@ lock check and the process checks read `/proc`). Other systems are not tested.
 
 The factory does not ship the skills it calls: it starts every job with
 `/implement .software-factory/<ticket>.md` (every fix round with `... Fix N`), its reviewers follow
-the `code-review` skill and planning the `grilling` skill. It takes them, exactly as installed,
-from `~/.agents/skills` (where the `skills` tool installs Matt Pocock's skills, with its lock file
-`~/.agents/.skill-lock.json`; `SF_SKILLS_DIR` names another folder): `implement`, `tdd`,
-`code-review` and `grilling`. At each job's start, and at `sf serve`'s, it checks the lock file's
-hashes and copies a changed skill verbatim into its snapshot under the state directory, which the
+the `code-review` skill and planning the `grilling` and `prototype` skills. It takes them, exactly
+as installed, from `~/.agents/skills` (where the `skills` tool installs Matt Pocock's skills, with
+its lock file `~/.agents/.skill-lock.json`; `SF_SKILLS_DIR` names another folder): `implement`,
+`tdd`, `code-review`, `grilling` and `prototype`. At each job's start, and at `sf serve`'s, it
+checks the lock file's hashes and copies a changed skill verbatim into its snapshot under the state directory, which the
 Implementer reads read-only; your personal `~/.claude/skills` stay hidden from it. A skill missing
 there: the job's page says so on its Skills line, and the agent runs without it.
 

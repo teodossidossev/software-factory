@@ -338,11 +338,11 @@ started by the run queue as before.
 
 - **The instructions** (SF-191): the server's `instructions` are the handbook's `## Quick start`
   followed by a `## Planning method` section: two lines (plan every ticket by the method below, the
-  user's grilling skill; no sub-agents, so look facts up with `read_file`, `search` and
-  `read_attachment` and ask only what only the user can decide; the plan is done when the user
-  confirms, then write the Task file), then the bodies of the skills snapshot's `SKILL.md` of each
-  skill of the `planner` role (by default `grilling`; the user's installed skills, copied verbatim;
-  section The agents' skills), in the role's order and without their front matter, read at `sf
+  skills the user chose for the planner; no sub-agents, so look facts up with `read_file`,
+  `search` and `read_attachment` and ask only what only the user can decide; the plan is done
+  when the user confirms, then write the Task file), then the bodies of the skills snapshot's
+  `SKILL.md` of each skill of the `planner` role (by default `grilling`, then `prototype`; the
+  user's installed skills, copied verbatim; section The agents' skills), in the role's order and without their front matter, read at `sf
   serve`'s start right after its sync of the snapshot and again before an MCP request once
   `skill-roles.json` changed, so a later update of a skill reaches planning at the next start.
   `guide` returns the whole handbook ending with the same section. `SF_PLAN_SKILL` names another
@@ -487,8 +487,8 @@ rules. It runs again at any time and refreshes the copy in place. The steps, in 
    `~/.claude/settings.json` still apply. Claude Code's bundled skills and your plugins' skills
    stay, and a skill of your Claude Code skills folder with a `planner` skill's name, or named
    `planning-tasks`, is the one Claude Code runs (personal over project). The output names the
-   skills installed (`Skills planning-tasks, grilling: installed in .claude/skills`) and how many
-   were switched off. `.claude/planning-copy.md` ends with the product vision: the folder
+   skills installed (`Skills planning-tasks, grilling, prototype: installed in .claude/skills`)
+   and how many were switched off. `.claude/planning-copy.md` ends with the product vision: the folder
    `<state dir>/vision/<workspace>/en` (section Vision), its `VISION.md` first, to read with the
    Read tool, when the store holds the workspace's English vision; else the line that none is
    stored. The setup reads the store at each run: after the first `sf vision put`, run it again.
@@ -608,7 +608,7 @@ environment and folders.
 | `SF_DASHBOARD_REMOTE_LOGINS` | none | Comma-separated Tailscale logins (`Tailscale-User-Login`, compared ignoring case) that may use the remote port; required with remote origins (`invalid_config` at start when missing or empty). |
 | `SF_CONFIG_DIR` | `${XDG_CONFIG_HOME:-~/.config}/software-factory` | Directory of the workspace registry, the default `auth.env` and the `rules/` files. |
 | `SF_HANDBOOK` | `factory/HANDBOOK.md` | Handbook served as instructions (its `## Quick start` section) and by `guide`. |
-| `SF_PLAN_SKILL` | the `planner` role's skills in the skills snapshot (`<state dir>/skills/grilling/SKILL.md` by default) | The planning skill whose body (without front matter) ends the instructions and `guide` as `## Planning method` (section MCP endpoint); set, it wins over the `planner` role's choice; empty: none. A missing file: the Quick start alone, and one warning at start. |
+| `SF_PLAN_SKILL` | the `planner` role's skills in the skills snapshot (`<state dir>/skills/grilling/SKILL.md`, then `<state dir>/skills/prototype/SKILL.md`, by default) | The planning skill whose body (without front matter) ends the instructions and `guide` as `## Planning method` (section MCP endpoint); set, it wins over the `planner` role's choice; empty: none. A missing file: the Quick start alone, and one warning at start. |
 | `SF_STATE_DIR` | `${XDG_STATE_HOME:-~/.local/state}/software-factory` | Job state and the `sf.sock` socket. |
 | `SF_WORKTREE_ROOT` | `${SF_STATE_DIR}/worktrees` | Where every job's worktree is created: `<root>/<workspace>/<ticket>`; absolute. |
 | `SF_PLANNING_DIR` | `~/planning` | Where `sf planner setup` keeps each workspace's planning copy: `<dir>/<workspace>`; absolute. |
@@ -2701,11 +2701,15 @@ skill"). It is no role's skill, and the snapshot does not hold it.
   `task_check` and `planner` (the planner, ChatGPT or Claude Code: the planning method of the MCP
   server's instructions, and the skills of a planning copy). Without a choice each
   has today's set: `implementer` `implement`, `tdd`, `code-review` and `grilling`;
-  `claude_review` and `codex_gate` `code-review`; `task_check` none; `planner` `grilling`.
+  `claude_review` and `codex_gate` `code-review`; `task_check` none; `planner` `grilling` and
+  `prototype`.
 - **The choice**: `<state dir>/skill-roles.json`, `{ "version": 1, "roles": { <role>: [<skill
   name>, ...] } }`, one choice shared by all workspaces, written atomically with mode 0600. A role missing
   from the file has its default; a role with `[]` has none, `implement` and `code-review` included
   (a role without skills works as it did before skills: no review method, the Quick start alone).
+  Every change, through `sf skills set` or the Skills page, writes every role's list, so a file
+  saved before a default changed keeps the old list for that role: switch the new skill on
+  yourself (`sf skills set planner prototype on`, or its box in the Planner column).
   A name not installed stays in the file and is reported missing; only names of a skill folder's
   form (`^[a-z0-9][a-z0-9._-]*$`) are read. A file that is not JSON counts as missing, with a
   warning line.

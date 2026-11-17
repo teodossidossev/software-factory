@@ -39,6 +39,7 @@ bin/sf mcp-url [--header|--rotate|--port]   # the MCP URL with its token (sectio
 bin/sf planner setup <workspace>   # the workspace's planning copy for Claude Code (section MCP endpoint, The planning copy): cloned or fast-forwarded, the MCP server for that folder, the planning skill, .claude/planning-copy.md
 bin/sf planner start <workspace> <ticket>   # the ticket's planner session (section MCP endpoint, The planner session): Claude Code with Remote Control in the planning copy, one per ticket; again while it runs: since when and its link; its tools need sf serve
 bin/sf planner stop <workspace> <ticket>    # end the ticket's planner session
+bin/sf planner trust <workspace>            # once per planning copy: Claude Code opens there, in this terminal, for you to accept its trust dialog (section MCP endpoint, The planner session)
 bin/sf planner waiting <workspace> [permission]   # the planning copy's Stop and Notification hook (section Notifications): tells you that the planner waits for you; always exits 0
 bin/sf dashboard [--open] [--rotate]  # the dashboard URL of the last sf serve start; --open opens it with xdg-open; --rotate removes the token so the next sf serve makes a new one; works without sf serve
 bin/sf check-task <workspace> <ticket>  # the Task check (section Task check): paraphrase, findings by severity, verdict; stored by sha; works without sf serve
@@ -502,9 +503,10 @@ rules. It runs again at any time and refreshes the copy in place. The steps, in 
    as `<token>`.
 9. **The output.** The warnings and notes of step 3, then the copy's path with its base branch and
    short commit, the MCP registration, the skill, the pointers file, the settings, the hooks, and
-   what to do next: open Claude Code in the copy once (`cd <copy> && claude`) and accept its folder trust dialog, then
+   what to do next: let Claude Code trust the copy once, accepting its folder trust dialog, then
    `/planning-tasks workspace <workspace>, ticket <ticket>`. The factory never accepts that dialog
-   for you.
+   for you. `sf planner trust <workspace>` opens Claude Code there for it; the last lines name that
+   command, or say `Trust: Claude Code trusts this folder already`.
 
 Every error and warning names paths as `<copy>`, `<planning folder>`, `<checkout>`, `<origin>`,
 `<factory>` (the factory's package folder, where the skill is copied from) or `~`, never an
@@ -528,8 +530,9 @@ set `sf planner setup` leaves out (a tracked file under a `.claude/` folder at a
 naming the first path; the copy trusted, its own entry in `projects` of Claude Code's global config
 (`$CLAUDE_CONFIG_DIR/.claude.json`, else `~/.claude.json`), by its path or its real path, with
 `hasTrustDialogAccepted: true` (a trusted parent folder does not count): `planning_copy_untrusted`.
-The factory reads that file and never writes it: you accept the trust dialog yourself, once (the
-Next line of `sf planner setup`). Start never refreshes the copy; `sf planner setup` does.
+The factory reads that file and never writes it: you accept the trust dialog yourself, once
+(`sf planner trust`, below; the refusal names it). Start never refreshes the copy; `sf planner
+setup` does.
 
 **The session** is `script -qfec '<command>' /dev/null`, run in the copy: a terminal of its own for
 Claude Code, whose input is an open FIFO that nothing writes (an input that ends would reach Claude
@@ -577,6 +580,17 @@ claude.ai, and `sf serve` for the planning tools. Its error codes: `planner_star
 (mkfifo failed or could not run, `script` could not run, its record could not be written, which
 ends the session at once, or the session ended within 3 s), and
 `invalid_name`, `invalid_ticket` and `workspace_not_found` as elsewhere.
+
+`sf planner trust <workspace>` is the one-time step before the first start: it checks the copy as
+start does (set up, none of the repository's Claude Code configuration), then runs `claude` in the
+copy in your terminal, without the factory's tokens and settings, and waits until you leave it.
+Accept the trust dialog, then `/exit`. The factory never accepts the dialog for you: it only reads
+Claude Code's answer, `hasTrustDialogAccepted` of the copy in Claude Code's global config, before (a
+trusted copy opens nothing) and after (still not trusted: `planning_copy_untrusted`). Ctrl+C goes to
+Claude Code while it runs. `sf planner start` refuses an untrusted copy with a message that names
+this command. Its error codes: `planning_copy_missing` and `planning_copy_unsafe` as start's,
+`claude_not_found` (no `claude` on `PATH`), `planner_trust_failed` (`claude` could not start), and
+`planning_copy_untrusted`.
 
 ## Environment
 
@@ -4110,11 +4124,12 @@ again"; `Priority: default`, `Tags: warning`. Its workspace's `notify` setting a
 brief body is "<workspace> · fetch_failed").
 
 A planner session in a planning copy (SF-245, section The planning copy) that waits for you is
-notified by the copy's hooks, `sf planner waiting <workspace> [permission]`: "Planner waits for you"
-when it ends a turn, "Planner waits for a permission" when it stops at a permission prompt;
-`Priority: high`, `Tags: speech_balloon`, the body the workspace's name only (no ticket, no text of
-the session). With Remote Control on, the session's page `https://claude.ai/code/<id>` goes to ntfy
-as its `Click` header, so a tap opens the session (an id of letters, digits, `_` and `-`, at most
+notified by the copy's hooks, `sf planner waiting <workspace> [permission]`. When it ends a turn, the
+title is "`<ticket>: planner waits for you`" for a session that `sf planner start` started, "Planner
+waits for you" for one you opened by hand; when it stops at a permission prompt, "`<ticket>: planner
+waits for a permission`" or "Planner waits for a permission". `Priority: high`,
+`Tags: speech_balloon`, the body the workspace's name only (no text of the session). With Remote
+Control on, the session's page `https://claude.ai/code/<id>` goes to ntfy as its `Click` header, so a tap opens the session (an id of letters, digits, `_` and `-`, at most
 128, else no link). A finished turn stays silent while the planner's own sub-agents or crons run
 (the Stop event's `background_tasks` or `session_crons` not empty), and when your last own message
 in the session's transcript is younger than 45 seconds (a quick answer in a live exchange); a

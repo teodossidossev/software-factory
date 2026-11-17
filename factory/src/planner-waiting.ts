@@ -3,11 +3,13 @@
 // notifications that the planner waits for them. A Stop stays silent while the planner's own
 // sub-agents or crons run, and when the user's last message is younger than QUICK_SECONDS (a quick
 // answer in a live exchange); a permission prompt is always notified. The notification names the
-// workspace only, with the session's page as its link, as the workspace's notify setting has it.
-// A hook never fails the session: every failure is one line on stderr, never a rejection.
+// workspace, and in its title the ticket of a session sf planner start started (SF_PLANNER_TICKET,
+// when it is a ticket key), with the session's page as its link, as the workspace's notify setting
+// has it. A hook never fails the session: every failure is one line on stderr, never a rejection.
 import { open } from 'node:fs/promises';
 import { notifyConfig, plannerNotification, sendNotification, withNotifyMode } from './notify.js';
 import { workspaceNotifyMode } from './registry.js';
+import { TICKET_PATTERN } from './task-file.js';
 
 export const QUICK_SECONDS = 45;
 // The transcript's tail searched for the user's last message.
@@ -112,7 +114,10 @@ export async function plannerWaiting(
       }
     }
     const mode = await workspaceNotifyMode(name, deps.configDir);
-    const notification = withNotifyMode(plannerNotification(name, permission, deps.env.CLAUDE_CODE_BRIDGE_SESSION_ID), mode, name);
+    const ticket = deps.env.SF_PLANNER_TICKET;
+    const notification = withNotifyMode(
+      plannerNotification(name, permission, deps.env.CLAUDE_CODE_BRIDGE_SESSION_ID, ticket !== undefined && TICKET_PATTERN.test(ticket) ? ticket : undefined),
+      mode, name);
     if (notification === undefined) {
       return;
     }

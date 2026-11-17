@@ -1,6 +1,6 @@
 // The planner session of a ticket: sf planner start|stop <workspace> <ticket> and the calls behind
-// them. Claude Code with Remote Control runs in the workspace's planning copy, in a terminal of its
-// own (script), detached so that it outlives its starter and a restart of sf serve; one runs per
+// them, and sf planner trust <workspace>, the copy's one-time trust dialog. Claude Code with
+// Remote Control runs in the workspace's planning copy, in a terminal of its own (script), detached so that it outlives its starter and a restart of sf serve; one runs per
 // ticket, recorded in <state dir>/planner/<workspace>/<ticket>.json; its claude.ai link is recorded
 // by the copy's hook (sf planner waiting) when the session first waits for the user.
 // Start takes the ticket's lock and answers with the session that runs, if any; else it checks, in
@@ -15,7 +15,7 @@ import { lstat, readFile, realpath, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { writeFileAtomic } from './atomic.js';
-import { checkJob, UsageError } from './commands.js';
+import { checkJob, checkName, UsageError } from './commands.js';
 import { planningDir } from './config.js';
 import { FactoryError } from './errors.js';
 import { localTime } from './local-time.js';
@@ -78,10 +78,10 @@ function commandLine(workspace: string, ticket: string): string {
   return `exec claude --remote-control ${word(sessionName(workspace, ticket))} ${word(`/planning-tasks workspace ${workspace}, ticket ${ticket}`)}`;
 }
 
-// The session's environment: sessionEnvironment's without the Anthropic, Claude Code and cloud
-// variables (CLAUDE_CONFIG_DIR kept), the directory settings the hook needs to find this factory's
-// state, a fixed TERM (the terminal is script's) and the hook's two markers.
-function plannerEnvironment(env: NodeJS.ProcessEnv, ticket: string, id: string): Record<string, string> {
+// The environment of any Claude Code the planner commands open in the copy: sessionEnvironment's
+// without the Anthropic, Claude Code and cloud variables (CLAUDE_CONFIG_DIR kept), and the
+// directory settings the hook needs to find this factory's state.
+function baseEnvironment(env: NodeJS.ProcessEnv): Record<string, string> {
   const result: Record<string, string> = {};
   for (const [name, value] of Object.entries(sessionEnvironment(env))) {
     if (name === 'CLAUDE_CONFIG_DIR' || !LEFT_OUT.test(name)) {
@@ -94,7 +94,13 @@ function plannerEnvironment(env: NodeJS.ProcessEnv, ticket: string, id: string):
       result[name] = value;
     }
   }
-  return { ...result, TERM: 'xterm-256color', SF_PLANNER_TICKET: ticket, SF_PLANNER_ID: id };
+  return result;
+}
+
+// The session's environment: the base environment, a fixed TERM (the terminal is script's) and the
+// hook's two markers.
+function plannerEnvironment(env: NodeJS.ProcessEnv, ticket: string, id: string): Record<string, string> {
+  return { ...baseEnvironment(env), TERM: 'xterm-256color', SF_PLANNER_TICKET: ticket, SF_PLANNER_ID: id };
 }
 
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -213,23 +219,62 @@ export async function startPlanner(workspace: string, ticket: string, deps: Sess
     if (running !== undefined) {
       return { started: false, session: running };
     }
-    await resolveWorkspace(w, deps.configDir);
-    const copy = join(planningDir(deps.env), w);
-    const pointers = await lstat(join(copy, '.claude', 'planning-copy.md')).catch(() => undefined);
-    if (pointers === undefined || !pointers.isFile()) {
-      throw new FactoryError('planning_copy_missing', `The planning copy of ${w} is not set up: run sf planner setup ${w} first.`);
-    }
-    const config = await repositoryConfigIn(copy);
-    if (config.length > 0) {
-      throw new FactoryError('planning_copy_unsafe', `${config[0]} is in the planning copy of ${w}, and Claude Code would load it: remove it, run sf planner setup ${w}, then start the planner again.`);
-    }
+    const copy = await safeCopy(w, deps, 'start the planner again');
     if (!(await copyTrusted(copy, deps.env))) {
-      throw new FactoryError('planning_copy_untrusted', `Claude Code does not trust the planning copy of ${w} yet: open Claude Code there once and accept its trust dialog (the Next line of sf planner setup ${w} says how), then start the planner again.`);
+      throw new FactoryError('planning_copy_untrusted', `Claude Code does not trust the planning copy of ${w} yet: run sf planner trust ${w}, accept its trust dialog, then start the planner again.`);
     }
     return { started: true, session: await launch(w, t, copy, file, deps.env) };
   } finally {
     await taken.held.release();
   }
+}
+
+// The workspace's planning copy, once the workspace is known, the copy set up and none of the
+// repository's Claude Code configuration in its working tree. retry ends the unsafe message: what
+// the user runs once the configuration is removed and the copy set up again.
+async function safeCopy(w: string, deps: SessionDeps, retry: string): Promise<string> {
+  await resolveWorkspace(w, deps.configDir);
+  const copy = join(planningDir(deps.env), w);
+  const pointers = await lstat(join(copy, '.claude', 'planning-copy.md')).catch(() => undefined);
+  if (pointers === undefined || !pointers.isFile()) {
+    throw new FactoryError('planning_copy_missing', `The planning copy of ${w} is not set up: run sf planner setup ${w} first.`);
+  }
+  const config = await repositoryConfigIn(copy);
+  if (config.length > 0) {
+    throw new FactoryError('planning_copy_unsafe', `${config[0]} is in the planning copy of ${w}, and Claude Code would load it: remove it, run sf planner setup ${w}, then ${retry}.`);
+  }
+  return copy;
+}
+
+// sf planner trust <workspace>: Claude Code in the workspace's planning copy, in this terminal,
+// for the user to accept its trust dialog once; the factory only reads the answer, before (a
+// trusted copy opens nothing) and after Claude Code ended. Ctrl+C goes to Claude Code while it runs.
+// Nothing is written.
+export async function trustPlanner(workspace: string, deps: SessionDeps & { print: (line: string) => void }): Promise<void> {
+  const w = checkName(workspace);
+  const copy = await safeCopy(w, deps, `sf planner trust ${w}`);
+  if (await copyTrusted(copy, deps.env)) {
+    deps.print(`Claude Code trusts the planning copy of ${w} already.`);
+    return;
+  }
+  deps.print(`Claude Code opens in the planning copy of ${w}: accept its trust dialog, then leave it with /exit.`);
+  const ignore = (): void => undefined;
+  process.on('SIGINT', ignore);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn('claude', [], { cwd: copy, env: baseEnvironment(deps.env), stdio: 'inherit' });
+      child.once('exit', () => resolve());
+      child.once('error', (error: NodeJS.ErrnoException) => reject(error.code === 'ENOENT'
+        ? new FactoryError('claude_not_found', `Claude Code (claude) is not on PATH: install it, then run sf planner trust ${w} again.`)
+        : new FactoryError('planner_trust_failed', `Claude Code could not start in the planning copy of ${w} (${error.code}).`)));
+    });
+  } finally {
+    process.off('SIGINT', ignore);
+  }
+  if (!(await copyTrusted(copy, deps.env))) {
+    throw new FactoryError('planning_copy_untrusted', `Claude Code still does not trust the planning copy of ${w}: its trust dialog was not accepted. Run sf planner trust ${w} again.`);
+  }
+  deps.print(`Claude Code trusts the planning copy of ${w} now: start its planner with sf planner start ${w} <ticket>.`);
 }
 
 // The session's input: a FIFO beside the record, opened for reading and writing (the open never
@@ -422,11 +467,15 @@ export async function recordLink(workspace: string, deps: { env: NodeJS.ProcessE
   }
 }
 
-// sf planner start|stop <workspace> <ticket>.
+// sf planner start|stop <workspace> <ticket>, sf planner trust <workspace>.
 export async function plannerSessionCommand(args: string[], deps: SessionDeps & { print: (line: string) => void }): Promise<void> {
   const [verb, workspace, ticket] = args;
+  if (verb === 'trust' && args.length === 2 && workspace !== undefined) {
+    await trustPlanner(workspace, deps);
+    return;
+  }
   if (args.length !== 3 || (verb !== 'start' && verb !== 'stop') || workspace === undefined || ticket === undefined) {
-    throw new UsageError('planner start and planner stop need <workspace> <ticket>.');
+    throw new UsageError('planner start and planner stop need <workspace> <ticket>; planner trust needs <workspace>.');
   }
   if (verb === 'stop') {
     const stopped = await stopPlanner(workspace, ticket, deps);

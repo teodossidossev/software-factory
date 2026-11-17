@@ -1,12 +1,13 @@
 // Unit tests of sf planner waiting (SF-245), the planning copy's hook: when a Stop stays silent, how
-// the user's last message is found in the transcript, and the one notification it sends.
+// the user's last message is found in the transcript, and the one notification it sends, its title
+// with the ticket of a session sf planner start started.
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { after, before, test } from 'node:test';
-import type { ChannelResult, Notification, NotifyConfig } from '../src/notify.js';
+import { type ChannelResult, type Notification, type NotifyConfig, plannerNotification } from '../src/notify.js';
 import { lastPromptAge, plannerWaiting, QUICK_SECONDS, silence } from '../src/planner-waiting.js';
 import { type NotifyMode, saveRegistry } from '../src/registry.js';
 
@@ -168,6 +169,27 @@ test("PW-3: the workspace's notify setting: off sends nothing, brief sends the w
   assert.deepEqual((await withMode('full')).map((notification) => [notification.title, notification.ntfyBody]), [
     ['Planner waits for you', undefined], ['Planner waits for a permission', undefined],
   ]);
+});
+
+test('TR-7: a session sf planner start started has its ticket first in the title; the body stays the workspace', async () => {
+  const titled = async (ticket: string, configDir?: string): Promise<Notification[]> => {
+    const asked = run({}, { env: { CLAUDE_CODE_BRIDGE_SESSION_ID: SESSION, SF_PLANNER_TICKET: ticket }, configDir });
+    await plannerWaiting('app', true, asked.deps);
+    return asked.sent.map(({ notification }) => notification);
+  };
+  assert.deepEqual((await titled('APP-12')).map((notification) => [notification.title, notification.body, notification.click]), [
+    ['APP-12: planner waits for a permission', 'app', `https://claude.ai/code/${SESSION}`],
+  ]);
+  // A value that is not a ticket key: the title without one.
+  assert.deepEqual((await titled('not a key')).map((notification) => notification.title), ['Planner waits for a permission']);
+  // A brief workspace: the title with the ticket, its brief body the workspace.
+  const configDir = join(temp, 'config-ticket');
+  await saveRegistry({ workspaces: { app: { read_checkout: temp, notify: 'brief' } } }, configDir);
+  assert.deepEqual((await titled('APP-12', configDir)).map((notification) => [notification.title, notification.ntfyBody]), [['APP-12: planner waits for a permission', 'app']]);
+
+  // The Stop title, from the pure call.
+  const stop = plannerNotification('app', false, undefined, 'APP-12');
+  assert.deepEqual([stop.title, stop.body, 'click' in stop], ['APP-12: planner waits for you', 'app', false]);
 });
 
 test('PW-5: invalid stdin is an event with no fields, a failed channel and a failed send are one stderr line each, never a rejection', async () => {

@@ -193,13 +193,17 @@ test('setup client (SF-103): the card shows the app, the description and the dig
   const page = await openPage([], [], []);
   const stream = page.streams.at(-1)!;
   stream.emit('workspaces', {
-    workspaces: [row103('api', { app: 'shop', description: 'The shop backend.', digest: { track: true, my_work: false } }), row103('web', { app: 'shop' }), row103('tools')],
+    workspaces: [row103('api', { app: 'shop', description: 'The shop backend.', label: 'exp', digest: { track: true, my_work: false } }), row103('web', { app: 'shop' }), row103('tools')],
     handoff_default: 'off', digest: { times: ['07:45'], weekdays_only: false, language: 'Deutsch' },
   });
   await page.flush();
   const [api, web, tools] = items(page, 'workspace-list');
   assert.equal(api!.querySelector('.ws-app')!.textContent, 'shop');
   assert.equal(api!.querySelector('.ws-description')!.textContent, 'The shop backend.');
+  // The label, under the description, only for a workspace that has one.
+  assert.equal(api!.querySelector('.ws-label')!.textContent, 'Label on its cards: exp');
+  assert.equal(web!.querySelector('.ws-label'), null);
+  assert.equal(tools!.querySelector('.ws-label'), null);
   assert.equal(api!.querySelector('.ws-digest')!.textContent, 'Morning digest: on · My daily: off');
   assert.equal(web!.querySelector('.ws-description')!.textContent, 'The web from its README. (from the repository)');
   assert.equal(tools!.querySelector('.ws-app'), null);
@@ -225,7 +229,7 @@ test('setup client (SF-103): the card shows the app, the description and the dig
 test('setup client (SF-103): Edit opens the card as a form with every field, Save posts them all once, Cancel changes nothing; a refusal stays in the form', async () => {
   const page = await openPage([], [], []);
   const stream = page.streams.at(-1)!;
-  const rows = [row103('api', { app: 'shop', description: 'The shop backend.', handoff: 'off', color: 'red', digest: { track: true, my_work: false } }), row103('web', { color: 'purple' })];
+  const rows = [row103('api', { app: 'shop', description: 'The shop backend.', handoff: 'off', color: 'red', label: 'exp', digest: { track: true, my_work: false } }), row103('web', { color: 'purple' })];
   stream.emit('workspaces', { workspaces: rows, handoff_default: 'checkout', digest: { times: ['08:00'], weekdays_only: true, language: 'English' } });
   await page.flush();
   named(items(page, 'workspace-list')[0]!, 'Edit').click();
@@ -235,8 +239,11 @@ test('setup client (SF-103): Edit opens the card as a form with every field, Sav
   assert.deepEqual([field('path').value, field('description').value, (field('description') as unknown as Record<string, unknown>).placeholder, field('app').value, field('handoff').value, field('color').value, field('track').checked, field('my_work').checked],
     ['/srv/api', 'The shop backend.', 'The api from its README.', 'shop', 'off', 'red', true, false]);
   assert.equal((field('handoff').children[0] as FakeElement).textContent, 'Default (now: yes, from SF_HANDOFF)');
+  // The Label field: the row's label, the name as its placeholder, at most 24 characters.
+  const label = field('label') as unknown as Record<string, unknown>;
+  assert.deepEqual([label.value, label.placeholder, label.maxLength, label.type], ['exp', 'api', 24, 'text']);
   // Labels in plain words, each with its own line.
-  assert.match(form().textContent, /Path of the local checkout[\s\S]*Description[\s\S]*App[\s\S]*When a job is ready, hand it over to my checkout[\s\S]*Colour of its cards on the board[\s\S]*Morning digest: follow this repository[\s\S]*My daily: my commits here go into the daily of its app/);
+  assert.match(form().textContent, /Path of the local checkout[\s\S]*Description[\s\S]*App[\s\S]*When a job is ready, hand it over to my checkout[\s\S]*Colour of its cards on the board[\s\S]*Label on its cards[\s\S]*Morning digest: follow this repository[\s\S]*My daily: my commits here go into the daily of its app/);
   // The other card's Edit is off while one is open; a redraw keeps what is typed.
   assert.equal(named(items(page, 'workspace-list')[1]!, 'Edit').disabled, true);
   field('description').value = '';
@@ -261,7 +268,7 @@ test('setup client (SF-103): Edit opens the card as a form with every field, Sav
   await page.flush();
   assert.equal(posts(page).length, 1);
   assert.equal(posts(page)[0]!.path, 'api/workspaces/api/edit');
-  assert.deepEqual(JSON.parse(posts(page)[0]!.body!), { path: '/srv/api2', description: '', app: 'shop', handoff: 'default', color: 'auto', digest: { track: true, my_work: true } });
+  assert.deepEqual(JSON.parse(posts(page)[0]!.body!), { path: '/srv/api2', description: '', app: 'shop', handoff: 'default', color: 'auto', label: 'exp', digest: { track: true, my_work: true } });
   posts(page)[0]!.respond(409, { ok: false, error: { code: 'workspace_busy', message: 'workspace "api" has a live job (A-1 working).' } });
   await page.flush();
   assert.equal(field('status').textContent, 'workspace_busy: workspace "api" has a live job (A-1 working).');
@@ -275,6 +282,9 @@ test('setup client (SF-103): Edit opens the card as a form with every field, Sav
   // A colour that is the one its name picks shows as Automatic.
   named(items(page, 'workspace-list')[1]!, 'Edit').click();
   assert.equal(items(page, 'workspace-list')[1]!.querySelector('[data-wsf="color"]')!.value, 'auto');
+  // A row without a label: an empty Label field, the name as its placeholder.
+  const empty = items(page, 'workspace-list')[1]!.querySelector('[data-wsf="label"]') as unknown as Record<string, unknown>;
+  assert.deepEqual([empty.value, empty.placeholder], ['', 'web']);
 });
 
 test('setup client (SF-103): the Morning digest section saves the times, weekdays only and the language; typed values stay over a redraw', async () => {

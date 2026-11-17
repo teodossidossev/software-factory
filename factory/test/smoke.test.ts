@@ -276,6 +276,55 @@ test('sf workspace notify (SF-215) sets and changes a workspace\'s notify settin
   assert.equal((await runCli(['workspace', 'remove', 'loud'])).code, 0);
 });
 
+test('sf workspace add --label sets, changes and removes a workspace\'s label; list shows it after the colour; a label that is not one line of at most 24 characters is refused', async () => {
+  const file = join(configDir, 'workspaces.json');
+  const entry = async (): Promise<unknown> => JSON.parse(await readFile(file, 'utf8')).workspaces['app-frontend-second'];
+  const listed = async (): Promise<string> => (await runCli(['workspace', 'list'])).stdout;
+
+  // WL-1: trimmed, stored and printed.
+  const added = await runCli(['workspace', 'add', 'app-frontend-second', '--read', repo, '--label', ' second ']);
+  assert.equal(added.code, 0, added.stderr);
+  assert.match(added.stdout, /^Registered workspace "app-frontend-second" \(checkout: .*; hand-over: .*; colour: .*; label: second\)\.$/m);
+  assert.deepEqual(await entry(), { read_checkout: repo, label: 'second' });
+
+  // WL-2: --label alone changes it and keeps the rest; --label "" removes it.
+  assert.equal((await runCli(['workspace', 'add', 'app-frontend-second', '--read', repo, '--color', 'teal', '--handoff', 'off'])).code, 0);
+  const again = await runCli(['workspace', 'add', 'app-frontend-second', '--read', repo]);
+  assert.equal(again.code, 1);
+  assert.match(again.stderr, /give the same --read with --handoff, --color or --label to change those\./);
+  const changed = await runCli(['workspace', 'add', 'app-frontend-second', '--read', repo, '--label', 'exp']);
+  assert.equal(changed.code, 0, changed.stderr);
+  assert.match(changed.stdout, /^Updated workspace "app-frontend-second" \(checkout: .*; hand-over: off \(this workspace\); colour: teal; label: exp\)\.$/m);
+  assert.deepEqual(await entry(), { read_checkout: repo, handoff: 'off', color: 'teal', label: 'exp' });
+
+  // WL-4: the label line right after the colour line, for that workspace only.
+  const list = await listed();
+  assert.match(list, /^app-frontend-second\n {2}checkout: .*\n {2}hand-over: off \(this workspace\)\n {2}colour: teal\n {2}label: exp$/m);
+  assert.equal(list.match(/^ {2}label: /gm)?.length, 1);
+
+  // WL-3: 25 characters or a line break, also a lone one or a tab between spaces: refused, nothing
+  // written (the label stays).
+  const before = await readFile(file, 'utf8');
+  for (const label of ['x'.repeat(25), 'two\nlines', '\n', ' \t ']) {
+    const refused = await runCli(['workspace', 'add', 'app-frontend-second', '--read', repo, '--label', label]);
+    assert.equal(refused.code, 1);
+    assert.match(refused.stderr, /The label must be one line of at most 24 characters\./);
+    assert.equal(await readFile(file, 'utf8'), before);
+  }
+  const fresh = await runCli(['workspace', 'add', 'too-long', '--read', repo, '--label', 'x'.repeat(25)]);
+  assert.equal(fresh.code, 1);
+  assert.equal(await readFile(file, 'utf8'), before);
+
+  // WL-2: --label "" removes the key; the message and the list say nothing of a label.
+  const removed = await runCli(['workspace', 'add', 'app-frontend-second', '--read', repo, '--label', '']);
+  assert.equal(removed.code, 0, removed.stderr);
+  assert.doesNotMatch(removed.stdout, /; label:/);
+  assert.match(removed.stdout, /colour: teal\)\.$/m);
+  assert.deepEqual(await entry(), { read_checkout: repo, handoff: 'off', color: 'teal' });
+  assert.doesNotMatch(await listed(), /label:/);
+  assert.equal((await runCli(['workspace', 'remove', 'app-frontend-second'])).code, 0);
+});
+
 test('sf serve on a fresh state directory syncs the skills and gives the Quick start and the Planning method as instructions and the planning and execution tools', async () => {
   const state = join(temp, 'fresh-state');
   const served = await serve({ SF_STATE_DIR: state });

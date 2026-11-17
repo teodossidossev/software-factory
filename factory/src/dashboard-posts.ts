@@ -42,12 +42,13 @@ const BODIES = {
       description: z.string().optional(), app: z.string().optional(), digest: z.strictObject({ track: z.boolean(), my_work: z.boolean() }).optional(),
     }),
   },
-  // Edit of a workspace: every field of the form; "" removes description and app,
-  // "default" the handoff, "auto" the color.
+  // Edit of a workspace: every field of the form; "" removes description, app and label,
+  // "default" the handoff, "auto" the color; an absent label keeps the label.
   'workspace-edit': {
-    shape: `{"path": string, "description": string, "app": string, "handoff": "default" | "checkout" | "off", "color": "auto" | ${WORKSPACE_COLORS.map((color) => `"${color}"`).join(' | ')}, "digest": {"track": boolean, "my_work": boolean}}`,
+    shape: `{"path": string, "description": string, "app": string, "handoff": "default" | "checkout" | "off", "color": "auto" | ${WORKSPACE_COLORS.map((color) => `"${color}"`).join(' | ')}, "label"?: string, "digest": {"track": boolean, "my_work": boolean}}`,
     schema: z.strictObject({
       path: z.string(), description: z.string(), app: z.string(), handoff: z.enum(['default', ...HANDOFF_MODES]), color: z.enum(['auto', ...WORKSPACE_COLORS]),
+      label: z.string().optional(),
       digest: z.strictObject({ track: z.boolean(), my_work: z.boolean() }),
     }),
   },

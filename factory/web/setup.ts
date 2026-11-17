@@ -145,6 +145,9 @@ function renderWorkspaces(): void {
     } else if (typeof row.derived_description === 'string' && row.derived_description !== '') {
       item.append(el('div', 'ws-description hint', `${row.derived_description} (from the repository)`));
     }
+    if (typeof row.label === 'string' && row.label !== '') {
+      item.append(el('div', 'ws-label hint', `Label on its cards: ${row.label}`));
+    }
     // The workspace's own hand-over setting, or SF_HANDOFF's.
     item.append(el('div', 'ws-handoff hint', row.handoff === 'checkout' || row.handoff === 'off' ? `Hand-over: ${row.handoff} (this workspace)` : 'Hand-over: as SF_HANDOFF'));
     const digest = row.digest ?? { track: false, my_work: false };
@@ -304,9 +307,13 @@ function wsSelect(key: string, options: ReadonlyArray<readonly [string, string]>
   return select;
 }
 
+// The copy of src/registry.ts MAX_LABEL_CHARS: the Label field's maxLength.
+const WS_LABEL_CHARS = 24;
+
 // Edit: the card becomes the form: the checkout's path, Description (its placeholder the
-// repository's own description), App (the existing apps as suggestions), Hand-over, Colour and the
-// two digest switches. Save posts every field; Cancel changes nothing. The name stays.
+// repository's own description), App (the existing apps as suggestions), Hand-over, Colour, Label
+// (its placeholder the name) and the two digest switches. Save posts every field; Cancel changes
+// nothing. The name stays.
 function openWorkspaceEdit(row: WorkspaceRow): void {
   const form = el('form', 'form ws-edit');
   form.dataset.ws = row.name;
@@ -332,6 +339,14 @@ function openWorkspaceEdit(row: WorkspaceRow): void {
   app.setAttribute('autocomplete', 'off');
   const handoff = wsSelect('handoff', [['default', handoffDefaultText()], ['checkout', 'Yes'], ['off', 'No']], row.handoff ?? 'default');
   const color = wsSelect('color', [['auto', 'Automatic (from the name)'], ...WS_COLORS.map((name): [string, string] => [name, name])], ownColor(row));
+  const label = el('input');
+  label.dataset.wsf = 'label';
+  label.type = 'text';
+  label.value = row.label ?? '';
+  label.placeholder = row.name;
+  label.maxLength = WS_LABEL_CHARS;
+  label.setAttribute('autocomplete', 'off');
+  label.setAttribute('spellcheck', 'false');
   const track = el('input');
   track.type = 'checkbox';
   track.dataset.wsf = 'track';
@@ -359,6 +374,7 @@ function openWorkspaceEdit(row: WorkspaceRow): void {
     wsField('App', app, 'Workspaces with the same app share one daily. Empty: its own name.'),
     wsField('When a job is ready, hand it over to my checkout', handoff, ''),
     wsField('Colour of its cards on the board', color, ''),
+    wsField('Label on its cards', label, `Optional: what its cards show instead of the name, at most ${WS_LABEL_CHARS} characters. Empty: the name.`),
     wsField('Morning digest: follow this repository', track, ''),
     wsField('My daily: my commits here go into the daily of its app', mine, ''),
     buttons, status,
@@ -408,6 +424,7 @@ async function submitWorkspaceEdit(name: string): Promise<void> {
   }
   const body = {
     path, description: field('description', 'textarea').value, app: field('app', 'input').value, handoff: field('handoff', 'select').value, color: field('color', 'select').value,
+    label: field('label', 'input').value,
     digest: { track: field('track', 'input').checked === true, my_work: field('my_work', 'input').checked === true },
   };
   if (state.setupPending.has('workspace')) {

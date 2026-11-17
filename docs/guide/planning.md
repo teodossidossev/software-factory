@@ -154,9 +154,10 @@ own terminal, not through an agent's session, whose transcript would keep the UR
 
 `sf planner setup <workspace>` does this for a planning copy: a clone of the workspace's repository
 in `~/planning/<workspace>` (`SF_PLANNING_DIR`), with the server registered for that folder only,
-the factory's planning skill and `.claude/planning-copy.md` (README, The planning copy). Open Claude
-Code there once and accept its trust dialog. The copy is read-only to the planner: its shell
-commands run in Claude Code's sandbox, and the factory's secrets are denied to every tool.
+the factory's planning skill and `.claude/planning-copy.md` (README, The planning copy). Run
+`sf planner trust <workspace>` once and accept Claude Code's trust dialog there. The copy is
+read-only to the planner: its shell commands run in Claude Code's sandbox, and the factory's
+secrets are denied to every tool.
 Your phone hears when the planner waits for you, or for a permission; a tap opens the session.
 
 Then, with `sf serve` running, start from the dashboard:
@@ -210,7 +211,8 @@ is none. To use it by hand:
    software-factory MCP server for that folder and installs the skill. The copy holds the
    repository's code and its `CLAUDE.md` files, never its Claude Code configuration: what it tracks
    under `.claude/` folders, and its `.mcp.json`, stay out, so none of its hooks, skills, agents or
-   MCP servers run. Open Claude Code there once and accept its trust dialog.
+   MCP servers run. Then run `sf planner trust my-app` once and accept Claude Code's trust dialog
+   there.
 2. Start Claude Code there and send `/planning-tasks workspace my-app, ticket APP-12`, followed by
    your words, or the first message the ticket's page offers.
 

@@ -240,10 +240,12 @@ export function healthNotification(check: { label: string; detail: string }, tur
 const SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
 // The notification of a planner session that waits for the user (or for a permission): the
-// workspace only, and the session's page when its id is known.
-export function plannerNotification(workspace: string, permission: boolean, sessionId: string | undefined): Notification {
+// workspace as its body, the session's ticket first in its title when it has one, and the
+// session's page when its id is known.
+export function plannerNotification(workspace: string, permission: boolean, sessionId: string | undefined, ticket?: string): Notification {
+  const waits = permission ? 'waits for a permission' : 'waits for you';
   return {
-    title: permission ? 'Planner waits for a permission' : 'Planner waits for you',
+    title: ticket !== undefined ? `${ticket}: planner ${waits}` : `Planner ${waits}`,
     body: workspace,
     priority: 'high',
     tags: 'speech_balloon',

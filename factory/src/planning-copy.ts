@@ -23,7 +23,8 @@
 //    syncClaudeAiSkills false, the file's other keys and hook events kept;
 // 8. the factory's MCP server registered for that folder only (claude mcp, local scope: the token
 //    stays in Claude Code's ~/.claude.json), removed and added again so a rotated token arrives;
-// 9. the result, and what the user does next: accept Claude Code's trust dialog there once.
+// 9. the result, and what the user does next: sf planner trust <workspace> while Claude Code does
+//    not trust the copy yet (the trust dialog is the user's, read here, never written).
 // Every message names paths relative to the planning folder, never an absolute path, except the
 // result lines for the user's terminal; a file system error on the way is planning_copy_failed,
 // its paths shown with the same placeholders.
@@ -41,7 +42,7 @@ import { FactoryError } from './errors.js';
 import { withoutHostTokens } from './forge.js';
 import { type GitResult, runGit } from './git.js';
 import { PACKAGE_ROOT } from './package-root.js';
-import { plannerSessionCommand, recordLink } from './planner-session.js';
+import { copyTrusted, plannerSessionCommand, recordLink } from './planner-session.js';
 import { plannerWaiting } from './planner-waiting.js';
 import { loadRegistry, resolveWorkspace } from './registry.js';
 import { absoluteRule, claudeConfigDir, claudeUserSettings, HOME_CREDENTIALS } from './sandbox-denials.js';
@@ -67,6 +68,7 @@ export const PLANNER_USAGE: readonly string[] = [
   "  sf planner waiting <workspace> [permission]           The planning copy's hook (Stop; Notification with permission): tells you that the planner waits for you, through the factory's notifications",
   "  sf planner start <workspace> <ticket>                 Start the ticket's planner: Claude Code with Remote Control in the workspace's planning copy (set up and trusted), its first message /planning-tasks workspace <workspace>, ticket <ticket>; one per ticket; it keeps running when sf serve restarts; again while it runs: since when, and its link once known",
   "  sf planner stop <workspace> <ticket>                  End the ticket's planner session",
+  "  sf planner trust <workspace>                          Once per planning copy: open Claude Code there, in this terminal, to accept its trust dialog (the factory never accepts it for you); refused while the copy holds the repository's Claude Code configuration",
 ];
 
 // Every Git command here: never a prompt (the values of the digest's).
@@ -181,18 +183,18 @@ export async function plannerWaitingCommand(args: readonly string[], setup: () =
 }
 
 // sf planner setup <workspace>, sf planner waiting <workspace> [permission], and sf planner
-// start|stop <workspace> <ticket> (src/planner-session.ts).
+// start|stop <workspace> <ticket> and trust <workspace> (src/planner-session.ts).
 export async function plannerCommand(args: string[], deps: PlannerDeps): Promise<void> {
   if (isPlannerWaiting(args)) {
     await plannerWaitingCommand(args, () => ({ env: deps.env, configDir: deps.configDir }));
     return;
   }
-  if (args.length === 3 && (args[0] === 'start' || args[0] === 'stop')) {
+  if ((args.length === 3 && (args[0] === 'start' || args[0] === 'stop')) || (args.length === 2 && args[0] === 'trust')) {
     await plannerSessionCommand(args, deps);
     return;
   }
   if (args.length !== 2 || args[0] !== 'setup') {
-    throw new UsageError('planner needs setup <workspace>, waiting <workspace> [permission], start <workspace> <ticket> or stop <workspace> <ticket>.');
+    throw new UsageError('planner needs setup <workspace>, waiting <workspace> [permission], start <workspace> <ticket>, stop <workspace> <ticket> or trust <workspace>.');
   }
   const name = checkName(args[1]);
   const ws = await resolveWorkspace(name, deps.configDir);
@@ -297,7 +299,7 @@ async function prepare(planning: Planning, deps: PlannerDeps): Promise<void> {
     `Pointers: ${POINTERS}`,
     "Settings: read-only; shell commands in Claude Code's sandbox (no writes, no network); secrets denied",
     'Hooks: the phone hears when the planner waits for you (sf planner waiting)',
-    `Next: open Claude Code there once and accept its trust dialog: cd ${copy} && claude`,
+    (await copyTrusted(copy, deps.env)) ? 'Trust: Claude Code trusts this folder already' : `Next: let Claude Code trust the copy once: sf planner trust ${name}`,
     `Then plan a ticket: /${SKILL} workspace ${name}, ticket <ticket>`,
   ]) {
     deps.print(line);

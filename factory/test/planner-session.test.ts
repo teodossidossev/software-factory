@@ -1,6 +1,7 @@
 // sf planner start and stop: the ticket's planner session (fake script and claude first on PATH),
 // one per ticket, its record and its environment; a session that ended is no session; every refusal
-// of start with its code; the hook's link written into its own session's record only; copyTrusted.
+// of start with its code; sf planner trust (a fake claude that accepts the dialog, or not) and its
+// refusals; the hook's link written into its own session's record only; copyTrusted.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
@@ -237,9 +238,9 @@ test('sf planner start refuses what it cannot run, each with its code', async ()
     await refused('planning_copy_unsafe', '.mcp.json is in the planning copy of app, and Claude Code would load it: remove it, run sf planner setup app, then start the planner again.');
     await rm(join(copy, '.mcp.json'));
 
-    // A copy trusted only through its parent folder.
+    // A copy trusted only through its parent folder: the message names sf planner trust.
     await trust(env, join(env.home, 'planning'));
-    const untrusted = 'Claude Code does not trust the planning copy of app yet: open Claude Code there once and accept its trust dialog (the Next line of sf planner setup app says how), then start the planner again.';
+    const untrusted = 'Claude Code does not trust the planning copy of app yet: run sf planner trust app, accept its trust dialog, then start the planner again.';
     await refused('planning_copy_untrusted', untrusted);
     // The CLI: exit 1 with the message.
     const refusedCli = await runCli(env, ['planner', 'start', 'app', 'APP-12']);
@@ -272,7 +273,7 @@ test('sf planner start refuses what it cannot run, each with its code', async ()
     // The usage error.
     const usage = await runCli(env, ['planner', 'start', 'app']);
     assert.equal(usage.code, 2);
-    assert.match(usage.stderr, /^sf: planner needs setup <workspace>, waiting <workspace> \[permission\], start <workspace> <ticket> or stop <workspace> <ticket>\./);
+    assert.match(usage.stderr, /^sf: planner needs setup <workspace>, waiting <workspace> \[permission\], start <workspace> <ticket>, stop <workspace> <ticket> or trust <workspace>\./);
   } finally {
     await killLeft(file);
     // The fake script is no terminal: a SIGKILL to it leaves its child, which the real script's
@@ -282,6 +283,104 @@ test('sf planner start refuses what it cannot run, each with its code', async ()
       forceKill(pid);
     }
   }
+});
+
+// sessionEnv's workspace with its copy untrusted, and a fake claude that logs its folder, arguments
+// and environment to claude.log, then accepts the trust dialog as Claude Code would (accept true) by
+// writing the copy's real path into its global config, and exits 0.
+async function trustEnv(name: string, accept = true): Promise<{ env: Env; copy: string; bin: string; config: string; written: string }> {
+  const { env, copy, bin } = await sessionEnv(name);
+  const config = join(env.home, 'cc', '.claude.json');
+  await rm(config);
+  const written = JSON.stringify({ projects: { [copy]: { hasTrustDialogAccepted: true } } });
+  const log = join(bin, 'claude.log');
+  await writeFile(join(bin, 'claude'), [
+    '#!/bin/sh',
+    `echo "cwd=$(pwd -P)" >> '${log}'`,
+    `for arg in "$@"; do echo "arg=$arg" >> '${log}'; done`,
+    `env >> '${log}'`,
+    ...(accept ? [`printf '%s' "{\\"projects\\":{\\"$(pwd -P)\\":{\\"hasTrustDialogAccepted\\":true}}}" > "\${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"`] : []),
+    'exit 0',
+    '',
+  ].join('\n'));
+  await chmod(join(bin, 'claude'), 0o755);
+  env.extra = { ...env.extra, TERM: 'users-own-term' };
+  return { env, copy, bin, config, written };
+}
+
+test('sf planner trust opens Claude Code in the copy and reads the answer', async () => {
+  const { env, copy, bin, config, written } = await trustEnv('planner-trust');
+  const log = join(bin, 'claude.log');
+
+  // TR-1: claude once, in the copy, no arguments, without the factory's token or the session markers.
+  const opened = await runCli(env, ['planner', 'trust', 'app']);
+  assert.deepEqual([opened.code, opened.stderr], [0, '']);
+  assert.equal(opened.stdout, [
+    'Claude Code opens in the planning copy of app: accept its trust dialog, then leave it with /exit.',
+    'Claude Code trusts the planning copy of app now: start its planner with sf planner start app <ticket>.',
+    '',
+  ].join('\n'));
+  const claudeLog = await readFile(log, 'utf8');
+  const lines = claudeLog.split('\n');
+  assert.deepEqual(lines.filter((line) => line.startsWith('cwd=')), [`cwd=${copy}`]);
+  assert.deepEqual(lines.filter((line) => line.startsWith('arg=')), []);
+  const names = lines.filter((line) => line.includes('=')).map((line) => line.slice(0, line.indexOf('=')));
+  for (const name of ['SF_PLANNER_TICKET', 'SF_PLANNER_ID', 'SF_GITHUB_TOKEN', 'OPENAI_API_KEY', 'SF_PLANNING_DIR', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN']) {
+    assert.equal(names.includes(name), false, name);
+  }
+  // The user's own TERM, and the directory settings the copy's hook needs.
+  for (const line of ['TERM=users-own-term', `CLAUDE_CONFIG_DIR=${join(env.home, 'cc')}`, `SF_STATE_DIR=${env.state}`, `SF_CONFIG_DIR=${env.config}`]) {
+    assert.ok(lines.includes(line), line);
+  }
+  // Claude Code's global config holds only what Claude Code wrote.
+  assert.equal(await readFile(config, 'utf8'), written);
+
+  // TR-2: a trusted copy opens nothing.
+  const already = await runCli(env, ['planner', 'trust', 'app']);
+  assert.deepEqual([already.code, already.stdout, already.stderr], [0, 'Claude Code trusts the planning copy of app already.\n', '']);
+  assert.equal(await readFile(log, 'utf8'), claudeLog);
+  assert.equal(await readFile(config, 'utf8'), written);
+});
+
+test('sf planner trust refuses what it cannot open', async () => {
+  const { env, copy, bin, config } = await trustEnv('planner-trust-refused', false);
+  const log = join(bin, 'claude.log');
+  const refused = async (code: number, message: string): Promise<void> => {
+    const result = await runCli(env, ['planner', 'trust', 'app']);
+    assert.deepEqual([result.code, result.stderr], [code, `sf: ${message}\n`]);
+  };
+
+  // TR-3: Claude Code ends without the acceptance.
+  await refused(1, 'Claude Code still does not trust the planning copy of app: its trust dialog was not accepted. Run sf planner trust app again.');
+  assert.equal((await readFile(log, 'utf8')).split('\n').filter((line) => line.startsWith('cwd=')).length, 1);
+  assert.equal(existsSync(config), false);
+  await rm(log);
+
+  // TR-4: a copy not set up, a copy holding .mcp.json: claude is not run.
+  const pointers = join(copy, '.claude', 'planning-copy.md');
+  await rm(pointers);
+  await refused(1, 'The planning copy of app is not set up: run sf planner setup app first.');
+  await writeFile(pointers, 'pointers\n');
+  await writeFile(join(copy, '.mcp.json'), '{}\n');
+  await refused(1, '.mcp.json is in the planning copy of app, and Claude Code would load it: remove it, run sf planner setup app, then sf planner trust app.');
+  await rm(join(copy, '.mcp.json'));
+  assert.equal(existsSync(log), false);
+
+  // No claude on PATH: a folder holding only a link to git.
+  const gitOnly = join(temp, 'planner-trust-git-only');
+  await mkdir(gitOnly);
+  await symlink(execFileSync('which', ['git'], { encoding: 'utf8' }).trim(), join(gitOnly, 'git'));
+  const extra = env.extra;
+  env.extra = { ...extra, PATH: gitOnly };
+  await refused(1, 'Claude Code (claude) is not on PATH: install it, then run sf planner trust app again.');
+  env.extra = extra;
+
+  // No workspace: the planner's usage error.
+  const usage = await runCli(env, ['planner', 'trust']);
+  assert.equal(usage.code, 2);
+  assert.match(usage.stderr, /^sf: planner needs setup <workspace>, waiting <workspace> \[permission\], start <workspace> <ticket>, stop <workspace> <ticket> or trust <workspace>\./);
+  assert.equal(existsSync(log), false);
+  assert.equal(existsSync(config), false);
 });
 
 test('the hook records the link in its own session\'s record only', async () => {

@@ -1,6 +1,7 @@
 // sf planner setup <workspace>: the planning copy it prepares (the clone, the exclude, the skill, the
 // pointers file, the settings, the MCP server registered with a fake claude for that folder only),
-// the token in no output and no file of the copy, a second run's fast-forward and its notes, and
+// the token in no output and no file of the copy, a second run's fast-forward and its notes, the
+// Next line naming sf planner trust until Claude Code trusts the copy, and
 // every refusal with its code; the repository's Claude Code configuration kept out of the copy by
 // its sparse checkout; plannerSettings for a given environment.
 import assert from 'node:assert/strict';
@@ -149,9 +150,24 @@ test('a first run clones the workspace, installs the skill and the pointers, and
     'Pointers: .claude/planning-copy.md',
     "Settings: read-only; shell commands in Claude Code's sandbox (no writes, no network); secrets denied",
     'Hooks: the phone hears when the planner waits for you (sf planner waiting)',
-    `Next: open Claude Code there once and accept its trust dialog: cd ${copy} && claude`,
+    'Next: let Claude Code trust the copy once: sf planner trust app',
     'Then plan a ticket: /planning-tasks workspace app, ticket <ticket>',
   ]);
+});
+
+test('sf planner setup names sf planner trust until Claude Code trusts the copy', async () => {
+  const { env, copy } = await plannerEnv('planner-trust-line');
+  const tail = (stdout: string): string[] => stdout.trim().split('\n').slice(-2);
+
+  // TR-6: an untrusted copy gets the Next line.
+  const first = await setup(env);
+  assert.deepEqual(tail(first.stdout), ['Next: let Claude Code trust the copy once: sf planner trust app', 'Then plan a ticket: /planning-tasks workspace app, ticket <ticket>']);
+
+  // A trusted copy gets the Trust line in its place, and no Next line.
+  await writeFile(join(env.home, '.claude.json'), JSON.stringify({ projects: { [copy]: { hasTrustDialogAccepted: true } } }));
+  const second = await setup(env);
+  assert.deepEqual(tail(second.stdout), ['Trust: Claude Code trusts this folder already', 'Then plan a ticket: /planning-tasks workspace app, ticket <ticket>']);
+  assert.doesNotMatch(second.stdout, /^Next:/m);
 });
 
 test('a second run fast-forwards a clean copy, leaves a changed one, and replaces a link at the skill', async () => {
@@ -312,10 +328,10 @@ test('sf planner setup refuses what it cannot use, each with its code', async ()
   assert.equal(missing.stderr.trim(), 'sf: Claude Code (claude) is not on PATH: install it, then run sf planner setup again.');
 
   // No arguments, or others: the usage error, exit 2.
-  for (const args of [['planner'], ['planner', 'setup'], ['planner', 'start', 'app'], ['planner', 'setup', 'app', 'more'], ['planner', 'waiting'], ['planner', 'waiting', 'app', 'other'], ['planner', 'waiting', 'app', 'permission', 'more']]) {
+  for (const args of [['planner'], ['planner', 'setup'], ['planner', 'start', 'app'], ['planner', 'setup', 'app', 'more'], ['planner', 'waiting'], ['planner', 'waiting', 'app', 'other'], ['planner', 'waiting', 'app', 'permission', 'more'], ['planner', 'trust'], ['planner', 'trust', 'app', 'more']]) {
     const usage = await runCli(env, args);
     assert.equal(usage.code, 2, args.join(' '));
-    assert.match(usage.stderr, /^sf: planner needs setup <workspace>, waiting <workspace> \[permission\], start <workspace> <ticket> or stop <workspace> <ticket>\./);
+    assert.match(usage.stderr, /^sf: planner needs setup <workspace>, waiting <workspace> \[permission\], start <workspace> <ticket>, stop <workspace> <ticket> or trust <workspace>\./);
   }
   assert.deepEqual(lines.filter((line) => line.includes(TOKEN)), []);
 });

@@ -6,10 +6,17 @@
 // from the answer; a marker per pin found, element gone and element hidden for the others; every
 // pin text stays text; the 📍 N button with the mode off; a click on window in the capture phase
 // places a pin and opens the note field, whose Enter saves. Script checks; the real clicks, the
-// outline and the layout are test/browser/pins.test.ts's.
+// outline and the layout are test/browser/pins.test.ts's. SF-267: on the local listener the panel
+// offers the Point bookmarklet (pin-selector.js and point-page.js, read once), elsewhere or after a
+// failed read it does not; the bookmarklet itself, run in a fresh context as a page of another
+// site runs it (the factory window, its messages, pointing, the note field, the markers, stop),
+// and on a page of the factory's own origin (the bar alone, nothing opened, sent or listened to).
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
-import { type FakeElement, type FetchRequest, loadPage, type Page } from './support/fake-dom.js';
+import { createContext, runInContext } from 'node:vm';
+import { dashboardScriptFiles, pointScriptFiles } from '../src/dashboard.js';
+import { cssEscape, FakeDocument, type FakeElement, type FetchRequest, loadPage, type Page, parseHtml } from './support/fake-dom.js';
 
 const STATIC_DIR = new URL('../../static/', import.meta.url);
 const RECT = { x: 10, y: 20, w: 120, h: 32, vw: 1280, vh: 800 };
@@ -330,3 +337,351 @@ function keyEvent(key: string, target: unknown = null) {
     },
   };
 }
+
+// ---------- The Point bookmarklet ----------
+
+const FACTORY = 'http://127.0.0.1:8788';
+const SHOP = 'http://localhost:3000';
+const STATUS = {
+  FACTORY: 'This page is the factory\'s own, so nothing is sent from it. The dashboard has its own point mode: press Shift+P.',
+  OPENING: 'Opening the factory window…',
+  BLOCKED: 'The browser blocked the factory window: allow pop-ups for this page, or press Open the factory window.',
+  ALLOW: 'Allow this page in the factory window.',
+  PRESS: 'Allowed. Press Point, then click what you mean.',
+  POINTING: 'Click what you mean. Escape stops pointing.',
+  REFUSED: 'The factory did not save the pin: the factory window says why.',
+  NO_ANSWER: 'The factory window does not answer: see what it shows. A page that cuts off the windows it opens (Cross-Origin-Opener-Policy) cannot use point mode.',
+  CLOSED: 'The factory window is closed: press Open the factory window.',
+  TOO_LONG: 'This element cannot be pinned.',
+};
+
+// The compiled pin-selector.js and point-page.js, as the dashboard serves them.
+async function bookmarkletScripts(): Promise<{ selector: string; page: string }> {
+  const selector = await readFile(dashboardScriptFiles().find(({ file }) => file === 'pin-selector.js')!.url, 'utf8');
+  const page = await readFile(pointScriptFiles().find(({ file }) => file === 'point-page.js')!.url, 'utf8');
+  return { selector, page };
+}
+
+// The dashboard on the local listener (or the host given) with the panel open by the mode, the
+// two scripts answered by answer (undefined: left pending for the test).
+async function openPanel(hostname: string, answer: (path: string) => string | undefined): Promise<Page> {
+  const page = await loadPage(STATIC_DIR, (path) => (path === 'api/jobs' ? { jobs: [] } : path === 'api/pins' ? { pins: [] } : answer(path)));
+  Object.assign(page.location, { origin: `http://${hostname}:8788`, hostname });
+  page.document.dispatch('DOMContentLoaded');
+  await page.flush();
+  page.streams.at(-1)!.emit('open');
+  page.streams.at(-1)!.emit('jobs', { jobs: [] });
+  await page.flush();
+  return page;
+}
+
+const scriptReads = (page: Page): FetchRequest[] => page.requests.filter((request) => request.path === 'pin-selector.js' || request.path === 'point-page.js');
+
+test('on 127.0.0.1 the panel reads pin-selector.js and point-page.js once and its line offers the bookmarklet: the factory\'s origin, no dashboard path; a click on it is prevented; another host or a failed read keeps the line hidden', async () => {
+  const { selector, page: script } = await bookmarkletScripts();
+  const page = await openPanel('127.0.0.1', (path) => (path === 'pin-selector.js' ? selector : path === 'point-page.js' ? script : undefined));
+  const line = page.$('pins-elsewhere');
+  assert.deepEqual([line.hidden, scriptReads(page).length], [true, 0], 'the panel is closed: nothing read');
+  page.$('point-toggle').click();
+  await page.flush();
+  const reads = scriptReads(page);
+  assert.deepEqual(reads.map(({ path, method }) => [path, method]), [['pin-selector.js', 'GET'], ['point-page.js', 'GET']]);
+  assert.equal(line.hidden, false);
+  const link = page.$('pins-bookmarklet');
+  assert.deepEqual([link.textContent, link.getAttribute('title'), line.textContent], ['📍 Point', 'Drag to the bookmarks bar', 'On other pages: drag 📍 Point to your bookmarks bar, then click it on the page.']);
+  assert.ok(link.href.startsWith('javascript:'));
+  const code = decodeURIComponent(link.href.slice('javascript:'.length));
+  assert.equal(code, `(()=>{${selector}\n${script}\npointOnPage("${FACTORY}");})()`);
+  assert.ok(!code.includes('/d/'));
+  assert.equal(link.dispatch('click').defaultPrevented, true);
+  // The panel shown again reads nothing again.
+  page.$('pins-stop').click();
+  page.$('point-toggle').click();
+  await page.flush();
+  assert.equal(scriptReads(page).length, 2);
+
+  // Another host: nothing read, the line hidden.
+  const remote = await openPanel('pc.tail1234.ts.net', (path) => (path === 'pin-selector.js' ? selector : path === 'point-page.js' ? script : undefined));
+  remote.$('point-toggle').click();
+  await remote.flush();
+  assert.deepEqual([scriptReads(remote).length, remote.$('pins-elsewhere').hidden, remote.$('pins').hidden], [0, true, false]);
+
+  // A 404: the line stays hidden, and the panel shown again does not ask again.
+  const failed = await openPanel('127.0.0.1', (path) => (path === 'pin-selector.js' ? selector : undefined));
+  failed.$('point-toggle').click();
+  await failed.flush();
+  scriptReads(failed).find(({ path }) => path === 'point-page.js')!.respond(404, '');
+  await failed.flush();
+  assert.deepEqual([failed.$('pins-elsewhere').hidden, failed.$('pins-bookmarklet').href], [true, '#']);
+  failed.$('pins-stop').click();
+  failed.$('point-toggle').click();
+  await failed.flush();
+  assert.equal(scriptReads(failed).length, 2);
+});
+
+interface Recorded { type: string; listener: (event: unknown) => void }
+interface PageRun {
+  document: FakeDocument;
+  $(id: string): FakeElement | null;
+  status(): string;
+  // window.open's calls; the factory window it returned last.
+  opened: Array<[string, string, string]>;
+  factoryWindow: { closed: boolean; posted: Array<[unknown, string]>; close(): void };
+  timers: Array<{ ms: number; cleared: boolean; fire(): void }>;
+  frames: Array<() => void>;
+  // Every listener added to window and to document, and the ones still on window.
+  added: Recorded[];
+  windowListeners: Recorded[];
+  host: { blockPopups: boolean; sfPointStop?: unknown };
+  // The window's listeners of type get the event; what they did to it.
+  fire(type: string, init: Record<string, unknown>): { defaultPrevented: boolean; stopped: boolean };
+  message(data: unknown, origin?: string, source?: unknown): void;
+  // The bookmarklet run again in the same page.
+  again(): void;
+}
+
+// The bookmarklet run in a fresh context: a page of its own (a Buy button), a window whose open
+// records its arguments and returns a factory window recording postMessage (or null, blocked),
+// recorded timers and animation frames, CSS.escape, the location given.
+function runOnPage(code: string, location: { href: string; origin: string }, blocked = false): PageRun {
+  const document = new FakeDocument();
+  parseHtml(document, '<body><main><h1>Shop</h1><button id="buy" type="button">Buy</button><p>Total</p></main></body>');
+  const added: Recorded[] = [];
+  const windowListeners: Recorded[] = [];
+  const realAdd = document.addEventListener.bind(document);
+  document.addEventListener = (type, listener) => {
+    added.push({ type, listener: listener as (event: unknown) => void });
+    realAdd(type, listener);
+  };
+  const opened: PageRun['opened'] = [];
+  const newWindow = (): PageRun['factoryWindow'] => {
+    const posted: Array<[unknown, string]> = [];
+    return {
+      closed: false, posted,
+      postMessage(data: unknown, target: string) {
+        posted.push([JSON.parse(JSON.stringify(data)), target]);
+      },
+      close() {
+        this.closed = true;
+      },
+    } as PageRun['factoryWindow'];
+  };
+  const run = {} as PageRun;
+  const host = {
+    blockPopups: blocked, innerWidth: 1280, innerHeight: 800,
+    open(url: string, target: string, features: string) {
+      opened.push([url, target, features]);
+      if (host.blockPopups) {
+        return null;
+      }
+      run.factoryWindow = newWindow();
+      return run.factoryWindow;
+    },
+    addEventListener(type: string, listener: (event: unknown) => void) {
+      added.push({ type, listener });
+      windowListeners.push({ type, listener });
+    },
+    removeEventListener(type: string, listener: (event: unknown) => void) {
+      const at = windowListeners.findIndex((entry) => entry.type === type && entry.listener === listener);
+      if (at >= 0) {
+        windowListeners.splice(at, 1);
+      }
+    },
+  } as PageRun['host'] & Record<string, unknown>;
+  const timers: PageRun['timers'] = [];
+  const frames: Array<() => void> = [];
+  const context = createContext({
+    window: host, document, location, CSS: { escape: cssEscape }, console,
+    setTimeout: (callback: () => void, ms: number) => timers.push({ ms, cleared: false, fire: callback }),
+    clearTimeout: (id: number | undefined) => {
+      if (typeof id === 'number' && timers[id - 1] !== undefined) {
+        timers[id - 1]!.cleared = true;
+      }
+    },
+    requestAnimationFrame: (callback: () => void) => frames.push(callback),
+  });
+  Object.assign(run, {
+    document, opened, timers, frames, added, host, windowListeners,
+    $: (id: string) => document.getElementById(id),
+    status: () => document.getElementById('sf-point-status')?.textContent ?? '-',
+    fire(type: string, init: Record<string, unknown>) {
+      const event = {
+        type, defaultPrevented: false, stopped: false, shiftKey: false,
+        preventDefault() {
+          event.defaultPrevented = true;
+        },
+        stopImmediatePropagation() {
+          event.stopped = true;
+        },
+        ...init,
+      };
+      for (const { listener } of windowListeners.filter((entry) => entry.type === type)) {
+        listener(event);
+        if (event.stopped) {
+          break;
+        }
+      }
+      return event;
+    },
+    message(data: unknown, origin = FACTORY, source: unknown = run.factoryWindow) {
+      run.fire('message', { data, origin, source });
+    },
+    again() {
+      runInContext(code, context);
+    },
+  });
+  run.again();
+  return run;
+}
+
+// The decoded bookmarklet the panel offers on 127.0.0.1:8788.
+async function decodedBookmarklet(): Promise<string> {
+  const { selector, page: script } = await bookmarkletScripts();
+  const page = await openPanel('127.0.0.1', (path) => (path === 'pin-selector.js' ? selector : path === 'point-page.js' ? script : undefined));
+  page.$('point-toggle').click();
+  await page.flush();
+  return decodeURIComponent(page.$('pins-bookmarklet').href.slice('javascript:'.length));
+}
+
+const toggleOf = (run: PageRun): [boolean, string | null] => [run.$('sf-point-toggle')!.disabled, run.$('sf-point-toggle')!.getAttribute('aria-pressed')];
+
+test('the bookmarklet on another site opens <factory>/point as sf-point, says hello once the window is ready, enables Point once allowed; another origin or source changes nothing; pointing stops the page\'s clicks and sends each pin with its note; saved draws its marker; a second run stops it all', async () => {
+  const code = await decodedBookmarklet();
+  const run = runOnPage(code, { href: `${SHOP}/shop`, origin: SHOP });
+  assert.deepEqual(run.opened, [[`${FACTORY}/point`, 'sf-point', 'popup,width=440,height=420']]);
+  assert.deepEqual([run.status(), toggleOf(run), run.$('sf-point-open')!.hidden], [STATUS.OPENING, [true, 'false'], true]);
+  const bar = run.$('sf-point-bar')!;
+  assert.equal(bar.parentNode, run.document.documentElement);
+  assert.deepEqual([bar.style.getPropertyValue('all'), bar.style.getPropertyValue('position'), bar.style.getPropertyValue('z-index')], ['initial', 'fixed', '2147483647']);
+  assert.deepEqual([run.$('sf-point-status')!.getAttribute('role'), run.$('sf-point-status')!.getAttribute('aria-live'), run.$('sf-point-close')!.getAttribute('aria-label')], ['status', 'polite', 'Close point mode']);
+  assert.deepEqual(['sf-point-outline', 'sf-point-note', 'sf-point-layer'].map((id) => run.$(id)?.parentNode === run.document.documentElement), [true, true, true]);
+  assert.deepEqual(run.timers.map(({ ms, cleared }) => [ms, cleared]), [[10000, false]]);
+  // A message of another origin, of another source, or not the window's: nothing changes.
+  run.message({ sf: 'point', type: 'ready' }, 'http://evil.example');
+  run.message({ sf: 'point', type: 'ready' }, FACTORY, {});
+  run.message({ sf: 'other', type: 'ready' });
+  run.message({ sf: 'point', type: 'allowed' }, SHOP);
+  assert.deepEqual([run.factoryWindow.posted, run.status(), toggleOf(run), run.timers[0]!.cleared], [[], STATUS.OPENING, [true, 'false'], false]);
+  run.message({ sf: 'point', type: 'ready' });
+  assert.deepEqual(run.factoryWindow.posted, [[{ sf: 'point', type: 'hello', url: `${SHOP}/shop` }, FACTORY]]);
+  assert.deepEqual([run.status(), toggleOf(run), run.timers[0]!.cleared], [STATUS.ALLOW, [true, 'false'], true]);
+  // Before Point is pressed, the page's clicks are its own.
+  const buy = run.$('buy')!;
+  buy.rect = { x: 100.4, y: 50.6, width: 80, height: 30 };
+  assert.equal(run.fire('click', { target: buy, clientX: 120, clientY: 60 }).defaultPrevented, false);
+  run.message({ sf: 'point', type: 'allowed' });
+  assert.deepEqual([run.status(), toggleOf(run)], [STATUS.PRESS, [false, 'false']]);
+  run.$('sf-point-toggle')!.click();
+  assert.deepEqual([run.status(), toggleOf(run)], [STATUS.POINTING, [false, 'true']]);
+
+  // Pointing: every pointer and mouse event outside the bar and the note field is stopped.
+  for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'dblclick', 'auxclick', 'dragstart']) {
+    const event = run.fire(type, { target: buy });
+    assert.deepEqual([event.defaultPrevented, event.stopped], [true, true], type);
+  }
+  assert.equal(run.fire('click', { target: run.$('sf-point-toggle') }).defaultPrevented, false, 'the bar\'s own');
+  assert.deepEqual([run.fire('click', { target: run.document.body }).defaultPrevented, run.$('sf-point-note')!.hidden], [true, true], 'body: nothing taken');
+  run.fire('pointerover', { target: buy });
+  const outline = run.$('sf-point-outline')!;
+  assert.deepEqual([outline.hidden, outline.style.getPropertyValue('left'), outline.style.getPropertyValue('width')], [false, '100px', '80px']);
+  const click = run.fire('click', { target: buy, clientX: 120, clientY: 60 });
+  assert.deepEqual([click.defaultPrevented, click.stopped], [true, true]);
+  const note = run.$('sf-point-note')!;
+  const text = run.$('sf-point-note-text') as unknown as FakeElement & { value: string; maxLength: number; placeholder: string };
+  assert.deepEqual([note.hidden, note.getAttribute('role'), note.getAttribute('aria-label'), run.document.activeElement?.id], [false, 'dialog', 'Note for the pin', 'sf-point-note-text']);
+  assert.deepEqual([text.maxLength, text.placeholder, note.style.getPropertyValue('left'), note.style.getPropertyValue('top')], [500, 'What about it? (optional)', '132px', '72px']);
+  // With the note field open, a click places nothing more.
+  run.fire('click', { target: run.document.querySelector('p')!, clientX: 5, clientY: 5 });
+  assert.equal(run.factoryWindow.posted.length, 1);
+  text.value = 'Wrong price';
+  assert.equal(run.fire('keydown', { key: 'Enter', shiftKey: true, target: text }).defaultPrevented, false, 'Shift+Enter is a new line');
+  const enter = run.fire('keydown', { key: 'Enter', target: text });
+  assert.deepEqual([enter.defaultPrevented, enter.stopped, note.hidden], [true, true, true]);
+  const rect = { x: 100, y: 51, w: 80, h: 30, vw: 1280, vh: 800 };
+  assert.deepEqual(run.factoryWindow.posted.at(-1), [{ sf: 'point', type: 'pin', ref: 1, url: `${SHOP}/shop`, selector: '#buy', text: 'Buy', rect, note: 'Wrong price' }, FACTORY]);
+  run.message({ sf: 'point', type: 'saved', ref: 1, id: 7 });
+  const markers = () => run.$('sf-point-layer')!.children.map((marker) => [marker.textContent, (marker as FakeElement).dataset.sfPin, (marker as FakeElement).style.getPropertyValue('left'), (marker as FakeElement).style.getPropertyValue('top')]);
+  assert.deepEqual([run.status(), markers()], ['📍7 saved.', [['📍7', '7', '100px', '51px']]]);
+  // A scroll draws the markers again in one animation frame.
+  buy.rect = { x: 100, y: 10, width: 80, height: 30 };
+  run.fire('scroll', {});
+  run.fire('resize', {});
+  assert.equal(run.frames.length, 1);
+  run.frames[0]!();
+  assert.deepEqual(markers(), [['📍7', '7', '100px', '10px']]);
+  // Escape in the note field is Skip: the pin goes with an empty note; refused says so.
+  run.fire('click', { target: run.document.querySelector('p')!, clientX: 5, clientY: 5 });
+  const skip = run.fire('keydown', { key: 'Escape', target: text });
+  assert.deepEqual([skip.stopped, toggleOf(run)], [true, [false, 'true']]);
+  assert.deepEqual(run.factoryWindow.posted.at(-1)![0], { sf: 'point', type: 'pin', ref: 2, url: `${SHOP}/shop`, selector: 'body > main:nth-of-type(1) > p:nth-of-type(1)', text: 'Total', rect: { x: 0, y: 0, w: 0, h: 0, vw: 1280, vh: 800 }, note: '' });
+  run.message({ sf: 'point', type: 'refused', ref: 2 });
+  assert.equal(run.status(), STATUS.REFUSED);
+  // Escape with the note field closed stops pointing and goes no further.
+  const escape = run.fire('keydown', { key: 'Escape', target: run.document.body });
+  assert.deepEqual([escape.defaultPrevented, escape.stopped, toggleOf(run), run.status()], [true, true, [false, 'false'], STATUS.PRESS]);
+  assert.equal(run.fire('click', { target: buy }).defaultPrevented, false);
+  // The window closed: the next pin is not sent, Open shows.
+  run.$('sf-point-toggle')!.click();
+  run.fire('click', { target: buy, clientX: 120, clientY: 60 });
+  run.factoryWindow.closed = true;
+  run.$('sf-point-note')!.querySelectorAll('button').find((button) => button.textContent === 'Save')!.click();
+  assert.deepEqual([run.status(), run.$('sf-point-open')!.hidden, run.factoryWindow.posted.length, toggleOf(run)], [STATUS.CLOSED, false, 3, [true, 'false']]);
+
+  // A second run: every element and listener gone, the window closed, sfPointStop deleted.
+  run.factoryWindow.closed = false;
+  const factoryWindow = run.factoryWindow;
+  run.again();
+  assert.deepEqual(['sf-point-bar', 'sf-point-outline', 'sf-point-note', 'sf-point-layer'].map((id) => run.$(id)), [null, null, null, null]);
+  assert.deepEqual([run.windowListeners.length, factoryWindow.closed, 'sfPointStop' in run.host, run.opened.length], [0, true, false, 1]);
+  assert.equal(run.timers.every(({ cleared }) => cleared), true);
+});
+
+test('the bookmarklet: a blocked window is BLOCKED with Open, which opens it again; no ready in 10 s is NO_ANSWER; a selector over the bound is TOO_LONG; × stops it', async () => {
+  const code = await decodedBookmarklet();
+  const run = runOnPage(code, { href: `${SHOP}/`, origin: SHOP }, true);
+  assert.deepEqual([run.opened.length, run.status(), run.$('sf-point-open')!.hidden, run.timers.length, toggleOf(run)], [1, STATUS.BLOCKED, false, 0, [true, 'false']]);
+  run.host.blockPopups = false;
+  run.$('sf-point-open')!.click();
+  assert.deepEqual([run.opened.length, run.status(), run.$('sf-point-open')!.hidden, run.timers.length], [2, STATUS.OPENING, true, 1]);
+  run.timers[0]!.fire();
+  assert.deepEqual([run.status(), run.$('sf-point-open')!.hidden], [STATUS.NO_ANSWER, false]);
+  // Open again restarts the one timer; ready clears it.
+  run.$('sf-point-open')!.click();
+  assert.deepEqual([run.timers.map(({ cleared }) => cleared), run.status()], [[false, false], STATUS.OPENING]);
+  run.message({ sf: 'point', type: 'ready' });
+  run.message({ sf: 'point', type: 'allowed' });
+  assert.equal(run.timers[1]!.cleared, true);
+  // An element whose selector is over 1,000 characters cannot be pinned.
+  let deep = run.$('buy')!;
+  for (let level = 0; level < 80; level += 1) {
+    const div = run.document.createElement('div');
+    deep.append(div);
+    deep = div;
+  }
+  run.$('sf-point-toggle')!.click();
+  run.fire('click', { target: deep, clientX: 1, clientY: 1 });
+  assert.deepEqual([run.status(), run.$('sf-point-note')!.hidden, run.factoryWindow.posted.length], [STATUS.TOO_LONG, true, 1]);
+  const factoryWindow = run.factoryWindow;
+  run.$('sf-point-close')!.click();
+  assert.deepEqual([run.$('sf-point-bar'), run.windowListeners.length, factoryWindow.closed, 'sfPointStop' in run.host], [null, 0, true, false]);
+  // Run again after a stop: a new run, a new window.
+  run.again();
+  assert.deepEqual([run.opened.length, run.status()], [4, STATUS.OPENING]);
+});
+
+test('the bookmarklet on a page of the factory\'s origin shows its bar alone with FACTORY: no window, no timer, no listener on window or document; a second run or × removes it; on localhost of the same port it runs as on any page', async () => {
+  const code = await decodedBookmarklet();
+  const run = runOnPage(code, { href: `${FACTORY}/d/${'a'.repeat(64)}/#stats`, origin: FACTORY });
+  assert.deepEqual([run.opened, run.timers, run.added, run.document.listeners.size], [[], [], [], 0]);
+  assert.deepEqual([run.status(), toggleOf(run), run.$('sf-point-open')!.hidden], [STATUS.FACTORY, [true, 'false'], true]);
+  assert.deepEqual(['sf-point-outline', 'sf-point-note', 'sf-point-layer'].map((id) => run.$(id)), [null, null, null]);
+  assert.equal(run.$('sf-point-bar')!.parentNode, run.document.documentElement);
+  run.again();
+  assert.deepEqual([run.$('sf-point-bar'), 'sfPointStop' in run.host, run.opened.length], [null, false, 0]);
+  run.again();
+  run.$('sf-point-close')!.click();
+  assert.deepEqual([run.$('sf-point-bar'), 'sfPointStop' in run.host, run.opened, run.added], [null, false, [], []]);
+
+  const other = runOnPage(code, { href: 'http://localhost:8788/d/x/', origin: 'http://localhost:8788' });
+  assert.deepEqual([other.opened.map(([url]) => url), other.status()], [[`${FACTORY}/point`], STATUS.OPENING]);
+});

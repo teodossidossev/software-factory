@@ -95,8 +95,8 @@ test('dashboard: token, static files with the security headers, 404 and 405 with
     // row, mr-row.js, right before review-page.js; SF-211: point mode, pins.js, right before main.js;
     // SF-226: the home and the two main views, home.js, right after routing.js; SF-285: the job page's
     // composer, composer.js, right after job-page.js; the ticket page's planner session, planner.js,
-    // right after ticket-page.js).
-    assert.deepEqual([...DASHBOARD_SCRIPTS], ['core.js', 'job-screens.js', 'job-page.js', 'composer.js', 'header.js', 'board.js', 'coordinator.js', 'routing.js', 'home.js', 'ticket-page.js', 'planner.js', 'reports.js', 'mr-row.js', 'review-page.js', 'digest-brief.js', 'setup.js', 'skills.js', 'health.js', 'pins.js', 'main.js']);
+    // right after ticket-page.js; SF-267: the pins' selector, pin-selector.js, right after core.js).
+    assert.deepEqual([...DASHBOARD_SCRIPTS], ['core.js', 'pin-selector.js', 'job-screens.js', 'job-page.js', 'composer.js', 'header.js', 'board.js', 'coordinator.js', 'routing.js', 'home.js', 'ticket-page.js', 'planner.js', 'reports.js', 'mr-row.js', 'review-page.js', 'digest-brief.js', 'setup.js', 'skills.js', 'health.js', 'pins.js', 'main.js']);
     // SF-136: every script of DASHBOARD_SCRIPTS is served as JavaScript, each with its own text (its
     // header names it); SF-137: none is longer than 2,500 lines.
     for (const file of DASHBOARD_SCRIPTS) {
@@ -1156,7 +1156,7 @@ test('dashboard: the factory window /point is served without token or cookie on 
     assert.doesNotMatch(script.body, /^\s*(import|export)\b/m);
     // Not a dashboard script: dashboard.html does not load it.
     assert.ok(!(DASHBOARD_SCRIPTS as readonly string[]).includes('point.js'));
-    assert.deepEqual([...POINT_SCRIPTS], ['point.js']);
+    assert.deepEqual([...POINT_SCRIPTS], ['point.js', 'point-page.js']);
 
     // The window's request: the root cookie and its own Origin store a page pin; another Origin is
     // invalid_origin and stores nothing.
@@ -1176,6 +1176,41 @@ test('dashboard: the factory window /point is served without token or cookie on 
   } finally {
     await dashboard.close();
   }
+});
+
+// The Point bookmarklet's two scripts (SF-267): pin-selector.js second among the dashboard's,
+// point-page.js beside point.js; each served as built, with its head comment and 'use strict';
+// neither names a way to send a request, to write HTML or a style attribute, or to read the page's
+// storage, nor the dashboard's path.
+const BOOKMARKLET_BANNED = [
+  'fetch(', 'XMLHttpRequest', 'sendBeacon', 'WebSocket', 'EventSource', 'import(', 'eval(', 'Function(', 'innerHTML', 'outerHTML', 'insertAdjacentHTML',
+  'document.write', 'cssText', "setAttribute('style'", 'document.cookie', 'localStorage', 'sessionStorage', '/d/',
+];
+test('dashboard: pin-selector.js and point-page.js are served with their head comment and \'use strict\', and name no request, HTML, style attribute, storage or dashboard path', async () => {
+  assert.equal(DASHBOARD_SCRIPTS.indexOf('pin-selector.js'), 1);
+  assert.deepEqual([...POINT_SCRIPTS], ['point.js', 'point-page.js']);
+  const files = [...dashboardScriptFiles(), ...pointScriptFiles()].filter(({ file }) => file === 'pin-selector.js' || file === 'point-page.js');
+  assert.deepEqual(files.map(({ file }) => file), ['pin-selector.js', 'point-page.js']);
+  await withDashboard('dash-bookmarklet', fakeActions(), async (dashboard) => {
+    for (const { file, url, source } of files) {
+      const reply = await fetchRaw(new URL(file, dashboard.url));
+      assert.equal(reply.status, 200, file);
+      assert.equal(reply.headers['content-type'], 'text/javascript; charset=utf-8', file);
+      assert.equal(reply.body, await readFile(url, 'utf8'), file);
+      assert.ok(reply.body.startsWith(`// ${file}, `), file);
+      assert.match(reply.body, /^'use strict';$/m, file);
+      assert.doesNotMatch(reply.body, /^\s*(import|export)\b/m, file);
+      const written = await readFile(source, 'utf8');
+      for (const text of [reply.body, written]) {
+        for (const banned of BOOKMARKLET_BANNED) {
+          assert.ok(!text.includes(banned), `${file} names ${banned}`);
+        }
+      }
+    }
+    // point-page.js has one top-level name, pointOnPage.
+    const page = (await fetchRaw(new URL('point-page.js', dashboard.url))).body;
+    assert.deepEqual([...page.matchAll(/^(?:function|const|let|var|class) ([\w$]+)/gm)].map(([, name]) => name), ['pointOnPage']);
+  });
 });
 
 test('dashboard (SF-040): no reviewer or subscription in the data; the subscriptions, test event and nudge routes are gone', async () => {

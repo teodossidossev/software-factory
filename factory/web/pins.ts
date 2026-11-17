@@ -13,14 +13,13 @@
 // with the mode off, #pins-open opens it. The pins are read at
 // the start, on every hashchange, when the mode is turned on and on Refresh; a write's answer
 // replaces them. The coordinator reads the same pins with sf pins. Every pin text and server
-// message goes in through textContent. A classic script, loaded before main.js (whose init calls
-// initPins), sharing the page's globals with the others: no import or export.
+// message goes in through textContent. The selector of a pin (pinSelector, pinFind, pinText) is
+// pin-selector.js's, which the Point bookmarklet shares; on the local listener (127.0.0.1) the
+// panel offers that bookmarklet for other pages (#pins-elsewhere). A classic script, loaded
+// before main.js (whose init calls initPins), sharing the page's globals with the others: no
+// import or export.
 'use strict';
 
-// The bounds of src/pins.ts: the text sent, the selector; a data-* value an anchor may use.
-const PIN_TEXT_CHARS = 200;
-const PIN_SELECTOR_CHARS = 1000;
-const PIN_DATA_VALUE_CHARS = 100;
 // The pins' own elements: a pointer event on them is never stopped, a click on them places nothing.
 const PIN_OWN = '#point-toggle, #pins, #pin-note, #pins-open';
 // The elements the pins draw into: their DOM changes do not draw the markers again.
@@ -58,10 +57,12 @@ interface PinsPage {
   // answer to an older one does not replace a newer one's.
   asked: number;
   applied: number;
+  // The Point bookmarklet's two scripts were asked for (once per page load).
+  bookmarkletAsked: boolean;
 }
 
 const pinPage: PinsPage = {
-  on: false, opened: false, closed: false, pins: [], status: '', noteFor: null, placing: false, hover: null, frame: false, places: new Map(), asked: 0, applied: 0,
+  on: false, opened: false, closed: false, pins: [], status: '', noteFor: null, placing: false, hover: null, frame: false, places: new Map(), asked: 0, applied: 0, bookmarkletAsked: false,
 };
 
 // The page's hash without '#': '' for the board.
@@ -152,92 +153,6 @@ async function pinWrite(path: string, body: unknown): Promise<Readonly<Record<st
   } finally {
     drawPins();
   }
-}
-
-// ---------- The selector ----------
-
-// The element's children of the same tag, its place among them from 1, as nth-of-type counts.
-function pinStep(node: Element): string {
-  const parent = node.parentElement;
-  const same = parent === null ? [node] : Array.from(parent.children).filter((child) => child.tagName === node.tagName);
-  return `${node.tagName.toLowerCase()}:nth-of-type(${same.indexOf(node) + 1})`;
-}
-
-// The elements the selector finds; none when the page cannot parse it.
-function pinMatches(selector: string): Element[] {
-  try {
-    return Array.from(document.querySelectorAll(selector));
-  } catch { // a selector the page cannot parse finds nothing
-    return [];
-  }
-}
-
-// The element the selector finds first, or null: none found, or a selector the page cannot parse.
-const pinFind = (selector: string): Element | null => pinMatches(selector)[0] ?? null;
-
-// The element as an id anchor: #<id> (escaped with CSS.escape, so any id can be written) when its
-// id is unique in the document; else null.
-function pinIdAnchor(node: Element): string | null {
-  if (node.id === '') {
-    return null;
-  }
-  const selector = `#${CSS.escape(node.id)}`;
-  return pinMatches(selector).length === 1 ? selector : null;
-}
-
-// The element as a data anchor: <tag>[data-<name>="<value>"] of its first data-* attribute (in
-// attribute order) with a value of at most 100 characters without " or \ that finds only this
-// element; else null.
-function pinDataAnchor(node: Element): string | null {
-  for (const name of node.getAttributeNames()) {
-    const value = node.getAttribute(name) ?? '';
-    if (!name.startsWith('data-') || value.length > PIN_DATA_VALUE_CHARS || /["\\]/.test(value)) {
-      continue;
-    }
-    const selector = `${node.tagName.toLowerCase()}[${name}="${value}"]`;
-    const found = pinMatches(selector);
-    if (found.length === 1 && found[0] === node) {
-      return selector;
-    }
-  }
-  return null;
-}
-
-// The selector of a pin's element. Walking from the element up to body, the first element with a
-// unique id is the anchor; failing that (no element on the way has one), the first with a data
-// anchor (pinDataAnchor); each element below the anchor adds its nth-of-type step, joined with
-// ' > '; without an anchor it starts at body. Kept only when it finds the element again; else the
-// plain body > ... path of nth-of-type steps.
-function pinSelector(node: Element): string {
-  // The element and its ancestors below body, nearest first.
-  const path: Element[] = [];
-  for (let at: Element | null = node; at !== null && at !== document.body; at = at.parentElement) {
-    path.push(at);
-  }
-  const steps = (count: number): string[] => path.slice(0, count).reverse().map(pinStep);
-  const plain = ['body', ...steps(path.length)].join(' > ');
-  for (const anchorOf of [pinIdAnchor, pinDataAnchor]) {
-    for (const [index, at] of path.entries()) {
-      const anchor = anchorOf(at);
-      if (anchor !== null) {
-        const selector = [anchor, ...steps(index)].join(' > ');
-        return pinFind(selector) === node ? selector : plain;
-      }
-    }
-  }
-  return plain;
-}
-
-// The element's visible text: every run of white space as one space, trimmed, at most 200
-// characters, never half of a surrogate pair.
-function pinText(node: Element): string {
-  const text = (node.textContent ?? '').replace(/\s+/g, ' ').trim();
-  if (text.length <= PIN_TEXT_CHARS) {
-    return text;
-  }
-  const cut = text.slice(0, PIN_TEXT_CHARS);
-  const last = cut.charCodeAt(cut.length - 1);
-  return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
 }
 
 // ---------- The mode, the click, the note field ----------
@@ -453,6 +368,12 @@ function renderPinsPanel(): void {
   byId('pins-title').textContent = `Pins (${open.length} open)`;
   byId('pins-stop').hidden = !pinPage.on;
   byId('pins-status').textContent = pinPage.status;
+  // Only on 127.0.0.1, the factory window's own host: the bookmarklet opens <origin>/point, which
+  // only the local listener serves, under the name its cookie was set for.
+  if (shown && !pinPage.bookmarkletAsked && location.hostname === '127.0.0.1') {
+    pinPage.bookmarkletAsked = true;
+    void offerPinBookmarklet();
+  }
   const toggle = byId('pins-open');
   toggle.hidden = pinPage.on || shown || open.length === 0;
   toggle.textContent = `📍 ${open.length}`;
@@ -476,6 +397,34 @@ function renderPinsPanel(): void {
     return row;
   });
   byId('pins-list').replaceChildren(...rows);
+}
+
+// ---------- The Point bookmarklet ----------
+
+// The bookmarklet: pin-selector.js and point-page.js in one arrow function that calls pointOnPage
+// with the factory's origin (never the page's address, whose path holds the token) and returns
+// nothing, so the browser keeps the page it runs in.
+function pinBookmarklet(selector: string, page: string, factory: string): string {
+  return `javascript:${encodeURIComponent(`(()=>{${selector}\n${page}\npointOnPage(${JSON.stringify(factory)});})()`)}`;
+}
+
+// The panel's line on other pages, on the local listener only (renderPinsPanel asks once): both
+// scripts read, the link is the bookmarklet and the line shows; a failed read keeps it hidden
+// until the page loads again.
+async function offerPinBookmarklet(): Promise<void> {
+  const read = async (file: string): Promise<string> => {
+    const response = await fetch(file, { cache: 'no-store' });
+    if (response.status !== 200) {
+      throw new Error(`${file}: HTTP ${response.status}`);
+    }
+    return response.text();
+  };
+  try {
+    const [selector, page] = await Promise.all([read('pin-selector.js'), read('point-page.js')]);
+    (byId('pins-bookmarklet') as HTMLAnchorElement).href = pinBookmarklet(selector, page, location.origin);
+    byId('pins-elsewhere').hidden = false;
+  } catch { // a script not served or the factory not answering: the line stays hidden
+  }
 }
 
 function drawPins(): void {
@@ -543,6 +492,8 @@ function initPins(): void {
     renderPinsPanel();
   });
   byId('pins').addEventListener('click', onPinsClick);
+  // The bookmarklet is dragged to the bookmarks bar, not run here.
+  byId('pins-bookmarklet').addEventListener('click', (event) => event.preventDefault());
   byId('pin-note').addEventListener('keydown', pinNoteKey);
   byId('pin-note-save').addEventListener('click', () => void savePinNote());
   byId('pin-note-skip').addEventListener('click', closePinNote);

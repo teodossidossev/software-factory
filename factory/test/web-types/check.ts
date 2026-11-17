@@ -157,6 +157,7 @@ type ServerTicketPage = {
   check_usd_complete: boolean;
   history: Awaited<ReturnType<TicketHistory.TicketHistory['timeline']>>;
   queue: null;
+  planner_session: ReturnType<typeof Dashboard.plannerSessionView>;
 };
 
 // --- The checks: one per page type, named after it.
@@ -217,6 +218,7 @@ export interface Checks {
   TicketPage: Copy<TicketPage, ServerTicketPage>;
   TicketPlan: Copy<TicketPlan, ServerPlan>;
   PlanDependency: Copy<PlanDependency, ServerPlan['waits_for'][number]>;
+  PlannerSessionView: Copy<PlannerSessionView, NonNullable<ReturnType<typeof Dashboard.plannerSessionView>>>;
   DigestList: Copy<DigestList, ServerDigests>;
   DigestSummary: Copy<DigestSummary, ServerDigests['digests'][number]>;
   DigestRecord: Copy<DigestRecord, ServerDigest>;

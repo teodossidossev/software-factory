@@ -95,6 +95,10 @@ export const ERROR_STATUS: Readonly<Record<string, number>> = {
   // The dashboard's pins (src/pins.ts): no such pin, too many open ones, a pins.json that only
   // sf pins clear may replace.
   pin_not_found: 404, too_many_pins: 409, pins_unreadable: 409,
+  // The ticket's planner session (src/planner-session.ts): a start of it under way, and a planning
+  // copy that is not set up, holds the repository's Claude Code configuration or is not trusted by
+  // Claude Code.
+  planner_starting: 409, planning_copy_missing: 409, planning_copy_unsafe: 409, planning_copy_untrusted: 409,
 };
 
 // The HTTP status of a FactoryError's code: ERROR_STATUS's, else fallback.

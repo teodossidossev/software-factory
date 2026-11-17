@@ -11,17 +11,18 @@ import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { MAX_ATTACHMENT_BYTES } from '../src/attachments.js';
-import { MAX_ACTION_BODY_BYTES, MAX_TASK_BODY_BYTES, startDashboard } from '../src/dashboard.js';
+import { type DashboardPlanner, MAX_ACTION_BODY_BYTES, MAX_TASK_BODY_BYTES, startDashboard } from '../src/dashboard.js';
 import { FactoryError } from '../src/errors.js';
 import { CHATGPT_PREFILL_URL, conversationUrl, ticketConversation } from '../src/conversation.js';
 import { JobStore } from '../src/jobs.js';
+import type { PlannerSession } from '../src/planner-session.js';
 import { loadRegistry, resolveWorkspace } from '../src/registry.js';
 import { draftContent, type JobDependencies, Setup } from '../src/setup.js';
 import { CheckStore, TaskChecks } from '../src/task-check.js';
 import { MAX_TASK_BYTES, taskSha256 } from '../src/task-file.js';
 import { TicketHistory } from '../src/ticket-history.js';
 import { act, CSP, fakeActions, fakeSetup, fetchRaw, openStream, type Reply, ticketRow, workspaceRow } from './support/dashboard-client.js';
-import { withDashboard } from './support/dashboard-state.js';
+import { fixture, withDashboard } from './support/dashboard-state.js';
 import { call, newEnv, newRepo, runCli, script, serve, stop, temp, waitFor } from './support/harness.js';
 
 const error = (reply: Reply): { status: number; code: string } => ({ status: reply.status, code: JSON.parse(reply.body).error.code });
@@ -310,13 +311,14 @@ test('dashboard ticket page (SF-081): the page payload of a skeleton and of a wr
   await withDashboard('dash-ticket-page', fake, async (dashboard) => {
     const base = dashboard.url;
     const skeleton = JSON.parse((await fetchRaw(new URL('api/tickets/app/T-1/page', base))).body);
-    assert.deepEqual(Object.keys(skeleton), ['ticket', 'task', 'plan', 'check', 'check_rounds', 'check_usd', 'check_usd_complete', 'history', 'queue']);
+    assert.deepEqual(Object.keys(skeleton), ['ticket', 'task', 'plan', 'check', 'check_rounds', 'check_usd', 'check_usd_complete', 'history', 'queue', 'planner_session']);
     assert.deepEqual([skeleton.ticket.ticket, skeleton.ticket.draft, skeleton.ticket.conversation.message], ['T-1', true, ticketConversation('app', 'T-1')]);
     assert.deepEqual(skeleton.task, { text: draftContent('T-1', 'Skeleton', 'main'), sha256: taskSha256(draftContent('T-1', 'Skeleton', 'main')) });
     assert.deepEqual(skeleton.plan, { starts_from: 'main', files: [], scoped: false, waits_for: [] });
     // Without the Task checks there is no check; the queue is SF-071's; nothing recorded, the
-    // fixture's job of T-1 read from the state directory.
-    assert.deepEqual([skeleton.check, skeleton.queue], [null, null]);
+    // fixture's job of T-1 read from the state directory. Without the dashboard's planner there is
+    // no planner session.
+    assert.deepEqual([skeleton.check, skeleton.queue, skeleton.planner_session], [null, null, null]);
     assert.deepEqual(skeleton.history.map((entry: { kind: string; text: string }) => [entry.kind, entry.text]), [
       ['started', 'Started as a job (now: awaiting_review)'], ['note', 'Older steps were not recorded; they are known only from checks and jobs.'],
     ]);
@@ -347,6 +349,10 @@ test('dashboard ticket page (SF-081): the page payload of a skeleton and of a wr
     }
     const posted = await fetchRaw(new URL('api/tickets/app/T-2/page', base), { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: '{}' });
     assert.deepEqual([posted.status, posted.headers.allow], [405, 'GET']);
+    // Without the dashboard's planner every planner path is an empty 404.
+    for (const reply of [await fetchRaw(new URL('api/tickets/app/T-1/planner', base)), await act(base, 'api/tickets/app/T-1/planner', {}), await act(base, 'api/tickets/app/T-1/planner/stop', {})]) {
+      assert.deepEqual([reply.status, reply.body], [404, '']);
+    }
     // A Task file the reader refuses answers the refusal.
     setup.texts.set('app/T-2', 'no front matter');
     setup.taskFile = async () => {
@@ -356,6 +362,123 @@ test('dashboard ticket page (SF-081): the page payload of a skeleton and of a wr
     assert.deepEqual(setup.calls, []);
     assert.deepEqual(fake.calls, []);
   }, setup);
+});
+
+test('dashboard ticket planner: GET reads the ticket\'s planner session, POST starts it, POST .../planner/stop ends it, through the planner the dashboard is given; bodies, methods, names, the tickets list and the refusals; every page gets the tickets again', async () => {
+  const store = await fixture('dash-planner');
+  const setup = fakeSetup([workspaceRow('app')], [ticketRow('app', 'T-5')]);
+  setup.texts.set('app/T-5', draftContent('T-5', 'Five', 'main'));
+  const calls: Array<[string, string, string]> = [];
+  const sessions = new Map<string, PlannerSession>();
+  let refusal: FactoryError | undefined;
+  const planner: DashboardPlanner = {
+    async start(workspace, ticket) {
+      calls.push(['start', workspace, ticket]);
+      if (refusal !== undefined) {
+        throw refusal;
+      }
+      const kept = sessions.get(`${workspace}/${ticket}`);
+      if (kept !== undefined) {
+        return { started: false, session: kept };
+      }
+      const session: PlannerSession = { workspace, ticket, name: `Planner ${workspace} ${ticket}`, id: 'id-1', pid: 4242, started_at: '2026-11-16T12:03:00.000Z' };
+      sessions.set(`${workspace}/${ticket}`, session);
+      return { started: true, session };
+    },
+    async session(workspace, ticket) {
+      calls.push(['session', workspace, ticket]);
+      return sessions.get(`${workspace}/${ticket}`);
+    },
+    async stop(workspace, ticket) {
+      calls.push(['stop', workspace, ticket]);
+      if (refusal !== undefined) {
+        throw refusal;
+      }
+      const kept = sessions.get(`${workspace}/${ticket}`);
+      sessions.delete(`${workspace}/${ticket}`);
+      return kept;
+    },
+  };
+  const dashboard = await startDashboard(0, store.state, store.jobs, fakeActions(), setup, { planner });
+  try {
+    const base = dashboard.url;
+    const path = 'api/tickets/app/T-5/planner';
+    const read = async (): Promise<Reply> => fetchRaw(new URL(path, base));
+    const view = { name: 'Planner app T-5', started_at: '2026-11-16T12:03:00.000Z', link: null };
+    // DP-1: none runs.
+    const none = await read();
+    assert.deepEqual([none.status, none.headers['content-type'], JSON.parse(none.body)], [200, 'application/json; charset=utf-8', { session: null }]);
+    assert.deepEqual(calls, [['session', 'app', 'T-5']]);
+    calls.length = 0;
+
+    // DP-6: the transport checks, the bodies, the methods and the names, before any call.
+    for (const post of [path, `${path}/stop`]) {
+      assert.deepEqual(error(await act(base, post, {}, { headers: { origin: 'http://localhost' } })), { status: 403, code: 'invalid_origin' }, post);
+      assert.deepEqual(error(await act(base, post, {}, { headers: { 'content-type': 'text/plain' } })), { status: 415, code: 'unsupported_media_type' }, post);
+      const route = post.endsWith('/stop') ? 'ticket-planner-stop' : 'ticket-planner';
+      for (const text of ['{"now":true}', '[]', 'null']) {
+        const reply = await act(base, post, undefined, { body: text });
+        assert.deepEqual([reply.status, JSON.parse(reply.body).error], [400, { code: 'invalid_body', message: `${route} expects {}; no other keys, no null.` }], `${post} ${text}`);
+      }
+    }
+    for (const [method, target, allow] of [['PUT', path, 'GET, POST'], ['DELETE', path, 'GET, POST'], ['GET', `${path}/stop`, 'POST'], ['PUT', `${path}/stop`, 'POST']] as const) {
+      const reply = await fetchRaw(new URL(target, base), { method });
+      assert.deepEqual([reply.status, reply.headers.allow], [405, allow], `${method} ${target}`);
+    }
+    for (const name of ['api/tickets/App/T-5/planner', 'api/tickets/app/..%2FT-5/planner']) {
+      for (const reply of [await fetchRaw(new URL(name, base)), await act(base, name, {}), await act(base, `${name}/stop`, {})]) {
+        assert.deepEqual([reply.status, reply.body], [404, ''], name);
+      }
+    }
+    const queried = await fetchRaw(new URL(`${path}?x=1`, base));
+    assert.deepEqual([queried.status, queried.body], [404, '']);
+    // DP-4: a start of a ticket the tickets list does not hold.
+    const unlisted = await act(base, 'api/tickets/app/T-9/planner', {});
+    assert.deepEqual([unlisted.status, unlisted.body], [404, '']);
+    assert.deepEqual(calls, []);
+
+    // DP-2: the start, then again with the session running; DP-1 and DP-7 while it runs.
+    const stream = await openStream(new URL('api/stream', base));
+    await stream.next('tickets');
+    assert.deepEqual(result(await act(base, path, {})), { started: true, session: view });
+    await stream.next('tickets');
+    assert.deepEqual(result(await act(base, path, {})), { started: false, session: view });
+    await stream.next('tickets');
+    assert.deepEqual(calls, [['start', 'app', 'T-5'], ['start', 'app', 'T-5']]);
+    assert.deepEqual(JSON.parse((await read()).body), { session: view });
+    sessions.get('app/T-5')!.link = 'https://claude.ai/code/session_01Ab';
+    const linked = { ...view, link: 'https://claude.ai/code/session_01Ab' };
+    assert.deepEqual(JSON.parse((await read()).body), { session: linked });
+    const page = JSON.parse((await fetchRaw(new URL('api/tickets/app/T-5/page', base))).body);
+    assert.equal(Object.keys(page).at(-1), 'planner_session');
+    assert.deepEqual(page.planner_session, linked);
+
+    // DP-5: the refusals with their statuses.
+    for (const [code, status] of [['planner_starting', 409], ['planning_copy_missing', 409], ['planning_copy_unsafe', 409], ['planning_copy_untrusted', 409], ['workspace_not_found', 404], ['planner_start_failed', 500]] as const) {
+      refusal = new FactoryError(code, `The ${code} message.`);
+      const reply = await act(base, path, {});
+      assert.deepEqual([reply.status, JSON.parse(reply.body)], [status, { ok: false, error: { code, message: `The ${code} message.` } }], code);
+    }
+    refusal = new FactoryError('planner_starting', 'The planner_starting message.');
+    const busy = await act(base, `${path}/stop`, {});
+    assert.deepEqual([busy.status, JSON.parse(busy.body)], [409, { ok: false, error: { code: 'planner_starting', message: 'The planner_starting message.' } }]);
+    refusal = undefined;
+
+    // DP-3: the stop, then again with none running; a ticket the tickets list does not hold too.
+    calls.length = 0;
+    assert.deepEqual(result(await act(base, `${path}/stop`, {})), { stopped: linked });
+    await stream.next('tickets');
+    assert.deepEqual(result(await act(base, `${path}/stop`, {})), { stopped: null });
+    await stream.next('tickets');
+    assert.deepEqual(result(await act(base, 'api/tickets/app/T-9/planner/stop', {})), { stopped: null });
+    await stream.next('tickets');
+    assert.deepEqual(calls, [['stop', 'app', 'T-5'], ['stop', 'app', 'T-5'], ['stop', 'app', 'T-9']]);
+    assert.deepEqual(JSON.parse((await read()).body), { session: null });
+    assert.equal(JSON.parse((await fetchRaw(new URL('api/tickets/app/T-5/page', base))).body).planner_session, null);
+    stream.close();
+  } finally {
+    await dashboard.close();
+  }
 });
 
 test('dashboard ticket page (SF-081): Save posts the content and the sha256 read; the body checks, a body over 128 KB taken, the error mapping and the refresh', async () => {

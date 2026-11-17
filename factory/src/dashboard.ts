@@ -12,8 +12,9 @@
 // check, its start (Check) and its view. The board adds to each job row what its card shows: who
 // acts now, the Implementer's tool calls and the findings a stopped job waits on. The Changes
 // screen reads the file lists and the file versions of the iterations (src/changes.ts), read-only.
-// The planned ticket page reads a ticket's Task file, its plan in plain words, its check and its
-// history in one payload, and saves the Task file (only over the version it read). A ticket's
+// The planned ticket page reads a ticket's Task file, its plan in plain words, its check, its
+// history and its planner session in one payload, and saves the Task file (only over the version
+// it read); the planner session is read, started and ended through DashboardPlanner. A ticket's
 // images are uploaded as raw bytes, served and removed through the attachments module's rules
 // (src/attachments.ts). The pins of the page's point mode are read and written through the pins
 // store (src/pins.ts), the same as sf pins.
@@ -42,6 +43,7 @@ import type { HealthMonitor } from './health.js';
 import type { RunQueue } from './queue.js';
 import { listen, LOOPBACK_HOST, sameSecret, sendJson, statusOf } from './http.js';
 import type { Job, JobState, JobStore } from './jobs.js';
+import type { PlannerSession } from './planner-session.js';
 import { DIGEST_DEFAULTS } from './registry.js';
 import { DASHBOARD_TOKEN_FILE as TOKEN_FILE, readTokenFile } from './secrets.js';
 import type { Setup } from './setup.js';
@@ -57,6 +59,7 @@ export { jobDetail, jobsPayload, NOW_TAIL_BYTES, planOf, ticketEntry, ticketsPay
 export { MAX_STREAMS } from './dashboard-changes.js';
 export { MAX_ACTION_BODY_BYTES, MAX_TASK_BODY_BYTES } from './dashboard-posts.js';
 export { STREAM_PAGE_LINES } from './dashboard-reads.js';
+export { plannerSessionView } from './dashboard-context.js';
 
 export const DEFAULT_DASHBOARD_PORT = 8788;
 // The remote listener's port, where `tailscale serve --bg 8789` points.
@@ -131,6 +134,15 @@ export type DashboardSetup = Pick<Setup, 'workspaces' | 'addWorkspace' | 'editWo
 export type DashboardDigests = Pick<Digests, 'list' | 'read' | 'start'>;
 // The health checks' last result (sf serve's HealthMonitor).
 export type DashboardHealth = Pick<HealthMonitor, 'list'>;
+// The planned ticket page's planner session (src/planner-session.ts) for startDashboard: start
+// (startPlanner), the session as it runs now (plannerSession, which removes the record of one
+// that ended) and stop (stopPlanner), each by the ticket's workspace and key; the caller binds
+// the session's environment and folders.
+export interface DashboardPlanner {
+  start(workspace: string, ticket: string): Promise<{ started: boolean; session: PlannerSession }>;
+  session(workspace: string, ticket: string): Promise<PlannerSession | undefined>;
+  stop(workspace: string, ticket: string): Promise<PlannerSession | undefined>;
+}
 
 // The Task checks: start one, a ticket's view and its board summary.
 // store: the records of a ticket's checks, its plan-check rounds and cost.
@@ -295,11 +307,12 @@ function printableLogin(login: string): string {
 // remoteLogins (SF_DASHBOARD_REMOTE_LOGINS, as dashboardRemoteLogins returns them). The logins and the
 // two ports are checked here too (invalid_config), for a caller that did not check them; health:
 // the health checks, none without (GET api/health answers 404, the stream sends no health
-// event).
+// event); planner: the planned ticket page's planner session, none without (the planner routes
+// answer an empty 404 and the page payload's planner_session is null).
 export async function startDashboard(
   port: number, stateDir: string, jobs: JobStore, actions: DashboardActions, setup: DashboardSetup = NO_SETUP,
-  { gate: gateOn = true, checks, queue, onWorkspacesChanged, digests, health, remoteOrigins = [], remoteLogins = [], remotePort = DEFAULT_DASHBOARD_REMOTE_PORT }: {
-    gate?: boolean; checks?: DashboardChecks; queue?: DashboardQueue; onWorkspacesChanged?: () => void; digests?: DashboardDigests; health?: DashboardHealth;
+  { gate: gateOn = true, checks, queue, onWorkspacesChanged, digests, health, planner, remoteOrigins = [], remoteLogins = [], remotePort = DEFAULT_DASHBOARD_REMOTE_PORT }: {
+    gate?: boolean; checks?: DashboardChecks; queue?: DashboardQueue; onWorkspacesChanged?: () => void; digests?: DashboardDigests; health?: DashboardHealth; planner?: DashboardPlanner;
     remoteOrigins?: readonly string[]; remoteLogins?: readonly string[]; remotePort?: number;
   } = {},
 ): Promise<RunningDashboard> {
@@ -392,7 +405,7 @@ export async function startDashboard(
 
   // origin, the exact origin of the page, is known once the listener has its port.
   const ctx: DashboardContext = {
-    stateDir, gateOn, remoteOrigins, onWorkspacesChanged, jobs, actions, setup, checks, queue, digests, health, tokenText, cookies, files, streams,
+    stateDir, gateOn, remoteOrigins, onWorkspacesChanged, jobs, actions, setup, checks, queue, digests, health, planner, tokenText, cookies, files, streams,
     toolCalls, changes, history, stats, send, empty, body, refuseRead, jobsOf, origin: '',
   };
   const feed = changeFeed(ctx);
@@ -492,6 +505,24 @@ export async function startDashboard(
         return;
       }
       reads.route(req, res, path, target.searchParams, remote).catch(failed);
+      return;
+    }
+    if (what.kind === 'ticket-planner') {
+      if (req.method !== 'POST' && (what.stop || req.method !== 'GET')) {
+        empty(res, 405, { allow: what.stop ? 'POST' : 'GET, POST' });
+        return;
+      }
+      if (req.method === 'GET') {
+        reads.route(req, res, path, target.searchParams, remote).catch(failed);
+        return;
+      }
+      const key = jobKey(what.workspace, what.ticket);
+      const post = key === undefined ? undefined : posts.plannerPost(key, what.stop);
+      if (post === undefined) {
+        empty(res, 404);
+        return;
+      }
+      posts.handlePost(req, res, post, remote).catch(failed);
       return;
     }
     if (what.kind === 'ticket-attachment-add' || what.kind === 'ticket-attachment-remove') {

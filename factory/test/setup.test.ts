@@ -138,6 +138,23 @@ test('setup (SF-103): add with the digest fields; edit keeps the name and the ke
   const row = await setup.editWorkspace('app', edit);
   assert.deepEqual(row, { name: 'app', path: repo, liveJobs: 0, problem: null, handoff: null, color: 'teal', app: 'shop', description: 'The shop\'s backend.', derived_description: 'hello', digest: { track: true, my_work: true } });
   assert.deepEqual((await loadRegistry(env.config)).workspaces.app, { read_checkout: repo, work_checkout: repo, rules_skip: ['docs/**'], description: 'The shop\'s backend.', app: 'shop', digest: { track: true, my_work: true } });
+  // The label: a text sets it trimmed, an absent label keeps it, too long is refused with nothing
+  // written, "" removes it.
+  const labelled = { read_checkout: repo, work_checkout: repo, rules_skip: ['docs/**'], description: 'The shop\'s backend.', app: 'shop', label: 'exp', digest: { track: true, my_work: true } };
+  assert.deepEqual(await setup.editWorkspace('app', { ...edit, label: ' exp ' }), { ...row, label: 'exp' });
+  assert.deepEqual((await loadRegistry(env.config)).workspaces.app, labelled);
+  assert.equal((await setup.editWorkspace('app', edit)).label, 'exp');
+  assert.deepEqual((await loadRegistry(env.config)).workspaces.app, labelled);
+  const labelBefore = await readFile(join(env.config, 'workspaces.json'), 'utf8');
+  for (const label of ['x'.repeat(25), '\n', ' \t ']) {
+    assert.equal(await refused(setup.editWorkspace('app', { ...edit, label }), 'workspace_invalid'), 'The label must be one line of at most 24 characters.');
+  }
+  assert.equal(await readFile(join(env.config, 'workspaces.json'), 'utf8'), labelBefore);
+  // Spaces alone are no label: the same as "".
+  assert.equal(Object.hasOwn(await setup.editWorkspace('app', { ...edit, label: '   ' }), 'label'), false);
+  await setup.editWorkspace('app', { ...edit, label: 'exp' });
+  assert.deepEqual(await setup.editWorkspace('app', { ...edit, label: '' }), row);
+  assert.equal(Object.hasOwn((await loadRegistry(env.config)).workspaces.app!, 'label'), false);
   await setup.editWorkspace('app', { ...edit, description: '', app: '', handoff: 'checkout', color: 'green', digest: { track: false, my_work: false } });
   assert.deepEqual((await loadRegistry(env.config)).workspaces.app, { read_checkout: repo, work_checkout: repo, rules_skip: ['docs/**'], handoff: 'checkout', color: 'green' });
   // No temp file left beside workspaces.json.

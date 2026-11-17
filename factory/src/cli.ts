@@ -44,7 +44,7 @@ import { followJobs, lockPath, runJob } from './runner.js';
 import { applyNetDefaults } from './net-defaults.js';
 import { notifyConfig, notifyTaskCheck, sendNotification, stateNotifier, testNotification } from './notify.js';
 import {
-  configDir, HANDOFF_MODES, ignoredWorkCheckouts, isHandoffMode, isNotifyMode, isWorkspaceColor, loadRegistry, resolveWorkspace, saveRegistry, setWorkspaceNotify, verifyCheckout,
+  checkLabel, configDir, HANDOFF_MODES, ignoredWorkCheckouts, isHandoffMode, isNotifyMode, isWorkspaceColor, loadRegistry, resolveWorkspace, saveRegistry, setWorkspaceNotify, verifyCheckout,
   WORKSPACE_COLORS, workspaceColor, type WorkspaceEntry, workspaceNotify, workspaceNotifyMode,
 } from './registry.js';
 import {
@@ -94,8 +94,8 @@ const USAGE = `Usage:
   sf mcp-url --redact|--probe                           The tunnel's steps: copy stdin to stdout with the token shown as <token>; send an MCP initialize with the token (exit 0 answers, 1 refused, 2 not reachable)
   sf up [--no-open] [--no-tunnel]                       sf serve (with its tunnel; --no-tunnel: SF_TUNNEL=off) in one terminal, and open the dashboard; Ctrl+C stops both
   sf dashboard [--open] [--rotate]                      Print the dashboard URL; --open also opens it (xdg-open); --rotate removes the token so the next sf serve makes a new one
-  sf workspace add <name> --read <path> [--handoff checkout|off] [--color <name>]  Register a workspace: the local checkout (every job works in a worktree of it); --handoff: its own hand-over setting, over SF_HANDOFF; --color: its colour on the board (blue, teal, green, olive, orange, red, purple or grey; default: by its name). Again with the same path: changes the --handoff and --color given
-  sf workspace list                                     List registered workspaces, their hand-over setting and colour, and their notify setting when it is not full
+  sf workspace add <name> --read <path> [--handoff checkout|off] [--color <name>] [--label <text>]  Register a workspace: the local checkout (every job works in a worktree of it); --handoff: its own hand-over setting, over SF_HANDOFF; --color: its colour on the board (blue, teal, green, olive, orange, red, purple or grey; default: by its name); --label: what its cards on the dashboard show instead of its name (one line, at most 24 characters; "" removes it). Again with the same path: changes the --handoff, --color and --label given
+  sf workspace list                                     List registered workspaces, their hand-over setting and colour, their label when they have one, and their notify setting when it is not full
   sf workspace notify <name> full|brief|off             How much the notifications of the workspace's jobs and Task checks tell: full (the default); brief, ntfy gets the title and one line (the workspace and an error's code; a plan not ready keeps its counts; the desktop stays full); off, none. Applies to the next notification
   sf workspace remove <name>                            Unregister a workspace
   sf check-task <workspace> <ticket>                    Check the Task file before Start: a read-only Claude session reads it and the repository, and prints its paraphrase, its findings by severity and its verdict (stored by the Task file's sha256; it only advises). sf serve checks a written Task file by itself 60 s after its last change (SF_TASK_CHECK_AUTO)
@@ -487,7 +487,7 @@ async function workspace(args: string[]): Promise<void> {
     args: rest,
     allowPositionals: true,
     strict: true,
-    options: command === 'add' ? { read: { type: 'string' }, work: { type: 'string' }, handoff: { type: 'string' }, color: { type: 'string' } } : {},
+    options: command === 'add' ? { read: { type: 'string' }, work: { type: 'string' }, handoff: { type: 'string' }, color: { type: 'string' }, label: { type: 'string' } } : {},
   });
   if (command === 'list') {
     if (positionals.length > 0) {
@@ -498,9 +498,10 @@ async function workspace(args: string[]): Promise<void> {
       console.log('No workspaces registered.');
     }
     for (const [name, entry] of entries) {
-      // The notify setting only when it is not the default.
+      // The label only when it has one, the notify setting only when it is not the default.
       const notify = workspaceNotify(entry);
-      console.log(`${name}\n  checkout: ${entry.read_checkout}\n  hand-over: ${handoffLabel(entry)}\n  colour: ${colorLabel(name, entry)}${notify !== 'full' ? `\n  notify: ${notify}` : ''}`);
+      const label = entry.label !== undefined ? `\n  label: ${entry.label}` : '';
+      console.log(`${name}\n  checkout: ${entry.read_checkout}\n  hand-over: ${handoffLabel(entry)}\n  colour: ${colorLabel(name, entry)}${label}${notify !== 'full' ? `\n  notify: ${notify}` : ''}`);
     }
     return;
   }
@@ -537,17 +538,22 @@ async function workspace(args: string[]): Promise<void> {
     if (color !== undefined && !isWorkspaceColor(color)) {
       throw new UsageError(`--color must be one of ${WORKSPACE_COLORS.join(', ')}, got "${String(color)}".`);
     }
+    // --label "" removes the label, a text sets it, no --label keeps it.
+    const labelGiven = typeof values.label === 'string';
+    const label = typeof values.label === 'string' ? checkLabel(values.label) : undefined;
     const registry = await loadRegistry();
     const real = await checkout(read, '--read');
-    // Registered: the same checkout with --handoff or --color changes those, the rest stays.
+    // Registered: the same checkout with --handoff, --color or --label changes those, the rest stays.
     const existing = Object.hasOwn(registry.workspaces, name) ? registry.workspaces[name] : undefined;
-    if (existing !== undefined && (existing.read_checkout !== real || (handoff === undefined && color === undefined))) {
-      throw new FactoryError('workspace_exists', `workspace "${name}" is already registered; remove it first, or give the same --read with --handoff or --color to change those.`);
+    if (existing !== undefined && (existing.read_checkout !== real || (handoff === undefined && color === undefined && !labelGiven))) {
+      throw new FactoryError('workspace_exists', `workspace "${name}" is already registered; remove it first, or give the same --read with --handoff, --color or --label to change those.`);
     }
-    const entry: WorkspaceEntry = { ...existing, read_checkout: real, ...(handoff !== undefined ? { handoff } : {}), ...(color !== undefined ? { color } : {}) };
+    const { label: oldLabel, ...others } = existing ?? {};
+    const kept = labelGiven ? label : oldLabel;
+    const entry: WorkspaceEntry = { ...others, read_checkout: real, ...(handoff !== undefined ? { handoff } : {}), ...(color !== undefined ? { color } : {}), ...(kept !== undefined ? { label: kept } : {}) };
     registry.workspaces[name] = entry;
     await saveRegistry(registry);
-    console.log(`${existing === undefined ? 'Registered' : 'Updated'} workspace "${name}" (checkout: ${entry.read_checkout}; hand-over: ${handoffLabel(entry)}; colour: ${colorLabel(name, entry)}).`);
+    console.log(`${existing === undefined ? 'Registered' : 'Updated'} workspace "${name}" (checkout: ${entry.read_checkout}; hand-over: ${handoffLabel(entry)}; colour: ${colorLabel(name, entry)}${entry.label !== undefined ? `; label: ${entry.label}` : ''}).`);
     return;
   }
   if (command === 'remove') {

@@ -21,11 +21,12 @@ browserTest('workspaces: Edit saves every field and the card shows them; the nam
   await form.getByLabel('App', { exact: true }).fill('shop');
   await form.getByLabel('When a job is ready, hand it over to my checkout').selectOption('checkout');
   await form.getByLabel('Colour of its cards on the board').selectOption('green');
+  await form.getByLabel('Label on its cards').fill('exp');
   await form.getByLabel('Morning digest: follow this repository').check();
   await form.getByLabel('My daily: my commits here go into the daily of its app').check();
   const request = fx.posted(`api/workspaces/${WS}/edit`);
   await form.getByRole('button', { name: 'Save' }).click();
-  const body = { path: before, description: 'The browser tests\' app.', app: 'shop', handoff: 'checkout', color: 'green', digest: { track: true, my_work: true } };
+  const body = { path: before, description: 'The browser tests\' app.', app: 'shop', handoff: 'checkout', color: 'green', label: 'exp', digest: { track: true, my_work: true } };
   assert.deepEqual((await request).postDataJSON(), body);
   assert.deepEqual(fx.setup.calls, [{ method: 'editWorkspace', args: [WS, body] }]);
   await eventually(() => fx.page.locator('#workspace-status').innerText(), `Saved ${WS}.`);

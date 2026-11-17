@@ -27,8 +27,8 @@ Their fix verdicts become the next Fix section without anyone in between.
 
 ```sh
 npm install && npm run build      # once, inside factory/
-bin/sf workspace add <name> --read <path> [--handoff checkout|off] [--color <name>]   # the local checkout; every job works in a worktree of it (--work is retired); --color: its colour on the board; again with the same path: changes --handoff/--color
-bin/sf workspace list             # also the notify setting when it is not full
+bin/sf workspace add <name> --read <path> [--handoff checkout|off] [--color <name>] [--label <text>]   # the local checkout; every job works in a worktree of it (--work is retired); --color: its colour on the board; --label: what its cards show instead of its name; again with the same path: changes --handoff/--color/--label
+bin/sf workspace list             # also the label when there is one, the notify setting when it is not full
 bin/sf workspace notify <name> full|brief|off   # how much the workspace's notifications tell (section Notifications); applies to the next one
 bin/sf workspace remove <name>
 bin/sf digest [--now]             # the morning digest (section Morning digest): the latest digest's period and counts; --now makes one at once and prints its record's path and cost; needs sf serve
@@ -4911,7 +4911,7 @@ shares; the setup, Task check, task and attachment posts have their own handlers
 | `POST api/jobs/<ws>/<ticket>/archive` | `{"confirm"?: string}` | `Execution.archiveFinished(ws, ticket)` (Archive of a Done card or the job's page): `sf reset` for a `pushed`, `aborted` or `failed` job, its active Task file archived with it (`Setup.archiveTicket`); result `{archived, branch, checkout?}`; `409 invalid_state` for a live job; on the remote port `confirm` must be the job's ticket (`409 confirm_required` without); every page gets the jobs again |
 | `POST api/jobs/<ws>/<ticket>/mr-status` | `{}` | `Execution.mergeRequestStatus(ws, ticket)` (`sf mr status`): result `{state, branch, mr, status?: {number, url, state, draft, mergeable, reason?, checks?, merge_commit?}, found?: {count}}` (`found` and a null `mr` without `status` for a job without a record looked up by its branch, SF-200); every page gets the jobs again, and the pages that show the job its detail (a merge request merged or closed on the host shows so at once) |
 | `POST api/workspaces` | `{"name": string, "path": string, "handoff"?: "checkout" \| "off", "color"?: <palette name>, "description"?: string, "app"?: string, "digest"?: {"track": boolean, "my_work": boolean}}` | `Setup.addWorkspace`: the rules of `sf workspace add`; `color` one of `blue`, `teal`, `green`, `olive`, `orange`, `red`, `purple`, `grey` (SF-084), anything else `400 invalid_body`; `description`, `app` and `digest` (SF-103; absent: none, the name, both off); result the workspace row |
-| `POST api/workspaces/<name>/edit` | `{"path": string, "description": string, "app": string, "handoff": "default" \| "checkout" \| "off", "color": "auto" \| <palette name>, "digest": {"track": boolean, "my_work": boolean}}`, every key required | `Setup.editWorkspace` (SF-103): the fields replace the entry's (`""` removes description and app, `default` the handoff, `auto` the color; `work_checkout` and `rules_skip` stay); the path checked as Add checks it; a path change while the workspace has a live job `409 workspace_busy`; result the workspace row |
+| `POST api/workspaces/<name>/edit` | `{"path": string, "description": string, "app": string, "handoff": "default" \| "checkout" \| "off", "color": "auto" \| <palette name>, "label"?: string, "digest": {"track": boolean, "my_work": boolean}}`, every key required but `label` | `Setup.editWorkspace` (SF-103): the fields replace the entry's (`""` removes description, app and label, `default` the handoff, `auto` the color; an absent `label` keeps the label, a label that is not one line of at most 24 characters is `workspace_invalid` (SF-281); `work_checkout` and `rules_skip` stay); the path checked as Add checks it; a path change while the workspace has a live job `409 workspace_busy`; result the workspace row |
 | `POST api/digest-settings` | `{"times"?: ["HH:MM", ...], "weekdays_only"?: boolean, "language"?: string}`, at least one key | `Setup.saveDigestSettings` (SF-103, SF-210): only the keys given change; `times` 1 to 4 distinct `HH:MM`, written sorted, a stored `at` removed; bad times or a bad language `400 invalid_digest_settings` ("1 to 4 times, each HH:MM from 00:00 to 23:59, no time twice"); the model stays; result the settings `{times, weekdays_only, language}` |
 | `POST api/digests/run` | `{}` | `Digests.start('manual')` (SF-103): answers at once `{started: true}`; `409 digest_running` while a digest runs; 404 without the digest |
 | `POST api/workspaces/<name>/remove` | `{}` | `Setup.removeWorkspace`; `409 workspace_busy` while the workspace has a live job; result `{removed}` |
@@ -6006,8 +6006,9 @@ workspace form set it; `sf workspace add` again with the same name and path and 
 it; `sf workspace list` shows it. The optional `label` (SF-280: 1 to 24 characters after trimming,
 one line; anything else makes the file invalid) is what the dashboard's cards show for the
 workspace instead of its name, for names that start alike (`app-frontend`, `app-frontend-second`,
-`app-frontend-beta`); without it the chip shows the whole name; set it by editing the file; the Edit
-keeps it. The optional `guard` (SF-122: `true` or `false`, absent is
+`app-frontend-beta`); without it the chip shows the whole name; set it with `sf workspace add --label
+<text>` (`""` removes it) or the Workspaces drawer's Edit (*Label on its cards*); `sf workspace
+list` shows it. The optional `guard` (SF-122: `true` or `false`, absent is
 `false`, any other value makes the file invalid) checks the workspace's pushes and MR texts for the
 names, Git hosts, ticket keys and email domains of your other workspaces and your private list
 (section Guard); turn it on for `software-factory` by editing the file (`sf workspace add` does not
@@ -6027,10 +6028,10 @@ repository rule files not given to the agents (section Coding rules); edit the f
 The optional `description`, `app` and `digest: {track, my_work}`, and the top-level `digest`
 settings, are the morning digest's (SF-103, section Morning digest); the optional top-level
 `explain: {on, language, model}` is the stop explanations' (SF-106, section Stop explanations). The Workspaces drawer's Edit
-changes an existing workspace's path, description, app, hand-over, colour and digest switches (the
-name stays; `work_checkout`, `label`, `rules_skip`, `guard`, `test_command`, `notify` and `auto_queue` are kept): its body has every field, `""` removes the
-description and the app, `"default"` the handoff, `"auto"` the color; the path is checked as Add
-checks it, and a path change while the workspace has a live job is `workspace_busy`.
+changes an existing workspace's path, description, app, hand-over, colour, label and digest switches (the
+name stays; `work_checkout`, `rules_skip`, `guard`, `test_command`, `notify` and `auto_queue` are kept): its body has every field, `""` removes the
+description, the app and the label, `"default"` the handoff, `"auto"` the color, and a body without
+`label` keeps the label; the path is checked as Add checks it, and a path change while the workspace has a live job is `workspace_busy`.
 
 ## Norms
 

@@ -122,9 +122,10 @@ const explainSettingsSchema = z.strictObject({
 // A workspace's label: what the dashboard's cards call it instead of its name; one line, trimmed.
 // The control characters are checked before the trim, so a line break or tab at either end is
 // refused, not trimmed away.
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/;
 const workspaceLabel = z.string()
-  // eslint-disable-next-line no-control-regex
-  .refine((label) => !/[\u0000-\u001f\u007f]/.test(label), 'must be one line without control characters')
+  .refine((label) => !CONTROL_CHARACTER.test(label), 'must be one line without control characters')
   .trim().min(1).max(MAX_LABEL_CHARS);
 
 const registrySchema = z.strictObject({
@@ -222,27 +223,44 @@ export async function setWorkspaceNotify(name: string, notify: NotifyMode, dir =
   await saveRegistry(registry, dir);
 }
 
-// What the Setup's Edit replaces; "" removes description and app, 'default' the handoff
-// key, 'auto' the color key, and digest with both false the digest key. work_checkout, rules_skip,
-// guard, test_command, notify and auto_queue stay as they are.
+// What the Setup's Edit replaces; "" removes description, app and label, 'default' the handoff
+// key, 'auto' the color key, and digest with both false the digest key; an absent label keeps the
+// label. work_checkout, rules_skip, guard, test_command, notify and auto_queue stay as they are.
 export interface WorkspaceEdit {
   read_checkout: string;
   description: string;
   app: string;
   handoff: HandoffMode | 'default';
   color: WorkspaceColor | 'auto';
+  // "" removes the label, a text sets it (through checkLabel), absent keeps it.
+  label?: string;
   digest: { track: boolean; my_work: boolean };
 }
 
+// A label as sf workspace add --label and the Edit take it: trimmed, "" (also after trimming) is
+// none (undefined); refused with workspace_invalid when it is not one line of at most
+// MAX_LABEL_CHARS characters. A control character is refused even when it is all there is, so a
+// lone line break or tab does not remove the label.
+export function checkLabel(text: string): string | undefined {
+  if (text.trim() === '' && !CONTROL_CHARACTER.test(text)) return undefined;
+  const parsed = workspaceLabel.safeParse(text);
+  if (!parsed.success) {
+    throw new FactoryError('workspace_invalid', `The label must be one line of at most ${MAX_LABEL_CHARS} characters.`);
+  }
+  return parsed.data;
+}
+
 export function editedEntry(entry: WorkspaceEntry, edit: WorkspaceEdit): WorkspaceEntry {
-  const { read_checkout: _read, description: _description, app: _app, handoff: _handoff, color: _color, digest: _digest, ...kept } = entry;
+  const { read_checkout: _read, description: _description, app: _app, handoff: _handoff, color: _color, label: _label, digest: _digest, ...kept } = entry;
   const description = edit.description.trim();
   const app = edit.app.trim();
+  const label = typeof edit.label === 'string' ? checkLabel(edit.label) : entry.label;
   return {
     ...kept,
     read_checkout: edit.read_checkout,
     ...(edit.handoff !== 'default' ? { handoff: edit.handoff } : {}),
     ...(edit.color !== 'auto' ? { color: edit.color } : {}),
+    ...(label !== undefined ? { label } : {}),
     ...(description !== '' ? { description } : {}),
     ...(app !== '' ? { app } : {}),
     ...(edit.digest.track || edit.digest.my_work ? { digest: { track: edit.digest.track, my_work: edit.digest.my_work } } : {}),

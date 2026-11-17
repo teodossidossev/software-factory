@@ -37,6 +37,8 @@ bin/sf serve                      # foreground; Ctrl+C stops it; prints the dash
 bin/sf up [--no-open] [--no-tunnel]   # sf serve (with its tunnel, section sf up) and the dashboard opened in the browser; --no-tunnel is SF_TUNNEL=off; Ctrl+C stops both; npm start at the repository root
 bin/sf mcp-url [--header|--rotate|--port]   # the MCP URL with its token (section MCP endpoint); --header: the URL without it and the bearer header; --rotate: a new token, taken at once by a running sf serve (restart the tunnel); works without sf serve
 bin/sf planner setup <workspace>   # the workspace's planning copy for Claude Code (section MCP endpoint, The planning copy): cloned or fast-forwarded, the MCP server for that folder, the planning skill, .claude/planning-copy.md
+bin/sf planner start <workspace> <ticket>   # the ticket's planner session (section MCP endpoint, The planner session): Claude Code with Remote Control in the planning copy, one per ticket; again while it runs: since when and its link; its tools need sf serve
+bin/sf planner stop <workspace> <ticket>    # end the ticket's planner session
 bin/sf planner waiting <workspace> [permission]   # the planning copy's Stop and Notification hook (section Notifications): tells you that the planner waits for you; always exits 0
 bin/sf dashboard [--open] [--rotate]  # the dashboard URL of the last sf serve start; --open opens it with xdg-open; --rotate removes the token so the next sf serve makes a new one; works without sf serve
 bin/sf check-task <workspace> <ticket>  # the Task check (section Task check): paraphrase, findings by severity, verdict; stored by sha; works without sf serve
@@ -509,6 +511,72 @@ Every error and warning names paths as `<copy>`, `<planning folder>`, `<checkout
 absolute path; only the output lines of step 9 show the copy's path, for your
 terminal. A file system error on the way (a folder that cannot be made or written) is
 `planning_copy_failed`, its paths shown the same way.
+
+### The planner session
+
+`sf planner start <workspace> <ticket>` (`src/planner-session.ts`) starts the ticket's planner: Claude
+Code with Remote Control in the workspace's planning copy, which you open in the Claude app or on
+claude.ai/code. `sf planner stop <workspace> <ticket>` ends it.
+
+**Start's checks**, in this order, each refusal leaving no session and no record: the ticket's lock
+(below; held by a start or stop under way: `planner_starting`, try again in a few seconds); a session
+of the ticket that runs (start answers with it, exit 0); the workspace (`workspace_not_found`); the
+copy set up, `.claude/planning-copy.md` a regular file (`planning_copy_missing`: run `sf planner
+setup` first); none of the repository's Claude Code configuration in the copy's working tree, the
+set `sf planner setup` leaves out (a tracked file under a `.claude/` folder at any depth but
+`CLAUDE.md`, or a `.mcp.json` at its top, tracked or not, in any form): `planning_copy_unsafe`,
+naming the first path; the copy trusted, its own entry in `projects` of Claude Code's global config
+(`$CLAUDE_CONFIG_DIR/.claude.json`, else `~/.claude.json`), by its path or its real path, with
+`hasTrustDialogAccepted: true` (a trusted parent folder does not count): `planning_copy_untrusted`.
+The factory reads that file and never writes it: you accept the trust dialog yourself, once (the
+Next line of `sf planner setup`). Start never refreshes the copy; `sf planner setup` does.
+
+**The session** is `script -qfec '<command>' /dev/null`, run in the copy: a terminal of its own for
+Claude Code, whose input is an open FIFO that nothing writes (an input that ends would reach Claude
+Code as a keystroke). The command is `exec claude --remote-control 'Planner <workspace> <ticket>'
+'/planning-tasks workspace <workspace>, ticket <ticket>'`: the session's name and its first message,
+fixed text and checked names only, each in single quotes; no `--model`, so it uses your default
+model. The session runs `claude` from your `PATH`, the Claude Code you use in the terminal, not
+`SF_CLAUDE`. The skill reads `.claude/planning-copy.md`, which names your request; no path goes on
+the command line. `script` is spawned detached (a session and process group of its own) and not
+waited for. Start watches it for 3 s: a session that ends in that time (no `claude` on `PATH`, no
+login, no working sandbox) is `planner_start_failed`, its record removed.
+
+**Its environment** is that of the factory's own sessions (the basics, `PATH`, locale, proxies)
+without any `ANTHROPIC_*` or `CLAUDE_*` variable but `CLAUDE_CONFIG_DIR`, and without cloud
+credentials (`AWS_*`, `GOOGLE_*`, `CLOUD_ML_*`): a key or token in `auth.env` meant for the factory's
+sessions would replace your claude.ai login, which Remote Control needs. It gets the directory
+settings (`XDG_CONFIG_HOME`, `XDG_STATE_HOME`, `SF_CONFIG_DIR`, `SF_STATE_DIR`, `SF_ENV_FILE`,
+`SF_WORKTREE_ROOT`, those set) so its hook finds this factory's state, `TERM=xterm-256color`, and two
+markers for the hook, `SF_PLANNER_TICKET` and `SF_PLANNER_ID`; no token or other setting of the
+factory.
+
+**The record** is `<state dir>/planner/<workspace>/<ticket>.json` (mode 0600, written atomically):
+`workspace`, `ticket`, `name`, `id` (this start's, also `SF_PLANNER_ID`), `pid` (of `script`),
+`pid_start` (its start time, so a reused pid is not taken for it), `started_at`, and `link` once
+known. A record whose process ended is no session, and is removed under the ticket's lock. **The
+ticket's lock** is `<ticket>.lock` beside it: start, stop and the hook's write take it, so one session
+runs per ticket. **The link** `https://claude.ai/code/<id>` comes from the copy's hook
+(`sf planner waiting`), which sees Claude Code's session id when the session first waits for you: it
+writes only into the record whose `id` is the session's `SF_PLANNER_ID`, and never creates a file
+or a folder; a session you opened by hand records nothing. `sf planner start` again while the
+session runs prints since when it runs and, once known, its link.
+
+**Restarts.** A session started by `sf serve` is in the service's control group, under its CPU
+limit and `Nice=10`; a stop or restart of the service leaves it running, as it leaves the job
+runners (section Service). One started in a terminal outlives the terminal.
+
+**Stop** sends SIGTERM to the session's Claude Code (`script`'s child; SIGKILL to `script` when it
+has none), waits up to 10 s, then sends SIGKILL to both and waits up to 2 s more; it removes the
+record. While a start holds the ticket's lock, stop waits for it up to 13 s, then is
+`planner_starting`. No session: it says so and exits 0.
+
+**It needs** Linux with util-linux `script` and `mkfifo`, `claude` on `PATH`, signed in to
+claude.ai, and `sf serve` for the planning tools. Its error codes: `planner_starting`,
+`planning_copy_missing`, `planning_copy_unsafe`, `planning_copy_untrusted`, `planner_start_failed`
+(mkfifo failed or could not run, `script` could not run, its record could not be written, which
+ends the session at once, or the session ended within 3 s), and
+`invalid_name`, `invalid_ticket` and `workspace_not_found` as elsewhere.
 
 ## Environment
 

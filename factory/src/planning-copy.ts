@@ -35,12 +35,13 @@ import { basename, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { writeFileAtomic, writeFileAtomicWith } from './atomic.js';
 import { checkName, UsageError } from './commands.js';
-import { envFilePath, planningDir } from './config.js';
+import { envFilePath, planningDir, stateDir } from './config.js';
 import { CLONE_TIMEOUT_MS, FETCH_TIMEOUT_MS, GIT_TIMEOUT_MS, originUrl, reason } from './digest.js';
 import { FactoryError } from './errors.js';
 import { withoutHostTokens } from './forge.js';
 import { type GitResult, runGit } from './git.js';
 import { PACKAGE_ROOT } from './package-root.js';
+import { plannerSessionCommand, recordLink } from './planner-session.js';
 import { plannerWaiting } from './planner-waiting.js';
 import { loadRegistry, resolveWorkspace } from './registry.js';
 import { absoluteRule, claudeConfigDir, claudeUserSettings, HOME_CREDENTIALS } from './sandbox-denials.js';
@@ -64,6 +65,8 @@ export interface PlannerDeps {
 export const PLANNER_USAGE: readonly string[] = [
   "  sf planner setup <workspace>                          Prepare the workspace's planning copy for Claude Code: <SF_PLANNING_DIR or ~/planning>/<workspace>, cloned or fast-forwarded, the factory's MCP server for that folder, the planning skill and .claude/planning-copy.md",
   "  sf planner waiting <workspace> [permission]           The planning copy's hook (Stop; Notification with permission): tells you that the planner waits for you, through the factory's notifications",
+  "  sf planner start <workspace> <ticket>                 Start the ticket's planner: Claude Code with Remote Control in the workspace's planning copy (set up and trusted), its first message /planning-tasks workspace <workspace>, ticket <ticket>; one per ticket; it keeps running when sf serve restarts; again while it runs: since when, and its link once known",
+  "  sf planner stop <workspace> <ticket>                  End the ticket's planner session",
 ];
 
 // Every Git command here: never a prompt (the values of the digest's).
@@ -159,28 +162,37 @@ export function isPlannerWaiting(args: readonly string[]): boolean {
 
 // sf planner waiting <workspace> [permission] (src/planner-waiting.ts), the planning copy's hook,
 // which exits 0 whatever happens: setup (the CLI's environment file and config folder) that throws,
-// or a name checkName refuses, is one line on stderr and nothing is sent.
+// or a name checkName refuses, is one line on stderr and nothing is sent. Before it sends, the
+// session's link goes into its ticket's record (recordLink, for a session sf planner start started).
 export async function plannerWaitingCommand(args: readonly string[], setup: () => { env: NodeJS.ProcessEnv; configDir: string }): Promise<void> {
   let deps: { env: NodeJS.ProcessEnv; configDir: string };
   let workspace: string;
+  let state: string;
   try {
     deps = setup();
     workspace = checkName(args[1]);
+    state = stateDir(deps.env);
   } catch (error) {
     console.error(`sf planner waiting: ${error instanceof Error ? error.message : String(error)}`);
     return;
   }
+  await recordLink(workspace, { env: deps.env, stateDir: state });
   await plannerWaiting(workspace, args.length === 3, { ...deps, stdin: process.stdin });
 }
 
-// sf planner setup <workspace>, and sf planner waiting <workspace> [permission].
+// sf planner setup <workspace>, sf planner waiting <workspace> [permission], and sf planner
+// start|stop <workspace> <ticket> (src/planner-session.ts).
 export async function plannerCommand(args: string[], deps: PlannerDeps): Promise<void> {
   if (isPlannerWaiting(args)) {
     await plannerWaitingCommand(args, () => ({ env: deps.env, configDir: deps.configDir }));
     return;
   }
+  if (args.length === 3 && (args[0] === 'start' || args[0] === 'stop')) {
+    await plannerSessionCommand(args, deps);
+    return;
+  }
   if (args.length !== 2 || args[0] !== 'setup') {
-    throw new UsageError('planner needs setup <workspace>, or waiting <workspace> [permission].');
+    throw new UsageError('planner needs setup <workspace>, waiting <workspace> [permission], start <workspace> <ticket> or stop <workspace> <ticket>.');
   }
   const name = checkName(args[1]);
   const ws = await resolveWorkspace(name, deps.configDir);

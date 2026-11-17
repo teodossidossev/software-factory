@@ -1,16 +1,18 @@
 // What the dashboard's modules share: DashboardContext, the one object startDashboard builds and
 // hands to the change feed (src/dashboard-changes.ts), the reads (src/dashboard-reads.ts) and the
 // posts (src/dashboard-posts.ts), and the helpers they and startDashboard use: the request's
-// cookie, names and target, a POST's body and content type, the change feed's change and the GET
-// route table's path match. No state of its own: everything that lives as long as the dashboard
-// is in the context.
+// cookie, names and target, a POST's body and content type, the change feed's change, the GET
+// route table's path match, and the view of a ticket's planner session that the reads and the
+// posts answer. No state of its own: everything that lives as long as the dashboard is in the
+// context.
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Changes } from './changes.js';
-import type { DashboardActions, DashboardChecks, DashboardDigests, DashboardHealth, DashboardQueue, DashboardSetup } from './dashboard.js';
+import type { DashboardActions, DashboardChecks, DashboardDigests, DashboardHealth, DashboardPlanner, DashboardQueue, DashboardSetup } from './dashboard.js';
 import type { jobsPayload, ToolCallCounter } from './dashboard-payloads.js';
 import { type JobKey, type JobRoute, postRoute, type QueueRoute } from './dashboard-routes.js';
 import { sameSecret } from './http.js';
 import type { JobStore } from './jobs.js';
+import type { PlannerSession } from './planner-session.js';
 import { WORKSPACE_NAME_PATTERN } from './registry.js';
 import type { Stats } from './stats.js';
 import { TICKET_PATTERN } from './task-file.js';
@@ -25,11 +27,11 @@ export interface DashboardCookie {
 
 // Everything the dashboard's modules share for as long as it runs, built once by startDashboard.
 // The options: stateDir, gateOn (SF_GATE), remoteOrigins and onWorkspacesChanged; jobs, actions,
-// setup, checks, queue, digests and health as startDashboard got them (the last four undefined
-// without). tokenText and cookies: the token and the cookie of a token visit on each side (the
-// local name set once the listener has its port). files: the page's static files and scripts by
-// path. streams: the open event streams. toolCalls, changes, history and stats: the readers with
-// their caches. send, empty, body and refuseRead: the answers every module writes. jobsOf: the
+// setup, checks, queue, digests, health and planner as startDashboard got them (the last five
+// undefined without). tokenText and cookies: the token and the cookie of a token visit on each
+// side (the local name set once the listener has its port). files: the page's static files and
+// scripts by path. streams: the open event streams. toolCalls, changes, history and stats: the
+// readers with their caches. send, empty, body and refuseRead: the answers every module writes. jobsOf: the
 // jobs as api/jobs and the jobs events send them. origin: the exact origin of the page, set once
 // the listener has its port and read at call time.
 export interface DashboardContext {
@@ -44,6 +46,7 @@ export interface DashboardContext {
   readonly queue: DashboardQueue | undefined;
   readonly digests: DashboardDigests | undefined;
   readonly health: DashboardHealth | undefined;
+  readonly planner: DashboardPlanner | undefined;
   readonly tokenText: string;
   readonly cookies: { local: DashboardCookie; remote: DashboardCookie };
   readonly files: ReadonlyMap<string, { body: Buffer; type: string }>;
@@ -94,6 +97,13 @@ export function jobKey(workspace: string | undefined, ticket: string | undefined
   return [workspace, ticket];
 }
 
+// A ticket's planner session as the planned ticket page shows it: its name in Claude Code, when
+// it started and its claude.ai link once the session's hook recorded it (else null); null for
+// none. No pid and no id: the page needs neither, and the hook's write is checked against the id.
+export function plannerSessionView(session: PlannerSession | undefined): { name: string; started_at: string; link: string | null } | null {
+  return session === undefined ? null : { name: session.name, started_at: session.started_at, link: session.link ?? null };
+}
+
 // What a path is for the method rule: a job action (POST only), a setup action (POST only), a
 // path that lists on GET and acts on POST, or a read (GET only).
 export type Target =
@@ -130,6 +140,9 @@ export type Target =
   // One of the dashboard's pins: POST api/pins/<id> changes it and POST api/pins/<id>/remove
   // removes it (id as the path has it, checked by the post), POST only.
   | { kind: 'pin'; id: string; remove: boolean }
+  // The ticket's planner session: GET api/tickets/<ws>/<ticket>/planner reads it, POST starts it;
+  // POST .../planner/stop (stop) ends it, POST only.
+  | { kind: 'ticket-planner'; workspace: string | undefined; ticket: string | undefined; stop: boolean }
   | { kind: 'read' };
 
 export function targetOf(path: string[]): Target {
@@ -176,6 +189,9 @@ export function targetOf(path: string[]): Target {
   }
   if (kind === 'tickets' && path.length === 5 && c === 'task') {
     return { kind: 'ticket-task', workspace: a, ticket: b };
+  }
+  if (kind === 'tickets' && c === 'planner' && (path.length === 5 || (path.length === 6 && path[5] === 'stop'))) {
+    return { kind: 'ticket-planner', workspace: a, ticket: b, stop: path.length === 6 };
   }
   if (kind === 'tickets' && path.length === 5 && c === 'attachments') {
     return { kind: 'ticket-attachment-add', workspace: a, ticket: b };

@@ -518,6 +518,8 @@ interface TicketPage {
   check_usd: number;
   check_usd_complete: boolean;
   history: Array<{ ts: string | null; text: string }>;
+  // The ticket's planner session while one runs, else null.
+  planner_session: PlannerSessionView | null;
 }
 // The plan in plain words: src/dashboard.ts planOf. The page updates waits_for's states from the
 // tickets payload.
@@ -532,6 +534,13 @@ interface PlanDependency {
   ticket: string;
   state: DependencyState;
   merged: boolean;
+}
+// A ticket's planner session as the planned ticket page shows it: src/dashboard-context.ts
+// plannerSessionView.
+interface PlannerSessionView {
+  name: string;
+  started_at: string;
+  link: string | null;
 }
 
 // The morning digests, api/digests: src/digest-run.ts Digests.list, newest first.

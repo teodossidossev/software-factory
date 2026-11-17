@@ -96,6 +96,8 @@ test('statusOf maps each code as the dashboard did before SF-139; any other code
     no_suggestion: 409, suggestion_changed: 409, invalid_chat_link: 400,
     // SF-211: the dashboard's pins.
     pin_not_found: 404, too_many_pins: 409, pins_unreadable: 409,
+    // The ticket's planner session: a start under way and the planning copy's refusals.
+    planner_starting: 409, planning_copy_missing: 409, planning_copy_unsafe: 409, planning_copy_untrusted: 409,
   };
   assert.deepEqual({ ...ERROR_STATUS }, before);
   for (const [code, status] of Object.entries(before)) {

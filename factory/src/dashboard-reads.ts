@@ -1,11 +1,13 @@
 // The dashboard's reads: the GET route table (the page's files, the JSON payloads, a job's
 // detail, Stream, MR text, Merge request screen, Changes and iteration files, the Stats page, the
-// digests, the health checks, the coordinator's state, a workspace's vision page, the pins, the planned ticket page, a Task file, a
-// ticket's images, a workspace's merge requests) and the Task check's GET. Nothing here changes anything; every
-// answer is written through the context.
+// digests, the health checks, the coordinator's state, a workspace's vision page, the pins, the
+// planned ticket page, a ticket's planner session, a Task file, a ticket's images, a workspace's
+// merge requests) and the Task check's GET. Nothing here changes anything but the record of a
+// planner session that ended, which its read removes (src/planner-session.ts plannerSession);
+// every answer is written through the context.
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { readCoordinator } from './coordinator.js';
-import { type DashboardContext, iterationParam, jobKey, matchPath, noQuery } from './dashboard-context.js';
+import { type DashboardContext, iterationParam, jobKey, matchPath, noQuery, plannerSessionView } from './dashboard-context.js';
 import { jobDetail, planOf, ticketEntry, ticketsPayload, workspacesPayload } from './dashboard-payloads.js';
 import { mergeRequestOverviewRead, mergeRequestThreadsRead, openMergeRequestsRead } from './dashboard-routes.js';
 import { FactoryError } from './errors.js';
@@ -43,7 +45,7 @@ interface GetRoute {
 // route: a GET through the route table, an empty 404 when no route matches; checkView: GET
 // api/tickets/<ws>/<ticket>/check.
 export function readHandlers(ctx: DashboardContext) {
-  const { jobs, actions, setup, checks, queue, digests, health, gateOn, files, changes, history, stats, empty, body, refuseRead, jobsOf } = ctx;
+  const { jobs, actions, setup, checks, queue, digests, health, planner, gateOn, files, changes, history, stats, empty, body, refuseRead, jobsOf } = ctx;
 
   // The GET routes, matched in order against the path: a pattern's segments must equal the path's,
   // "*" stands for any one segment and hands it to the handler; when, if given, must hold too. A
@@ -75,6 +77,7 @@ export function readHandlers(ctx: DashboardContext) {
     { pattern: 'api/digests/*', when: (query) => digests !== undefined && noQuery(query), handler: ({ res, params: [id] }) => digestRecord(res, id!) },
     { pattern: 'api/tickets/*/*/page', handler: ({ res, params, query }) => ticketPage(res, params, query) },
     { pattern: 'api/tickets/*/*/task', handler: ({ res, params, query }) => taskText(res, params, query) },
+    { pattern: 'api/tickets/*/*/planner', when: (query) => planner !== undefined && noQuery(query), handler: ({ res, params }) => plannerRead(res, params) },
     { pattern: 'api/tickets/*/*/attachments/*', handler: ({ res, params, query }) => attachmentFile(res, params, query) },
     { pattern: 'api/jobs/*/*', handler: jobRead(jobView) },
     { pattern: 'api/jobs/*/*/stream', handler: jobRead(streamView) },
@@ -293,8 +296,9 @@ export function readHandlers(ctx: DashboardContext) {
   // row with its conversation, the Task file and its sha256 (the version a Save starts from), the
   // plan in plain words, the last check (null without the Task checks), the plan-check rounds of
   // every version (check_rounds, failed ones included; check_usd, the sum of the known costs;
-  // check_usd_complete, false when a cost is unknown; all-time), the history, newest first, and
-  // queue, always null. A ticket that is not in the tickets list is an empty 404.
+  // check_usd_complete, false when a cost is unknown; all-time), the history, newest first,
+  // queue, always null, and the planner session's view (null when none runs or without the
+  // planner). A ticket that is not in the tickets list is an empty 404.
   async function ticketPage(res: ServerResponse, [workspace, ticket]: string[], query: URLSearchParams): Promise<void> {
     const key = jobKey(workspace, ticket);
     const row = key === undefined || [...query.keys()].length > 0 ? undefined : (await setup.tickets()).find((entry) => entry.workspace === key[0] && entry.ticket === key[1]);
@@ -319,6 +323,14 @@ export function readHandlers(ctx: DashboardContext) {
         console.error(error);
       }
     }
+    let plannerSession = null;
+    if (planner !== undefined) {
+      try {
+        plannerSession = plannerSessionView(await planner.session(...key));
+      } catch (error) {
+        console.error(error);
+      }
+    }
     sendJson(res, 200, {
       ticket: await ticketEntry(row, checks),
       task: { text: file.text, sha256: file.sha256 },
@@ -329,7 +341,20 @@ export function readHandlers(ctx: DashboardContext) {
       check_usd_complete: records.every((record) => record.cost_usd !== null),
       history: await history.timeline(...key, { sha256: file.sha256, mtime: file.mtime }),
       queue: null,
+      planner_session: plannerSession,
     });
+  }
+
+  // The ticket's planner session as it runs now: {session: its view, or null}, read through
+  // DashboardPlanner.session, which removes the record of one that ended; names that are not a
+  // workspace's and a ticket's are an empty 404.
+  async function plannerRead(res: ServerResponse, [workspace, ticket]: string[]): Promise<void> {
+    const key = jobKey(workspace, ticket);
+    if (key === undefined) {
+      empty(res, 404);
+      return;
+    }
+    sendJson(res, 200, { session: plannerSessionView(await planner!.session(...key)) });
   }
 
   // GET api/tickets/<ws>/<ticket>/task[?archived=1]: the Task file through the Task file reader,

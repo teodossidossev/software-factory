@@ -1,15 +1,16 @@
 // The dashboard's posts: the User's actions as POST endpoints, each validated and dispatched as
 // the one call it stands for: the job and queue actions of POST_ROUTES (src/dashboard-routes.ts,
 // routePost), the setup actions (setupPost), the Task check's start (checkPost), the planned
-// ticket page's Save (taskPost), a ticket's images (attachmentAddPost, attachmentRemovePost), the
-// pins (through setupPost) and an agent role's skills (skillRolesPost, the one PUT); handlePost runs the transport checks, the call, and tells the open pages through the change
-// feed. Nothing here changes a job by itself.
+// ticket page's Save (taskPost), a ticket's images (attachmentAddPost, attachmentRemovePost), a
+// ticket's planner session (plannerPost), the pins (through setupPost) and an agent role's skills
+// (skillRolesPost, the one PUT); handlePost runs the transport checks, the call, and tells the
+// open pages through the change feed. Nothing here changes a job by itself.
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import * as z from 'zod/v4';
 import { MAX_ATTACHMENT_BYTES } from './attachments.js';
 import { TICKET_OWNERS } from './conversation.js';
 import type { DashboardSetup } from './dashboard.js';
-import { type ChangeFeed, type DashboardContext, isJsonContentType, isOctetStream, jobKey, type Post, readBody, type Target } from './dashboard-context.js';
+import { type ChangeFeed, type DashboardContext, isJsonContentType, isOctetStream, jobKey, plannerSessionView, type Post, readBody, type Target } from './dashboard-context.js';
 import { ticketEntry } from './dashboard-payloads.js';
 import { type JobKey, type JobRoute, openWhileUpdating, type PostRoute, type QueueRoute } from './dashboard-routes.js';
 import { FactoryError } from './errors.js';
@@ -31,7 +32,7 @@ const MAX_SKILL_NAME = 200;
 // A file of mostly non-ASCII or control characters can need more and is written with write_task.
 export const MAX_TASK_BODY_BYTES = 2 * MAX_TASK_BYTES + 1024;
 
-// The request body of each setup, Task check, task, attachment and pin POST, strict: unknown keys, null,
+// The request body of each setup, Task check, task, attachment, planner and pin POST, strict: unknown keys, null,
 // arrays and wrong types are refused; shape is what the refusal names. The job and queue actions
 // have theirs in POST_ROUTES (src/dashboard-routes.ts).
 const BODIES = {
@@ -81,6 +82,9 @@ const BODIES = {
   'ticket-owner': { shape: '{"owner": "chatgpt" | "claude_code"}', schema: z.strictObject({ owner: z.enum(TICKET_OWNERS) }) },
   // The ticket's planning chat link: a https://chatgpt.com/ URL, or null to remove it.
   'ticket-chat': { shape: '{"url": string | null}', schema: z.strictObject({ url: z.string().nullable() }) },
+  // The ticket's planner session: its start and its end take {}.
+  'ticket-planner': { shape: '{}', schema: z.strictObject({}) },
+  'ticket-planner-stop': { shape: '{}', schema: z.strictObject({}) },
   // The dashboard's pins (src/pins.ts, with their bounds): a new one, a change of one, a removal.
   'pin-add': { shape: PIN_INPUT_SHAPE, schema: PIN_INPUT },
   'pin-change': { shape: PIN_CHANGE_SHAPE, schema: PIN_CHANGE },
@@ -92,7 +96,7 @@ const setupBody = (route: SetupRoute): { route: SetupRoute; shape: string } => (
 
 // The posts' handlers, each a Post for handle in startDashboard or undefined (an empty 404).
 export function postHandlers(ctx: DashboardContext, feed: Pick<ChangeFeed, 'changed' | 'jobChanged'>) {
-  const { stateDir, remoteOrigins, onWorkspacesChanged, jobs, actions, setup, checks, queue, digests, empty } = ctx;
+  const { stateDir, remoteOrigins, onWorkspacesChanged, jobs, actions, setup, checks, queue, digests, planner, empty } = ctx;
   // The workspace change succeeded: the hook hears of it (a failing hook is logged).
   const workspacesChanged = <T>(result: T): T => {
     try {
@@ -187,6 +191,32 @@ export function postHandlers(ctx: DashboardContext, feed: Pick<ChangeFeed, 'chan
     };
   }
 
+  // POST api/tickets/<ws>/<ticket>/planner: the ticket's planner session starts
+  // (DashboardPlanner.start, sf planner start), only for a ticket of the tickets list (else an
+  // empty 404 before the body is read); the answer comes once start has watched the new session:
+  // {started, session}, started false with the session that runs already. POST
+  // .../planner/stop (stop) ends it (DashboardPlanner.stop) for any ticket names: {stopped}, the
+  // session it ended or null. Every page gets the tickets again, so an open ticket page reads its
+  // payload, with the session, again. Neither without the planner.
+  function plannerPost([workspace, ticket]: [string, string], stop: boolean): Post | undefined {
+    if (planner === undefined) {
+      return undefined;
+    }
+    const route = stop ? 'ticket-planner-stop' : 'ticket-planner';
+    const run = stop
+      ? async () => ({ stopped: plannerSessionView(await planner.stop(workspace, ticket)) })
+      : async () => {
+        const { started, session } = await planner.start(workspace, ticket);
+        return { started, session: plannerSessionView(session) };
+      };
+    return {
+      ...setupBody(route),
+      exists: stop ? undefined : async () => (await setup.tickets()).some((entry) => entry.workspace === workspace && entry.ticket === ticket),
+      call: (data) => (BODIES[route].schema.safeParse(data).success ? run : undefined),
+      refreshSetup: true,
+    };
+  }
+
   // PUT api/skills/roles/<role>: the role's whole list of skills, checked as sf skills set checks a
   // skill (an unknown role, a skill not installed: refused with the list), written, and the snapshot synced.
   // coordinator: the skills on, written to its Claude Code settings file. The answer is the new view,
@@ -233,7 +263,7 @@ export function postHandlers(ctx: DashboardContext, feed: Pick<ChangeFeed, 'chan
     };
   }
 
-  function setupPost(target: Exclude<Target, { kind: 'read' | 'action' | 'ticket-check' | 'ticket-task' | 'queue' | 'ticket-attachment-add' | 'ticket-attachment-remove' | 'skill-roles' }>): Post | undefined {
+  function setupPost(target: Exclude<Target, { kind: 'read' | 'action' | 'ticket-check' | 'ticket-task' | 'queue' | 'ticket-attachment-add' | 'ticket-attachment-remove' | 'skill-roles' | 'ticket-planner' }>): Post | undefined {
     if (target.kind === 'pin') {
       return pinPost(target.id, target.remove);
     }
@@ -452,5 +482,5 @@ export function postHandlers(ctx: DashboardContext, feed: Pick<ChangeFeed, 'chan
     sendJson(res, 200, { ok: true, result });
   }
 
-  return { checkPost, routePost, taskPost, attachmentAddPost, attachmentRemovePost, setupPost, skillRolesPost, handlePost };
+  return { checkPost, routePost, taskPost, attachmentAddPost, attachmentRemovePost, plannerPost, setupPost, skillRolesPost, handlePost };
 }

@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="referrer" content="no-referrer">
+  <title>Software Factory: point mode</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="app.css">
+  <script src="point.js" defer></script>
+</head>
+<body>
+  <main id="point">
+    <h1>Point mode</h1>
+    <p id="point-status" role="status" aria-live="polite">If this text stays, this browser has no session with the factory: open the dashboard (sf dashboard --open), then start point mode on the page again.</p>
+    <section id="point-ask" hidden aria-labelledby="point-ask-title">
+      <h2 id="point-ask-title">Pins from <span id="point-origin"></span>?</h2>
+      <p id="point-url"></p>
+      <p>Only you can allow it, here; the page cannot.</p>
+      <button id="point-allow" class="btn primary" type="button" disabled>Allow pins from this page</button>
+    </section>
+    <ul id="point-list" aria-label="Pins saved"></ul>
+  </main>
+</body>
+</html>

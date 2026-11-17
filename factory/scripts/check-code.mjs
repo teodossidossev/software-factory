@@ -7,10 +7,10 @@
 // list.
 // --update rewrites code-size.json with today's counts and only ever lowers them: it never adds a
 // file and never raises a count. Also: no .js file under static/, and every web/X.ts is a
-// dashboard script (X.js in DASHBOARD_SCRIPTS of src/dashboard.ts). Declaration files (.d.ts) are
-// exempt from those rules. Last, no comment in a .ts file under src/ or web/, .d.ts included, cites
-// a ticket (SF- and a number): comments say what the code does now; the ticket lives in the commit
-// and the Task file. And every catch without a binding (`catch {`) under src/ or web/ has a
+// dashboard script or the script of a page beside it (X.js in DASHBOARD_SCRIPTS or POINT_SCRIPTS
+// of src/dashboard.ts). Declaration files (.d.ts) are exempt from those rules. Last, no comment in
+// a .ts file under src/ or web/, .d.ts included, cites a ticket (SF- and a number): comments say
+// what the code does now; the ticket lives in the commit and the Task file. And every catch without a binding (`catch {`) under src/ or web/ has a
 // comment after it on its line, saying why any failure there is fine. Comments, strings and
 // templates are told apart by a lexer that follows them across lines (lex), so a ticket or a catch
 // in a string, and a catch in a comment, do not count; a file it cannot read to the end fails.
@@ -228,12 +228,23 @@ function ticketProblems(lexed) {
   return problems;
 }
 
-// The names of DASHBOARD_SCRIPTS, read from its line in src/dashboard.ts; null when there is none.
-function dashboardScripts(root) {
+// The names of a script list (export const <name> = [...]), read from its line in
+// src/dashboard.ts; null when there is none.
+function listedScripts(root, name) {
   const path = join(root, 'src', 'dashboard.ts');
   const source = existsSync(path) ? readFileSync(path, 'utf8') : '';
-  const line = /^export const DASHBOARD_SCRIPTS = \[([^\]]*)\]/m.exec(source);
+  const line = new RegExp(`^export const ${name} = \\[([^\\]]*)\\]`, 'm').exec(source);
   return line === null ? null : [...line[1].matchAll(/['"]([^'"]+)['"]/g)].map((match) => match[1]);
+}
+
+// The names of DASHBOARD_SCRIPTS; null when there is no such line.
+function dashboardScripts(root) {
+  return listedScripts(root, 'DASHBOARD_SCRIPTS');
+}
+
+// The names of POINT_SCRIPTS; none when there is no such line.
+function pointScripts(root) {
+  return listedScripts(root, 'POINT_SCRIPTS') ?? [];
 }
 
 function readList(root) {
@@ -296,10 +307,11 @@ function layoutProblems(root) {
   if (scripts === null) {
     return [...problems, `src/dashboard.ts has no line export const DASHBOARD_SCRIPTS = [...].`];
   }
+  const pages = pointScripts(root);
   for (const file of web) {
     const script = file.slice('web/'.length).replace(/\.ts$/, '.js');
-    if (!scripts.includes(script)) {
-      problems.push(`${file}: ${script} is not in DASHBOARD_SCRIPTS of src/dashboard.ts.`);
+    if (!scripts.includes(script) && !pages.includes(script)) {
+      problems.push(`${file}: ${script} is not in DASHBOARD_SCRIPTS or POINT_SCRIPTS of src/dashboard.ts.`);
     }
   }
   return problems;

@@ -174,7 +174,8 @@ refused), and the factory's test command passed in a sandbox without network on 
     `SF_DASHBOARD_REMOTE_LOGINS`.
   - Approve, Retry, Create merge request, Merge, Archive and Merged — archive from there need the
     ticket typed again.
-  - A foreign web page cannot act on it, nor show it inside a frame to trick a click
+  - A foreign web page cannot act on it, but for one thing you allow (a page you allow in the
+    factory window adds pins, below), nor show it inside a frame to trick a click
     (`frame-ancestors 'none'`, `X-Frame-Options: DENY`).
   - No token is written to a log.
   - The coordinator's state (its status, its open questions and its chat link) is a local file
@@ -190,12 +191,18 @@ refused), and the factory's test command passed in a sandbox without network on 
     (`VISION_PAGE_CSP`): an opaque origin that can use neither the dashboard's cookie and storage
     nor its API, and loads nothing. Every Markdown text on it is escaped, and its only script is
     the factory's.
-  - A pin of point mode stores the page's hash, a selector, up to 200 characters of the element's
-    text, its position and the note, in `<state dir>/pins.json` (mode 0600), on this machine
-    only. It is written only through the dashboard's checked POSTs (the exact Origin, JSON, the
+  - A pin of point mode stores the page's hash or another page's address, a selector, up to 200
+    characters of the element's text, its position and the note, in `<state dir>/pins.json`
+    (mode 0600), on this machine only. It is written only through the dashboard's checked POSTs (the exact Origin, JSON, the
     body's bound, strict bounded fields) or `sf pins`, both in `sf serve`. The page shows every pin
     text as text, never as HTML, and no control character is stored (none but a line break and a
     tab in the text and the note), so `sf pins` prints nothing a terminal would act on.
+  - The factory window (`http://127.0.0.1:<port>/point`) is the one page served without the
+    token: static, with no data, on the local listener only, never in a frame, and its script
+    loads only with the dashboard's cookie. It takes pins only from the page that opened it, only
+    after you press Allow in it, only for addresses of that page's own origin, and only through
+    `POST api/pins`; it tells the page nothing but each pin's number. The page never gets the token
+    or the cookie and sends `sf serve` no request.
 - **What is published is checked.**
   - The guard refuses a push or an MR text that holds a secret, in every workspace.
   - In a workspace with `"guard": true`, it also refuses the names on your private list and the
@@ -210,6 +217,9 @@ refused), and the factory's test command passed in a sandbox without network on 
 
 ## Open
 
+- **A pin from another page holds that page's text and address:** the coordinator reads them as
+  data, not instructions, and a note typed next to the pin is typed into that page, whose scripts
+  can read it.
 - **LFS content is not scanned for secrets in a workspace without the guard flag.** The guard reads
   an LFS file's pointer only.
 - **The network is open to the agents.** It has to be: Claude and Codex are remote models. The

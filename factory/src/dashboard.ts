@@ -1,8 +1,10 @@
 // The Dashboard: a second loopback HTTP listener with the static page, JSON endpoints, one
 // server-sent event stream per open page and the User's actions as POST endpoints (approve, abort,
 // say, the retry of a failed review, the override of a stopped gate, the merge request on the Git
-// host and the other routes of src/dashboard-routes.ts). Every path starts with /d/<token>/;
-// anything else is an empty 404.
+// host and the other routes of src/dashboard-routes.ts). Every path starts with /d/<token>/, or
+// goes with the cookie of a token visit; anything else is an empty 404, but for GET and HEAD of
+// /point on the local listener: the factory window, static/point.html, which saves the pins of the
+// page that opened it (web/point.ts) and holds no data, served without the token or the cookie.
 // Reads JobStore and events.jsonl; job state changes arrive through onStateChange, which
 // `sf serve` composes with the notifier. The actions validate the HTTP request and delegate once
 // to the Execution of `sf serve` (DashboardActions); nothing here changes a job by itself. The
@@ -66,9 +68,9 @@ export const DEFAULT_DASHBOARD_PORT = 8788;
 export const DEFAULT_DASHBOARD_REMOTE_PORT = 8789;
 // The Host names of the local listener, and the loopback Hosts the remote one takes with a listed Origin.
 const LOOPBACK_NAMES: ReadonlySet<string> = new Set(['localhost', '127.0.0.1', '[::1]']);
-// Compiled to dist/src/dashboard.js; the package root is two levels up. The page's HTML and CSS are
-// in static/, and nothing else; its scripts are written in TypeScript in web/ and built into
-// dist/web/.
+// Compiled to dist/src/dashboard.js; the package root is two levels up. The page's HTML and CSS,
+// and the factory window's HTML, are in static/, and nothing else; their scripts are written in
+// TypeScript in web/ and built into dist/web/.
 const PACKAGE_DIR = new URL('../../', import.meta.url);
 const STATIC_DIR = new URL('static/', PACKAGE_DIR);
 const WEB_SOURCE_DIR = new URL('web/', PACKAGE_DIR);
@@ -92,8 +94,22 @@ export type DashboardScript = (typeof DASHBOARD_SCRIPTS)[number];
 // web/<name>.ts. The dashboard reads url once at start, and the tests read the same files through
 // this function.
 export function dashboardScriptFiles(): Array<{ file: DashboardScript; url: URL; source: URL }> {
-  return DASHBOARD_SCRIPTS.map((file) => ({ file, url: new URL(file, WEB_BUILD_DIR), source: new URL(file.replace(/\.js$/, '.ts'), WEB_SOURCE_DIR) }));
+  return scriptFiles(DASHBOARD_SCRIPTS);
 }
+function scriptFiles<T extends string>(names: readonly T[]): Array<{ file: T; url: URL; source: URL }> {
+  return names.map((file) => ({ file, url: new URL(file, WEB_BUILD_DIR), source: new URL(file.replace(/\.js$/, '.ts'), WEB_SOURCE_DIR) }));
+}
+// The scripts of the pages beside the dashboard (point.js: the factory window of /point): built
+// from web/ into dist/web/ and served like the dashboard's own (with the token or the cookie),
+// never loaded by dashboard.html. Each page loads its one script alone.
+export const POINT_SCRIPTS = ['point.js'] as const;
+export type PointScript = (typeof POINT_SCRIPTS)[number];
+// The files of each entry of POINT_SCRIPTS, as dashboardScriptFiles gives the dashboard's.
+export function pointScriptFiles(): Array<{ file: PointScript; url: URL; source: URL }> {
+  return scriptFiles(POINT_SCRIPTS);
+}
+// The factory window's page, in static/: served at /point without the token or the cookie.
+const POINT_PAGE = 'point.html';
 // The page's other files, all in static/.
 const STATIC_FILES: Record<string, { file: string; type: string }> = {
   '': { file: 'dashboard.html', type: 'text/html; charset=utf-8' },
@@ -325,9 +341,11 @@ export async function startDashboard(
   for (const [path, { file, type }] of Object.entries(STATIC_FILES)) {
     files.set(path, { body: await readFile(new URL(file, STATIC_DIR)), type });
   }
-  for (const { file, url } of dashboardScriptFiles()) {
+  for (const { file, url } of [...dashboardScriptFiles(), ...pointScriptFiles()]) {
     files.set(file, { body: await readFile(url), type: 'text/javascript; charset=utf-8' });
   }
+  // The factory window's page: outside files, so no path with the token or the cookie serves it.
+  const pointPage = await readFile(new URL(POINT_PAGE, STATIC_DIR));
   // The token persists across starts, so a bookmark keeps working; a missing or unusable file
   // gets a new one (sf dashboard --rotate removes the file on purpose).
   let tokenText = await readToken(stateDir).catch(() => undefined);
@@ -428,12 +446,20 @@ export async function startDashboard(
       empty(res, 404);
       return;
     }
+    // The factory window: GET or HEAD of exactly /point (a query ignored), on the local listener,
+    // with the headers every answer gets and no cookie set. It is static and holds no data; its
+    // script and app.css load with the cookie.
+    if (!remote && target.pathname === '/point' && (req.method === 'GET' || req.method === 'HEAD')) {
+      body(res, 'text/html; charset=utf-8', pointPage);
+      return;
+    }
     const segments = target.pathname.split('/').slice(1);
     const [first, given, ...rest] = segments;
     const cookie = remote ? cookies.remote : cookies.local;
     let path: string[];
     // /d/<token>/...: the token segment must be followed by a slash, so path has at least one
-    // entry. Without the token, the cookie of a token visit opens every path at the root.
+    // entry. Without the token, the cookie of a token visit opens every path at the root. Without
+    // either, only GET or HEAD /point on the local listener is answered (above).
     if (first === 'd' && given !== undefined && rest.length > 0 && sameSecret(given, tokenText)) {
       path = rest;
       if (path.length === 1 && path[0] === '' && (req.method === 'GET' || req.method === 'HEAD')) {

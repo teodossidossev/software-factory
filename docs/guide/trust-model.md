@@ -332,6 +332,44 @@ refuses that here, but a file of the change a run wrote never reaches the commit
 preparation finds that the worktree no longer matches the reviewed iteration (What runs outside
 the sandbox), and the change goes back to review.
 
+## Point mode on other pages
+
+Point mode on a page that is not the dashboard (an app on `localhost:3000`, a public site) saves
+its pins in the factory without giving that page a way in:
+
+- **No request, no credential.** The page reaches the factory only through a window it opens, the
+  factory window at `http://127.0.0.1:<port>/point`, and `postMessage`. It never gets the token
+  or the cookie, holds no pin-only token, and sends `sf serve` no request. A request would meet
+  the dashboard's Origin checks and need CORS; a public site would meet the browser's Local Network
+  Access permission and its own `connect-src`; a token in the page would be readable by its
+  scripts. A top-level window and its messages meet none of these.
+- **The one page without the token.** `GET` or `HEAD` of exactly `/point`, on the local listener
+  only, answers the window's page without the token or the cookie. It is static and holds no data,
+  and it carries the headers of every dashboard answer: the policy ending
+  `frame-ancestors 'none'` and `X-Frame-Options: DENY`, so no page can show it in a frame. It has
+  no `Cross-Origin-Opener-Policy`, since the window needs its opener. Its script and `app.css`
+  load only with the dashboard's cookie (the window's own requests are same-site, so the
+  `SameSite=Strict` cookie goes with them): in a browser without a dashboard session the script
+  never runs and the static text says so. The remote listener does not serve the page.
+- **You allow each page.** The window shows the page's origin and address and an *Allow* button
+  enabled 1,000 ms after they show, so a double click that opened the window cannot land on it.
+  One click per window; the page cannot press it. Without it any web page could open the window
+  and add pins.
+- **What the window takes.** Messages from its opener only (`event.source`), as plain objects of
+  exactly the expected keys and types; anything else is ignored and answered by nothing. The first
+  `hello` binds the page's `http:` or `https:` origin (a page without a web address, origin
+  `null`, gets nothing); pins count only after Allow, only from that origin, only for addresses of
+  that origin. Each is saved through `POST api/pins`, from the window's own origin, with every check
+  of the dashboard's own pins; the address loses its user name and password and is cut to 2,000
+  characters.
+- **What the page learns.** Only `ready`, `allowed`, and per pin `saved` with its number or
+  `refused`, each posted to the bound origin but `ready` (to `'*'`, before an origin is known; it
+  says nothing). The reason for a refusal shows in the window only.
+- **What stays open.** A pin from another page holds that page's text and address: the
+  coordinator reads them as data, not instructions. A note typed next to the pin is typed into that
+  page, whose scripts can read it. A page whose own policy cuts the windows it opens leaves the
+  window without an opener; it then does nothing.
+
 ## The limits
 
 - **Built once per session.** A worktree or state entry created after a session started stays

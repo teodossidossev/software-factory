@@ -515,7 +515,8 @@ async function removeWorkspace(name: string): Promise<void> {
     ({ level: 'ok', text: `Removed ${fieldOf(data, 'removed')} from the registry; the checkout and its files are untouched.` }));
 }
 
-// plan: Create & plan, which then opens the planning conversation (main.ts) and the ticket's page.
+// plan: Create & plan, which then opens the planning conversation (main.ts) and the ticket's page;
+// Create too, for Claude Code in a workspace with auto_planner.
 async function submitTicket(plan = false): Promise<void> {
   const workspace = byIdAs('ticket-workspace', 'select').value;
   const ticket = byIdAs('ticket-key', 'input').value.trim();
@@ -546,6 +547,9 @@ async function submitTicket(plan = false): Promise<void> {
     tab?.close();
     return;
   }
+  // Create with Claude Code in a workspace with auto_planner (the create's answer says so) is
+  // Create & plan: the planner starts once the images are up, and the ticket's page opens.
+  const planned = plan || (owner === 'claude_code' && fieldOf(result, 'auto_planner') === true);
   // Created: the dialog closes and the new ticket's card is highlighted (a click on it opens its
   // page); a failure keeps the dialog open with the error and the input. Then its images go up; one
   // that fails leaves the ticket created, and the form stays open saying which and why. Its
@@ -575,8 +579,9 @@ async function submitTicket(plan = false): Promise<void> {
   releaseNewImages();
   // A newer submission may have the form by now (Create & plan's read is a wait): see finishTicketForm.
   const note = tab === undefined ? '' : await pointPlanningTab(tab, key);
-  // Create & plan with Claude Code: the ticket's planner session starts now (planner.js); its page shows it.
-  if (plan && owner === 'claude_code') {
+  // Create & plan (or Create with auto_planner) with Claude Code: the ticket's planner session
+  // starts now (planner.js); its page shows it.
+  if (planned && owner === 'claude_code') {
     void tkPlannerStart(key);
   }
   if (uploaded.failed.length > 0) {
@@ -586,7 +591,7 @@ async function submitTicket(plan = false): Promise<void> {
   }
   const outcome = describe(result);
   toast({ ...outcome, text: `${outcome.text}${uploaded.count > 0 ? ` ${counted(uploaded.count, 'image')} attached.` : ''}${note}` });
-  finishTicketForm(submission, plan ? key : null);
+  finishTicketForm(submission, planned ? key : null);
 }
 
 // Archive, restore or delete one ticket; one request per ticket at a time, the outcome in the

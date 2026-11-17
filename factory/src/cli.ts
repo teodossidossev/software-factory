@@ -44,7 +44,7 @@ import { followJobs, lockPath, runJob } from './runner.js';
 import { applyNetDefaults } from './net-defaults.js';
 import { notifyConfig, notifyTaskCheck, sendNotification, stateNotifier, testNotification } from './notify.js';
 import {
-  checkLabel, configDir, HANDOFF_MODES, ignoredWorkCheckouts, isHandoffMode, isNotifyMode, isWorkspaceColor, loadRegistry, resolveWorkspace, saveRegistry, setWorkspaceNotify, verifyCheckout,
+  checkLabel, configDir, HANDOFF_MODES, ignoredWorkCheckouts, isHandoffMode, isNotifyMode, isWorkspaceColor, loadRegistry, resolveWorkspace, saveRegistry, setWorkspaceAutoPlanner, setWorkspaceNotify, verifyCheckout,
   WORKSPACE_COLORS, workspaceColor, type WorkspaceEntry, workspaceNotify, workspaceNotifyMode,
 } from './registry.js';
 import {
@@ -96,8 +96,9 @@ const USAGE = `Usage:
   sf up [--no-open] [--no-tunnel]                       sf serve (with its tunnel; --no-tunnel: SF_TUNNEL=off) in one terminal, and open the dashboard; Ctrl+C stops both
   sf dashboard [--open] [--rotate]                      Print the dashboard URL; --open also opens it (xdg-open); --rotate removes the token so the next sf serve makes a new one
   sf workspace add <name> --read <path> [--handoff checkout|off] [--color <name>] [--label <text>]  Register a workspace: the local checkout (every job works in a worktree of it); --handoff: its own hand-over setting, over SF_HANDOFF; --color: its colour on the board (blue, teal, green, olive, orange, red, purple or grey; default: by its name); --label: what its cards on the dashboard show instead of its name (one line, at most 24 characters; "" removes it). Again with the same path: changes the --handoff, --color and --label given
-  sf workspace list                                     List registered workspaces, their hand-over setting and colour, their label when they have one, and their notify setting when it is not full
+  sf workspace list                                     List registered workspaces, their hand-over setting and colour, their label when they have one, their notify setting when it is not full, and auto-planner: on when it is on
   sf workspace notify <name> full|brief|off             How much the notifications of the workspace's jobs and Task checks tell: full (the default); brief, ntfy gets the title and one line (the workspace and an error's code; a plan not ready keeps its counts; the desktop stays full); off, none. Applies to the next notification
+  sf workspace auto-planner <name> on|off               Whether New ticket on the dashboard, for Claude Code, starts the ticket's planner session once its images are stored (as Create & plan); off (the default) leaves the start to you
   sf workspace remove <name>                            Unregister a workspace
   sf check-task <workspace> <ticket>                    Check the Task file before Start: a read-only Claude session reads it and the repository, and prints its paraphrase, its findings by severity and its verdict (stored by the Task file's sha256; it only advises). sf serve checks a written Task file by itself 60 s after its last change (SF_TASK_CHECK_AUTO)
   sf rules <workspace> [ticket]                         List the coding rules the agents would be given (AGENTS.md and the Markdown files it links to, the user's rules files): paths, sources, sizes and the files left out, without their text; a started job's stored list, else read at the Task file's base, else at the checkout's HEAD
@@ -502,10 +503,12 @@ async function workspace(args: string[]): Promise<void> {
       console.log('No workspaces registered.');
     }
     for (const [name, entry] of entries) {
-      // The label only when it has one, the notify setting only when it is not the default.
+      // The label only when it has one, the notify setting only when it is not the default, and
+      // auto-planner only when it is on.
       const notify = workspaceNotify(entry);
       const label = entry.label !== undefined ? `\n  label: ${entry.label}` : '';
-      console.log(`${name}\n  checkout: ${entry.read_checkout}\n  hand-over: ${handoffLabel(entry)}\n  colour: ${colorLabel(name, entry)}${label}${notify !== 'full' ? `\n  notify: ${notify}` : ''}`);
+      const autoPlanner = entry.auto_planner === true ? '\n  auto-planner: on' : '';
+      console.log(`${name}\n  checkout: ${entry.read_checkout}\n  hand-over: ${handoffLabel(entry)}\n  colour: ${colorLabel(name, entry)}${label}${notify !== 'full' ? `\n  notify: ${notify}` : ''}${autoPlanner}`);
     }
     return;
   }
@@ -520,6 +523,21 @@ async function workspace(args: string[]): Promise<void> {
     }
     await setWorkspaceNotify(name, notify);
     console.log(`Workspace "${name}" notifies ${notify}.`);
+    return;
+  }
+  // sf workspace auto-planner <name> on|off: off removes the key (the default).
+  if (command === 'auto-planner') {
+    if (positionals.length > 2) {
+      throw new UsageError(`unexpected argument "${positionals[2]}".`);
+    }
+    const [name, value] = [checkName(positionals[0]), positionals[1]];
+    if (value !== 'on' && value !== 'off') {
+      throw new UsageError(value === undefined ? 'workspace auto-planner needs <name> on|off.' : `auto-planner must be on or off, got "${value}".`);
+    }
+    await setWorkspaceAutoPlanner(name, value === 'on');
+    console.log(value === 'on'
+      ? `Workspace "${name}" starts the Claude Code planner of each ticket created on the dashboard by itself.`
+      : `Workspace "${name}" starts no planner by itself.`);
     return;
   }
   if (positionals.length > 1) {

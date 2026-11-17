@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { FactoryError } from '../src/errors.js';
 import {
-  configDir, digestSettings, editedEntry, MAX_DIGEST_TIMES, MAX_LABEL_CHARS, explainSettings, isNotifyMode, loadRegistry, NOTIFY_MODES, parseRegistry, resolveWorkspace, saveRegistry, WORKSPACE_COLORS, workspaceApp, workspaceColor,
+  configDir, digestSettings, editedEntry, MAX_DIGEST_TIMES, MAX_LABEL_CHARS, explainSettings, isNotifyMode, loadRegistry, NOTIFY_MODES, parseRegistry, resolveWorkspace, saveRegistry, setWorkspaceAutoPlanner, WORKSPACE_COLORS, workspaceApp, workspaceColor,
   workspaceDigest, workspaceNotify, workspaceNotifyMode,
 } from '../src/registry.js';
 
@@ -100,6 +100,36 @@ test('parseRegistry, resolveWorkspace and editedEntry (SF-234): auto_queue is tr
   assert.deepEqual(await resolveWorkspace('off', dir), { name: 'off', readCheckout: repo, workCheckout: repo });
   const edit = { read_checkout: '/srv/b', description: '', app: '', handoff: 'default', color: 'auto', digest: { track: false, my_work: false } } as const;
   assert.deepEqual(editedEntry({ read_checkout: '/srv/a', auto_queue: true }, edit), { read_checkout: '/srv/b', auto_queue: true });
+});
+
+test('parseRegistry, resolveWorkspace and editedEntry (SF-301): auto_planner is true or false, any other value refused; autoPlanner only when true; the Edit keeps it', async () => {
+  for (const autoPlanner of [true, false]) {
+    assert.deepEqual(parseRegistry(JSON.stringify({ workspaces: { app: { read_checkout: '/srv/app', auto_planner: autoPlanner } } })).workspaces.app, { read_checkout: '/srv/app', auto_planner: autoPlanner });
+  }
+  for (const autoPlanner of ['yes', 'true', 1, null]) {
+    invalid(JSON.stringify({ workspaces: { app: { read_checkout: '/srv/app', auto_planner: autoPlanner } } }));
+  }
+  assert.throws(() => parseRegistry(JSON.stringify({ workspaces: { app: { read_checkout: '/srv/app', auto_planner: 'yes' } } })), /workspaces\.app\.auto_planner/);
+  const dir = join(temp, 'resolve-auto-planner');
+  await saveRegistry({ workspaces: { on: { read_checkout: repo, auto_planner: true }, off: { read_checkout: repo, auto_planner: false } } }, dir);
+  assert.deepEqual(await resolveWorkspace('on', dir), { name: 'on', readCheckout: repo, workCheckout: repo, autoPlanner: true });
+  assert.deepEqual(await resolveWorkspace('off', dir), { name: 'off', readCheckout: repo, workCheckout: repo });
+  const edit = { read_checkout: '/srv/b', description: '', app: '', handoff: 'default', color: 'auto', digest: { track: false, my_work: false } } as const;
+  assert.deepEqual(editedEntry({ read_checkout: '/srv/a', auto_planner: true }, edit), { read_checkout: '/srv/b', auto_planner: true });
+});
+
+test('setWorkspaceAutoPlanner (SF-301): on writes auto_planner true, off removes the key and keeps the others, an unknown name is workspace_not_found', async () => {
+  const dir = join(temp, 'set-auto-planner');
+  await saveRegistry({ workspaces: { app: { read_checkout: repo, notify: 'brief', auto_queue: true } } }, dir);
+  await setWorkspaceAutoPlanner('app', true, dir);
+  assert.deepEqual((await loadRegistry(dir)).workspaces.app, { read_checkout: repo, notify: 'brief', auto_queue: true, auto_planner: true });
+  await setWorkspaceAutoPlanner('app', true, dir);
+  assert.deepEqual((await loadRegistry(dir)).workspaces.app, { read_checkout: repo, notify: 'brief', auto_queue: true, auto_planner: true });
+  await setWorkspaceAutoPlanner('app', false, dir);
+  assert.deepEqual((await loadRegistry(dir)).workspaces.app, { read_checkout: repo, notify: 'brief', auto_queue: true });
+  await assert.rejects(setWorkspaceAutoPlanner('absent', true, dir), (error: unknown) =>
+    error instanceof FactoryError && error.code === 'workspace_not_found' && error.message === 'workspace "absent" is not registered.');
+  assert.deepEqual(Object.keys((await loadRegistry(dir)).workspaces), ['app']);
 });
 
 test('parseRegistry, resolveWorkspace and editedEntry (SF-128): test_command is 1 to 2000 characters without NUL, exposed as testCommand; the Edit keeps it', async () => {

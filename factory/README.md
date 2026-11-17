@@ -28,8 +28,9 @@ Their fix verdicts become the next Fix section without anyone in between.
 ```sh
 npm install && npm run build      # once, inside factory/
 bin/sf workspace add <name> --read <path> [--handoff checkout|off] [--color <name>] [--label <text>]   # the local checkout; every job works in a worktree of it (--work is retired); --color: its colour on the board; --label: what its cards show instead of its name; again with the same path: changes --handoff/--color/--label
-bin/sf workspace list             # also the label when there is one, the notify setting when it is not full
+bin/sf workspace list             # also the label when there is one, the notify setting when it is not full, auto-planner: on when it is on
 bin/sf workspace notify <name> full|brief|off   # how much the workspace's notifications tell (section Notifications); applies to the next one
+bin/sf workspace auto-planner <name> on|off   # whether New ticket for Claude Code starts the ticket's planner session as Create & plan does (section Workspace registry)
 bin/sf workspace remove <name>
 bin/sf digest [--now]             # the morning digest (section Morning digest): the latest digest's period and counts; --now makes one at once and prints its record's path and cost; needs sf serve
 bin/sf explain <ws> <ticket>      # the plain explanation of the job's current stop (section Stop explanations): headline, explanation, choices, recommendation; or "No explanation for the current stop."; no sf serve, no model call
@@ -4768,7 +4769,8 @@ the toast, and the form stays the newer one's); an image that was not attached k
 open instead, as with Create. For a Claude Code owner there is no tab: once the ticket and its images are there (one that failed
 too), it starts the ticket's planner session (`POST api/tickets/<ws>/<ticket>/planner`, as Start
 the planner does, its outcome in the toast), and the ticket's page opens as above, showing it.
-Enter in the form is Create. **Archived** (with the count) lists the archived tickets
+In a workspace with `auto_planner`, *Create the ticket* with Claude Code does the same as *Create &
+plan*. Enter in the form is Create. **Archived** (with the count) lists the archived tickets
 with Task (the archived text), Restore and Delete…; Archive, Restore and Delete… are described
 under SF-027 (a finished job of the ticket leaves the board with them). The archived Task drawer
 shows the file (`GET api/tickets/<ws>/<ticket>/task?archived=1`) as text: one line per line,
@@ -5127,7 +5129,7 @@ shares; the setup, Task check, task and attachment posts have their own handlers
 | `POST api/digest-settings` | `{"times"?: ["HH:MM", ...], "weekdays_only"?: boolean, "language"?: string}`, at least one key | `Setup.saveDigestSettings` (SF-103, SF-210): only the keys given change; `times` 1 to 4 distinct `HH:MM`, written sorted, a stored `at` removed; bad times or a bad language `400 invalid_digest_settings` ("1 to 4 times, each HH:MM from 00:00 to 23:59, no time twice"); the model stays; result the settings `{times, weekdays_only, language}` |
 | `POST api/digests/run` | `{}` | `Digests.start('manual')` (SF-103): answers at once `{started: true}`; `409 digest_running` while a digest runs; 404 without the digest |
 | `POST api/workspaces/<name>/remove` | `{}` | `Setup.removeWorkspace`; `409 workspace_busy` while the workspace has a live job; result `{removed}` |
-| `POST api/tickets` | `{"workspace", "ticket", "title", "request", "owner"?: "chatgpt" \| "claude_code"}` | `Setup.createTicket`: the ticket skeleton through the Task file writer, the request and the Context owner (`chatgpt` when left out) kept for the conversation; result `{workspace, ticket, path, base}` |
+| `POST api/tickets` | `{"workspace", "ticket", "title", "request", "owner"?: "chatgpt" \| "claude_code"}` | `Setup.createTicket`: the ticket skeleton through the Task file writer, the request and the Context owner (`chatgpt` when left out) kept for the conversation; result `{workspace, ticket, path, base}`, with `auto_planner: true` when the workspace has it (section Workspace registry) |
 | `POST api/tickets/<ws>/<ticket>/owner` | `{"owner": "chatgpt" \| "claude_code"}` | `Setup.setTicketOwner` (the ticket page's *Plan with*): rewrites `<state dir>/requests/<ws>/<ticket>.owner`; the names checked, `409 job_active` while a job of the ticket is live, `404 task_not_found` without a Task file listed as a ticket; result the ticket's row as the tickets payload has it (with `owner` and its `conversation`, without the queue fields); every page gets the tickets again; POST only |
 | `POST api/tickets/<ws>/<ticket>/chat` | `{"url": string \| null}` | `Setup.setPlanningChat` (SF-208, the planning chat link's Save and Remove): writes `<state dir>/requests/<ws>/<ticket>.chat` (null removes it); the names checked, allowed while a job of the ticket is live, `404 task_not_found` without the ticket's active Task file, `400 invalid_chat_link` for anything but a `https://chatgpt.com/` link; result `{workspace, ticket, planning_chat}`; every page gets the tickets and the jobs again; POST only |
 | `POST api/tickets/<ws>/<ticket>/planner` | `{}` | `startPlanner` (`sf planner start`, section MCP endpoint, The planner session) through the dashboard's planner: only for a ticket of the tickets list (an empty 404 otherwise, before the body is read); it answers once start has watched the new session (about 3 s): `{started, session}`, `started` false with the session that runs already; `409` for `planner_starting`, `planning_copy_missing`, `planning_copy_unsafe` and `planning_copy_untrusted`, `404 workspace_not_found`, `500` with its code for `planner_start_failed` and `invalid_config`; every page gets the tickets again |
@@ -6329,7 +6331,14 @@ set it; the Edit keeps it). The optional `notify` (SF-215: `"full"`, `"brief"` o
 `full`, any other value makes the file invalid) decides how much the notifications of the
 workspace's jobs and Task checks tell (section Notifications); `sf workspace notify <name>
 full|brief|off` sets it (`full` removes the key), `sf workspace list` shows it when it is not
-`full`, the dashboard's Edit keeps it. The optional `test_command` (SF-128: 1 to 2000 characters without NUL;
+`full`, the dashboard's Edit keeps it. The optional `auto_planner` (SF-301: `true` or `false`,
+absent is `false`, any other value makes the file invalid): on the dashboard, *Create the ticket*
+with the Context owner Claude Code does what *Create & plan* does: once the ticket and its images
+are stored, the page starts the ticket's planner session (`POST api/tickets/<ws>/<ticket>/planner`)
+and opens its page; a refused start says why in the message, and nothing retries. A page closed
+before the images are up starts nothing: start it on the ticket's page. ChatGPT tickets are not
+affected. `sf workspace auto-planner <name> on|off` sets it (`off` removes the key), `sf workspace
+list` shows it when it is on, the dashboard's Edit keeps it; each create reads it. The optional `test_command` (SF-128: 1 to 2000 characters without NUL;
 anything else makes the file invalid) is the command the factory runs in a sandbox on the reviewed
 worktree before the job is ready (section MR preparation, the test step); without it nothing runs.
 Edit the file to set it (`sf workspace add` and the dashboard's form do not show it; the Edit keeps
@@ -6342,7 +6351,7 @@ The optional `description`, `app` and `digest: {track, my_work}`, and the top-le
 settings, are the morning digest's (SF-103, section Morning digest); the optional top-level
 `explain: {on, language, model}` is the stop explanations' (SF-106, section Stop explanations). The Workspaces drawer's Edit
 changes an existing workspace's path, description, app, hand-over, colour, label and digest switches (the
-name stays; `work_checkout`, `rules_skip`, `guard`, `test_command`, `notify` and `auto_queue` are kept): its body has every field, `""` removes the
+name stays; `work_checkout`, `rules_skip`, `guard`, `test_command`, `notify`, `auto_queue` and `auto_planner` are kept): its body has every field, `""` removes the
 description, the app and the label, `"default"` the handoff, `"auto"` the color, and a body without
 `label` keeps the label; the path is checked as Add checks it, and a path change while the workspace has a live job is `workspace_busy`.
 

@@ -13,7 +13,9 @@
 // user's other workspaces; absent: false) and an optional `test_command` (src/test-command.ts: the
 // factory runs it in a sandbox before a job is ready; absent: no run) and an optional `notify`
 // (full, brief or off: how much its notifications tell; absent: full) and an optional `auto_queue`
-// (src/queue.ts addByItself: a Task whose plan is ready joins the run queue by itself; absent: false).
+// (src/queue.ts addByItself: a Task whose plan is ready joins the run queue by itself; absent: false)
+// and an optional `auto_planner` (New ticket on the dashboard with the owner Claude Code starts the
+// ticket's planner session once its images are stored; absent: false).
 import { mkdir, readFile, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
@@ -142,6 +144,7 @@ const registrySchema = z.strictObject({
       guard: z.boolean().optional(),
       test_command: testCommand.optional(),
       auto_queue: z.boolean().optional(),
+      auto_planner: z.boolean().optional(),
     }),
   ),
   digest: digestSettingsSchema.optional(),
@@ -223,9 +226,22 @@ export async function setWorkspaceNotify(name: string, notify: NotifyMode, dir =
   await saveRegistry(registry, dir);
 }
 
+// sf workspace auto-planner: on writes "auto_planner": true, off removes the key (the default);
+// workspace_not_found when it is not registered.
+export async function setWorkspaceAutoPlanner(name: string, on: boolean, dir = configDir()): Promise<void> {
+  const registry = await loadRegistry(dir);
+  if (!Object.hasOwn(registry.workspaces, name)) {
+    throw new FactoryError('workspace_not_found', `workspace "${name}" is not registered.`);
+  }
+  const { auto_planner: _old, ...rest } = registry.workspaces[name]!;
+  registry.workspaces[name] = on ? { ...rest, auto_planner: true } : rest;
+  await saveRegistry(registry, dir);
+}
+
 // What the Setup's Edit replaces; "" removes description, app and label, 'default' the handoff
 // key, 'auto' the color key, and digest with both false the digest key; an absent label keeps the
-// label. work_checkout, rules_skip, guard, test_command, notify and auto_queue stay as they are.
+// label. work_checkout, rules_skip, guard, test_command, notify, auto_queue and auto_planner stay
+// as they are.
 export interface WorkspaceEdit {
   read_checkout: string;
   description: string;
@@ -295,6 +311,8 @@ export interface Workspace {
   testCommand?: string;
   // "auto_queue": true in workspaces.json; absent otherwise.
   autoQueue?: boolean;
+  // "auto_planner": true in workspaces.json; absent otherwise.
+  autoPlanner?: boolean;
 }
 
 // The entries whose ignored work_checkout differs from the checkout, for one warning at start.
@@ -372,6 +390,7 @@ export async function resolveWorkspace(name: string, dir = configDir()): Promise
       ...(entry.guard === true ? { guard: true } : {}),
       ...(entry.test_command !== undefined ? { testCommand: entry.test_command } : {}),
       ...(entry.auto_queue === true ? { autoQueue: true } : {}),
+      ...(entry.auto_planner === true ? { autoPlanner: true } : {}),
     };
   } catch (error) {
     if (error instanceof FactoryError) {

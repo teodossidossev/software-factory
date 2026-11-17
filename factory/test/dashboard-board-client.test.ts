@@ -1733,6 +1733,8 @@ test('board client: the Coordinator card reads api/coordinator on each coordinat
 
 // How long the Zen lights stay lit: their timer's ms.
 const ZEN_MS = 3000;
+// The Zen screen's tooltip.
+const ZEN_TITLE = 'Zen: lights up when a job changes state; click to wake it';
 // The Zen lights in the Coordinator card's title; undefined when the card draws none.
 const coordZen = (page: Page): FakeElement | undefined => part(page.$('coord'), 'coord-zen');
 const coordLit = (page: Page): boolean | undefined => coordZen(page)?.classList.contains('lit');
@@ -1760,11 +1762,13 @@ test('board client: the Coordinator card\'s Zen lights flash for a job\'s state 
   await coordChanged(page);
   assert.equal(coordLit(page), true);
 
-  // ZL-6: five empty bars, hidden from a screen reader, inside the title; no text added.
+  // ZL-6: twelve empty lights, the first the bar, hidden from a screen reader, inside the title; no
+  // text added.
   const zen = coordZen(page)!;
   assert.deepEqual([zen.tagName, zen.getAttribute('aria-hidden'), zen.getAttribute('title'), zen.parentNode, zen.textContent],
-    ['SPAN', 'true', 'Zen: lights up when a job changes state', part(coord, 'coord-title'), '']);
-  assert.deepEqual((zen.children as FakeElement[]).map((bar) => [bar.tagName, bar.children.length, bar.textContent]), Array.from({ length: 5 }, () => ['I', 0, '']));
+    ['SPAN', 'true', ZEN_TITLE, part(coord, 'coord-title'), '']);
+  assert.deepEqual((zen.children as FakeElement[]).map((light) => [light.tagName, light.className, light.children.length, light.textContent]),
+    [['I', 'bar', 0, ''], ...Array.from({ length: 11 }, () => ['I', '', 0, ''])]);
   assert.deepEqual((coord.children as FakeElement[]).map((child) => [child.tagName, child.className]), [['H2', 'coord-title'], ['DIV', 'coord-box']]);
   assert.equal(part(coord, 'coord-title')!.textContent, 'Coordinator');
   assert.equal(coord.textContent, `Coordinator${part(coord, 'coord-box')!.textContent}`);
@@ -1806,6 +1810,35 @@ test('board client: the Coordinator card\'s Zen lights flash for a job\'s state 
   stream.emit('coordinator', {});
   await fresh.flush();
   assert.deepEqual([coordLit(fresh), fresh.timers.filter((timer) => timer.ms === ZEN_MS).length], [false, 0]);
+});
+
+test('board client: a click on Zen\'s screen lights it for 3 s; another click restarts the 3 s', async () => {
+  const page = await openCoordinator(() => coordStatus('Planning'));
+  await coordChanged(page);
+  const start = page.timers.length;
+  const zenTimers = () => page.timers.slice(start).filter((timer) => timer.ms === ZEN_MS);
+  // A click on the screen, which sends no request.
+  const click = async (): Promise<void> => {
+    const requests = page.requests.length;
+    coordZen(page)!.dispatch('click');
+    await page.flush();
+    assert.equal(page.requests.length, requests);
+  };
+  assert.deepEqual([coordLit(page), zenTimers().length], [false, 0]);
+
+  // ZS-4: a click lights them and sets one 3 s timer.
+  await click();
+  assert.deepEqual([coordLit(page), zenTimers().length], [true, 1]);
+
+  // A second click (on the screen a render drew again) clears it and sets a new one.
+  await coordChanged(page);
+  await click();
+  assert.deepEqual(zenTimers().map((timer) => [timer.cleared, timer.fired]), [[true, false], [false, false]]);
+  assert.equal(coordLit(page), true);
+
+  // The last timer dims them.
+  zenTimers()[1]!.fire();
+  assert.equal(coordLit(page), false);
 });
 
 // The coordinator's state with this status, written a minute ago.

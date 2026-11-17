@@ -543,7 +543,16 @@ export async function commitAndRebase(cwd: string, input: { baseCommit: string; 
   if ((await factoryGit(cwd, ['merge-base', '--is-ancestor', targetCommit, 'HEAD'])).code === 0) {
     return { kind: 'ready' };
   }
-  const rebased = await factoryGit(cwd, input.onlyOwn === true ? ['rebase', '-q', '--onto', targetCommit, baseCommit] : ['rebase', '-q', targetCommit]);
+  return rebaseOnto(cwd, targetCommit, input.onlyOwn === true ? baseCommit : undefined);
+}
+
+// The branch checked out in cwd rebased onto targetCommit: with baseCommit only its commits after
+// it are replayed (`git rebase -q --onto <targetCommit> <baseCommit>`), without it every commit not
+// on targetCommit (`git rebase -q <targetCommit>`). ready; conflict with the unmerged files, the
+// rebase left in progress for the conflict turn; failed (mr_rebase_failed with Git's text) after
+// the rebase was aborted.
+export async function rebaseOnto(cwd: string, targetCommit: string, baseCommit?: string): Promise<Exclude<Prepared, { kind: 'unreviewed' }>> {
+  const rebased = await factoryGit(cwd, baseCommit !== undefined ? ['rebase', '-q', '--onto', targetCommit, baseCommit] : ['rebase', '-q', targetCommit]);
   if (rebased.code === 0) {
     return { kind: 'ready' };
   }

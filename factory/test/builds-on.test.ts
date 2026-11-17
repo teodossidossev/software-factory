@@ -4,13 +4,16 @@
 // change alone; MR preparation replays its one commit onto that ticket's new prepared commit; it
 // stops with builds_on_not_ready while that ticket is being changed, and Retry goes on once it is
 // ready again; Approve is refused while that ticket is not merged; a start by hand is refused
-// while it has no prepared commit; and once it is merged the job starts from origin/<base>.
+// while it has no prepared commit; once it is merged the job starts from origin/<base>; and once it
+// is merged, Merged — archive moves a part waiting for review onto origin/<base> (its test command
+// run again), a conflict of the move taking the conflict turn.
 import assert from 'node:assert/strict';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { callSocket } from '../src/ipc.js';
 import { type Job, type JobState, JobStore, now } from '../src/jobs.js';
+import { saveRegistry } from '../src/registry.js';
 import { writeTask } from '../src/task-file.js';
 import { call, type Env, git, newEnv, newRepo, refused, reviewScript, runCli, script, serve, stop, temp, waitFor } from './support/harness.js';
 import { mrText, remoteTip, rev } from './support/handoff.js';
@@ -131,7 +134,7 @@ test('a part starts from the prepared commit of the part it builds on with its P
     await call(served, 'mark_clean', { workspace: 'app', ticket: 'T-2' });
     await waitFor(served, 'T-2', 'ready_for_human_review', 1);
     job = (await p.jobs.read('app', 'T-2'))!;
-    assert.deepEqual([job.target_commit, job.base_commit], [second, second]);
+    assert.deepEqual([job.target_commit, job.base_commit, job.builds_on_commit], [second, second, second]);
     assert.equal(rev(p.repo, `${PART_TWO}~1`), second);
     // Part one's change once (its new version) and part two's once.
     assert.equal(git(p.repo, 'rev-list', '--count', `main..${PART_TWO}`).trim(), '2');
@@ -226,6 +229,96 @@ test('a start by hand is refused while the part it builds on has no prepared com
     const tip = git(p.repo, 'rev-parse', 'origin/main').trim();
     assert.notEqual(tip, rev(p.repo, 'main'));
     assert.deepEqual([job.builds_on, job.builds_on_commit, job.base_commit], ['T-1', null, tip]);
+  } finally {
+    await stop(served);
+  }
+});
+
+// origin's main gets one commit with files, as a squash merge of T-1 would leave it; the local main
+// stays where it was. Returns origin/main.
+async function squashOnOrigin(p: Parts, files: Record<string, string>): Promise<string> {
+  for (const [path, text] of Object.entries(files)) {
+    await writeFile(join(p.repo, path), text);
+  }
+  git(p.repo, 'add', ...Object.keys(files));
+  git(p.repo, 'commit', '-q', '-m', 'feat(T-1): Part one (#1)');
+  git(p.repo, 'push', '-q', 'origin', 'main');
+  git(p.repo, 'reset', '-q', '--hard', 'HEAD~1');
+  return git(p.repo, 'rev-parse', 'origin/main').trim();
+}
+
+// The state changes of the job's events.jsonl, in order, as "from → to".
+async function stateChanges(p: Parts, ticket: string): Promise<string[]> {
+  const lines = (await readFile(p.jobs.eventsPath('app', ticket), 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as { type?: string; state?: { from: string; to: string } });
+  return lines.flatMap((event) => (event.state === undefined ? [] : [`${event.state.from} → ${event.state.to}`]));
+}
+
+test('once the part it builds on is merged, Merged — archive moves a part waiting for review onto origin/<base>, runs the test command on it and gives it back', TIMEOUT, async () => {
+  const p = await parts('builds-on-move');
+  await saveRegistry({ workspaces: { app: { read_checkout: p.repo, work_checkout: p.repo, test_command: 'test -f part1.txt' } } }, p.env.config);
+  await script(p.env, [{ write: { 'README.md': 'hello part two\n' } }, { write: { '.software-factory/T-2.mr.md': mrText('feat(T-2): Part two') } }]);
+  const served = await serve(p.env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'T-2' });
+    await waitFor(served, 'T-2', 'awaiting_review', 1);
+    await call(served, 'mark_clean', { workspace: 'app', ticket: 'T-2' });
+    await waitFor(served, 'T-2', 'ready_for_human_review', 1);
+    const prepared = (await p.jobs.read('app', 'T-2'))!;
+    assert.deepEqual([prepared.builds_on_commit, prepared.base_commit], [p.first, p.first]);
+
+    // MV-3: another ticket is merged; T-1 is not: T-2 is left as it was.
+    await p.jobs.write(partOneJob('pushed', p.first, { ticket: 'T-9', branch: 'T-9-x' }));
+    const other = await runCli(p.env, ['handed-done', 'app', 'T-9', '--merged']);
+    assert.equal(other.code, 0, other.stdout + other.stderr);
+    assert.deepEqual(await p.jobs.read('app', 'T-2'), prepared);
+
+    // T-1 is squash-merged on origin and pushed by its job; the user says it is merged.
+    const merged = await squashOnOrigin(p, { 'part1.txt': 'part one\n' });
+    await setPartOne(p, 'pushed', p.first);
+    const done = await runCli(p.env, ['handed-done', 'app', 'T-1', '--merged']);
+    assert.equal(done.code, 0, done.stdout + done.stderr);
+    await waitFor(served, 'T-2', 'ready_for_human_review', 1);
+
+    // Its one commit on origin/main, its own file alone changed; nothing pushed.
+    assert.equal(rev(p.repo, `${PART_TWO}~1`), merged);
+    assert.equal(git(p.repo, 'diff', '--name-only', 'origin/main', PART_TWO).trim(), 'README.md');
+    const job = (await p.jobs.read('app', 'T-2'))!;
+    assert.deepEqual([job.base_commit, job.target_commit, job.builds_on_commit, job.prepared_commit], [merged, merged, null, rev(p.repo, PART_TWO)]);
+    const events = (await readFile(p.jobs.eventsPath('app', 'T-2'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as { type?: string });
+    assert.equal(events.filter((event) => event.type === 'tests_started').length, 2);
+    assert.deepEqual((await stateChanges(p, 'T-2')).slice(-2), ['ready_for_human_review → preparing_mr', 'preparing_mr → ready_for_human_review']);
+    assert.equal(remoteTip(p.origin, PART_TWO), undefined);
+  } finally {
+    await stop(served);
+  }
+});
+
+test('a conflict while moving takes the conflict turn', TIMEOUT, async () => {
+  const p = await parts('builds-on-move-conflict');
+  await script(p.env, [
+    { write: { 'README.md': 'hello part two\n' } },
+    { write: { '.software-factory/T-2.mr.md': mrText('feat(T-2): Part two') } },
+    { write: { 'README.md': 'hello main and part two\n' }, text: '# Report: T-2, conflict resolution\n\n## Done\nREADME.md: kept both changes.' },
+  ]);
+  const served = await serve(p.env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'T-2' });
+    await waitFor(served, 'T-2', 'awaiting_review', 1);
+    await call(served, 'mark_clean', { workspace: 'app', ticket: 'T-2' });
+    await waitFor(served, 'T-2', 'ready_for_human_review', 1);
+
+    const merged = await squashOnOrigin(p, { 'part1.txt': 'part one\n', 'README.md': 'hello main\n' });
+    await setPartOne(p, 'pushed', p.first);
+    const done = await runCli(p.env, ['handed-done', 'app', 'T-1', '--merged']);
+    assert.equal(done.code, 0, done.stdout + done.stderr);
+    await waitFor(served, 'T-2', 'awaiting_review', 2);
+
+    const { report } = await p.jobs.readIteration('app', 'T-2', 2);
+    assert.ok(report.includes(`The rebase onto origin/main (${merged}) had conflicts in README.md, resolved by the Implementer.`), report);
+    const job = (await p.jobs.read('app', 'T-2'))!;
+    assert.deepEqual([job.base_commit, job.builds_on_commit, job.prepared_commit], [merged, null, null]);
+    assert.doesNotMatch(await readFile(join(job.worktree!, 'README.md'), 'utf8'), /^(<<<<<<< |=======$|>>>>>>> )/m);
+    assert.equal(remoteTip(p.origin, PART_TWO), undefined);
   } finally {
     await stop(served);
   }

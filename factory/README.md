@@ -590,7 +590,9 @@ trusted copy opens nothing) and after (still not trusted: `planning_copy_untrust
 Claude Code while it runs. `sf planner start` refuses an untrusted copy with a message that names
 this command. Its error codes: `planning_copy_missing` and `planning_copy_unsafe` as start's,
 `claude_not_found` (no `claude` on `PATH`), `planner_trust_failed` (`claude` could not start), and
-`planning_copy_untrusted`.
+`planning_copy_untrusted`. With `sf serve` running, the dashboard starts, reads and ends it too
+(section Dashboard, The planned ticket page): `sf serve` gives it these functions with its own
+environment and folders.
 
 ## Environment
 
@@ -4659,7 +4661,9 @@ the ticket's planner session as `GET api/tickets/<ws>/<ticket>/planner` gives it
 dashboard's planner); a ticket that is not in
 the tickets list is an empty 404, and the page goes back to the board). The header has *← Board*
 (Escape), the key, the workspace, the title and `draft` for a skeleton; *Open the ChatGPT
-conversation ↗* (the server's link only, and only when ChatGPT plans the ticket), **Check the plan** (*Check again* after a check,
+conversation ↗* (the server's link only, and only when ChatGPT plans the ticket), *Open the planner
+session ↗* (while the ticket's planner session runs and its hook has recorded its
+`https://claude.ai/code/` link; only such a link), **Check the plan** (*Check again* after a check,
 *Checking…* while one runs; today's `POST api/tickets/<ws>/<ticket>/check`) and **Start now**; its
 line says "waits for …" while a dependency is not merged, "Starts from <branch>" and the plan check
 in words. On the left the **Task file** (`.software-factory/<ticket>.md`): *Preview* (the default)
@@ -4677,7 +4681,7 @@ itself), each card with a short help line:
 | **Files it will change** | `scope` and `may_touch`, in one list | The files the job is expected to create, change or delete (one path or pattern per row). A change outside the list needs your OK before it can ship. 🔒 marks a `may_touch` entry: a sensitive file (build, CI, packages, credentials) the ticket may change on purpose. Without `scope`: "No list: the job may change any file, and nothing is checked." |
 | **Waits for** | `lands_after` | Each ticket with SF-084's state in words: ✓ merged, pushed, not merged yet, running, planned, not started, unknown ticket (another workspace's as `<workspace>/<ticket>`). Start now still starts it. |
 | **Plan check** | (the Task check) | "Ready: …", "Not ready: N blockers, M majors." with the findings (their kind in words: needs a decision, contradicts itself, something is missing, does more than asked, unclear), what the checker understood and the files it expects to change; "Not checked yet.", "Checking…", "The plan changed after this check: check it again."; the date, the model and the cost. It only advises. |
-| **Planning conversation** | | *Plan with: ChatGPT · Claude Code* (the Context owner, switchable); for ChatGPT the link, for Claude Code where to paste; the first message and its Copy (below); the ticket's planning chat link (SF-208): *Open the planning chat ↗* when one is stored, and the field *Planning chat link* with Save and Remove. |
+| **Planning conversation** | | *Plan with: ChatGPT · Claude Code* (the Context owner, switchable); for ChatGPT the link, for Claude Code its planner session (below) and where to paste; the first message and its Copy (below); the ticket's planning chat link (SF-208): *Open the planning chat ↗* when one is stored, and the field *Planning chat link* with Save and Remove. |
 | **Images** | | The ticket's images (SF-064, section Ticket images): each opens whole in a new tab, with **Copy image** and ×; "Paste an image here (Ctrl+V) or drop one." |
 | **History** | | What happened to the plan (below). |
 
@@ -4737,7 +4741,7 @@ registered yet) with the refusal shown as it comes. **New ticket** takes the wor
 default the one the last ticket was created in, in this browser, kept in localStorage as
 `sf-ticket-workspace`; when that one is not registered any more, or the browser keeps nothing, the
 board filter's, else the first), the ticket key, a one-line title, what the user wants in their
-own words and the Context owner (*ChatGPT, in the browser*, the default, or *Claude Code, in your terminal*), and writes a
+own words and the Context owner (*ChatGPT, in the browser*, the default, or *Claude Code, in a planner session*), and writes a
 **ticket skeleton** (SF-028), `.software-factory/<ticket>.md` in the checkout, through the Task
 file writer: the front matter (`ticket`, `title`, `base` = the branch `origin/HEAD` points at, else
 `main`), `# <ticket>: <title>` and `## Status: waiting for the Context owner` with one line of
@@ -4759,7 +4763,9 @@ conversation on the ticket's page; a blocked tab says the same. Then the ticket'
 opens, once the board lists the ticket, unless the user has moved on meanwhile (another page, or
 the drawer open again) or a newer create was sent before it finished (its outcome then goes to
 the toast, and the form stays the newer one's); an image that was not attached keeps the form
-open instead, as with Create. For a Claude Code owner there is no tab: the ticket's page opens, with the first message to copy.
+open instead, as with Create. For a Claude Code owner there is no tab: once the ticket and its images are there (one that failed
+too), it starts the ticket's planner session (`POST api/tickets/<ws>/<ticket>/planner`, as Start
+the planner does, its outcome in the toast), and the ticket's page opens as above, showing it.
 Enter in the form is Create. **Archived** (with the count) lists the archived tickets
 with Task (the archived text), Restore and Delete…; Archive, Restore and Delete… are described
 under SF-027 (a finished job of the ticket leaves the board with them). The archived Task drawer
@@ -4774,10 +4780,29 @@ redrawn from the answer (every other page gets the tickets again); a ticket whos
 already written keeps the switch. For **ChatGPT**: *Open the ChatGPT conversation ↗*, a link
 (`target=_blank`, opened only by the user's click) to `https://chatgpt.com/?q=` plus the message of
 `ticketConversation` URL-encoded, and the first message with Copy. For **Claude Code** the payload
-has no link (`conversation.url` is `null`) and neither the header nor the card shows one: the line
+has no link (`conversation.url` is `null`) and neither the header nor the card shows a ChatGPT link: the line
 "Paste it into a Claude Code session that has the software-factory MCP server (see the planning
 guide)" (text, not a link), then the first message with Copy; the session is set up as section 2
-of `docs/guide/planning.md` says. Claude Code's message starts "Use the software-factory MCP
+of `docs/guide/planning.md` says.
+
+**The planner session** of a ticket Claude Code plans (`planner.js`; section MCP endpoint, The
+planner session) comes in the card right after *Plan with*. None running: "No planner session
+runs." and **Start the planner** (`POST api/tickets/<ws>/<ticket>/planner`), with "Starting the
+planner in the planning copy of <workspace>…" while it is out. Running: "Planner session "Planner
+<workspace> <ticket>" runs since <day, time>.", until its hook recorded its link followed by "Its
+link shows here once it first waits for you; until then find it under that name in the Claude app
+or on claude.ai/code."; then *Open the planner session ↗* (in the header too) once the link is
+known, and **End**, which asks first (*End the session*) and posts `.../planner/stop`. A session
+the page showed and a later read finds gone: "The planner session ended." and Start the planner.
+The page reads the session with its payload (`planner_session`), again on each tickets refresh
+that may concern the ticket, and with `GET api/tickets/<ws>/<ticket>/planner` every 10 s while one
+runs and the page shows the ticket and is visible; a read sent before the last answer of Start or
+End is dropped. Start's and End's outcomes go to the toast, a refusal as its code and message; an
+answer that comes once the page shows another ticket or page changes only the toast (the ticket's
+page reads its session again when opened), so the shown ticket keeps its session and its reads. A
+ticket ChatGPT plans shows these lines only while its session runs or starts.
+
+Claude Code's message starts "Use the software-factory MCP
 server." instead of "Use the Software Factory connector.", and before its last sentence it may
 build a throwaway prototype (the prototype skill) outside the factory's worktrees when a design
 question is best settled by seeing it, writing what the user chose into the Task file, since the
@@ -4996,6 +5021,8 @@ naming the type, when a type of `web/types.d.ts` has neither.
 - `home.js`: the two main views (`showMain`, `back`) and the home (section Home): Needs you and the
   Coordinator card's place.
 - `ticket-page.js`: Markdown preview, the planned ticket page, a ticket's images.
+- `planner.js`: the planned ticket page's planner session: its lines in the Planning conversation
+  card and its link in the header, Start the planner, End, and its read every 10 s while it runs.
 - `reports.js`: the morning digest (its page and Repositories tab) and the Stats page.
 - `mr-row.js`: `mrRow`, one compact row of an open merge request (its pipeline, readiness, rebase
   need, SonarQube's problem, its comments button); it reads no page state, so any page can draw it.
@@ -5942,8 +5969,12 @@ end), in a browser:
    puts the first message on the clipboard; History says "Created by you". Once ChatGPT wrote the Task file, Start
    appears on the card. *Plan with: Claude Code* on the page: the ChatGPT link goes from the header
    and the card, the card says where to paste, and the first message starts "Use the
-   software-factory MCP server."; a new ticket created with *Claude Code, in your terminal* opens
-   that way. Remove on a workspace with a live job is off with the reason. Nowhere on
+   software-factory MCP server."; a new ticket created with *Claude Code, in a planner session*
+   opens that way; with the workspace's planning copy set up and trusted (`sf planner setup app`,
+   `sf planner trust app`), its Create & plan shows "Starting the planner…", then the running
+   session with End, and once the planner first waits for you *Open the planner session ↗* (card
+   and header) opens it on claude.ai, from the phone too; End asks, then the card says "The planner
+   session ended.". Remove on a workspace with a live job is off with the reason. Nowhere on
    the page is there a Reviewer line, a reviewer setup, Nudge, Send test event or Subscriptions.
 14. Stream: a running job's entries arrive live at the bottom and the view follows them while it is
    at the bottom (scroll up: it stays where you are). Each tool call is one line with its result;

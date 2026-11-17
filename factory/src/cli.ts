@@ -78,6 +78,7 @@ import { watchEvents } from './watch.js';
 import { DEFAULT_BUDGET_USD, DEFAULT_TIMEOUT_MIN, positiveDecimal, runSmoke } from './live-smoke.js';
 import { INSTALLED_SF, serviceCommand, updateService } from './service.js';
 import { isPlannerWaiting, PLANNER_USAGE, plannerCommand, plannerWaitingCommand } from './planning-copy.js';
+import { plannerSession, startPlanner, stopPlanner } from './planner-session.js';
 import { watchdog } from './watchdog.js';
 import { checkStateVersion } from './state-version.js';
 import { answerLines, checkArgs, checkJob, checkName, cliCommand, type Command, COMMANDS, socketName, UsageError, usageLines } from './commands.js';
@@ -324,10 +325,13 @@ async function serve(options: { tunnel?: 'off' } = {}): Promise<{ dashboard: URL
   const healthMonitor = upkept.monitor;
   try {
     if (dashboardOn()) {
+      // The ticket page's planner session (src/planner-session.ts), with this service's environment and folders.
+      const sessionDeps = { env: process.env, stateDir: config.stateDir, configDir: configDir() };
       // The dashboard's actions (DashboardActions: start, approve, abort, say, retryReview,
       // acceptGate and archiveFinished) run on the same Execution as the socket commands.
       dashboard = await startDashboard(dashboardPort, config.stateDir, jobs, execution, setup, {
         gate: config.gate.on, checks, queue: runQueue, onWorkspacesChanged: () => void autoChecks?.rereadWorkspaces(), digests, remoteOrigins, remoteLogins, remotePort,
+        planner: { start: (w, t) => startPlanner(w, t, sessionDeps), session: (w, t) => plannerSession(w, t, sessionDeps), stop: (w, t) => stopPlanner(w, t, sessionDeps) },
         ...(healthMonitor !== undefined ? { health: healthMonitor } : {}),
       });
     } else {

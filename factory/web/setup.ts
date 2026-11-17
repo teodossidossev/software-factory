@@ -575,6 +575,10 @@ async function submitTicket(plan = false): Promise<void> {
   releaseNewImages();
   // A newer submission may have the form by now (Create & plan's read is a wait): see finishTicketForm.
   const note = tab === undefined ? '' : await pointPlanningTab(tab, key);
+  // Create & plan with Claude Code: the ticket's planner session starts now (planner.js); its page shows it.
+  if (plan && owner === 'claude_code') {
+    void tkPlannerStart(key);
+  }
   if (uploaded.failed.length > 0) {
     setSetupStatus(submission === state.ticketSubmits ? 'ticket-status' : 'toast', { level: 'error', text: `Ticket created: ${fieldOf(result, 'path')} in ${fieldOf(result, 'workspace') ?? workspace}. Not attached: ${uploaded.failed.join('; ')}. Add ${uploaded.failed.length === 1 ? 'it' : 'them'} on the ticket's page: paste or drop on its Images card.${note}` });
     renderBoard();
@@ -605,9 +609,10 @@ async function ticketAction(action: 'archive' | 'restore' | 'delete', row: Ticke
   await setupRequest(id, `api/tickets/${jobPath(key)}/${action}`, {}, 'toast', (data) => ({ level: 'ok', text: texts[action](data ?? {}) }));
 }
 
-// Start and Delete ask first: Start names the workspace, the ticket and the base branch; Delete
-// cannot be undone. extra: what the planned ticket page adds to Start's text (what it waits for).
-function openTicketConfirm(action: 'start' | 'delete', row: ConfirmedTicket, extra = ''): void {
+// Start, Delete and End (a ticket's planner session) ask first: Start names the workspace, the
+// ticket and the base branch; Delete cannot be undone; End stops Claude Code even in the middle of
+// an answer. extra: what the planned ticket page adds to Start's text (what it waits for).
+function openTicketConfirm(action: 'start' | 'delete' | 'planner-stop', row: ConfirmedTicket, extra = ''): void {
   const key = `${row.workspace}/${row.ticket}`;
   if (state.ticketConfirm !== null) {
     return;
@@ -620,6 +625,11 @@ function openTicketConfirm(action: 'start' | 'delete', row: ConfirmedTicket, ext
     byId('ticket-confirm-text').textContent = `Starts a job on .software-factory/${row.ticket}.md of workspace ${row.workspace}: a new branch from ${row.base} in its own worktree, where the Implementer runs iteration 1. Claude reviews it, the Codex gate checks it, and the branch comes back to you to approve.${note}${extra}`;
     byId('ticket-ok').textContent = 'Start the job';
     byId('ticket-ok').className = 'btn btn-primary';
+  } else if (action === 'planner-stop') {
+    byId('ticket-confirm-title').textContent = `End the planner of ${row.ticket}?`;
+    byId('ticket-confirm-text').textContent = `Ends the Claude Code session that plans ${row.ticket} in the planning copy of ${row.workspace}, even in the middle of an answer. What it already wrote, such as the Task file, stays; Start the planner then begins a new session.`;
+    byId('ticket-ok').textContent = 'End the session';
+    byId('ticket-ok').className = 'btn btn-danger';
   } else {
     byId('ticket-confirm-title').textContent = `Delete ${key}?`;
     byId('ticket-confirm-text').textContent = `Deletes .software-factory/${row.ticket}.md and its MR text${row.archivedRow ? ' from the archive' : ''}. Cannot be undone; Archive keeps the file instead. A finished job of the ticket leaves the board (its history stays in the state directory).`;
@@ -649,6 +659,8 @@ async function submitTicketConfirm(): Promise<void> {
   closeTicketConfirm();
   if (confirm.action === 'start') {
     await startTicket(confirm.row);
+  } else if (confirm.action === 'planner-stop') {
+    await tkPlannerStop(confirm.key);
   } else {
     await ticketAction('delete', confirm.row);
   }

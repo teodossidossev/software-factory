@@ -17,6 +17,7 @@
   <script src="routing.js" defer></script>
   <script src="home.js" defer></script>
   <script src="ticket-page.js" defer></script>
+  <script src="planner.js" defer></script>
   <script src="reports.js" defer></script>
   <script src="mr-row.js" defer></script>
   <script src="review-page.js" defer></script>
@@ -323,11 +324,11 @@
         <fieldset class="owner">
           <legend>Context owner</legend>
           <label class="choice"><input id="owner-chatgpt" type="radio" name="owner" value="chatgpt" checked> ChatGPT, in the browser</label>
-          <label class="choice"><input id="owner-claude" type="radio" name="owner" value="claude_code"> Claude Code, in your terminal</label>
+          <label class="choice"><input id="owner-claude" type="radio" name="owner" value="claude_code"> Claude Code, in a planner session</label>
         </fieldset>
         <div class="row">
           <button id="ticket-create" type="submit" class="btn btn-primary">Create the ticket</button>
-          <button id="ticket-plan" type="button" class="btn" title="Creates the ticket, then opens its planning conversation in a new tab (ChatGPT) or its page (Claude Code)">Create &amp; plan</button>
+          <button id="ticket-plan" type="button" class="btn" title="Creates the ticket, then opens its planning conversation in a new tab (ChatGPT), or starts its planner session and opens its page (Claude Code)">Create &amp; plan</button>
         </div>
         <div id="ticket-status" class="status" role="status" aria-live="polite"></div>
       </form>

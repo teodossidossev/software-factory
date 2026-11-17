@@ -87,7 +87,7 @@ const SECURITY_HEADERS = {
 // The dashboard's script: classic scripts that share the page's globals, in load order.
 // dashboard.html has one deferred <script> per entry, in this order; nothing at the top level of a
 // file uses a name defined in a later one.
-export const DASHBOARD_SCRIPTS = ['core.js', 'job-screens.js', 'job-page.js', 'composer.js', 'header.js', 'board.js', 'coordinator.js', 'routing.js', 'home.js', 'ticket-page.js', 'reports.js', 'mr-row.js', 'review-page.js', 'digest-brief.js', 'setup.js', 'skills.js', 'health.js', 'pins.js', 'main.js'] as const;
+export const DASHBOARD_SCRIPTS = ['core.js', 'job-screens.js', 'job-page.js', 'composer.js', 'header.js', 'board.js', 'coordinator.js', 'routing.js', 'home.js', 'ticket-page.js', 'planner.js', 'reports.js', 'mr-row.js', 'review-page.js', 'digest-brief.js', 'setup.js', 'skills.js', 'health.js', 'pins.js', 'main.js'] as const;
 export type DashboardScript = (typeof DASHBOARD_SCRIPTS)[number];
 // The files of each entry of DASHBOARD_SCRIPTS, in load order: url, the file
 // served, is the build output dist/web/<name>.js; source, the file written by hand, is

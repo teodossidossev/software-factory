@@ -94,8 +94,9 @@ test('dashboard: token, static files with the security headers, 404 and 405 with
     // board's Coordinator card, coordinator.js, right after board.js; SF-209: the merge request
     // row, mr-row.js, right before review-page.js; SF-211: point mode, pins.js, right before main.js;
     // SF-226: the home and the two main views, home.js, right after routing.js; SF-285: the job page's
-    // composer, composer.js, right after job-page.js).
-    assert.deepEqual([...DASHBOARD_SCRIPTS], ['core.js', 'job-screens.js', 'job-page.js', 'composer.js', 'header.js', 'board.js', 'coordinator.js', 'routing.js', 'home.js', 'ticket-page.js', 'reports.js', 'mr-row.js', 'review-page.js', 'digest-brief.js', 'setup.js', 'skills.js', 'health.js', 'pins.js', 'main.js']);
+    // composer, composer.js, right after job-page.js; the ticket page's planner session, planner.js,
+    // right after ticket-page.js).
+    assert.deepEqual([...DASHBOARD_SCRIPTS], ['core.js', 'job-screens.js', 'job-page.js', 'composer.js', 'header.js', 'board.js', 'coordinator.js', 'routing.js', 'home.js', 'ticket-page.js', 'planner.js', 'reports.js', 'mr-row.js', 'review-page.js', 'digest-brief.js', 'setup.js', 'skills.js', 'health.js', 'pins.js', 'main.js']);
     // SF-136: every script of DASHBOARD_SCRIPTS is served as JavaScript, each with its own text (its
     // header names it); SF-137: none is longer than 2,500 lines.
     for (const file of DASHBOARD_SCRIPTS) {
@@ -742,6 +743,10 @@ test('dashboard end to end: a fake cycle, the stream across mark_clean (the bran
   try {
     const base = served.dashboard!;
     assert.ok(base !== undefined);
+    // SF-256: sf serve passes the planner: a ticket without a planner record reads as no session
+    // (without the planner, the route would be an empty 404).
+    const plannerRead = await fetchRaw(new URL('api/tickets/app/T-9/planner', base));
+    assert.deepEqual([plannerRead.status, JSON.parse(plannerRead.body)], [200, { session: null }]);
     // The MCP endpoint, the dashboard and its remote listener (SF-126).
     const open = await listeners(served.child.pid!);
     assert.ok(open === undefined || open === 3, `listeners: ${open}`);

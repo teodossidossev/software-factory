@@ -162,14 +162,24 @@ Your phone hears when the planner waits for you, or for a permission; a tap open
 
 Then, with `sf serve` running, start from the dashboard:
 
-1. **New ticket** (section 1, step 2) with the Context owner **Claude Code, in your terminal**. A
-   ticket made with ChatGPT switches on its page: *Plan with: ChatGPT · Claude Code* in the
-   Planning conversation card (you can switch back the same way, even after the Task file is
-   written).
-2. Click its card. The ticket's page has no ChatGPT link; the Planning conversation card says "Paste
-   it into a Claude Code session that has the software-factory MCP server (see the planning
-   guide)" and shows the first message: press **Copy**.
-3. Paste it into a Claude Code session (any directory). The message starts "Use the
+1. **New ticket** (section 1, step 2) with the Context owner **Claude Code, in a planner
+   session**, then **Create & plan**: the factory starts the ticket's planner session, as
+   `sf planner start my-app APP-12` does (The planning skill, below), and the dashboard shows the
+   ticket's page. The workspace's planning copy must be set up and trusted first (`sf planner
+   setup my-app`, then `sf planner trust my-app`); it plans on the base of its last `sf planner
+   setup`, so run that again for a newer one. A ticket made with ChatGPT switches on its page:
+   *Plan with: ChatGPT · Claude Code* in the Planning conversation card (you can switch back the
+   same way, even after the Task file is written).
+2. The Planning conversation card shows the session: "Starting the planner in the planning copy
+   of my-app…", then since when it runs, with **End**. Once the planner first waits for you,
+   **Open the planner session ↗**, in the card and in the page's header, opens it on claude.ai;
+   until then find it as "Planner my-app APP-12" in the Claude app. A refused start says why in
+   the message at the top of the page, with the command to run, for example `sf planner trust
+   my-app`. **Start the planner** on the card starts it for a ticket made with *Create the
+   ticket*, after a refusal or after the session ended; **End** asks first, then ends it.
+3. Or plan in a Claude Code session of your own: the card still says "Paste it into a Claude Code
+   session that has the software-factory MCP server (see the planning guide)" over the first
+   message and its **Copy**. Paste it into a session (any directory). The message starts "Use the
    software-factory MCP server. Call guide." and names the ticket, the workspace and your words,
    as ChatGPT's does; it also lets Claude Code build a throwaway prototype (the prototype skill)
    outside the factory's worktrees when a design question is best settled by seeing it. The

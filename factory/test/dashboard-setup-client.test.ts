@@ -963,6 +963,8 @@ function fill(page: Page, key: string, workspaceName = 'web'): void {
 }
 
 const created = (workspaceName: string, name: string) => ({ ok: true, result: { workspace: workspaceName, ticket: name, path: `.software-factory/${name}.md`, base: 'main' } });
+// The create's answer in a workspace with auto_planner.
+const createdAutoPlanner = (workspaceName: string, name: string) => ({ ok: true, result: { ...created(workspaceName, name).result, auto_planner: true } });
 const createdText = (workspaceName: string, name: string): string => `Ticket created: .software-factory/${name}.md in ${workspaceName} (base main), an empty skeleton in the Queue. Next: a click on its card opens the conversation; your words are its first message.`;
 const pageReads = (page: Page, key: string): FetchRequest[] => page.requests.filter((request) => request.method === 'GET' && request.path === `api/tickets/${key}/page`);
 // The ticket's planned page as the server answers it: only its row matters to Create & plan.
@@ -1145,6 +1147,97 @@ test('setup client: Create & plan without a link closes the tab, with a blocked 
   assert.equal(page.$('toast-text').textContent, 'The planner of web/W-10 started.');
   assert.equal(plannerLine(page)!.textContent, `Planner session "Planner web W-10" runs since ${SESSION_DAY}.${HINT}`);
   assert.equal(posts(page).length, 5);
+});
+
+test('setup client: Create with Claude Code, answered with auto_planner, is Create & plan: the images go up, then the planner starts once, and the ticket\'s page opens; an image that fails still starts it and keeps the form open', async () => {
+  const page = await openPage([], [workspace('web')], []);
+  page.$('open-new-ticket').click();
+  page.$('owner-chatgpt').checked = false;
+  page.$('owner-claude').checked = true;
+  const create = async (key: string): Promise<FetchRequest> => {
+    page.$('ticket-form').dispatch('paste', { clipboardData: files(new File([PNG], 'shot.png')) });
+    await page.flush();
+    fill(page, key);
+    page.$('ticket-form').dispatch('submit');
+    await page.flush();
+    const before = posts(page).length;
+    posts(page).at(-1)!.respond(200, createdAutoPlanner('web', key));
+    await page.flush();
+    // The image goes up first; no start while it is in flight.
+    assert.equal(posts(page).length, before + 1);
+    const upload = posts(page).at(-1)!;
+    assert.equal(upload.path, `api/tickets/web/${key}/attachments?name=1.png`);
+    return upload;
+  };
+
+  // Every image attached: then the start, once, with {}; a refusal says why in the toast.
+  const upload = await create('W-8');
+  upload.respond(200, { ok: true, result: { name: '1.png', bytes: PNG.length, type: 'image/png' } });
+  await page.flush();
+  assert.equal(posts(page).length, 3);
+  assert.deepEqual([posts(page)[2]!.path, posts(page)[2]!.body], ['api/tickets/web/W-8/planner', '{}']);
+  assert.deepEqual([page.opened.length, page.$('drawer').hidden, page.$('toast-text').textContent], [0, true, `${createdText('web', 'W-8')} 1 image attached.`]);
+  const message = 'Claude Code does not trust the planning copy of web yet: run sf planner trust web, accept its trust dialog, then start the planner again.';
+  posts(page)[2]!.respond(409, { ok: false, error: { code: 'planning_copy_untrusted', message } });
+  await page.flush();
+  assert.equal(page.$('toast-text').textContent, `planning_copy_untrusted: ${message}`);
+  const row = ticket('web/W-8', { owner: 'claude_code' });
+  page.streams.at(-1)!.emit('tickets', { tickets: [row], archived: [] });
+  await page.flush();
+  assert.equal(page.location.hash, '#web/W-8/ticket');
+  pageReads(page, 'web/W-8')[0]!.respond(200, pagePayload(row));
+  await page.flush();
+  assert.equal(plannerLine(page)!.textContent, 'No planner session runs.');
+  assert.equal(posts(page).length, 3);
+
+  // An image that fails: the start is still posted; the form stays open with what failed; no page opens.
+  page.$('ticket').querySelector('[data-back]')!.click();
+  page.$('open-new-ticket').click();
+  const failed = await create('W-9');
+  failed.respond(400, { ok: false, error: { code: 'attachment_type', message: 'no' } });
+  await page.flush();
+  assert.equal(posts(page).length, 6);
+  assert.deepEqual([posts(page)[5]!.path, posts(page)[5]!.body], ['api/tickets/web/W-9/planner', '{}']);
+  assert.deepEqual([page.$('drawer').hidden, page.$('ticket-status').textContent],
+    [false, 'Ticket created: .software-factory/W-9.md in web. Not attached: 1.png (attachment_type: no). Add it on the ticket\'s page: paste or drop on its Images card.']);
+  posts(page)[5]!.respond(200, { ok: true, result: { started: true, session: { ...SESSION, name: 'Planner web W-9' } } });
+  await page.flush();
+  assert.equal(page.$('toast-text').textContent, 'The planner of web/W-9 started.');
+  page.streams.at(-1)!.emit('tickets', { tickets: [row, ticket('web/W-9', { owner: 'claude_code' })], archived: [] });
+  await page.flush();
+  assert.deepEqual([page.location.hash, page.$('drawer').hidden, posts(page).length, page.opened.length], ['#', false, 6, 0]);
+});
+
+test('setup client: Create starts no planner when the answer has no auto_planner, nor for ChatGPT when it has; no page opens', async () => {
+  const page = await openPage([], [workspace('web')], []);
+  // Claude Code, the answer without auto_planner: Create as it was.
+  page.$('open-new-ticket').click();
+  page.$('owner-chatgpt').checked = false;
+  page.$('owner-claude').checked = true;
+  fill(page, 'W-8');
+  page.$('ticket-form').dispatch('submit');
+  await page.flush();
+  posts(page)[0]!.respond(200, created('web', 'W-8'));
+  await page.flush();
+  assert.deepEqual([posts(page).length, page.$('drawer').hidden, page.$('toast-text').textContent], [1, true, createdText('web', 'W-8')]);
+  page.streams.at(-1)!.emit('tickets', { tickets: [ticket('web/W-8', { owner: 'claude_code' })], archived: [] });
+  await page.flush();
+  assert.equal(page.location.hash, '');
+
+  // ChatGPT, the answer with auto_planner: no start, no tab, no page.
+  page.$('open-new-ticket').click();
+  page.$('owner-claude').checked = false;
+  page.$('owner-chatgpt').checked = true;
+  fill(page, 'W-9');
+  page.$('ticket-form').dispatch('submit');
+  await page.flush();
+  posts(page)[1]!.respond(200, createdAutoPlanner('web', 'W-9'));
+  await page.flush();
+  assert.deepEqual([posts(page).length, page.opened.length, page.$('drawer').hidden, page.$('toast-text').textContent], [2, 0, true, createdText('web', 'W-9')]);
+  page.streams.at(-1)!.emit('tickets', { tickets: [ticket('web/W-8', { owner: 'claude_code' }), ticket('web/W-9')], archived: [] });
+  await page.flush();
+  assert.equal(page.location.hash, '');
+  assert.equal(pageReads(page, 'web/W-9').length, 0);
 });
 
 test('setup client: a ticket Create & plan made opens only where the create left the user; Create alone opens nothing', async () => {

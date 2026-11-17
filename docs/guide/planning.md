@@ -169,7 +169,10 @@ Then, with `sf serve` running, start from the dashboard:
    setup my-app`, then `sf planner trust my-app`); it plans on the base of its last `sf planner
    setup`, so run that again for a newer one. A ticket made with ChatGPT switches on its page:
    *Plan with: ChatGPT · Claude Code* in the Planning conversation card (you can switch back the
-   same way, even after the Task file is written).
+   same way, even after the Task file is written). In a workspace switched on with `sf workspace
+   auto-planner my-app on`, *Create the ticket* does the same, so you can create the ticket from
+   your phone and wait for its "planner waits for you" notification; keep the page open until the
+   toast says the planner started.
 2. The Planning conversation card shows the session: "Starting the planner in the planning copy
    of my-app…", then since when it runs, with **End**. Once the planner first waits for you,
    **Open the planner session ↗**, in the card and in the page's header, opens it on claude.ai;

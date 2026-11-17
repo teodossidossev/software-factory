@@ -932,8 +932,10 @@ export class Setup {
 
   // Writes the ticket skeleton through the Task file writer (the exclude entry, the job guard) and
   // keeps the User's words for the conversation and its owner (chatgpt by default) in the state
-  // directory; an existing Task file for the ticket is never replaced from here.
-  createTicket(input: TicketInput): Promise<{ workspace: string; ticket: string; path: string; base: string }> {
+  // directory; an existing Task file for the ticket is never replaced from here. It answers with
+  // the ticket's place and the workspace's auto_planner as this create read it, for the page's
+  // planner start.
+  createTicket(input: TicketInput): Promise<{ workspace: string; ticket: string; path: string; base: string; auto_planner?: true }> {
     return this.#exclusive(async () => {
       const { workspace: name, ticket } = input;
       checkNames(name, ticket);
@@ -961,7 +963,7 @@ export class Setup {
       }
       await this.#writeOwner(name, ticket, input.owner ?? 'chatgpt');
       await writeFileAtomic(this.#requestPath(name, ticket), Buffer.from(request.replace(/\r\n/g, '\n'), 'utf8'));
-      return { workspace: name, ticket, path, base };
+      return { workspace: name, ticket, path, base, ...(workspace.autoPlanner === true ? { auto_planner: true as const } : {}) };
     });
   }
 }

@@ -784,3 +784,59 @@ test('dashboard setup end to end: a workspace from the page, a ticket draft, the
     await stop(served);
   }
 });
+
+test('dashboard setup end to end: sf workspace auto-planner switches it, and the create of a Claude Code ticket says so; the server starts nothing', async () => {
+  const env = await newEnv('dash-auto-planner');
+  const repo = await newRepo(env, 'dash-auto-planner-repo', true);
+  const entry = async (): Promise<unknown> => (await loadRegistry(env.config)).workspaces.app;
+  const listed = async (): Promise<string> => (await runCli(env, ['workspace', 'list'])).stdout;
+  const plain = { read_checkout: repo, work_checkout: repo };
+
+  // The CLI: no value, a bad one and a third argument are usage errors (2); an unknown workspace is 1.
+  const none = await runCli(env, ['workspace', 'auto-planner', 'app']);
+  assert.equal(none.code, 2);
+  assert.match(none.stderr, /workspace auto-planner needs <name> on\|off\./);
+  const wrong = await runCli(env, ['workspace', 'auto-planner', 'app', 'yes']);
+  assert.equal(wrong.code, 2);
+  assert.match(wrong.stderr, /auto-planner must be on or off, got "yes"\./);
+  const extra = await runCli(env, ['workspace', 'auto-planner', 'app', 'on', 'extra']);
+  assert.equal(extra.code, 2);
+  assert.match(extra.stderr, /unexpected argument "extra"\./);
+  const missing = await runCli(env, ['workspace', 'auto-planner', 'absent', 'on']);
+  assert.equal(missing.code, 1);
+  assert.match(missing.stderr, /workspace "absent" is not registered\./);
+  assert.deepEqual(await entry(), plain);
+  assert.doesNotMatch(await listed(), /auto-planner:/);
+
+  // on: the key, the line, and the list shows it last for app.
+  const on = await runCli(env, ['workspace', 'auto-planner', 'app', 'on']);
+  assert.equal(on.code, 0, on.stderr);
+  assert.equal(on.stdout, 'Workspace "app" starts the Claude Code planner of each ticket created on the dashboard by itself.\n');
+  assert.deepEqual(await entry(), { ...plain, auto_planner: true });
+  assert.match(await listed(), /^app\n(?: {2}.*\n){3} {2}auto-planner: on$/m);
+
+  const served = await serve(env);
+  try {
+    const base = served.dashboard!;
+    // The create answers the setting as it read it, for either owner (the page decides by the
+    // owner); the server starts no planner.
+    const claude = result(await act(base, 'api/tickets', { workspace: 'app', ticket: 'T-1', title: 'One', request: 'Plan it.', owner: 'claude_code' }));
+    assert.deepEqual(claude, { workspace: 'app', ticket: 'T-1', path: '.software-factory/T-1.md', base: 'main', auto_planner: true });
+    const session = await fetchRaw(new URL('api/tickets/app/T-1/planner', base));
+    assert.deepEqual([session.status, JSON.parse(session.body)], [200, { session: null }]);
+    const chatgpt = result(await act(base, 'api/tickets', { workspace: 'app', ticket: 'T-2', title: 'Two', request: 'Plan it.', owner: 'chatgpt' }));
+    assert.deepEqual(chatgpt, { workspace: 'app', ticket: 'T-2', path: '.software-factory/T-2.md', base: 'main', auto_planner: true });
+
+    // off: the key and the line go; the next create, with no restart, answers without it.
+    const off = await runCli(env, ['workspace', 'auto-planner', 'app', 'off']);
+    assert.equal(off.code, 0, off.stderr);
+    assert.equal(off.stdout, 'Workspace "app" starts no planner by itself.\n');
+    assert.deepEqual(await entry(), plain);
+    assert.doesNotMatch(await listed(), /auto-planner:/);
+    const after = result(await act(base, 'api/tickets', { workspace: 'app', ticket: 'T-3', title: 'Three', request: 'Plan it.', owner: 'claude_code' }));
+    assert.deepEqual(after, { workspace: 'app', ticket: 'T-3', path: '.software-factory/T-3.md', base: 'main' });
+    assert.deepEqual(JSON.parse((await fetchRaw(new URL('api/tickets/app/T-3/planner', base))).body), { session: null });
+  } finally {
+    await stop(served);
+  }
+});

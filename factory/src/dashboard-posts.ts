@@ -15,7 +15,7 @@ import { ticketEntry } from './dashboard-payloads.js';
 import { type JobKey, type JobRoute, openWhileUpdating, type PostRoute, type QueueRoute } from './dashboard-routes.js';
 import { FactoryError } from './errors.js';
 import { internalError, sendJson, statusOf } from './http.js';
-import { addPin, changePin, PIN_CHANGE, PIN_CHANGE_SHAPE, PIN_ID, PIN_INPUT, PIN_INPUT_SHAPE, PIN_REMOVE, pinIdOf, removePin } from './pins.js';
+import { addPin, changePin, PIN_CHANGE, PIN_CHANGE_SHAPE, PIN_ID, PIN_INPUT, PIN_INPUT_SHAPE, PIN_REMOVE, pinIdOf, refusePinToken, removePin } from './pins.js';
 import { HANDOFF_MODES, WORKSPACE_COLORS, WORKSPACE_NAME_PATTERN } from './registry.js';
 import { REVIEW_JOB_SHAPE, reviewJobCall } from './review-job.js';
 import { setRoleSkills, skillsForClients } from './skills.js';
@@ -96,7 +96,7 @@ const setupBody = (route: SetupRoute): { route: SetupRoute; shape: string } => (
 
 // The posts' handlers, each a Post for handle in startDashboard or undefined (an empty 404).
 export function postHandlers(ctx: DashboardContext, feed: Pick<ChangeFeed, 'changed' | 'jobChanged'>) {
-  const { stateDir, remoteOrigins, onWorkspacesChanged, jobs, actions, setup, checks, queue, digests, planner, empty } = ctx;
+  const { stateDir, remoteOrigins, onWorkspacesChanged, jobs, actions, setup, checks, queue, digests, planner, empty, tokenText } = ctx;
   // The workspace change succeeded: the hook hears of it (a failing hook is logged).
   const workspacesChanged = <T>(result: T): T => {
     try {
@@ -232,21 +232,28 @@ export function postHandlers(ctx: DashboardContext, feed: Pick<ChangeFeed, 'chan
     };
   }
 
-  // POST api/pins: a new open pin (too_many_pins past the open ones' bound); the answer is the pin
-  // and every pin.
+  // POST api/pins: a new open pin (pin_holds_token for one with the dashboard's token in any of its
+  // strings, before the store is read; too_many_pins past the open ones' bound); the answer is the
+  // pin and every pin.
   function pinAddPost(): Post {
     return {
       ...setupBody('pin-add'),
       call: (data) => {
         const parsed = BODIES['pin-add'].schema.safeParse(data);
-        return parsed.success ? () => addPin(stateDir, parsed.data) : undefined;
+        return parsed.success
+          ? () => {
+            refusePinToken(parsed.data, tokenText);
+            return addPin(stateDir, parsed.data);
+          }
+          : undefined;
       },
     };
   }
 
   // POST api/pins/<id> (its note, resolved or open again) and POST api/pins/<id>/remove; an id that
   // is not a whole number from 1 without a leading zero is an empty 404, an unknown one pin_not_found.
-  // The answer is every pin.
+  // A note with the dashboard's token is pin_holds_token, before the id is looked up. The answer is
+  // every pin.
   function pinPost(id: string, remove: boolean): Post | undefined {
     if (!PIN_ID.test(id)) {
       return undefined;
@@ -258,7 +265,12 @@ export function postHandlers(ctx: DashboardContext, feed: Pick<ChangeFeed, 'chan
       ...setupBody('pin-change'),
       call: (data) => {
         const parsed = BODIES['pin-change'].schema.safeParse(data);
-        return parsed.success ? async () => changePin(stateDir, pinIdOf(id), parsed.data) : undefined;
+        return parsed.success
+          ? async () => {
+            refusePinToken(parsed.data, tokenText);
+            return changePin(stateDir, pinIdOf(id), parsed.data);
+          }
+          : undefined;
       },
     };
   }

@@ -280,6 +280,44 @@ test('in point mode a click (on window, in the capture phase) is stopped and pla
   assert.deepEqual([escape.defaultPrevented, escape.stopped, pointing(page)], [true, true, ['false', false]]);
 });
 
+test('a note refused with pin_holds_token shows the server\'s message as text in the panel\'s status line and the note field stays open with what was typed; the note changed and saved closes it', async () => {
+  const page = await openPage({ list: [] });
+  const target = page.$('open-new-ticket');
+  const click = (node: FakeElement, type = 'click') => page.window.dispatch(type, {
+    type, target: node, clientX: 1150, clientY: 20, defaultPrevented: false, stopped: false,
+    preventDefault() {
+      this.defaultPrevented = true;
+    },
+    stopImmediatePropagation() {
+      this.stopped = true;
+    },
+  });
+  page.key('P', { shiftKey: true });
+  click(target);
+  const stored = pin(1, '', '#open-new-ticket', 'New ticket');
+  posts(page).at(-1)!.respond(200, { ok: true, result: { pin: stored, pins: [stored] } });
+  await page.flush();
+  const note = page.$('pin-note');
+  const field = page.$('pin-note-text') as unknown as { value: string };
+  const typed = 'Open http://127.0.0.1:4000/d/<token>/ here';
+  field.value = typed;
+  page.key('Enter');
+  const message = "A pin cannot hold the dashboard's token (the secret in the dashboard's address); nothing was saved.";
+  const refused = posts(page).at(-1)!;
+  assert.deepEqual([refused.path, JSON.parse(refused.body!)], ['api/pins/1', { note: typed }]);
+  refused.respond(400, { ok: false, error: { code: 'pin_holds_token', message } });
+  await page.flush();
+  const status = page.$('pins-status');
+  assert.deepEqual([note.hidden, field.value, status.textContent, status.children.every((child) => child.nodeType === 3)], [false, typed, message, true]);
+  field.value = 'Make it say Plan';
+  page.key('Enter');
+  const saved = posts(page).at(-1)!;
+  assert.deepEqual([saved.path, JSON.parse(saved.body!)], ['api/pins/1', { note: 'Make it say Plan' }]);
+  saved.respond(200, { ok: true, result: { pins: [{ ...stored, note: 'Make it say Plan' }] } });
+  await page.flush();
+  assert.deepEqual([note.hidden, status.textContent], [true, '']);
+});
+
 // A keydown as the window's capture listeners get it, with what they did to it.
 function keyEvent(key: string, target: unknown = null) {
   return {

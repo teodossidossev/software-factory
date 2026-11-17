@@ -203,6 +203,10 @@ refused), and the factory's test command passed in a sandbox without network on 
     after you press Allow in it, only for addresses of that page's own origin, and only through
     `POST api/pins`; it tells the page nothing but each pin's number. The page never gets the token
     or the cookie and sends `sf serve` no request.
+  - A pin never holds the dashboard's token. A new pin, or a pin's note, with the token anywhere
+    in its address, route, selector, text or note is refused (`400 pin_holds_token`) before
+    anything is stored, whichever page it comes from; so neither `pins.json` nor `sf pins` shows
+    the token, also when something is pinned on the dashboard's own address.
 - **What is published is checked.**
   - The guard refuses a push or an MR text that holds a secret, in every workspace.
   - In a workspace with `"guard": true`, it also refuses the names on your private list and the

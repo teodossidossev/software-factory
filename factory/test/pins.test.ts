@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { FactoryError } from '../src/errors.js';
 import {
-  addPin, changePin, clearPins, MAX_OPEN_PINS, MAX_RESOLVED_PINS, type PinInput, pinsFile, pinsLines, readPins, removePin,
+  addPin, changePin, clearPins, MAX_OPEN_PINS, MAX_RESOLVED_PINS, type PinInput, pinsFile, pinsLines, readPins, refusePinToken, removePin,
 } from '../src/pins.js';
 import { act, fakeActions, fetchRaw } from './support/dashboard-client.js';
 import { withDashboard } from './support/dashboard-state.js';
@@ -173,6 +173,28 @@ test('the store: writes started together go one after the other, and every one i
   assert.equal((await addPin(dir, input())).pin.id, 1);
 });
 
+const HOLDS_TOKEN = "A pin cannot hold the dashboard's token (the secret in the dashboard's address); nothing was saved.";
+const PIN_STRINGS = ['route', 'selector', 'text', 'note', 'url'] as const;
+
+test('refusePinToken: a new pin with the whole token in its route, selector, text, note or url, alone or in a longer text, and a note with it, are pin_holds_token; its first 63 characters, and a body without it, pass', () => {
+  const token = 'ab'.repeat(32);
+  const short = token.slice(0, 63);
+  const holdsToken = (error: unknown): boolean => refused('pin_holds_token')(error) && (error as Error).message === HOLDS_TOKEN;
+  assert.equal(refusePinToken(input(), token), undefined);
+  assert.equal(refusePinToken(input({ url: 'http://localhost:3000/' }), token), undefined);
+  assert.equal(refusePinToken({ resolved: true }, token), undefined);
+  assert.equal(refusePinToken({ note: 'x' }, token), undefined);
+  for (const field of PIN_STRINGS) {
+    for (const [label, value] of [['alone', token], ['inside', `http://localhost:3000/d/${token}/#x`]] as const) {
+      assert.throws(() => refusePinToken(input({ [field]: value }), token), holdsToken, `${field} ${label}`);
+      assert.equal(refusePinToken(input({ [field]: value.replace(token, short) }), token), undefined, `${field} ${label}, 63 characters`);
+    }
+  }
+  assert.throws(() => refusePinToken({ note: token }, token), holdsToken, 'a change\'s note');
+  assert.throws(() => refusePinToken({ note: `x ${token}`, resolved: true }, token), holdsToken, 'a change\'s note beside resolved');
+  assert.equal(refusePinToken({ note: short }, token), undefined, 'a change\'s note, 63 characters');
+});
+
 test('sf pins lines: the open pins only, the board as #board, a pin of another page by its address, the note indented, \\n and \\t as spaces; none: No open pins.', () => {
   const pin = (id: number, route: string, text: string, note: string, resolved = false) => ({ id, route, selector: 'body', text, rect: RECT, note, at: at(id).toISOString(), resolved });
   assert.deepEqual(pinsLines([]), ['No open pins.']);
@@ -204,6 +226,50 @@ test('dashboard: POST api/pins stores a pin of another page with its url and GET
       }
     }
     assert.deepEqual(await readPins(state), before);
+  });
+});
+
+test('dashboard: a new pin with the dashboard\'s token in any of its strings, and a note with it, are 400 pin_holds_token without the token, and nothing is stored; 63 of its characters are stored; a body of another shape stays invalid_body', async () => {
+  await withDashboard('dash-pin-token', fakeActions(), async (dashboard, { state }) => {
+    const base = dashboard.url;
+    const token = base.pathname.split('/')[2]!;
+    const json = (reply: { body: string }): any => JSON.parse(reply.body);
+    const refusal = { code: 'pin_holds_token', message: HOLDS_TOKEN };
+    const first = await act(base, 'api/pins', input());
+    assert.equal(first.status, 200, first.body);
+    const holding: Record<(typeof PIN_STRINGS)[number], string> = {
+      route: `x/${token}`, selector: `a[data-href="/d/${token}/"]`, text: `Open ${token} now`, note: `see ${base.href}`, url: `${base.href}#stats`,
+    };
+    for (const field of PIN_STRINGS) {
+      const reply = await act(base, 'api/pins', input({ [field]: holding[field] }));
+      assert.deepEqual([reply.status, json(reply).error], [400, refusal], field);
+      assert.equal(reply.body.includes(token), false, field);
+    }
+    for (const [path, body, label] of [
+      ['api/pins/1', { note: token }, 'note'], ['api/pins/1', { resolved: true, note: `x ${token}` }, 'note beside resolved'], ['api/pins/9', { note: token }, 'note of no pin'],
+    ] as const) {
+      const reply = await act(base, path, body);
+      assert.deepEqual([reply.status, json(reply).error], [400, refusal], label);
+      assert.equal(reply.body.includes(token), false, label);
+    }
+    const stored = (await readPins(state)).pins;
+    assert.deepEqual(stored.map((pin) => [pin.id, pin.resolved, pin.note]), [[1, false, '']]);
+    const other = await act(base, 'api/pins', { ...input(), text: token, extra: 1 });
+    assert.deepEqual([other.status, json(other).error.code], [400, 'invalid_body'], 'text beside an unknown key');
+    const short = token.slice(0, 63);
+    const almost = input({ route: `x/${short}`, selector: `a[data-href="/d/${short}/"]`, text: `Open ${short} now`, note: `see ${short}` });
+    const second = await act(base, 'api/pins', { ...almost, route: '', url: `${base.origin}/d/${short}/` });
+    assert.deepEqual([second.status, json(second).result?.pin.id], [200, 2], 'route, selector, text, note and url with 63 characters');
+    const routed = await act(base, 'api/pins', almost);
+    assert.deepEqual([routed.status, json(routed).result?.pin.id], [200, 3], 'route with 63 characters');
+    const note = await act(base, 'api/pins/1', { note: short });
+    assert.equal(note.status, 200, 'note with 63 characters');
+    const kept = (await readPins(state)).pins.map((each) => ({ route: each.route, selector: each.selector, text: each.text, note: each.note, url: each.url }));
+    assert.deepEqual(kept, [
+      { route: '', selector: '#open-new-ticket', text: 'New ticket', note: short, url: undefined },
+      { route: '', selector: almost.selector, text: almost.text, note: almost.note, url: `${base.origin}/d/${short}/` },
+      { route: almost.route, selector: almost.selector, text: almost.text, note: almost.note, url: undefined },
+    ], 'route, selector, text, note and url with 63 characters, as stored');
   });
 });
 

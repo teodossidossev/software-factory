@@ -423,7 +423,7 @@ rules. It runs again at any time and refreshes the copy in place. The steps, in 
 
    **The settings.** `.claude/settings.local.json` makes the copy read-only to the planner
    (`plannerSettings`). Its `permissions` and `sandbox` keys are replaced whole at every run, and in
-   `hooks` the events `Stop` and `Notification`; every other key (`skillOverrides`, your own) and
+   `hooks` the events `Stop` and `Notification`; every other key (your own) and
    every other hook event keeps its value and its place, and a rule you added to `permissions` is
    dropped, so the copy stays read-only.
    - `permissions.allow`: the factory's MCP tools (`mcp__software-factory`) and the reading tools
@@ -465,6 +465,29 @@ rules. It runs again at any time and refreshes the copy in place. The steps, in 
      `planning_copy_unsafe`, a file that is not a JSON object `planning_copy_unusable`; neither is
      changed. It is written atomically, with its mode (0600 when new), and holds paths, never a
      secret. On Linux Claude Code's sandbox needs `bwrap` and `socat`.
+
+   **The planner's skills.** After `planning-tasks`, the copy's `.claude/skills/` gets each skill of
+   the `planner` role (section The agents' skills), in the role's order, removed and copied again at
+   every run from the folder the skills snapshot's link names when the setup starts; the setup syncs
+   nothing. A role skill the snapshot does not hold is a `warning:` line, and the copy keeps what it
+   had at that path; a role skill named `planning-tasks` is the factory's own there; a repository
+   that tracks a role skill's folder is refused (`planning_copy_unsafe`), as for the other paths the
+   copy writes. The settings switch every other skill off for the planner: `skillOverrides` sets
+   `"off"` for each skill folder (a name of a skill folder's form holding a `SKILL.md`, links
+   followed) of your Claude Code skills folder (`$CLAUDE_CONFIG_DIR/skills`, else
+   `~/.claude/skills`) and of the copy's own `.claude/skills/` that is neither `planning-tasks` nor a
+   `planner` skill, so a skill the role no longer has stays in the copy, switched off, and nothing is
+   deleted; `syncClaudeAiSkills: false` keeps your claude.ai account's skills out of the copy's
+   sessions (in this local file it moves nothing). The factory sets both keys at every run, as it
+   sets `permissions` and `sandbox`; your own `skillOverrides` of other names in
+   `~/.claude/settings.json` still apply. Claude Code's bundled skills and your plugins' skills
+   stay, and a skill of your Claude Code skills folder with a `planner` skill's name, or named
+   `planning-tasks`, is the one Claude Code runs (personal over project). The output names the
+   skills installed (`Skills planning-tasks, grilling: installed in .claude/skills`) and how many
+   were switched off. `.claude/planning-copy.md` ends with the product vision: the folder
+   `<state dir>/vision/<workspace>/en` (section Vision), its `VISION.md` first, to read with the
+   Read tool, when the store holds the workspace's English vision; else the line that none is
+   stored. The setup reads the store at each run: after the first `sf vision put`, run it again.
 8. **The MCP server.** With the MCP token (`no_mcp_token` without one) and the MCP port (`SF_PORT`,
    else the running `sf serve`'s), `claude` from `PATH` (the Claude Code you open the copy with;
    `claude_not_found` without it) runs in the copy `claude mcp remove software-factory --scope
@@ -2547,16 +2570,19 @@ does not match the rule, so it is a change of the Implementer's or the user's.
 ### The agents' skills
 
 The agents use the user's installed skills, exactly as installed, and the user chooses which ones
-each agent role uses. The factory ships no copy, never edits one and installs none (`npx skills
-add` in a terminal does); where a skill's step conflicts with the factory (commit, push, ask the
-user), the factory's prompt rule wins and the sandbox refuses mutating Git.
+each agent role uses. The factory ships no copy, never edits one and installs none for the user
+(`npx skills add` in a terminal does); its one copy of them outside its state directory is a
+planning copy's, which `sf planner setup` gives the `planner` role's skills (section MCP endpoint,
+The planning copy). Where a skill's step conflicts with the factory (commit, push, ask the user),
+the factory's prompt rule wins and the sandbox refuses mutating Git.
 
 Apart from those, the factory ships one skill of its own, `factory/skills/planning-tasks`: the
 planning method for a Claude Code session that plans a ticket (the planning guide, "The planning
 skill"). It is no role's skill, and the snapshot does not hold it.
 
 - **The roles**: `implementer` (the Implementer's session), `claude_review`, `codex_gate`,
-  `task_check` and `planner` (the ChatGPT Context owner's planning method). Without a choice each
+  `task_check` and `planner` (the planner, ChatGPT or Claude Code: the planning method of the MCP
+  server's instructions, and the skills of a planning copy). Without a choice each
   has today's set: `implementer` `implement`, `tdd`, `code-review` and `grilling`;
   `claude_review` and `codex_gate` `code-review`; `task_check` none; `planner` `grilling`.
 - **The choice**: `<state dir>/skill-roles.json`, `{ "version": 1, "roles": { <role>: [<skill
@@ -2578,16 +2604,21 @@ skill"). It is no role's skill, and the snapshot does not hold it.
   is left out and the later ones are still tried. `review.json` and `gate.json` get `skills` and
   `skills_omitted` (the names sent and left out) when the role has skills besides `code-review`,
   the gate's `review` event `skills_omitted` when one was left out, and the Task check's stored
-  record the same two fields when its role has skills. The planning method is the `SKILL.md` body of
-  each `planner` skill, in the file's order; none: the Quick start alone, and `sf serve` logs
-  `warning: the planner role has no skill (sf skills set planner <skill> on); the instructions are
-  the Quick start alone`. `SF_REVIEW_SKILL` and `SF_PLAN_SKILL`, when set, still win.
+  record the same two fields when its role has skills. The planning method of the MCP server's
+  instructions is the `SKILL.md` body of each `planner` skill, in the file's order; none: the Quick
+  start alone, and `sf serve` logs `warning: the planner role has no skill (sf skills set planner
+  <skill> on); the instructions are the Quick start alone`. A Claude Code planner gets each
+  `planner` skill as a folder of its planning copy's `.claude/skills/`, copied from the snapshot by
+  `sf planner setup`, and its other skills switched off there (section MCP endpoint, The planning
+  copy). `SF_REVIEW_SKILL` and `SF_PLAN_SKILL`, when set, still win; `SF_PLAN_SKILL` changes the
+  planning method only, not a planning copy's skills.
 - **When a change applies**: `sf skills set` and `PUT api/skills/roles/<role>` write the file and
   sync the snapshot at once. A job uses the lists its `skills` event recorded at its start (each
   role's default for a job started before they were recorded): a change applies to jobs started
   after it. A Task check reads the choice and the snapshot's link at its own start. `sf serve`
   reads the planning method at its start and again, before an MCP request, once
-  `skill-roles.json`'s mtime changed since the last read.
+  `skill-roles.json`'s mtime changed since the last read. A planning copy gets the `planner` role's
+  skills, and the switches of the others, at each `sf planner setup`.
 - **`sf skills`** lists the installed skills (those the lock file lists whose folder has a
   `SKILL.md`): name, source (the lock file's `source`), updated (`updatedAt`, its date), one column
   per role (`on` or `-`), a `coordinator` column (below) and the description of the `SKILL.md`
@@ -5296,8 +5327,8 @@ choice is one for all workspaces, and every skill may be switched off.
 - **The table**: one row per installed skill, by name: the name (a link to its `SKILL.md`), the
   first line of its description (the whole on hover), its source and updated date in muted text;
   then one checkbox column per role, headed Implementer, Claude review, Codex gate, Task check and
-  Planner (ChatGPT), each with the count of the role's skills ("Implementer · 3"); under Planner,
-  "Applies to the next planning request"; last, Coordinator (Claude Code), the coordinator's
+  Planner (ChatGPT or Claude Code), each with the count of the role's skills ("Implementer · 3");
+  under Planner, "Applies to ChatGPT's next planning request and the next sf planner setup"; last, Coordinator (Claude Code), the coordinator's
   skills (section The agents' skills), its count the skills that are on. There a `name-only` or
   `user-invocable-only` skill is an indeterminate box with the value in its title; a column the
   factory could not read (no coordinator workspace, an unreadable or unsafe file) has no boxes and
@@ -6223,8 +6254,10 @@ language's place without following it.
 **Why sf serve makes the folder.** An agent session denies the state directory's entries it finds
 when it starts ([the trust model's limits](../docs/guide/trust-model.md#the-limits)); a folder made by the first put would stay readable to the
 sessions already running. So `sf serve` makes `<state dir>/vision` (0700) before it listens or
-resumes a job, and every session after it denies it: no agent session reads a vision, and it goes
-to no model.
+resumes a job, and every job's session after it denies it: no job's session reads a vision. The
+Claude Code planner does: `sf planner setup` names the English folder in the planning copy's
+`.claude/planning-copy.md` (section MCP endpoint, The planning copy), the planner reads it with the
+Read tool, and those files go to Anthropic.
 
 **The page** is built at each put and remove and stored as `page.html`; `GET vision/<workspace>`
 answers that file (section Dashboard, its routes table) under its own policy, `VISION_PAGE_CSP`:

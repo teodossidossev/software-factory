@@ -9,8 +9,9 @@ import { join } from 'node:path';
 import { writeFileAtomic } from './atomic.js';
 import { FactoryError } from './errors.js';
 
-// The roles: the Implementer, the Claude review, the Codex gate, the Task check, and the ChatGPT
-// Context owner's planning method.
+// The roles: the Implementer, the Claude review, the Codex gate, the Task check, and the planner
+// (ChatGPT or Claude Code: the planning method of the MCP server's instructions, and the skills sf
+// planner setup puts into a planning copy).
 export const ROLES = ['implementer', 'claude_review', 'codex_gate', 'task_check', 'planner'] as const;
 export type Role = (typeof ROLES)[number];
 export type RoleSkills = Record<Role, string[]>;

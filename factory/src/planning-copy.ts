@@ -12,13 +12,15 @@
 //    checkout (src/repository-config.ts), at every run: a failure stops the setup, a path tracked as
 //    .claude itself is refused, a configuration file that stays is a warning;
 // 4. /.claude/ in the copy's .git/info/exclude;
-// 5. .claude and .claude/skills checked without following a link, and the paths written here
-//    refused when the repository tracks them;
-// 6. the factory's planning-tasks skill copied into .claude/skills;
-// 7. .claude/planning-copy.md: where the user's request and rules are;
+// 5. .claude and .claude/skills checked without following a link, and the paths written here (the
+//    planner role's skills among them) refused when the repository tracks them;
+// 6. the factory's planning-tasks skill copied into .claude/skills, then the planner role's skills
+//    from the skills snapshot as it is (src/skills.ts; nothing synced);
+// 7. .claude/planning-copy.md: where the user's request, rules and the workspace's English vision are;
 // 7b. .claude/settings.local.json: permissions and sandbox replaced with plannerSettings' (read-only
 //    tools, the shell in Claude Code's sandbox, the secrets denied), its hooks' Stop and Notification
-//    with sf planner waiting, the file's other keys and hook events kept;
+//    with sf planner waiting, skillOverrides switching off every skill but the planner's and
+//    syncClaudeAiSkills false, the file's other keys and hook events kept;
 // 8. the factory's MCP server registered for that folder only (claude mcp, local scope: the token
 //    stays in Claude Code's ~/.claude.json), removed and added again so a rotated token arrives;
 // 9. the result, and what the user does next: accept Claude Code's trust dialog there once.
@@ -27,7 +29,7 @@
 // its paths shown with the same placeholders.
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { appendFile, cp, lstat, mkdir, readFile, readlink, realpath, rename, rm, stat } from 'node:fs/promises';
+import { appendFile, cp, lstat, mkdir, readdir, readFile, readlink, realpath, rename, rm, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -46,7 +48,10 @@ import { DASHBOARD_TOKEN_FILE, MCP_TOKEN_FILE } from './secrets.js';
 import { mcpBaseUrl, redactMcpToken, requireMcpToken, SERVER_NAME } from './server.js';
 import { COPY_SPARSE_PATTERNS, repositoryConfigIn } from './repository-config.js';
 import { requestFile } from './setup.js';
+import { readRoles, SKILL_NAME } from './skill-roles.js';
+import { skillsSnapshot } from './skills.js';
 import { tunnelProfile } from './tunnel.js';
+import { visionIndex, visionRoot } from './vision.js';
 
 export interface PlannerDeps {
   env: NodeJS.ProcessEnv;           // process.env (SF_PLANNING_DIR, HOME, PATH)
@@ -131,6 +136,22 @@ export function plannerSettings(env: NodeJS.ProcessEnv, stateDir: string): Plann
   };
 }
 
+// The skill folders a planning copy's settings switch off: each entry of personal (the user's
+// Claude Code skills folder) and of own (the copy's .claude/skills) whose name has SKILL_NAME's
+// form, is not in keep and holds a SKILL.md file (links followed); once each, sorted by name. A
+// folder that is missing or cannot be read adds no name.
+export async function skillsOff(personal: string, own: string, keep: readonly string[]): Promise<string[]> {
+  const names = new Set<string>();
+  for (const folder of [personal, own]) {
+    for (const entry of await readdir(folder).catch((): string[] => [])) {
+      if (SKILL_NAME.test(entry) && !keep.includes(entry) && (await stat(join(folder, entry, 'SKILL.md')).then((info) => info.isFile(), () => false))) {
+        names.add(entry);
+      }
+    }
+  }
+  return [...names].sort();
+}
+
 // The arguments of sf planner waiting: waiting <workspace> [permission].
 export function isPlannerWaiting(args: readonly string[]): boolean {
   return args[0] === 'waiting' && (args.length === 2 || (args.length === 3 && args[2] === 'permission'));
@@ -178,7 +199,7 @@ export async function plannerCommand(args: string[], deps: PlannerDeps): Promise
 
   const temp = `${copy}.${randomUUID()}.tmp`;
   const relative = relativeTo([
-    [temp, '<copy>.tmp'], [copy, '<copy>'], [target, '<copy>'], [dir, '<planning folder>'], [ws.readCheckout, '<checkout>'], [FACTORY_DIR, '<factory>'],
+    [temp, '<copy>.tmp'], [copy, '<copy>'], [target, '<copy>'], [dir, '<planning folder>'], [ws.readCheckout, '<checkout>'], [FACTORY_DIR, '<factory>'], [deps.stateDir, '<state dir>'],
     ...(url.startsWith('/') ? [[url, '<origin>'] as [string, string]] : []),
     ...(deps.env.HOME ? [[deps.env.HOME, '~'] as [string, string]] : []),
   ]);
@@ -217,20 +238,36 @@ async function prepare(planning: Planning, deps: PlannerDeps): Promise<void> {
   // 4. The exclude.
   await excludeClaude(copy);
 
-  // 5. The .claude folder, never through a link.
-  await prepareClaudeFolder(copy, name);
+  // 5. The .claude folder, never through a link. The planner role's skills other than the
+  // factory's own planning-tasks.
+  const plannerSkills = (await readRoles(deps.stateDir)).planner.filter((skill) => skill !== SKILL);
+  await prepareClaudeFolder(copy, name, plannerSkills);
 
-  // 6. The skill (rm removes a link there itself, never its target).
-  const skillDir = join(copy, '.claude', 'skills', SKILL);
-  await rm(skillDir, { recursive: true, force: true });
-  await cp(SKILL_SOURCE, skillDir, { recursive: true });
+  // 6. The skill.
+  const skills = join(copy, '.claude', 'skills');
+  await copyAfresh(SKILL_SOURCE, join(skills, SKILL));
+  // The planner role's skills, copied from the skills snapshot as it is (its link read once); one it
+  // lacks is a warning, and the copy keeps what it has at that path.
+  const snapshot = await realpath(skillsSnapshot(deps.stateDir)).catch(() => undefined);
+  const installed: string[] = [];
+  for (const skill of plannerSkills) {
+    if (snapshot !== undefined && (await stat(join(snapshot, skill)).then((info) => info.isDirectory(), () => false))) {
+      await copyAfresh(join(snapshot, skill), join(skills, skill));
+      installed.push(skill);
+    } else {
+      deps.print(`warning: the planner's skill ${skill} is not in the factory's skills snapshot; the copy goes without it (sf skills shows what is installed).`);
+    }
+  }
 
   // 7. The pointers.
   const text = await pointersText(name, base, deps);
   await writeFileAtomic(join(copy, POINTERS), Buffer.from(text, 'utf8'), 0o644);
 
-  // 7b. The settings.
-  await writeSettings(copy, name, deps);
+  // 7b. The settings. Every other skill off for the planner, by name, and the claude.ai account's
+  // skills; the factory sets both keys at every run.
+  const home = deps.env.HOME || homedir();
+  const off = await skillsOff(join(claudeConfigDir(deps.env, home), 'skills'), skills, [SKILL, ...plannerSkills]);
+  await writeSettings(copy, name, deps, { skillOverrides: Object.fromEntries(off.map((skill) => [skill, 'off'])), syncClaudeAiSkills: false });
 
   // 8. The MCP server.
   const token = await requireMcpToken(deps.stateDir);
@@ -243,7 +280,8 @@ async function prepare(planning: Planning, deps: PlannerDeps): Promise<void> {
     ...notes,
     `Planning copy of ${name}: ${copy} (${base} at ${short})`,
     `MCP server ${SERVER_NAME}: registered for this folder only (Claude Code local scope)`,
-    `Skill ${SKILL}: installed in .claude/skills`,
+    `${installed.length > 0 ? 'Skills' : 'Skill'} ${[SKILL, ...installed].join(', ')}: installed in .claude/skills`,
+    `Skills switched off for the planner: ${off.length} of yours (skillOverrides), and your claude.ai skills (syncClaudeAiSkills false)`,
     `Pointers: ${POINTERS}`,
     "Settings: read-only; shell commands in Claude Code's sandbox (no writes, no network); secrets denied",
     'Hooks: the phone hears when the planner waits for you (sf planner waiting)',
@@ -252,6 +290,13 @@ async function prepare(planning: Planning, deps: PlannerDeps): Promise<void> {
   ]) {
     deps.print(line);
   }
+}
+
+// The folder source copied to dest, whatever was at dest removed first (rm removes a link there
+// itself, never its target).
+async function copyAfresh(source: string, dest: string): Promise<void> {
+  await rm(dest, { recursive: true, force: true });
+  await cp(source, dest, { recursive: true });
 }
 
 // A missing copy cloned; an existing one checked, fetched and its base branch fast-forwarded. The
@@ -407,8 +452,9 @@ async function excludeClaude(copy: string): Promise<void> {
 }
 
 // .claude and .claude/skills: each missing (made, mode 0700) or a folder, never a link; the paths
-// this command writes must not be tracked by the repository.
-async function prepareClaudeFolder(copy: string, name: string): Promise<void> {
+// this command writes, the folders of the planner's skills among them, must not be tracked by the
+// repository.
+async function prepareClaudeFolder(copy: string, name: string, planner: readonly string[]): Promise<void> {
   const subs = ['', '/skills'];
   const missing: string[] = [];
   for (const sub of subs) {
@@ -420,7 +466,8 @@ async function prepareClaudeFolder(copy: string, name: string): Promise<void> {
       throw new FactoryError('planning_copy_unsafe', `.claude${sub} in ${name}'s planning copy is a link or not a folder: remove it and run sf planner setup again.`);
     }
   }
-  const tracked = out(await git(copy, ['ls-files', '--', `.claude/skills/${SKILL}`, POINTERS, SETTINGS])).split('\n')[0];
+  const paths = [`.claude/skills/${SKILL}`, POINTERS, SETTINGS, ...planner.map((skill) => `.claude/skills/${skill}`)];
+  const tracked = out(await git(copy, ['ls-files', '--', ...paths])).split('\n')[0];
   if (tracked !== undefined && tracked !== '') {
     throw new FactoryError('planning_copy_unsafe', `The repository of ${name} tracks ${tracked}, which the planning copy writes.`);
   }
@@ -429,8 +476,9 @@ async function prepareClaudeFolder(copy: string, name: string): Promise<void> {
   }
 }
 
-// The text of .claude/planning-copy.md: the request's path, and the user's rules files that exist
-// (rules/<workspace>.md, then rules/global.md, once).
+// The text of .claude/planning-copy.md: the request's path, the user's rules files that exist
+// (rules/<workspace>.md, then rules/global.md, once), and the workspace's English vision folder or
+// that none is stored.
 async function pointersText(name: string, base: string, deps: PlannerDeps): Promise<string> {
   const candidates = [...new Set([join(deps.configDir, 'rules', `${name}.md`), join(deps.configDir, 'rules', 'global.md')])];
   const rules: string[] = [];
@@ -456,6 +504,17 @@ async function pointersText(name: string, base: string, deps: PlannerDeps): Prom
       `  them before any test plan: ${rules.join(' and ')}`,
     );
   }
+  // The store's English folder, read at each run; the Read tool reaches it, the sandboxed shell not.
+  const visions = (await visionIndex(deps.stateDir)).visions;
+  if (visions.some((entry) => entry.workspace === name && entry.languages.some((stored) => stored.lang === 'en'))) {
+    lines.push(
+      '- **The product vision** of this workspace, in English: the folder below. Read its `VISION.md`',
+      '  first, with the Read tool (the shell does not see the folder), then what the ticket needs of',
+      `  its \`CODEMAP.md\` and \`chapters/\`: \`${join(visionRoot(deps.stateDir), name, 'en')}\``,
+    );
+  } else {
+    lines.push('- **The product vision:** none is stored for this workspace.');
+  }
   return `${lines.join('\n')}\n`;
 }
 
@@ -479,11 +538,12 @@ function plannerHooks(name: string): Record<'Stop' | 'Notification', unknown[]> 
 
 // .claude/settings.local.json, missing or a regular file (never a link), a JSON object: its
 // permissions and sandbox replaced whole with plannerSettings', its hooks' Stop and Notification
-// with plannerHooks' (the other hook events kept), every other key kept in its place (a new key
-// last); written atomically with the file's mode, else 0600. The checks go by path: the
-// planner cannot write in the copy and the factory is its only writer, so a link there comes only
-// from the repository or an earlier tool.
-async function writeSettings(copy: string, name: string, deps: PlannerDeps): Promise<void> {
+// with plannerHooks' (the other hook events kept), skillOverrides and syncClaudeAiSkills replaced
+// whole with skills', every other key kept in its place (a new key last, in this order); written
+// atomically with the file's mode, else 0600. The checks go by path: the planner cannot write in
+// the copy and the factory is its only writer, so a link there comes only from the repository or
+// an earlier tool.
+async function writeSettings(copy: string, name: string, deps: PlannerDeps, skills: { skillOverrides: Record<string, string>; syncClaudeAiSkills: false }): Promise<void> {
   const path = join(copy, SETTINGS);
   const found = await lstat(path).catch((error: NodeJS.ErrnoException) => (error.code === 'ENOENT' ? undefined : Promise.reject(error)));
   if (found !== undefined && !found.isFile()) {
@@ -505,7 +565,7 @@ async function writeSettings(copy: string, name: string, deps: PlannerDeps): Pro
   }
   const settings = plannerSettings(deps.env, deps.stateDir);
   const hooks = 'hooks' in data && typeof data.hooks === 'object' && data.hooks !== null && !Array.isArray(data.hooks) ? data.hooks : {};
-  const written = { ...data, permissions: settings.permissions, sandbox: settings.sandbox, hooks: { ...hooks, ...plannerHooks(name) } };
+  const written = { ...data, permissions: settings.permissions, sandbox: settings.sandbox, hooks: { ...hooks, ...plannerHooks(name) }, ...skills };
   const mode = found === undefined ? 0o600 : found.mode & 0o777;
   await writeFileAtomicWith(path, async (handle) => {
     await handle.chmod(mode);

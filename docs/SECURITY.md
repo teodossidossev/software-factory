@@ -50,11 +50,15 @@ refused), and the factory's test command passed in a sandbox without network on 
     Its skills are the user's choice: of the skills installed in `~/.agents/skills`, each agent
     role (the Implementer, the Claude review, the Codex gate, the Task check, the planner) uses the
     ones you switch on with `sf skills set` (by default `implement`, `tdd`, `code-review`,
-    `grilling` for the Implementer). The factory only reads `~/.agents/skills` and its lock file:
-    it installs nothing (`npx skills add` in your terminal does) and never writes into `~/.agents`,
-    `~/.claude` or a workspace's checkout, with one exception: the `skillOverrides` key of the
+    `grilling` for the Implementer). The factory reads `~/.agents/skills` and its lock file, and
+    for a planning copy's settings the names of the skill folders in `~/.claude/skills`
+    (`$CLAUDE_CONFIG_DIR/skills`): it installs nothing for you (`npx skills add` in your terminal
+    does) and never writes into `~/.agents`, `~/.claude` or a workspace's checkout, with one exception: the `skillOverrides` key of the
     coordinator checkout's `.claude/settings.local.json` (below). The chosen skills are copied verbatim into the factory's
     skills snapshot in its state directory when their lock file's hashes change, and never edited.
+    `sf planner setup` copies the planner role's skills from that snapshot into a planning copy's
+    `.claude/skills/` and switches your other skills off in that copy's settings (`skillOverrides`,
+    and `syncClaudeAiSkills` for your claude.ai skills).
     Only the Implementer's chosen skills are mounted, each read-only, where Claude Code looks for
     the user's skills, over an empty read-only folder: the job can read them but not change them or
     add one, every turn of a job binds the folder and the choice its start recorded (an update
@@ -175,7 +179,9 @@ refused), and the factory's test command passed in a sandbox without network on 
     only reads it, and shows every text as text. The chat link is limited to `https://claude.ai/`,
     checked when it is written and again on the page.
   - A workspace's vision is local files in the state directory (folders 0700, files 0600), in
-    `<state dir>/vision/`, which `sf serve` makes at its start so that no agent session reads it.
+    `<state dir>/vision/`, which `sf serve` makes at its start so that no job's session reads it.
+    The Claude Code planner reads its English files, which `sf planner setup` names in the
+    workspace's planning copy, so they go to Anthropic.
     Only `sf vision`, through `sf serve`, writes it, from a folder you name, following no link in
     it; no dashboard route writes it. Its page is served behind the token under its own policy
     (`VISION_PAGE_CSP`): an opaque origin that can use neither the dashboard's cookie and storage

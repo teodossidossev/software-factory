@@ -1,8 +1,9 @@
 // The code checks of npm test (SF-144), scripts/check-code.mjs run on temporary package trees: the
 // size limits (a warning past the 600-line target or a listed count, a failure past 800 lines or
 // that count plus 100) and the ratchet of code-size.json, which --update only ever lowers, no
-// script under static/, every web/*.ts a dashboard script, no comment that cites a ticket, and
-// every catch without a binding saying on its line why any failure there is fine.
+// script under static/, every web/*.ts a dashboard script or a script of POINT_SCRIPTS, no comment
+// that cites a ticket, and every catch without a binding saying on its line why any failure there
+// is fine.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -170,6 +171,26 @@ test('check-code: a web/*.ts file not in DASHBOARD_SCRIPTS fails; a declaration 
     assert.equal(run.code, 1);
     assert.match(run.stderr, /web\/extra\.ts: extra\.js is not in DASHBOARD_SCRIPTS/);
     assert.doesNotMatch(run.stderr, /types/);
+  });
+});
+
+test('check-code: a web/*.ts file in POINT_SCRIPTS passes; one in neither list is named with both lists', async () => {
+  const both = `${DASHBOARD}export const POINT_SCRIPTS = ['point.js'] as const;\n`;
+  await withTree({ 'src/dashboard.ts': both, 'web/point.ts': lines(5) }, {}, async (root) => {
+    const run = check(root);
+    assert.equal(run.code, 0, run.stderr);
+  });
+  await withTree({ 'src/dashboard.ts': both, 'web/point.ts': lines(5), 'web/other.ts': lines(5) }, {}, async (root) => {
+    const run = check(root);
+    assert.equal(run.code, 1);
+    assert.match(run.stderr, /web\/other\.ts: other\.js is not in DASHBOARD_SCRIPTS or POINT_SCRIPTS of src\/dashboard\.ts\./);
+    assert.doesNotMatch(run.stderr, /point\.ts/);
+  });
+  // Without a POINT_SCRIPTS line, the list is empty.
+  await withTree({ 'web/point.ts': lines(5) }, {}, async (root) => {
+    const run = check(root);
+    assert.equal(run.code, 1);
+    assert.match(run.stderr, /web\/point\.ts: point\.js is not in DASHBOARD_SCRIPTS or POINT_SCRIPTS/);
   });
 });
 

@@ -1326,7 +1326,8 @@ leading `_`.
   count nor adds a module, so the check still warns or fails on one that grew; a larger count is
   a hand edit of `code-size.json` that review sees.
 - **Layout**: no `.js` file under `static/` (the dashboard's scripts are `web/*.ts`, built to
-  `dist/web/`), and each `web/X.ts` has its `X.js` in `DASHBOARD_SCRIPTS` (`src/dashboard.ts`).
+  `dist/web/`), and each `web/X.ts` has its `X.js` in `DASHBOARD_SCRIPTS` or in `POINT_SCRIPTS`
+  (the scripts of the pages beside the dashboard), both in `src/dashboard.ts`.
 - **Comments**: no comment in a `.ts` file under `src/` or `web/` cites a ticket (`SF-` and a
   number), and every `catch` there without a binding (`catch {`) says on its line, after `//`, why
   any failure is fine (`} catch { // the process is already gone`). Strings, templates, comments
@@ -4328,7 +4329,9 @@ every page and API path works at the root too (`/`, `/api/jobs`, the relative UR
 scripts), so `/` can be bookmarked; the actions keep their Origin check. Each side's cookie works on
 its own port only. A path with neither the right token nor a valid cookie (both compared in constant time)
 answers 404 with an empty body, and so does a link from another site to `/` (`SameSite=Strict`
-sends no cookie with it).
+sends no cookie with it). The one path without the token or the cookie is `GET` (or `HEAD`)
+`/point` on the local port: the factory window's static page, which holds no data (Pins from
+other pages, below).
 
 `sf dashboard --open` prints the same URL and then opens it in the browser with `xdg-open` (Linux
 only, from `xdg-utils`), run without a shell with the URL as its one argument and waited for up to
@@ -4943,9 +4946,11 @@ retargets a request, and an answer that arrives for another job changes nothing 
 The page is plain HTML, CSS and JavaScript, with no external resources, under
 `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self';
 img-src 'self' blob:; frame-ancestors 'none'` (`blob:` for New ticket's thumbnails before upload, SF-064) and `Cache-Control: no-store`, `X-Frame-Options: DENY`; every value is rendered as text.
-The HTML and the CSS are in `static/`, and nothing else. The page's JavaScript is nineteen classic scripts that
+The HTML and the CSS are in `static/`, and nothing else; `static/` also holds `point.html`, the
+factory window's page (Pins from other pages, below). The page's JavaScript is nineteen classic scripts that
 share its globals, loaded with `defer` in the order of `DASHBOARD_SCRIPTS` (`src/dashboard.ts`,
-SF-136, SF-137); the server serves those and no other script, and none is longer than 2,500 lines.
+SF-136, SF-137); the server serves those and the scripts of `POINT_SCRIPTS` (`point.js`, which
+`dashboard.html` never loads) and no other script, and none is longer than 2,500 lines.
 The page code lives only in `web/`, in TypeScript (SF-146 to SF-150): each script's source
 `web/<name>.ts` is built by `npm run build` into `dist/web/<name>.js` and served from there
 (`dashboardScriptFiles`); `static/` holds no script. A file of `web/` has no `import` or `export`,
@@ -5615,6 +5620,66 @@ screenshot. Nothing leaves the machine.
   `  note: <note>`, with `\n` and `\t` as spaces (`No open pins.` without); `sf pins resolve <id>`
   prints `Resolved pin <id>.`; `sf pins clear` prints `Removed N pins.` The three answer while
   `sf update` drains or builds; they touch no job.
+
+### Pins from other pages
+
+The factory window (`static/point.html` with `web/point.ts`, built to `point.js`) saves as pins
+what another page sends it, so point mode on that page reaches the factory. The page holds no
+credential and sends `sf serve` no request: it opens the window and talks to it with `postMessage`.
+A request from the page would meet the dashboard's Origin checks and need CORS, a public site would
+meet the browser's Local Network Access permission and its own `connect-src`, and a token in the
+page could be read by its scripts; a top-level window and its messages meet none of these.
+
+- **The address.** `http://127.0.0.1:<port>/point` (the dashboard's local port). `GET` or `HEAD`
+  of exactly `/point` (a query ignored), on the local listener only, answers the static page
+  without the token or the cookie: it holds no data, and every answer's headers (the policy with
+  `frame-ancestors 'none'`, `X-Frame-Options: DENY`, `no-store`, `nosniff`) go with it, no
+  `Set-Cookie` and no `Cross-Origin-Opener-Policy` (the window needs its opener). Its script
+  `point.js` and `app.css` load with the dashboard's cookie (the window's own requests are
+  same-site, so the `SameSite=Strict` cookie goes with them). Any other method on `/point`,
+  `/point/`, `/point/x`, `/d/<token>/point` and the remote port answer as any other path.
+- **Without a session.** Without the cookie the script never loads and the page's static text
+  stays: *If this text stays, this browser has no session with the factory: open the dashboard (sf
+  dashboard --open), then start point mode on the page again.*
+- **Allow.** The user allows each page in the window, once per window: the page's origin and
+  address show with *Allow pins from this page*, a button enabled 1,000 ms after they show, so the
+  double click that opened the window cannot land on it. Without it any web page could open the
+  window and add pins.
+- **What it takes.** A message counts only from the window's opener (`event.source`), as a plain
+  object with `sf: 'point'`, a `type` of `hello` or `pin` and exactly that type's keys: strings,
+  `ref` a safe whole number from 1, `rect` exactly `x`, `y`, `w`, `h`, `vw`, `vh` (finite numbers).
+  Anything else is ignored and answered by nothing. The first `hello` from an `http:` or `https:`
+  origin whose `url` is of that origin binds it; every later `hello` is ignored. A `hello` from a
+  page without a web address (origin `null`, a file or a sandboxed page) ends the window's work. A
+  `pin` counts only after Allow, from the bound origin, for an address of that origin.
+- **What it posts.** Each pin is a same-origin `POST api/pins` of `{route: '', url, selector,
+  text, rect, note}`, with every check of the dashboard's own pins: `url` is the page's address
+  without user name or password, as `URL` writes it; over 2,000 characters its origin and path;
+  over that too its origin and `/`. The window lists each pin saved (`📍<id>`, its text, its note)
+  and each refusal (*Not saved:* the server's message, else `HTTP <status>`, or *the factory does
+  not answer.*).
+- **What it tells the page.** Only `ready`, `allowed`, and per pin `saved` with its id or
+  `refused`; the reason of a refusal shows in the window only.
+
+| Message (`sf: 'point'`, `type`) | From | Other keys | Target |
+|---|---|---|---|
+| `ready` | window | none | `'*'` |
+| `hello` | page | `url` | the factory's origin |
+| `allowed` | window | none | the bound origin |
+| `pin` | page | `ref`, `url`, `selector`, `text`, `rect`, `note` | the factory's origin |
+| `saved` / `refused` | window | `ref`, `id` / `ref` | the bound origin |
+
+| State | The window's status line |
+|---|---|
+| static | *If this text stays, this browser has no session with the factory: open the dashboard (sf dashboard --open), then start point mode on the page again.* |
+| no opener | *This window saves the pins of the page that opens it. Opened on its own, it has nothing to do.* |
+| waiting (`ready` posted) | *Waiting for the page…* |
+| no address | *This page has no web address (a file or a sandboxed page): it cannot send pins.* |
+| ask (origin bound) | *Allow this page below, or close this window.* |
+| allowed | *Pins from &lt;origin&gt; are saved here. Keep this window open while you point.* |
+
+A page whose own policy cuts the windows it opens (`Cross-Origin-Opener-Policy`) leaves the window
+without an opener: it shows *no opener*. Every text in the window is set as text, never HTML.
 
 ### Home
 

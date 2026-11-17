@@ -11,7 +11,8 @@ import { appendFile, mkdir, readdir, readFile, readlink, stat, writeFile } from 
 import { join } from 'node:path';
 import { mock, test } from 'node:test';
 import {
-  checkDashboardPorts, DASHBOARD_SCRIPTS, dashboardRemoteLogins, dashboardScriptFiles, dashboardRemoteOrigins, jobDetail, MAX_STREAMS, remoteDashboardUrls, removeToken, startDashboard, STREAM_PAGE_LINES, TOKEN_FILE,
+  checkDashboardPorts, DASHBOARD_SCRIPTS, dashboardRemoteLogins, dashboardScriptFiles, dashboardRemoteOrigins, jobDetail, MAX_STREAMS, POINT_SCRIPTS, pointScriptFiles, remoteDashboardUrls, removeToken,
+  startDashboard, STREAM_PAGE_LINES, TOKEN_FILE,
 } from '../src/dashboard.js';
 import { POST_ROUTES, type RouteName } from '../src/dashboard-routes.js';
 import { FactoryError } from '../src/errors.js';
@@ -19,6 +20,7 @@ import { explanationPath } from '../src/explain.js';
 import { askQuestion, readCoordinator, setLink, setStatus } from '../src/coordinator.js';
 import { type EventRecord, type Job, JobStore } from '../src/jobs.js';
 import { buildPatch, fileChanges } from '../src/patch.js';
+import { readPins } from '../src/pins.js';
 import { saveRegistry } from '../src/registry.js';
 import { putVision, VISION_PAGE_CSP } from '../src/vision.js';
 import { act, CSP, fakeActions, fakeSetup, fetchRaw, openStream, type Stream, ticketRow, workspaceRow } from './support/dashboard-client.js';
@@ -136,7 +138,7 @@ test('dashboard: every script is served from the build output dist/web/, static/
   for (const { file, url, source } of files) {
     assert.deepEqual([url.href, source.href], [new URL(`dist/web/${file}`, packageDir).href, new URL(`web/${file.replace(/\.js$/, '.ts')}`, packageDir).href], file);
   }
-  assert.deepEqual((await readdir(new URL('static/', packageDir))).sort(), ['app.css', 'dashboard.html', 'favicon.svg']);
+  assert.deepEqual((await readdir(new URL('static/', packageDir))).sort(), ['app.css', 'dashboard.html', 'favicon.svg', 'point.html']);
   await withDashboard('dash-built', fakeActions(), async (dashboard) => {
     for (const { file, url } of files) {
       const reply = await fetchRaw(new URL(file, dashboard.url));
@@ -1085,6 +1087,87 @@ test('dashboard (SF-126): a token visit sets the local cookie; with it the page 
     const renewed = dashboard.url.pathname.split('/')[2]!;
     assert.notEqual(renewed, token);
     assert.deepEqual(fresh.headers['set-cookie'], [`sf_dashboard_${port}=${cookieValue(renewed, 'local')}; HttpOnly; SameSite=Strict; Path=/`]);
+  } finally {
+    await dashboard.close();
+  }
+});
+
+// The factory window: GET and HEAD of exactly /point on the local listener go without the token
+// or the cookie (static, the headers of every answer, no cookie set, no opener policy); its script
+// and app.css need the cookie; its request stores a page pin with the exact Origin only.
+test('dashboard: the factory window /point is served without token or cookie on the local listener only; point.js and app.css need the cookie; its POST api/pins stores a page pin', async () => {
+  const { store, dashboard, token, remote } = await remoteDashboard('dash-point');
+  try {
+    const port = Number(dashboard.url.port);
+    const root = `http://127.0.0.1:${port}`;
+    const page = await readFile(new URL('../../static/point.html', import.meta.url), 'utf8');
+    for (const [method, path] of [['GET', '/point'], ['HEAD', '/point'], ['GET', '/point?x=1'], ['HEAD', '/point?x=1']] as const) {
+      const reply = await fetchRaw(`${root}${path}`, { method });
+      assert.equal(reply.status, 200, `${method} ${path}`);
+      assert.equal(reply.headers['content-type'], 'text/html; charset=utf-8', path);
+      assert.equal(reply.headers['content-security-policy'], CSP, path);
+      assert.ok(CSP.endsWith("; frame-ancestors 'none'"));
+      assert.equal(reply.headers['x-frame-options'], 'DENY', path);
+      assert.equal(reply.headers['cache-control'], 'no-store', path);
+      assert.equal(reply.headers['x-content-type-options'], 'nosniff', path);
+      assert.equal(reply.headers['cross-origin-opener-policy'], undefined, path);
+      assert.equal(reply.headers['set-cookie'], undefined, path);
+      assert.equal(reply.body, method === 'GET' ? page : '', `${method} ${path}`);
+    }
+    // The page loads only point.js, deferred, and has no inline script or style.
+    assert.deepEqual([...page.matchAll(/<script\b[^>]*>/g)].map(([tag]) => tag), ['<script src="point.js" defer>']);
+    assert.doesNotMatch(page, /<script>|<style|style=/);
+    for (const [method, path] of [['POST', '/point'], ['PUT', '/point'], ['GET', '/point/'], ['GET', '/point/x'], ['GET', `/d/${token}/point`], ['GET', '/point.html']] as const) {
+      const reply = await fetchRaw(`${root}${path}`, { method, ...(method === 'GET' ? {} : { headers: { origin: root } }) });
+      assert.deepEqual([reply.status, reply.body], [404, ''], `${method} ${path}`);
+    }
+    // The remote listener does not serve the page, with a login and a listed Host or not.
+    const remoteRoot = `http://127.0.0.1:${dashboard.remotePort}`;
+    for (const path of ['/point', `${remote.pathname}point`]) {
+      const reply = await fetchRaw(`${remoteRoot}${path}`, { host: 'pc.tail1234.ts.net', headers: LOGIN });
+      assert.deepEqual([reply.status, reply.body], [404, ''], path);
+    }
+    // Without a login, the remote listener's empty 403 (its log line kept out of the test's output).
+    const errors = mock.method(console, 'error', () => undefined);
+    try {
+      const bare = await fetchRaw(`${remoteRoot}/point`);
+      assert.deepEqual([bare.status, bare.body, errors.mock.callCount()], [403, '', 1]);
+    } finally {
+      errors.mock.restore();
+    }
+
+    // point.js and app.css: an empty 404 without the cookie, 200 with it; point.js a classic script.
+    const cookie = `sf_dashboard_${port}=${cookieValue(token, 'local')}`;
+    for (const path of ['/point.js', '/app.css']) {
+      const bare = await fetchRaw(`${root}${path}`);
+      assert.deepEqual([bare.status, bare.body], [404, ''], path);
+      assert.equal((await fetchRaw(`${root}${path}`, { headers: { cookie } })).status, 200, path);
+    }
+    const script = await fetchRaw(`${root}/point.js`, { headers: { cookie } });
+    assert.equal(script.headers['content-type'], 'text/javascript; charset=utf-8');
+    assert.equal(script.body, await readFile(pointScriptFiles()[0]!.url, 'utf8'));
+    assert.ok(script.body.startsWith('// point.js, '));
+    assert.match(script.body, /^'use strict';$/m);
+    assert.doesNotMatch(script.body, /^\s*(import|export)\b/m);
+    // Not a dashboard script: dashboard.html does not load it.
+    assert.ok(!(DASHBOARD_SCRIPTS as readonly string[]).includes('point.js'));
+    assert.deepEqual([...POINT_SCRIPTS], ['point.js']);
+
+    // The window's request: the root cookie and its own Origin store a page pin; another Origin is
+    // invalid_origin and stores nothing.
+    const pinBody = { route: '', url: 'http://localhost:3000/orders?x=1', selector: '#total', text: 'Total', rect: { x: 1, y: 2, w: 3, h: 4, vw: 1280, vh: 800 }, note: 'Wrong' };
+    const refused = await act(new URL(`${root}/`), 'api/pins', pinBody, { headers: { cookie, origin: 'http://localhost:3000' } });
+    assert.deepEqual([refused.status, JSON.parse(refused.body).error.code], [403, 'invalid_origin']);
+    assert.deepEqual((await readPins(store.state)).pins, []);
+    const saved = await act(new URL(`${root}/`), 'api/pins', pinBody, { headers: { cookie } });
+    assert.equal(saved.status, 200, saved.body);
+    const answer = JSON.parse(saved.body);
+    assert.equal(answer.ok, true);
+    assert.equal(answer.result.pin.id, 1);
+    const pins = (await readPins(store.state)).pins;
+    assert.deepEqual(pins.map(({ id, route, url, selector, text, note }) => ({ id, route, url, selector, text, note })), [
+      { id: 1, route: '', url: 'http://localhost:3000/orders?x=1', selector: '#total', text: 'Total', note: 'Wrong' },
+    ]);
   } finally {
     await dashboard.close();
   }

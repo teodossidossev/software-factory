@@ -4994,10 +4994,11 @@ The page is plain HTML, CSS and JavaScript, with no external resources, under
 `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self';
 img-src 'self' blob:; frame-ancestors 'none'` (`blob:` for New ticket's thumbnails before upload, SF-064) and `Cache-Control: no-store`, `X-Frame-Options: DENY`; every value is rendered as text.
 The HTML and the CSS are in `static/`, and nothing else; `static/` also holds `point.html`, the
-factory window's page (Pins from other pages, below). The page's JavaScript is nineteen classic scripts that
-share its globals, loaded with `defer` in the order of `DASHBOARD_SCRIPTS` (`src/dashboard.ts`,
-SF-136, SF-137); the server serves those and the scripts of `POINT_SCRIPTS` (`point.js`, which
-`dashboard.html` never loads) and no other script, and none is longer than 2,500 lines.
+factory window's page (Pins from other pages, below). The page's JavaScript is the classic scripts of
+`DASHBOARD_SCRIPTS`, which share its globals, loaded with `defer` in that list's order (`src/dashboard.ts`,
+SF-136, SF-137); the server serves those and the scripts of `POINT_SCRIPTS` (`point.js`, the factory
+window's, and `point-page.js`, the Point bookmarklet's, which `dashboard.html` never loads) and no
+other script, and none is longer than 2,500 lines.
 The page code lives only in `web/`, in TypeScript (SF-146 to SF-150): each script's source
 `web/<name>.ts` is built by `npm run build` into `dist/web/<name>.js` and served from there
 (`dashboardScriptFiles`); `static/` holds no script. A file of `web/` has no `import` or `export`,
@@ -5013,6 +5014,9 @@ or a `PAGE_ONLY` entry with its reason when no server value carries it; a server
 naming the type, when a type of `web/types.d.ts` has neither.
 
 - `core.js`: constants, state, the DOM, format and HTTP helpers.
+- `pin-selector.js`: the pins' selector (section Pins): how a pin names its element, finds it
+  again and reads its text. The Point bookmarklet carries the same file (Pins from other pages), so
+  it uses nothing of another script.
 - `job-screens.js`: what the job page reads, Task check, Changes, Merge request, Stream.
 - `job-page.js`: the job page's header and the job's actions (availability, outcomes, requests, confirmations).
 - `composer.js`: the job page's composer: its sentence, the planner block, the message box and the
@@ -5037,8 +5041,8 @@ naming the type, when a type of `web/types.d.ts` has neither.
 - `skills.js`: the Skills page (each agent role's skills, switched by a click).
 - `health.js`: the factory pill's health dot and words and its popover with the checks.
 - `pins.js`: point mode (section Pins): the Point button and Shift+P, the stopped clicks, the
-  outline, the selector, the note field, the markers and the pins panel; `pinKey` goes first in
-  `onKey`.
+  outline, the note field, the markers and the pins panel with its line offering the Point
+  bookmarklet on the local listener; `pinKey` goes first in `onKey`.
 - `main.js`: the stream, the job selected, the page's start and loading; it loads last.
 
 Endpoints under `/d/<token>/`. The read endpoints are GET only (anything else `405` with
@@ -5641,7 +5645,7 @@ screenshot. Nothing leaves the machine.
   element's text with its white space folded, at most 200 characters, and its position), unless it
   is on the page itself or the note field is open; then a note field opens next to it: Save (or
   Enter; Shift+Enter is a new line) stores the note, Skip (or Escape) leaves the pin without one.
-- **The selector.** Walking up from the element to `body`, the first element with an id that is
+- **The selector** (`web/pin-selector.ts`, which the Point bookmarklet shares). Walking up from the element to `body`, the first element with an id that is
   unique in the document is the anchor (`#<id>`, escaped with `CSS.escape`, so any id works);
   failing that (no element on the way has one), the first with a `data-*` attribute (the first, in
   attribute order, of at most 100 characters without `"` or `\`) that finds only it
@@ -5661,7 +5665,8 @@ screenshot. Nothing leaves the machine.
   element gone or hidden and is listed among the others; its row shows the address as the text of a
   link that opens in a new tab (`noopener noreferrer`), with an `href` only for an `http:` or
   `https:` address. A pin whose `url` is not a string is not listed. Then the last
-  refusal under them. With the mode off and open pins, a small *📍 N* button opens it. The page
+  refusal under them, and on the local listener the line offering the Point bookmarklet (Pins
+  from other pages). With the mode off and open pins, a small *📍 N* button opens it. The page
   reads the pins at its start, on every hashchange, when the mode is turned on and on Refresh; a
   write's answer replaces them. A pin resolved with `sf pins resolve` leaves the page at its next
   read. Every text is set as text, never HTML.
@@ -5749,6 +5754,79 @@ page could be read by its scripts; a top-level window and its messages meet none
 
 A page whose own policy cuts the windows it opens (`Cross-Origin-Opener-Policy`) leaves the window
 without an opener: it shows *no opener*. Every text in the window is set as text, never HTML.
+
+#### The Point bookmarklet
+
+The Point bookmarklet (SF-267, `web/point-page.ts` with `web/pin-selector.ts`) turns point mode on
+in the page it is clicked on and sends each pin to the factory window. It holds no token and makes
+no request of its own.
+
+- **Where to get it.** The pins panel, on the local listener only (the dashboard opened at
+  `127.0.0.1`), ends with *On other pages: drag 📍 Point to your bookmarks bar, then click it on
+  the page.* The first time the panel shows, the page reads `pin-selector.js` and `point-page.js`;
+  with both, the link is `javascript:` and, URL-encoded, `(()=>{<pin-selector.js>`,
+  `<point-page.js>`, `pointOnPage("<origin>");})()`, one per line, `<origin>` being the
+  dashboard's `location.origin` (`http://127.0.0.1:<port>`), never its address (whose path holds
+  the token). The function returns nothing, so the browser keeps the page. A failed read keeps the
+  line hidden until the page loads again; on another host (the phone through Tailscale) there is
+  no line and nothing is read. A click on the link does nothing: it is dragged, not run here. There
+  is no `sf` command for it; `sf pins` prints a page pin with its address. Point mode on the phone
+  is not offered.
+- **Start.** A second click of the bookmarklet in the same page ends point mode
+  (`window.sfPointStop`). Else it shows its bar at the top right (*📍 Factory*, the status line,
+  *Point*, *Open the factory window* and *×*) and opens the factory window
+  (`window.open('<origin>/point', 'sf-point', 'popup,width=440,height=420')`); a blocked window
+  shows *Open the factory window*, which opens it again. Each open gives the window 10 s to say
+  `ready`.
+- **Allow, then Point.** On `ready` the page posts `hello` with its address to the factory's origin;
+  the user allows the page in the window, and on `allowed` *Point* is enabled. Pointing starts
+  only with *Point*, so the click that brings the page back to the front places nothing; the
+  bookmarklet takes none of the page's keys but Escape while pointing (no Shift+P).
+- **Pointing.** While *Point* is pressed, a press, release, click, double click, middle click or
+  drag start anywhere but on the bar and the note field is stopped on `window` in the capture
+  phase, so the page's own action never runs; the outline follows the pointer. A click (not on
+  `html` or `body`, the note field closed) measures the element as the dashboard does (the same
+  selector, text and position) and opens the note field next to it: Save (or Enter; Shift+Enter is
+  a new line) sends the pin with the note, Skip (or Escape) without one. Each pin is a `pin`
+  message with a `ref` counting from 1 and the page's address, posted to the factory's origin;
+  with the window closed nothing is sent. Escape with the note field closed stops pointing.
+- **Markers.** The pins saved in this run show as `📍<id>` at their element's top-left corner,
+  inside the viewport, drawn again on a scroll or a resize (one animation frame); the page cannot
+  read the store, so earlier pins have none.
+- **Stop.** *×* or a second click removes every element and listener, clears the timer and closes
+  the window.
+- **The factory's own pages.** Where the page's `location.origin` is the origin written into the
+  bookmarklet (the dashboard, at `/` or its token address, and the factory window), the bookmarklet
+  shows only its bar with the FACTORY line of the table below, *Point* disabled and no *Open*, and does nothing
+  else: no window, no timer, no message, no listener on `window` or `document`, so Shift+P still
+  turns the dashboard's own point mode on. *×* or a second click removes the bar. A dashboard
+  opened under another name (`http://localhost:<port>`, the Tailscale address) is another origin
+  to the bookmarklet, which runs there as on any page; there the factory's refusal of a pin that
+  holds the token (`400 pin_holds_token`, section Pins) keeps the token out of the pins.
+
+| State | The bar's status line |
+|---|---|
+| FACTORY | *This page is the factory's own, so nothing is sent from it. The dashboard has its own point mode: press Shift+P.* |
+| OPENING (start, Open) | *Opening the factory window…* |
+| BLOCKED | *The browser blocked the factory window: allow pop-ups for this page, or press Open the factory window.* |
+| ALLOW (`ready`) | *Allow this page in the factory window.* |
+| PRESS (`allowed`, Escape) | *Allowed. Press Point, then click what you mean.* |
+| POINTING | *Click what you mean. Escape stops pointing.* |
+| SAVED | *📍&lt;id&gt; saved.* |
+| REFUSED | *The factory did not save the pin: the factory window says why.* |
+| NO_ANSWER (no `ready` in 10 s) | *The factory window does not answer: see what it shows. A page that cuts off the windows it opens (Cross-Origin-Opener-Policy) cannot use point mode.* |
+| CLOSED (a pin sent to a closed window) | *The factory window is closed: press Open the factory window.* |
+| TOO_LONG (a selector over 1,000 characters) | *This element cannot be pinned.* |
+
+*Open the factory window* shows in BLOCKED, NO_ANSWER and CLOSED only.
+
+What the page can see: the bookmarklet runs in the page, so the page's own scripts can read its
+bar, the note as it is typed, its messages to the window and the ids the window answers; never the
+token, the store or another page's pins. Its elements are appended to `document.documentElement`
+and styled only through `style.setProperty` (`all: initial` first, each property `!important`),
+so a page's `Content-Security-Policy` for styles does not stop them; every text is set as text.
+Some browsers apply the page's `Content-Security-Policy` to a bookmarklet itself: there nothing
+runs, and only the browser's console says why.
 
 ### Home
 
@@ -5864,7 +5942,16 @@ attribute and with neither find it again after the board redraws (an ancestor's 
 a nearer data- attribute; an id that is not a plain name is escaped; a data- attribute anchors
 where no id is above); a marker stays inside the window however wide its id; a marker sits at its element's
 corner and moves with a scroll; Escape leaves the mode; at 390 px the panel scrolls nothing
-sideways), and the Coordinator card (`test/browser/coordinator.test.ts`, a status of 1,500 to
+sideways), the Point bookmarklet (`test/browser/point.test.ts`, its code read from the pins
+panel's link and run with `page.evaluate`: in a shop of another site, `http://localhost:<port>`
+with a `Content-Security-Policy` that allows only its own scripts and styles, the factory window
+opens as its popup, Allow there, *Point*, a click on the shop's button whose own handler does not
+run, a note and Save store a page pin with the shop's address, its marker shows, the window lists
+it, the shop sends nothing to the factory's origin, the bar is fixed, Escape unpresses *Point* and
+a second run closes the bar and the window; in a browser without a dashboard session the window
+keeps its static text and the bar says it does not answer; on the dashboard at its token address
+the bar alone with the factory's message, no window, Shift+P still the dashboard's, *×* removes the
+bar), and the Coordinator card (`test/browser/coordinator.test.ts`, a status of 1,500 to
 2,000 characters as the coordinator writes it and the chat's link: at 1280 px on the home its title
 and box line up with Needs you's heading and first card within 1 px, the footer's age and *Open the
 chat* share a row within 2 px with the button at the right, Enter on the focused *Show all* opens

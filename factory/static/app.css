@@ -1125,7 +1125,17 @@ body.pointing :is(#pins, #pins-open, #point-toggle) :is(button, a), body.pointin
 .pin-acts { display: flex; gap: 6px; justify-content: flex-end; }
 .pins-status:empty { display: none; }
 .pins-status { margin: 0; color: var(--del); overflow-wrap: anywhere; }
+.pins-elsewhere { margin: 0; font-size: 12px; color: var(--muted); }
 #pins-open { position: fixed; z-index: 72; right: max(16px, env(safe-area-inset-right, 0px)); bottom: max(16px, env(safe-area-inset-bottom, 0px)); box-shadow: 0 2px 8px rgba(0, 0, 0, .2); }
 @media (max-width: 767px), (hover: none) {
   .pin-acts .btn, .pins-head .btn, .pn-row .btn, #pins-open { min-height: 44px; min-width: 44px; }
 }
+
+/* The factory window (static/point.html, web/point.ts): the page's origin to allow and the pins
+   saved, a row each as in the pins panel, a refused one in red. Light and dark through the tokens. */
+#point { padding: 16px; display: grid; gap: 10px; max-width: 560px; }
+#point-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.point-row { display: grid; gap: 4px; padding: 8px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--panel-2); min-width: 0; overflow-wrap: anywhere; }
+.point-id { font-weight: 600; }
+.point-note { color: var(--muted); }
+.point-refused { color: var(--del); }

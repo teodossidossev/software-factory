@@ -8,6 +8,7 @@
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="app.css">
   <script src="core.js" defer></script>
+  <script src="pin-selector.js" defer></script>
   <script src="job-screens.js" defer></script>
   <script src="job-page.js" defer></script>
   <script src="composer.js" defer></script>
@@ -182,6 +183,7 @@
     </div>
     <ul id="pins-list"></ul>
     <p id="pins-status" class="pins-status" role="status" aria-live="polite"></p>
+    <p id="pins-elsewhere" class="pins-elsewhere" hidden>On other pages: drag <a id="pins-bookmarklet" href="#" title="Drag to the bookmarks bar">📍 Point</a> to your bookmarks bar, then click it on the page.</p>
   </section>
   <button id="pins-open" type="button" class="btn" aria-label="Open the pins panel" hidden></button>
   <div id="toast" hidden role="status"><span id="toast-text"></span><button id="toast-close" type="button" class="toast-x" aria-label="Close the message">×</button></div>

@@ -9,7 +9,8 @@
 // fixed layer (#pin-layer) whether or not the mode is on, so a screenshot shows them; they are
 // drawn again on scroll, resize, hashchange, a pins read or write and the page's DOM changes (one
 // MutationObserver, coalesced into one animation frame; no timer). The pins panel (#pins) lists the
-// open pins with Resolve and Delete; with the mode off, #pins-open opens it. The pins are read at
+// open pins with Resolve and Delete (a pin of another page, with url, too: listed, never drawn);
+// with the mode off, #pins-open opens it. The pins are read at
 // the start, on every hashchange, when the mode is turned on and on Refresh; a write's answer
 // replaces them. The coordinator reads the same pins with sf pins. Every pin text and server
 // message goes in through textContent. A classic script, loaded before main.js (whose init calls
@@ -81,7 +82,29 @@ function pinsOf(value: unknown): Pin[] | null {
     return null;
   }
   return (value.pins as unknown[]).filter((pin): pin is Pin => isRecord(pin) && typeof pin.id === 'number' && typeof pin.route === 'string'
-    && typeof pin.selector === 'string' && typeof pin.text === 'string' && typeof pin.note === 'string' && typeof pin.resolved === 'boolean');
+    && typeof pin.selector === 'string' && typeof pin.text === 'string' && typeof pin.note === 'string' && typeof pin.resolved === 'boolean'
+    && (pin.url === undefined || typeof pin.url === 'string'));
+}
+
+// A pin of the current hash: one of the dashboard (a pin of another page, with url, has no hash).
+const pinHere = (pin: Pin, route: string): boolean => pin.url === undefined && pin.route === route;
+
+// A panel row's place: the dashboard hash (the board as Board) as a link to it; or the address of
+// another page as its text, a link to a new tab only when it is an http: or https: address.
+function pinPlaceLink(pin: Pin): HTMLAnchorElement {
+  if (pin.url === undefined) {
+    const link = el('a', 'pin-route', pin.route === '' ? 'Board' : pin.route);
+    link.href = `#${pin.route}`;
+    return link;
+  }
+  const link = el('a', 'pin-route', pin.url);
+  const protocol = URL.parse(pin.url)?.protocol;
+  if (protocol === 'http:' || protocol === 'https:') {
+    link.href = pin.url;
+  }
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
+  return link;
 }
 
 // The pins of an answer, unless a newer read or write was answered first.
@@ -370,7 +393,7 @@ function drawPinMarkers(): boolean {
   pinPage.places = new Map();
   const markers: Array<{ marker: HTMLElement; box: DOMRect }> = [];
   for (const pin of openPins()) {
-    if (pin.route !== route) {
+    if (!pinHere(pin, route)) {
       continue;
     }
     const node = pinFind(pin.selector);
@@ -421,7 +444,8 @@ function pinHover(event: Event): void {
   drawPinOutline();
 }
 
-// The panel: its head, the open pins (the current hash's first), the status line; and #pins-open.
+// The panel: its head, the open pins (the current hash's first, then the others, pins of other
+// pages among them, in id order), the status line; and #pins-open.
 function renderPinsPanel(): void {
   const open = openPins();
   const shown = pinPage.on ? !pinPage.closed : pinPage.opened;
@@ -434,13 +458,11 @@ function renderPinsPanel(): void {
   toggle.textContent = `📍 ${open.length}`;
   toggle.setAttribute('aria-label', `Pins: ${counted(open.length, 'open pin')}`);
   const route = pinRoute();
-  const rows = [...open.filter((pin) => pin.route === route), ...open.filter((pin) => pin.route !== route)].map((pin) => {
+  const rows = [...open.filter((pin) => pinHere(pin, route)), ...open.filter((pin) => !pinHere(pin, route))].map((pin) => {
     const row = el('li', 'pin-row');
-    const link = el('a', 'pin-route', pin.route === '' ? 'Board' : pin.route);
-    link.href = `#${pin.route}`;
     const head = el('div', 'pin-rhead');
-    head.append(el('span', 'pin-id', `📍${pin.id}`), link);
-    const place = pin.route === route ? pinPage.places.get(pin.id) : undefined;
+    head.append(el('span', 'pin-id', `📍${pin.id}`), pinPlaceLink(pin));
+    const place = pinHere(pin, route) ? pinPage.places.get(pin.id) : undefined;
     if (place === 'gone' || place === 'hidden') {
       head.append(el('span', 'pin-place', `element ${place}`));
     }

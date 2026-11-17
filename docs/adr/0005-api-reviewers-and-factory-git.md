@@ -184,3 +184,20 @@ stops where it stopped before; one whose reviews keep finding less goes on. Chur
 stay the brakes for real loops.
 
 The rest of this ADR stands.
+
+## Amendment 2026-11-16 (SF-293): the gate's cap counts rounds without progress
+
+What changes: `SF_GATE_MAX_ROUNDS` no longer counts every gate round with fixes. It counts the
+gate's fix rounds without progress, by the judgement of the SF-292 amendment above on the
+round's merged ledger, and never the first fix the gate asks for. A job that keeps lowering its
+findings may so have more than five gate rounds with fixes; one that makes no progress stops
+where it stopped before. This supersedes "At most five gate rounds with fixes" in the
+Decision's Gate item and "`SF_GATE_MAX_ROUNDS` stays the cap" in the SF-052 amendment: it is the
+cap of the gate's rounds without progress. What stays: at the cap the job is `needs_human` with
+both verdicts, which the user can accept over the gate; a Claude fix of the same round applies
+alone; the per-ticket token ceiling.
+
+Why: the same decision of 2026-11-16 (SF-290): a count of every gate fix stopped changes that
+were still converging, and two rules for one loop would stop the same job at different moments.
+
+The rest of this ADR stands.

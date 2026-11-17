@@ -7,7 +7,7 @@
 // (src/execution/reviews.ts) runs the sessions, keeps their records and acts on the outcome.
 import { GATE_REVIEWER } from './gate.js';
 import type { GateRecord, ReviewRecord } from './jobs.js';
-import { applyVerdict, type Applied, factoryKey, FACTORY_PROBLEMS, type FixItem, type LedgerEntry, SEVERITY_RANK as RANK } from './ledger.js';
+import { applyVerdict, type Applied, factoryKey, FACTORY_PROBLEMS, type FixItem, type LedgerEntry, roundProgress, type RoundProgress, SEVERITY_RANK as RANK } from './ledger.js';
 import { decide, fixContent, jointFixContent, oneLine, REVIEWER, type ReviewItem, type Severity } from './review.js';
 import type { UsageLimit } from './usage-limit.js';
 
@@ -40,6 +40,14 @@ export function budgetMessage(tokens: number, maxTokens: number): string {
   return `The gate runs of this job used ${tokens} tokens, the limit of SF_GATE_MAX_TOKENS (${maxTokens}); the user decides how to go on.`;
 }
 
+// The stop at SF_GATE_MAX_ROUNDS: stalled the gate's fix rounds without progress since its
+// first fix, this one included; max SF_GATE_MAX_ROUNDS; round the judgement of this round; the
+// reviewers' summaries.
+export function gateRoundsMessage(stalled: number, max: number, round: RoundProgress, claude: string, codex: string): string {
+  const message = `The gate's fix rounds without progress since its first fix reached ${stalled}, the limit of SF_GATE_MAX_ROUNDS (${max}); the fix was not applied. Open blocker or major findings: ${round.open} (${round.raised} raised by the last review, ${round.reopened} of them reopened; ${round.open - round.raised} carried from earlier rounds). Claude: ${oneLine(claude)} Codex: ${oneLine(codex)}`;
+  return message.slice(0, 2000);
+}
+
 // How a reviewer's session of this round ended, besides its record: the usage limit it hit or the
 // code of its failure (a refusal, gate_sandbox_unavailable).
 export interface SessionEnd {
@@ -63,7 +71,12 @@ export interface RoundInput {
   claude?: ReviewerEnd<ReviewRecord>;
   // Present for 'only' and 'joint'.
   gate?: ReviewerEnd<GateRecord>;
+  // The job's gate_fixes: the gate fixes written so far.
   gateFixes: number;
+  // The job's least_open.
+  least: number | undefined;
+  // The job's gate_stalled: its counted gate fix rounds without progress.
+  gateStalled: number;
   gateTokens: number;
   maxRounds: number;
   maxTokens: number;
@@ -71,11 +84,13 @@ export interface RoundInput {
 
 // The outcome of a round, and the items each reviewer's verdict dropped (they reopened an accepted
 // risk), for its record. A stop writes its ledger when it has one; a fix counts for gate_fixes when
-// the gate's verdict is a fix.
+// the gate's verdict is a fix, and, after the gate's first fix, for gate_stalled when the round made
+// no progress (progress: the judgement of the round's ledger, roundProgress). The gate's limit counts
+// its fix rounds without progress after its first fix.
 export type RoundOutcome = { dropped: { claude?: ReviewItem[]; gate?: ReviewItem[] } } & (
   | { kind: 'park'; step: 'review' | 'gate'; limit: UsageLimit }
   | { kind: 'stop'; code: string; message: string; ledger?: LedgerEntry[] }
-  | { kind: 'fix'; content: string; ledger: LedgerEntry[]; gateFix: boolean }
+  | { kind: 'fix'; content: string; ledger: LedgerEntry[]; gateFix: boolean; progress: RoundProgress }
   | { kind: 'clean'; ledger: LedgerEntry[]; accepted: string[] }
 );
 
@@ -93,10 +108,10 @@ const NAMES: Record<string, string> = { [REVIEWER]: CLAUDE, [GATE_REVIEWER]: COD
 
 // The round's outcome, in this order: Claude's usage limit (park at review), failure or refusal
 // (review_failed, the refusal's code); the gate's usage limit (park at gate), failure (gate_failed,
-// gate_sandbox_unavailable) or tokens over SF_GATE_MAX_TOKENS (gate_budget); a ledger stop; the
-// gate's Fix rounds (gate_rounds); else one Fix section, or Clean. A Claude verdict that is a fix
-// as decide reads it wins over a gate that failed or would stop the job: its Fix section is made as
-// Claude's alone.
+// gate_sandbox_unavailable) or tokens over SF_GATE_MAX_TOKENS (gate_budget); a ledger stop; Clean;
+// the gate's fix rounds without progress after its first fix (gate_rounds); else one Fix section.
+// A Claude verdict that is a fix as decide reads it wins over a gate that failed or would stop the
+// job: its Fix section is made as Claude's alone.
 export function roundOutcome(input: RoundInput): RoundOutcome {
   const { claude, gate } = input;
   const none = { dropped: {} };
@@ -132,14 +147,15 @@ export function roundOutcome(input: RoundInput): RoundOutcome {
   return joint(input, review, claude.extra, gate.record as Verdicted<GateRecord>, gate.extra);
 }
 
-// The gate as the job's only reviewer: its verdict decides; a fix counts for gate_fixes.
+// The gate as the job's only reviewer: its verdict decides; a fix counts for gate_fixes, and after
+// the gate's first fix for gate_stalled when the round made no progress, but never stops the job.
 function gateAlone(input: RoundInput, gate: Verdicted<GateRecord>, extra: ReviewItem[]): RoundOutcome {
   const applied = applyVerdict({ ledger: input.ledger, items: gate.items, extra, reviewer: GATE_REVIEWER, iteration: input.iteration, decides: true });
   const dropped = { gate: applied.dropped };
   return applied.kind === 'stop'
     ? { kind: 'stop', code: applied.code, message: applied.message, ledger: applied.ledger, dropped }
     : applied.kind === 'fix'
-      ? { kind: 'fix', content: fixContent(gate.summary, applied.items, CODEX), ledger: applied.ledger, gateFix: true, dropped }
+      ? { kind: 'fix', content: fixContent(gate.summary, applied.items, CODEX), ledger: applied.ledger, gateFix: true, progress: roundProgress(input.ledger, applied.ledger, input.least), dropped }
       : { kind: 'clean', ledger: applied.ledger, accepted: gate.accepted_sensitive, dropped };
 }
 
@@ -151,7 +167,7 @@ function claudeAlone(input: RoundInput, review: Verdicted<ReviewRecord>, extra: 
   const dropped = { claude: applied.dropped };
   // Beside a failed gate only Claude's own fix (decide) goes on; open entries alone do not.
   if (applied.kind === 'fix' && (gateStop === undefined || decide(review, extra).verdict === 'fix')) {
-    return { kind: 'fix', content: fixContent(review.summary, applied.items), ledger: applied.ledger, gateFix: false, dropped };
+    return { kind: 'fix', content: fixContent(review.summary, applied.items), ledger: applied.ledger, gateFix: false, progress: roundProgress(input.ledger, applied.ledger, input.least), dropped };
   }
   if (gateStop !== undefined) {
     return { kind: 'stop', ...gateStop, dropped };
@@ -239,7 +255,9 @@ function joint(input: RoundInput, review: Verdicted<ReviewRecord>, claudeExtra: 
   // item or carried entries) wins, as Claude alone makes it: its own items, without the merge.
   const alone = (): RoundOutcome | undefined => {
     const own = claudeFix ? applyVerdict({ ledger, items: review.items, extra: claudeExtra, reviewer: REVIEWER, iteration, decides: false, keep: gateKeys }) : undefined;
-    return own?.kind === 'fix' ? { kind: 'fix', content: fixContent(review.summary, own.items), ledger: own.ledger, gateFix: false, dropped: { claude: own.dropped, gate: second.dropped } } : undefined;
+    return own?.kind === 'fix'
+      ? { kind: 'fix', content: fixContent(review.summary, own.items), ledger: own.ledger, gateFix: false, progress: roundProgress(ledger, own.ledger, input.least), dropped: { claude: own.dropped, gate: second.dropped } }
+      : undefined;
   };
   if (second.kind === 'stop') {
     // A Claude pass that made no Fix section leaves no id and no ask: the gate's stop then reads
@@ -249,14 +267,11 @@ function joint(input: RoundInput, review: Verdicted<ReviewRecord>, claudeExtra: 
       ? { kind: 'stop', code: stop.code, message: stop.message, ledger: stop.ledger, dropped }
       : { kind: 'stop', code: second.code, message: second.message, dropped });
   }
-  const gateFix = second.kind === 'fix' || [...items.gateBlocking].some((item) => !first.dropped.includes(item));
-  if (gateFix && input.gateFixes >= input.maxRounds) {
-    const message = `The gate asked for a fix ${input.gateFixes + 1} times, over the limit of SF_GATE_MAX_ROUNDS (${input.maxRounds}); the fix was not applied. Claude: ${oneLine(review.summary)} Codex: ${oneLine(gate.summary)}`;
-    return alone() ?? { kind: 'stop', code: 'gate_rounds', message: message.slice(0, 2000), dropped };
-  }
+  // A gate fix always comes with a pass that is a fix, so a clean round never meets the gate's limit.
   if (first.kind !== 'fix' && second.kind !== 'fix') {
     return { kind: 'clean', ledger: second.ledger, accepted: [...new Set([...review.accepted_sensitive, ...gate.accepted_sensitive])], dropped };
   }
+  const gateFix = second.kind === 'fix' || [...items.gateBlocking].some((item) => !first.dropped.includes(item));
   // Who raised an item in this round; none for an entry carried over.
   const raisedBy = (fixItem: FixItem, name: string, inputs: ReviewItem[]): string[] => {
     if (items.shared.has(fixItem.item)) {
@@ -269,7 +284,15 @@ function joint(input: RoundInput, review: Verdicted<ReviewRecord>, claudeExtra: 
     return inputs.includes(fixItem.item) ? [name] : [];
   };
   const merged = mergeFixItems([[first, CLAUDE, items.claude], [second, CODEX, items.gate]], raisedBy, second.ledger);
-  return { kind: 'fix', content: jointFixContent(review.summary, gate.summary, merged.items), ledger: merged.ledger, gateFix, dropped };
+  // Judged on the merged ledger, the one the Fix section is judged on for SF_MAX_ITERATIONS, so the
+  // gate's fix rounds without progress are a part of the job's. The gate's first fix never counts;
+  // the gate fix of the round that reaches SF_GATE_MAX_ROUNDS is not applied.
+  const progress = roundProgress(ledger, merged.ledger, input.least);
+  if (gateFix && !progress.progress && input.gateFixes > 0 && input.gateStalled + 1 >= input.maxRounds) {
+    const message = gateRoundsMessage(input.gateStalled + 1, input.maxRounds, progress, review.summary, gate.summary);
+    return alone() ?? { kind: 'stop', code: 'gate_rounds', message, dropped };
+  }
+  return { kind: 'fix', content: jointFixContent(review.summary, gate.summary, merged.items), ledger: merged.ledger, gateFix, progress, dropped };
 }
 
 // The Fix items of both passes as one list, Claude's first: an id both give is one item with the

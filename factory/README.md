@@ -638,7 +638,7 @@ this command. Its error codes: `planning_copy_missing` and `planning_copy_unsafe
 | `SF_GATE` | `codex` | The gate (SF-039), in the same round as the Claude review (the joint round, SF-214) or alone on a job without it: `codex` runs the Codex CLI, `off` lets the Claude verdict decide. With `codex` and no executable found the gate is off, and `sf serve` prints one line saying so. |
 | `SF_CODEX` | `codex` on `PATH` | Absolute path of the Codex CLI executable. Pointing at nothing turns the gate off; it is not looked for on `PATH` then. |
 | `SF_CODEX_MODEL` | unset | Model of the gate, passed as `--model`; unset uses Codex's default (the user's `~/.codex/config.toml`). |
-| `SF_GATE_MAX_ROUNDS` | `5` | Fix sections the gate asked for per job with the Claude review (the job's `gate_fixes`; a joint round's Fix counts only when the gate's verdict is a fix); the next gate fix is not applied (`gate_rounds`, job `needs_human`), unless the Claude review of the same round gives a fix, whose Fix section then applies alone. |
+| `SF_GATE_MAX_ROUNDS` | `5` | Review rounds without progress (as for `SF_MAX_ITERATIONS`) whose Fix the gate asked for, per job with the Claude review, the gate's first fix never counted (the job's `gate_stalled`; a joint round's Fix counts only when the gate's verdict is a fix); the gate fix of the round that reaches the limit is not applied (`gate_rounds`, job `needs_human`), unless the Claude review of the same round gives a fix, whose Fix section then applies alone. A job that makes no progress so stops after as many gate fixes as before. The job's `gate_fixes` still counts every gate fix (the light gate level reads it). |
 | `SF_GATE_MAX_TOKENS` | `5000000` | Input plus output tokens of all gate runs of a job (the job's `gate_tokens`); a gate does not start at the limit, and a run that goes over it is not applied (`gate_budget`, job `needs_human`). |
 | `SF_GATE_TIMEOUT_MS` | `900000` | How long one gate run may take; then SIGTERM, and SIGKILL 5 s later (`gate_failed`). |
 | `SF_TEST_TIMEOUT_MS` | `1800000` (30 min) | How long one run of a workspace's `test_command` may take (SF-128, section MR preparation), 1 to 14400000 (4 h), by the clock, the time the machine sleeps included (SF-152); then its process group is killed with SIGKILL and the run failed (a Tests Fix that names the timeout). |
@@ -2095,10 +2095,13 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   `Review by Codex: <summary>`, each item naming who raised it; without the Claude review `Review
   by Codex: <summary>` alone) and runs the next iteration, which both review again. The job counts
   the Fix sections the gate asked for in `gate_fixes` (a joint Fix only when the gate's verdict is a
-  fix): at `SF_GATE_MAX_ROUNDS` the next one is not applied (`needs_human`, `gate_rounds`, the
-  message holds both reviewers' summaries). Every run adds its input plus output tokens to the
-  job's `gate_tokens`: a gate does not start once they reach `SF_GATE_MAX_TOKENS` (the Claude review
-  then runs alone: its fix is the next Fix section, its clean verdict stops with `gate_budget`),
+  fix), and, from the gate's second fix on, those of rounds without progress (SF-292's judgement,
+  on the merged ledger) in `gate_stalled`: the gate fix of the round that brings `gate_stalled` to
+  `SF_GATE_MAX_ROUNDS` is not applied (`needs_human`, `gate_rounds`; the message names the rounds,
+  the open findings raised and carried, and both reviewers' summaries). Every run adds its input
+  plus output tokens to the job's `gate_tokens`: a gate does not start once they reach
+  `SF_GATE_MAX_TOKENS` (the Claude review then runs alone: its fix is the next Fix section, its
+  clean verdict stops with `gate_budget`),
   and a run that takes them over it is recorded but not applied (`needs_human`, `gate_budget`). A
   non-zero exit, a timeout, a missing or invalid output or a Codex `error` event is `gate_failed`
   (the exit code or signal and the last error line); nothing is retried. `sf abort` and `sf reset`

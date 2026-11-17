@@ -47,6 +47,9 @@ const ACCEPT_CODES: readonly string[] = codesWithAction('accept');
 const refusalCode = (error: unknown): string | undefined =>
   error instanceof FactoryError && error.code === USER_SETTINGS_WEAKEN_SANDBOX ? error.code : undefined;
 
+// The gate tokens the budget counts: those since the user's last message at a limit stop.
+const countedTokens = (job: Job): number => job.gate_tokens - (job.gate_budget_from ?? 0);
+
 // What ReviewsPart calls of the other parts, by just those methods.
 export interface ReviewsControl {
   park(job: Job, step: PauseStep, limit: UsageLimit): Promise<void>;
@@ -120,10 +123,10 @@ export class ReviewsPart {
     const levelRuns = (!claudeReviews(job) || config.gate.on) && (await this.#gateRuns(job));
     const limit = await this.#gateBudget(job);
     const { budget, lines } = limit;
-    const place = gatePlace({ claudeReview: claudeReviews(job), levelRuns, stored: stored.gate, tokens: job.gate_tokens, maxTokens: budget });
-    if (place === 'only' && !stored.gate && job.gate_tokens >= budget) {
+    const place = gatePlace({ claudeReview: claudeReviews(job), levelRuns, stored: stored.gate, tokens: countedTokens(job), maxTokens: budget });
+    if (place === 'only' && !stored.gate && countedTokens(job) >= budget) {
       // from: awaiting_review (every caller)
-      await this.#store.transition(job, 'needs_human', 'verdict', { code: 'gate_budget', message: budgetMessage(job.gate_tokens, budget, lines) });
+      await this.#store.transition(job, 'needs_human', 'verdict', { code: 'gate_budget', message: budgetMessage(countedTokens(job), budget, lines) });
       return;
     }
     const runs = roundRuns(place, stored);
@@ -170,7 +173,7 @@ export class ReviewsPart {
       place, ledger: await this.#store.jobs.readLedger(workspace, ticket), iteration,
       claude: place !== 'only' ? { record: review, extra: await extra(review), ...ends.claude } : undefined,
       gate: place === 'only' || place === 'joint' ? { record: gate, extra: await extra(gate), ...ends.gate } : undefined,
-      gateFixes: job.gate_fixes, least: job.least_open, gateStalled: job.gate_stalled ?? 0, gateTokens: job.gate_tokens, maxRounds: config.gateMaxRounds,
+      gateFixes: job.gate_fixes, least: job.least_open, gateStalled: job.gate_stalled ?? 0, gateTokens: countedTokens(job), maxRounds: config.gateMaxRounds,
       maxTokens: limit.budget, lines: limit.lines,
     });
     if (review !== undefined && 'verdict' in review && (outcome.dropped.claude?.length ?? 0) > 0) {

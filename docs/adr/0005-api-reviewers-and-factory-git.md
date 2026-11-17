@@ -201,3 +201,23 @@ Why: the same decision of 2026-11-16 (SF-290): a count of every gate fix stopped
 were still converging, and two rules for one loop would stop the same job at different moments.
 
 The rest of this ADR stands.
+
+## Amendment 2026-11-16 (SF-295): the user's message at a limit stop starts the counts again
+
+What changes: when a job has stopped at `SF_MAX_ITERATIONS`, at `SF_GATE_MAX_ROUNDS` or at the
+gate's token ceiling, a message of the user to it starts all three counts again: the rounds
+without progress of the two amendments above count from zero, and the token ceiling counts from
+the tokens used so far. The ceiling, since SF-294 `SF_GATE_MAX_TOKENS` for every started 2,000
+changed lines of the job's change, is so a ceiling between two such messages, not one per
+ticket: this supersedes "a per-ticket token ceiling" in the Decision's Gate item and "the
+per-ticket token ceiling" among what the SF-293 amendment says stays. After the stop at
+`SF_MAX_ITERATIONS` the message also carries the findings the refused Fix held back. What stays:
+without a message of the user at such a stop no count starts again; the fewest open findings a
+round must beat are kept; between the user's decisions the ceiling still protects the
+subscription's limits.
+
+Why: the user's decision of 2026-11-16 (SF-290): going on after such a stop must not need a
+setting edited and `sf serve` restarted. The user who answers the stop has looked at the job and
+decided to spend more on it.
+
+The rest of this ADR stands.

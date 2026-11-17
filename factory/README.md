@@ -642,7 +642,7 @@ environment and folders.
 | `SF_CODEX` | `codex` on `PATH` | Absolute path of the Codex CLI executable. Pointing at nothing turns the gate off; it is not looked for on `PATH` then. |
 | `SF_CODEX_MODEL` | unset | Model of the gate, passed as `--model`; unset uses Codex's default (the user's `~/.codex/config.toml`). |
 | `SF_GATE_MAX_ROUNDS` | `5` | Review rounds without progress (as for `SF_MAX_ITERATIONS`) whose Fix the gate asked for, per job with the Claude review, the gate's first fix never counted (the job's `gate_stalled`; a joint round's Fix counts only when the gate's verdict is a fix); the gate fix of the round that reaches the limit is not applied (`gate_rounds`, job `needs_human`), unless the Claude review of the same round gives a fix, whose Fix section then applies alone. A job that makes no progress so stops after as many gate fixes as before. The job's `gate_fixes` still counts every gate fix (the light gate level reads it). |
-| `SF_GATE_MAX_TOKENS` | `5000000` | The gate's token budget for every started 2,000 changed lines of the job's change at the reviewed iteration (its `meta.json` files; at least once; once when they cannot be read): input plus output tokens of all its gate runs (the job's `gate_tokens`). A change of up to 2,000 lines gets this, one of 2,001 to 4,000 twice this. A gate does not start at the budget, and a run that goes over it is not applied (`gate_budget`, job `needs_human`). |
+| `SF_GATE_MAX_TOKENS` | `5000000` | The gate's token budget for every started 2,000 changed lines of the job's change at the reviewed iteration (its `meta.json` files; at least once; once when they cannot be read): input plus output tokens of all its gate runs (the job's `gate_tokens`). A change of up to 2,000 lines gets this, one of 2,001 to 4,000 twice this. A gate does not start at the budget, and a run that goes over it is not applied (`gate_budget`, job `needs_human`). A message at the stop starts the count again from the tokens used so far. |
 | `SF_GATE_TIMEOUT_MS` | `900000` | How long one gate run may take; then SIGTERM, and SIGKILL 5 s later (`gate_failed`). |
 | `SF_TEST_TIMEOUT_MS` | `1800000` (30 min) | How long one run of a workspace's `test_command` may take (SF-128, section MR preparation), 1 to 14400000 (4 h), by the clock, the time the machine sleeps included (SF-152); then its process group is killed with SIGKILL and the run failed (a Tests Fix that names the timeout). |
 | `SF_GATE_LEVEL` | `auto` | The gate level of each iteration (SF-092, section Jobs): `auto` by the risk of the job's change (`full`, `light` or `none`); `full` runs the gate in every round, as before SF-092. Empty is the default; anything else refuses to start (`invalid_config`). |
@@ -2102,8 +2102,9 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   on the merged ledger) in `gate_stalled`: the gate fix of the round that brings `gate_stalled` to
   `SF_GATE_MAX_ROUNDS` is not applied (`needs_human`, `gate_rounds`; the message names the rounds,
   the open findings raised and carried, and both reviewers' summaries). Every run adds its input
-  plus output tokens to the job's `gate_tokens`: a gate does not start once they reach
-  the job's gate budget, `SF_GATE_MAX_TOKENS` for every started 2,000 changed lines of the change
+  plus output tokens to the job's `gate_tokens`: a gate does not start once the tokens counted
+  since the user's last message at a limit stop (`gate_tokens` − `gate_budget_from`) reach the
+  job's gate budget, `SF_GATE_MAX_TOKENS` for every started 2,000 changed lines of the change
   at the reviewed iteration (`gateBudget` in `src/round.ts`, SF-294; the lines are a lower bound
   when the Patch was truncated) (the Claude review then runs alone: its fix is the next Fix section, its
   clean verdict stops with `gate_budget`),
@@ -2168,7 +2169,12 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   major findings, those the last review raised apart from those carried from earlier rounds, and
   the stop panel lists them (`ledgerStopEntries`). The stop can be accepted whatever the last verdict
   (`sf accept`, SF-115, SF-131). An `sf say` turn publishes an iteration but writes no Fix section,
-  so it does not count. The Fix of your *Must fix* on a stop that resumes (`escalated`,
+  so it does not count. A message at a limit stop (`iteration_limit`, `gate_rounds`, `gate_budget`;
+  Send, Tell it to go on, a planner suggestion's Send) starts the counts again: `stalled_fixes` and
+  `gate_stalled` to 0, and the gate budget counts from the tokens used so far (`gate_budget_from`);
+  `least_open` stays. After `iteration_limit` the message carries the findings the refused Fix held
+  back (`heldBackNote` in `src/ledger.ts`): the open entries it asked, with their ids, which the
+  turn's Report answers in its `## Fix N items` table like a Fix section's (SF-295). The Fix of your *Must fix* on a stop that resumes (`escalated`,
   `review_disputed`) is written even at the limit (SF-203): the limit stops the factory's own rounds,
   not one you decided. It counts in `fixes`, its section's lead line names the settlement ("The
   user settled the stop (escalated): R5 to fix."), the ticket's history records it `by: "you"`
@@ -2254,7 +2260,8 @@ ended. A restart of `sf serve` therefore leaves a working job working.
     while the pass ran records it as failed ("interrupted") and goes on to MR preparation.
 - `sf say` queues a message as the next turn (in `working`, `awaiting_review`, `needs_human` or
   `ready_for_human_review`, where it reopens the worktree like the fix path); outside `working`
-  the job goes back to `working` and publishes a new iteration at the end.
+  the job goes back to `working` and publishes a new iteration at the end. At a limit stop it also
+  starts the limits' counts again (above).
 - **The turn limit** (SF-069, `src/turn-limit.ts`). An Implementer turn that reaches `SF_MAX_TURNS`
   (the SDK's `error_max_turns`) goes on by itself when it made progress: the worktree changed
   during the turn (its changed paths or the hash of its whole Patch, binary content included and

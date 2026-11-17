@@ -13,6 +13,7 @@ import { addAttachment } from '../src/attachments.js';
 import { firstPrompt } from '../src/execution.js';
 import { iterationLimitMessage } from '../src/execution/turns.js';
 import { JobStore } from '../src/jobs.js';
+import { heldBackNote } from '../src/ledger.js';
 import type { SandboxSettings } from '@anthropic-ai/claude-agent-sdk';
 import { sandboxSettings } from '../src/config.js';
 import { ImplementerSession, type IdleOutcome, sandboxEnvDenials, sessionEnvironment } from '../src/session.js';
@@ -21,6 +22,7 @@ import {
   call, codexLog, codexScript, FAKE, fakeCodex, fakeLog, git, newEnv, newRepo, putTask, refused, reviewLog, reviewScript, runCli, script, serve, stop, task, useFakeBwrap,
   jobPrompt, waitFor,
 } from './support/harness.js';
+import { CLAUDE_CLEAN, GATE_CLEAN, GATE_FIX, gateEnv, iterationDir } from './support/gate.js';
 
 const ID = ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid'];
 
@@ -291,7 +293,7 @@ test('the Fix round limit by default (SF-131): the fourth Fix is refused; its it
     const limited = await waitFor(served, 'LIM-1', 'needs_human', 4);
     assert.deepEqual(limited.error, {
       code: 'iteration_limit',
-      message: "3 of the job's review rounds made no progress (SF_MAX_ITERATIONS is 3): each left no fewer open blocker and major findings than the fewest before, or reopened a fixed or left one. Open blocker or major findings: 1 (1 raised by the last review, 0 of them reopened; 0 carried from earlier rounds). The user decides how to go on: sf accept takes iteration 4 as it is (the open findings go unapplied and are listed in the MR text), sf say gives a direction.",
+      message: "3 of the job's review rounds made no progress (SF_MAX_ITERATIONS is 3): each left no fewer open blocker and major findings than the fewest before, or reopened a fixed or left one. Open blocker or major findings: 1 (1 raised by the last review, 0 of them reopened; 0 carried from earlier rounds). The user decides how to go on: sf accept takes iteration 4 as it is (the open findings go unapplied and are listed in the MR text), sf say goes on: the count starts again, and the held-back findings go with the message.",
     });
     assert.deepEqual((await readFile(join(repo, '.software-factory', 'LIM-1.md'), 'utf8')).match(/^## Fix \d+$/gm), ['## Fix 1', '## Fix 2', '## Fix 3']);
     const jobs = new JobStore(env.state);
@@ -314,6 +316,79 @@ test('the Fix round limit by default (SF-131): the fourth Fix is refused; its it
     assert.deepEqual(override?.unapplied, [{ id: 'R4', path: 'a.txt', problem: 'Problem 4.', expected: 'Solved 4.', severity: 'major' }]);
     assert.doesNotMatch((await jobs.readMrText('app', 'LIM-1'))!, /### Accepted over a stop\n(- .*\n)*- R[56] /);
     assert.match((await jobs.readMrText('app', 'LIM-1'))!, /### Accepted over a stop\n- The user accepted iteration 4 over iteration_limit\.\n- R4 \[major\] `a\.txt`: Problem 4\. Expected: Solved 4\./);
+  } finally {
+    await stop(served);
+  }
+});
+
+test("the user's message at the Fix round limit starts the count again and carries the held-back findings: the say turn's Report answers them, the next fix is written", async () => {
+  const env = await newEnv('limit-go-on', { SF_REVIEW: 'on', SF_MAX_ITERATIONS: '2', SF_SIMPLIFY: 'off' });
+  const repo = await newRepo(env, 'limit-go-on-repo', false);
+  await putTask(env, repo, 'LIM-3', 'Go on');
+  const fix = (n: number) => ({ verdict: 'fix', summary: `Problem ${n}.`, items: [{ path: 'a.txt', problem: `Problem ${n}.`, expected: `Solved ${n}.`, severity: 'major' }], accepted_sensitive: [] });
+  await script(env, [
+    { write: { 'a.txt': '1\n' } },
+    { write: { 'a.txt': '2\n' }, text: '| R1 | fixed | Done. |' },
+    { write: { 'a.txt': '3\n' }, text: '| R2 | fixed | Done. |' },
+    { write: { 'a.txt': '4\n' }, text: '| R3 | fixed | Done. |' },
+    { write: { 'a.txt': '5\n' }, text: '| R4 | fixed | Done. |' },
+    { write: { '.software-factory/LIM-3.mr.md': mrText('feat(LIM-3): Go on') }, text: 'prepared' },
+  ]);
+  await reviewScript(env, [{ output: fix(1) }, { output: fix(2) }, { output: fix(3) }, { output: fix(4) }, { output: { verdict: 'clean', summary: 'Right.', items: [], accepted_sensitive: [] } }]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'LIM-3' });
+    const limited = await waitFor(served, 'LIM-3', 'needs_human', 3);
+    assert.equal(limited.error.code, 'iteration_limit');
+    const jobs = new JobStore(env.state);
+    const ledger = await jobs.readLedger('app', 'LIM-3');
+    assert.equal((await jobs.read('app', 'LIM-3'))?.stalled_fixes, 2);
+
+    const said = await runCli(env, ['say', 'app', 'LIM-3', 'Go on.']);
+    assert.equal(said.code, 0, said.stderr);
+    await waitFor(served, 'LIM-3', 'ready_for_human_review', 5);
+    const note = heldBackNote(ledger, 3);
+    assert.match(note, /^- \[R3, major\] `a\.txt`: Problem 3\. Expected: Solved 3\.$/m);
+    assert.equal((await fakeLog(env))[3]!.prompt, await jobPrompt(env, `Go on.\n\n${note}`, 'LIM-3', 4));
+    const after = await jobs.readLedger('app', 'LIM-3');
+    assert.equal(after.find((entry) => entry.id === 'R3')?.status, 'fixed');
+    assert.deepEqual((await readFile(join(repo, '.software-factory', 'LIM-3.md'), 'utf8')).match(/^## Fix \d+$/gm), ['## Fix 1', '## Fix 2', '## Fix 4']);
+    // The say turn started the count again; Fix 4 (R4, no new low) counted one round without progress.
+    const job = await jobs.read('app', 'LIM-3');
+    assert.deepEqual([job?.stalled_fixes, job?.least_open], [1, 1]);
+  } finally {
+    await stop(served);
+  }
+});
+
+test("the user's message at the gate budget starts the budget's count from the tokens used so far: the gate runs again, gate_tokens stays the total", async () => {
+  const env = await newEnv('budget-go-on', gateEnv({ SF_GATE_MAX_TOKENS: '1000', SF_SIMPLIFY: 'off' }));
+  const repo = await newRepo(env, 'budget-go-on-repo', false);
+  await putTask(env, repo, 'LIM-4', 'Go on');
+  await script(env, [
+    { write: { 'a.txt': '1\n' } },
+    { write: { 'a.txt': '2\n' }, text: '| R1 | fixed | Done. |' },
+    { write: { 'b.txt': '1\n' } },
+    { write: { '.software-factory/LIM-4.mr.md': mrText('feat(LIM-4): Go on') }, text: 'prepared' },
+  ]);
+  const usage = { input_tokens: 900, cached_input_tokens: 0, output_tokens: 100 };
+  await codexScript(env, [{ output: GATE_FIX, usage }, { output: GATE_CLEAN, usage }]);
+  // Round 1 joint, round 2 the Claude review alone at the budget, round 3 joint.
+  await reviewScript(env, [{ output: CLAUDE_CLEAN }, { output: CLAUDE_CLEAN }, { output: CLAUDE_CLEAN }]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'LIM-4' });
+    const stopped = await waitFor(served, 'LIM-4', 'needs_human', 2);
+    assert.equal(stopped.error.code, 'gate_budget');
+
+    const said = await runCli(env, ['say', 'app', 'LIM-4', 'Go on.']);
+    assert.equal(said.code, 0, said.stderr);
+    await waitFor(served, 'LIM-4', 'ready_for_human_review', 3);
+    assert.equal((await codexLog(env)).length, 2);
+    const gate = JSON.parse(await readFile(join(iterationDir(env, 'LIM-4', 3), 'gate.json'), 'utf8'));
+    assert.equal(gate.verdict, 'clean');
+    const job = await new JobStore(env.state).read('app', 'LIM-4');
+    assert.deepEqual([job?.gate_budget_from, job?.gate_tokens], [1000, 2000]);
   } finally {
     await stop(served);
   }

@@ -86,3 +86,14 @@ Replaces the Roles and Transport entries of 2026-11-01 and the MCP Events transp
 - **Gate amended (2026-11-04, SF-039).** The user has a ChatGPT subscription, not API access: the
   gate runs the Codex CLI (`codex exec`, read-only sandbox in the worktree) signed in with the
   ChatGPT account, with no API key and no function tools of the factory.
+
+## 2026-11-16: limits stop loops, not hard work (SF-290)
+
+The user: "When the task is important and complex, let's remove these limits, or have them hit
+only when it is real nonsense." The round limits (`SF_MAX_ITERATIONS`, `SF_GATE_MAX_ROUNDS`) count
+only review rounds that made no progress; the gate's token budget grows with the size of the
+change; the user's message at a stop of one of these three limits goes on without a setting
+changed; a ticket marked `important: true` is never stopped by these three limits, while
+everything else that stops a job (churn, disputes, escalations, the turn limit, failed tests,
+failures, usage limits, the user) still stops it. This replaces the per-ticket ceilings of the
+2026-11-04 entry.

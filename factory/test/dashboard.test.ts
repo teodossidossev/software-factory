@@ -24,6 +24,7 @@ import { buildPatch, fileChanges } from '../src/patch.js';
 import { readPins } from '../src/pins.js';
 import { saveRegistry } from '../src/registry.js';
 import { putVision, VISION_PAGE_CSP } from '../src/vision.js';
+import { PROTOTYPE_FRAME_CSP, PROTOTYPE_PAGE_CSP, prototypePage } from '../src/prototypes.js';
 import { act, CSP, fakeActions, fakeSetup, fetchRaw, openStream, type Stream, ticketRow, workspaceRow } from './support/dashboard-client.js';
 import type { DashboardDigests } from '../src/dashboard.js';
 import type { HealthCheck } from '../src/health.js';
@@ -792,9 +793,10 @@ test('dashboard end to end: a fake cycle, the stream across mark_clean (the bran
     const base = served.dashboard!;
     assert.ok(base !== undefined);
     // SF-256: sf serve passes the planner: a ticket without a planner record reads as no session
-    // (without the planner, the route would be an empty 404).
+    // (without the planner, the route would be an empty 404); sf serve passes no prototypes folder
+    // yet, so the list is empty.
     const plannerRead = await fetchRaw(new URL('api/tickets/app/T-9/planner', base));
-    assert.deepEqual([plannerRead.status, JSON.parse(plannerRead.body)], [200, { session: null }]);
+    assert.deepEqual([plannerRead.status, JSON.parse(plannerRead.body)], [200, { session: null, prototypes: [] }]);
     // The MCP endpoint, the dashboard and its remote listener (SF-126).
     const open = await listeners(served.child.pid!);
     assert.ok(open === undefined || open === 3, `listeners: ${open}`);
@@ -928,6 +930,76 @@ async function remoteDashboard(name: string, fake = fakeActions()) {
   assert.ok(dashboard.remotePort !== undefined && dashboard.remotePort !== 0 && dashboard.remotePort !== Number(dashboard.url.port));
   return { store, dashboard, token, remote: new URL(`http://127.0.0.1:${dashboard.remotePort}/d/${token}/`) };
 }
+
+test('dashboard: a ticket\'s prototype is a page of the factory\'s under its own policy, and the file goes only to its frame, through either cookie; without the folder both are an empty 404', async () => {
+  const store = await fixture('dash-prototypes');
+  const root = join(store.state, 'planning', 'prototypes');
+  await mkdir(join(root, 'app', 'APP-12'), { recursive: true });
+  const file = '<!doctype html><script>document.body.textContent = "x";</script>\n';
+  await writeFile(join(root, 'app', 'APP-12', 'x.html'), file);
+  const dashboard = await startDashboard(0, store.state, store.jobs, fakeActions(), undefined, { prototypes: root, remoteOrigins: [REMOTE], remoteLogins: ['alice@github'], remotePort: 0 });
+  try {
+    const base = dashboard.url;
+    const token = base.pathname.split('/')[2]!;
+
+    // The page, under the token: its own policy; the other security headers stay.
+    const page = await fetchRaw(new URL('prototypes/app/APP-12/x.html', base));
+    assert.deepEqual(
+      [page.status, page.headers['content-type'], page.headers['content-security-policy'], page.headers['cache-control'], page.headers['x-content-type-options'], page.headers['referrer-policy']],
+      [200, 'text/html; charset=utf-8', PROTOTYPE_PAGE_CSP, 'no-store', 'nosniff', 'no-referrer'],
+    );
+    assert.equal(page.body, prototypePage('app', 'APP-12', 'x.html'));
+    assert.ok(!page.body.includes(token), 'the frame\'s address never holds the token');
+    for (const path of ['prototypes/app/APP-12/y.html', 'prototypes/app/APP-12/X.html', 'prototypes/App/APP-12/x.html', 'prototypes/app/APP-12/x.html?x=1', 'prototypes/app/APP-12', 'prototypes/app/APP-12/x.html/y']) {
+      const other = await fetchRaw(new URL(path, base));
+      assert.deepEqual([other.status, other.body], [404, ''], path);
+    }
+    const posted = await act(base, 'prototypes/app/APP-12/x.html', {});
+    assert.deepEqual([posted.status, posted.headers.allow, posted.body], [405, 'GET', '']);
+
+    // The file, at the root with the local cookie, only to a frame's request with no query.
+    const local = `sf_dashboard_${base.port}=${cookieValue(token, 'local')}`;
+    const frameAt = (path: string): string => `http://127.0.0.1:${base.port}/prototype-frames/${path}`;
+    const frame = await fetchRaw(frameAt('app/APP-12/x.html'), { headers: { cookie: local, 'sec-fetch-dest': 'iframe' } });
+    assert.deepEqual(
+      [frame.status, frame.headers['content-type'], frame.headers['content-security-policy'], frame.headers['cache-control'], frame.headers['x-content-type-options'], frame.headers['referrer-policy'], frame.body],
+      [200, 'text/html; charset=utf-8', PROTOTYPE_FRAME_CSP, 'no-store', 'nosniff', 'no-referrer', file],
+    );
+    for (const [path, headers] of [
+      ['app/APP-12/x.html', { cookie: local }],
+      ['app/APP-12/x.html', { cookie: local, 'sec-fetch-dest': 'document' }],
+      ['app/APP-12/x.html?x=1', { cookie: local, 'sec-fetch-dest': 'iframe' }],
+      ['app/APP-12/y.html', { cookie: local, 'sec-fetch-dest': 'iframe' }],
+      ['app/APP-12/x.html', { 'sec-fetch-dest': 'iframe' }],
+    ] as const) {
+      const other = await fetchRaw(frameAt(path), { headers });
+      assert.deepEqual([other.status, other.body], [404, ''], `${path} ${JSON.stringify(headers)}`);
+    }
+
+    // Through the remote listener, with a listed login and Host and the remote cookie: the same.
+    const remote = `__Host-sf_dashboard=${cookieValue(token, 'remote')}`;
+    const far = await fetchRaw(`http://127.0.0.1:${dashboard.remotePort}/prototype-frames/app/APP-12/x.html`, { host: 'pc.tail1234.ts.net', headers: { ...LOGIN, cookie: remote, 'sec-fetch-dest': 'iframe' } });
+    assert.deepEqual([far.status, far.headers['content-security-policy'], far.body], [200, PROTOTYPE_FRAME_CSP, file]);
+  } finally {
+    await dashboard.close();
+  }
+
+  // Without the folder: both routes are an empty 404.
+  const without = await startDashboard(0, store.state, store.jobs, fakeActions());
+  try {
+    const base = without.url;
+    const token = base.pathname.split('/')[2]!;
+    const page = await fetchRaw(new URL('prototypes/app/APP-12/x.html', base));
+    assert.deepEqual([page.status, page.body], [404, '']);
+    const local = `sf_dashboard_${base.port}=${cookieValue(token, 'local')}`;
+    const frame = await fetchRaw(`http://127.0.0.1:${base.port}/prototype-frames/app/APP-12/x.html`, { headers: { cookie: local, 'sec-fetch-dest': 'iframe' } });
+    assert.deepEqual([frame.status, frame.body], [404, '']);
+    // The cookie itself works there.
+    assert.equal((await fetchRaw(`http://127.0.0.1:${base.port}/api/jobs`, { headers: { cookie: local } })).status, 200);
+  } finally {
+    await without.close();
+  }
+});
 
 test('dashboard (SF-126): the remote port serves listed logins only; its Host is a listed ts.net name, or loopback with a listed Origin; an Origin is a listed one, absent only on GET and HEAD', async () => {
   const hex = 'ab'.repeat(32);

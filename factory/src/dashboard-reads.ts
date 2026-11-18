@@ -1,10 +1,10 @@
 // The dashboard's reads: the GET route table (the page's files, the JSON payloads, a job's
 // detail, Stream, MR text, Merge request screen, Changes and iteration files, the Stats page, the
-// digests, the health checks, the coordinator's state, a workspace's vision page, the pins, the
-// planned ticket page, a ticket's planner session, a Task file, a ticket's images, a workspace's
-// merge requests) and the Task check's GET. Nothing here changes anything but the record of a
-// planner session that ended, which its read removes (src/planner-session.ts plannerSession);
-// every answer is written through the context.
+// digests, the health checks, the coordinator's state, a workspace's vision page, a ticket's
+// prototypes, the pins, the planned ticket page, a ticket's planner session, a Task file, a
+// ticket's images, a workspace's merge requests) and the Task check's GET. Nothing here changes
+// anything but the record of a planner session that ended, which its read removes
+// (src/planner-session.ts plannerSession); every answer is written through the context.
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { type CoordinatorState, readCoordinator } from './coordinator.js';
 import { type DashboardContext, iterationParam, jobKey, matchPath, noQuery, plannerSessionView } from './dashboard-context.js';
@@ -16,6 +16,7 @@ import { sendJson, statusOf } from './http.js';
 import { lineEntries, type StreamEntry, streamContext } from './job-stream.js';
 import type { Job, JobStore } from './jobs.js';
 import { readPins } from './pins.js';
+import { listPrototypes, PROTOTYPE_FRAME_CSP, PROTOTYPE_PAGE_CSP, type PrototypeEntry, prototypePage, readPrototype } from './prototypes.js';
 import { WORKSPACE_NAME_PATTERN } from './registry.js';
 import { skillsForClients, skillsView, skillText } from './skills.js';
 import { STATS_DAYS, type StatsDays } from './stats.js';
@@ -59,7 +60,7 @@ export async function coordinatorView(stateDir: string, jobs: JobStore): Promise
 // route: a GET through the route table, an empty 404 when no route matches; checkView: GET
 // api/tickets/<ws>/<ticket>/check.
 export function readHandlers(ctx: DashboardContext) {
-  const { jobs, actions, setup, checks, queue, digests, health, planner, gateOn, files, changes, history, stats, empty, body, refuseRead, jobsOf } = ctx;
+  const { jobs, actions, setup, checks, queue, digests, health, planner, prototypes, gateOn, files, changes, history, stats, empty, body, refuseRead, jobsOf } = ctx;
 
   // The GET routes, matched in order against the path: a pattern's segments must equal the path's,
   // "*" stands for any one segment and hands it to the handler; when, if given, must hold too. A
@@ -79,6 +80,11 @@ export function readHandlers(ctx: DashboardContext) {
     // A workspace's vision page (src/vision.ts), which only sf vision writes: user content, under
     // its own policy (an opaque origin that loads nothing); the security headers set before stay.
     { pattern: 'vision/*', when: noQuery, handler: ({ res, params: [workspace] }) => visionRead(res, workspace!) },
+    // A ticket's prototype (src/prototypes.ts), which the planner wrote: the factory's page that shows
+    // it in a sandboxed frame, and the file itself, only to that frame (Sec-Fetch-Dest iframe), each
+    // under its own policy; the security headers set before stay.
+    { pattern: 'prototypes/*/*/*', when: (query) => prototypes !== undefined && noQuery(query), handler: ({ res, params }) => prototypePageRead(res, params) },
+    { pattern: 'prototype-frames/*/*/*', when: (query) => prototypes !== undefined && noQuery(query), handler: ({ req, res, params }) => prototypeFrameRead(req, res, params) },
     // The installed skills, the agent roles' choice and the coordinator's (sf skills; without the
     // coordinator checkout's path), and one skill's SKILL.md, read from the skills' source folder (a
     // name that is not an installed skill's is refused).
@@ -116,6 +122,23 @@ export function readHandlers(ctx: DashboardContext) {
       return;
     }
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': VISION_PAGE_CSP }).end(page);
+  }
+
+  async function prototypePageRead(res: ServerResponse, [workspace, ticket, name]: string[]): Promise<void> {
+    if (jobKey(workspace, ticket) === undefined || (await readPrototype(prototypes!, workspace!, ticket!, name!)) === undefined) {
+      empty(res, 404);
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': PROTOTYPE_PAGE_CSP }).end(prototypePage(workspace!, ticket!, name!));
+  }
+
+  async function prototypeFrameRead(req: IncomingMessage, res: ServerResponse, [workspace, ticket, name]: string[]): Promise<void> {
+    const bytes = req.headers['sec-fetch-dest'] !== 'iframe' || jobKey(workspace, ticket) === undefined ? undefined : await readPrototype(prototypes!, workspace!, ticket!, name!);
+    if (bytes === undefined) {
+      empty(res, 404);
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-security-policy': PROTOTYPE_FRAME_CSP }).end(bytes);
   }
 
   async function hostRead(res: ServerResponse, found: Promise<unknown>): Promise<void> {
@@ -312,8 +335,9 @@ export function readHandlers(ctx: DashboardContext) {
   // plan in plain words, the last check (null without the Task checks), the plan-check rounds of
   // every version (check_rounds, failed ones included; check_usd, the sum of the known costs;
   // check_usd_complete, false when a cost is unknown; all-time), the history, newest first,
-  // queue, always null, and the planner session's view (null when none runs or without the
-  // planner). A ticket that is not in the tickets list is an empty 404.
+  // queue, always null, the planner session's view (null when none runs or without the planner)
+  // and the ticket's prototypes (listPrototypes', [] without the prototypes folder). A ticket that
+  // is not in the tickets list is an empty 404.
   async function ticketPage(res: ServerResponse, [workspace, ticket]: string[], query: URLSearchParams): Promise<void> {
     const key = jobKey(workspace, ticket);
     const row = key === undefined || [...query.keys()].length > 0 ? undefined : (await setup.tickets()).find((entry) => entry.workspace === key[0] && entry.ticket === key[1]);
@@ -357,19 +381,29 @@ export function readHandlers(ctx: DashboardContext) {
       history: await history.timeline(...key, { sha256: file.sha256, mtime: file.mtime }),
       queue: null,
       planner_session: plannerSession,
+      prototypes: await prototypesOf(key),
     });
   }
 
-  // The ticket's planner session as it runs now: {session: its view, or null}, read through
-  // DashboardPlanner.session, which removes the record of one that ended; names that are not a
-  // workspace's and a ticket's are an empty 404.
+  // A ticket's prototypes as its payloads list them: [] without the prototypes folder.
+  async function prototypesOf([workspace, ticket]: [string, string]): Promise<PrototypeEntry[]> {
+    return prototypes === undefined ? [] : listPrototypes(prototypes, workspace, ticket);
+  }
+
+  // The ticket's planner session as it runs now, and the ticket's prototypes: {session: its view,
+  // or null, prototypes: listPrototypes'} ([] without the prototypes folder), the session read
+  // through DashboardPlanner.session, which removes the record of one that ended; names that are
+  // not a workspace's and a ticket's are an empty 404.
   async function plannerRead(res: ServerResponse, [workspace, ticket]: string[]): Promise<void> {
     const key = jobKey(workspace, ticket);
     if (key === undefined) {
       empty(res, 404);
       return;
     }
-    sendJson(res, 200, { session: plannerSessionView(await planner!.session(...key)) });
+    sendJson(res, 200, {
+      session: plannerSessionView(await planner!.session(...key)),
+      prototypes: await prototypesOf(key),
+    });
   }
 
   // GET api/tickets/<ws>/<ticket>/task[?archived=1]: the Task file through the Task file reader,

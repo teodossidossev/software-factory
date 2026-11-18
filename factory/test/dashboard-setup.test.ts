@@ -7,7 +7,7 @@
 // type by the magic bytes, the limits, the names and the removal through the real Setup, the image
 // served with its type, the guard, the payload's attachments and the first message that names them.
 import assert from 'node:assert/strict';
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { MAX_ATTACHMENT_BYTES } from '../src/attachments.js';
@@ -311,14 +311,14 @@ test('dashboard ticket page (SF-081): the page payload of a skeleton and of a wr
   await withDashboard('dash-ticket-page', fake, async (dashboard) => {
     const base = dashboard.url;
     const skeleton = JSON.parse((await fetchRaw(new URL('api/tickets/app/T-1/page', base))).body);
-    assert.deepEqual(Object.keys(skeleton), ['ticket', 'task', 'plan', 'check', 'check_rounds', 'check_usd', 'check_usd_complete', 'history', 'queue', 'planner_session']);
+    assert.deepEqual(Object.keys(skeleton), ['ticket', 'task', 'plan', 'check', 'check_rounds', 'check_usd', 'check_usd_complete', 'history', 'queue', 'planner_session', 'prototypes']);
     assert.deepEqual([skeleton.ticket.ticket, skeleton.ticket.draft, skeleton.ticket.conversation.message], ['T-1', true, ticketConversation('app', 'T-1')]);
     assert.deepEqual(skeleton.task, { text: draftContent('T-1', 'Skeleton', 'main'), sha256: taskSha256(draftContent('T-1', 'Skeleton', 'main')) });
     assert.deepEqual(skeleton.plan, { starts_from: 'main', files: [], scoped: false, waits_for: [] });
     // Without the Task checks there is no check; the queue is SF-071's; nothing recorded, the
     // fixture's job of T-1 read from the state directory. Without the dashboard's planner there is
-    // no planner session.
-    assert.deepEqual([skeleton.check, skeleton.queue, skeleton.planner_session], [null, null, null]);
+    // no planner session, and without its prototypes folder no prototypes.
+    assert.deepEqual([skeleton.check, skeleton.queue, skeleton.planner_session, skeleton.prototypes], [null, null, null, []]);
     assert.deepEqual(skeleton.history.map((entry: { kind: string; text: string }) => [entry.kind, entry.text]), [
       ['started', 'Started as a job (now: awaiting_review)'], ['note', 'Older steps were not recorded; they are known only from checks and jobs.'],
     ]);
@@ -407,7 +407,7 @@ test('dashboard ticket planner: GET reads the ticket\'s planner session, POST st
     const view = { name: 'Planner app T-5', started_at: '2026-11-16T12:03:00.000Z', link: null };
     // DP-1: none runs.
     const none = await read();
-    assert.deepEqual([none.status, none.headers['content-type'], JSON.parse(none.body)], [200, 'application/json; charset=utf-8', { session: null }]);
+    assert.deepEqual([none.status, none.headers['content-type'], JSON.parse(none.body)], [200, 'application/json; charset=utf-8', { session: null, prototypes: [] }]);
     assert.deepEqual(calls, [['session', 'app', 'T-5']]);
     calls.length = 0;
 
@@ -445,12 +445,13 @@ test('dashboard ticket planner: GET reads the ticket\'s planner session, POST st
     assert.deepEqual(result(await act(base, path, {})), { started: false, session: view });
     await stream.next('tickets');
     assert.deepEqual(calls, [['start', 'app', 'T-5'], ['start', 'app', 'T-5']]);
-    assert.deepEqual(JSON.parse((await read()).body), { session: view });
+    assert.deepEqual(JSON.parse((await read()).body), { session: view, prototypes: [] });
     sessions.get('app/T-5')!.link = 'https://claude.ai/code/session_01Ab';
     const linked = { ...view, link: 'https://claude.ai/code/session_01Ab' };
-    assert.deepEqual(JSON.parse((await read()).body), { session: linked });
+    assert.deepEqual(JSON.parse((await read()).body), { session: linked, prototypes: [] });
     const page = JSON.parse((await fetchRaw(new URL('api/tickets/app/T-5/page', base))).body);
-    assert.equal(Object.keys(page).at(-1), 'planner_session');
+    assert.deepEqual(Object.keys(page).slice(-2), ['planner_session', 'prototypes']);
+    assert.deepEqual(page.prototypes, []);
     assert.deepEqual(page.planner_session, linked);
 
     // DP-5: the refusals with their statuses.
@@ -473,9 +474,40 @@ test('dashboard ticket planner: GET reads the ticket\'s planner session, POST st
     assert.deepEqual(result(await act(base, 'api/tickets/app/T-9/planner/stop', {})), { stopped: null });
     await stream.next('tickets');
     assert.deepEqual(calls, [['stop', 'app', 'T-5'], ['stop', 'app', 'T-5'], ['stop', 'app', 'T-9']]);
-    assert.deepEqual(JSON.parse((await read()).body), { session: null });
+    assert.deepEqual(JSON.parse((await read()).body), { session: null, prototypes: [] });
     assert.equal(JSON.parse((await fetchRaw(new URL('api/tickets/app/T-5/page', base))).body).planner_session, null);
     stream.close();
+  } finally {
+    await dashboard.close();
+  }
+});
+
+test('dashboard ticket prototypes: with the prototypes folder, the page payload and the planner GET list the ticket\'s prototypes newest first, as the payload\'s last key', async () => {
+  const store = await fixture('dash-prototypes-list');
+  const setup = fakeSetup([workspaceRow('app')], [ticketRow('app', 'T-5')]);
+  setup.texts.set('app/T-5', draftContent('T-5', 'Five', 'main'));
+  const planner: DashboardPlanner = {
+    start: async () => Promise.reject(new Error('not started here')),
+    session: async () => undefined,
+    stop: async () => undefined,
+  };
+  const root = join(store.state, 'planning', 'prototypes');
+  const dir = join(root, 'app', 'T-5');
+  await mkdir(dir, { recursive: true });
+  const older = new Date('2026-11-18T09:00:00.000Z');
+  const newer = new Date('2026-11-18T10:00:00.000Z');
+  for (const [name, time] of [['export-states.html', older], ['layout.html', newer]] as const) {
+    await writeFile(join(dir, name), `<p>${name}</p>`);
+    await utimes(join(dir, name), time, time);
+  }
+  const listed = [{ name: 'layout.html', modified: newer.toISOString() }, { name: 'export-states.html', modified: older.toISOString() }];
+  const dashboard = await startDashboard(0, store.state, store.jobs, fakeActions(), setup, { planner, prototypes: root });
+  try {
+    const base = dashboard.url;
+    const page = JSON.parse((await fetchRaw(new URL('api/tickets/app/T-5/page', base))).body);
+    assert.deepEqual(Object.keys(page).slice(-2), ['planner_session', 'prototypes']);
+    assert.deepEqual(page.prototypes, listed);
+    assert.deepEqual(JSON.parse((await fetchRaw(new URL('api/tickets/app/T-5/planner', base))).body), { session: null, prototypes: listed });
   } finally {
     await dashboard.close();
   }
@@ -823,7 +855,7 @@ test('dashboard setup end to end: sf workspace auto-planner switches it, and the
     const claude = result(await act(base, 'api/tickets', { workspace: 'app', ticket: 'T-1', title: 'One', request: 'Plan it.', owner: 'claude_code' }));
     assert.deepEqual(claude, { workspace: 'app', ticket: 'T-1', path: '.software-factory/T-1.md', base: 'main', auto_planner: true });
     const session = await fetchRaw(new URL('api/tickets/app/T-1/planner', base));
-    assert.deepEqual([session.status, JSON.parse(session.body)], [200, { session: null }]);
+    assert.deepEqual([session.status, JSON.parse(session.body)], [200, { session: null, prototypes: [] }]);
     const chatgpt = result(await act(base, 'api/tickets', { workspace: 'app', ticket: 'T-2', title: 'Two', request: 'Plan it.', owner: 'chatgpt' }));
     assert.deepEqual(chatgpt, { workspace: 'app', ticket: 'T-2', path: '.software-factory/T-2.md', base: 'main', auto_planner: true });
 
@@ -835,7 +867,7 @@ test('dashboard setup end to end: sf workspace auto-planner switches it, and the
     assert.doesNotMatch(await listed(), /auto-planner:/);
     const after = result(await act(base, 'api/tickets', { workspace: 'app', ticket: 'T-3', title: 'Three', request: 'Plan it.', owner: 'claude_code' }));
     assert.deepEqual(after, { workspace: 'app', ticket: 'T-3', path: '.software-factory/T-3.md', base: 'main' });
-    assert.deepEqual(JSON.parse((await fetchRaw(new URL('api/tickets/app/T-3/planner', base))).body), { session: null });
+    assert.deepEqual(JSON.parse((await fetchRaw(new URL('api/tickets/app/T-3/planner', base))).body), { session: null, prototypes: [] });
   } finally {
     await stop(served);
   }

@@ -27,8 +27,8 @@ export interface DashboardCookie {
 
 // Everything the dashboard's modules share for as long as it runs, built once by startDashboard.
 // The options: stateDir, gateOn (SF_GATE), remoteOrigins and onWorkspacesChanged; jobs, actions,
-// setup, checks, queue, digests, health and planner as startDashboard got them (the last five
-// undefined without). tokenText and cookies: the token and the cookie of a token visit on each
+// setup, checks, queue, digests, health, planner and prototypes as startDashboard got them (the
+// last six undefined without). tokenText and cookies: the token and the cookie of a token visit on each
 // side (the local name set once the listener has its port). files: the page's static files and
 // scripts by path. streams: the open event streams. toolCalls, changes, history and stats: the
 // readers with their caches. send, empty, body and refuseRead: the answers every module writes. jobsOf: the
@@ -47,6 +47,7 @@ export interface DashboardContext {
   readonly digests: DashboardDigests | undefined;
   readonly health: DashboardHealth | undefined;
   readonly planner: DashboardPlanner | undefined;
+  readonly prototypes: string | undefined;
   readonly tokenText: string;
   readonly cookies: { local: DashboardCookie; remote: DashboardCookie };
   readonly files: ReadonlyMap<string, { body: Buffer; type: string }>;

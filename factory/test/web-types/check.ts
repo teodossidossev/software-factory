@@ -18,6 +18,7 @@ import type * as Dashboard from '../../src/dashboard.js';
 import type * as DashboardReads from '../../src/dashboard-reads.js';
 import type * as JobStream from '../../src/job-stream.js';
 import type * as Pins from '../../src/pins.js';
+import type * as Prototypes from '../../src/prototypes.js';
 import type * as ReviewJob from '../../src/review-job.js';
 import type * as SkillRoles from '../../src/skill-roles.js';
 import type * as Skills from '../../src/skills.js';
@@ -159,6 +160,7 @@ type ServerTicketPage = {
   history: Awaited<ReturnType<TicketHistory.TicketHistory['timeline']>>;
   queue: null;
   planner_session: ReturnType<typeof Dashboard.plannerSessionView>;
+  prototypes: Prototypes.PrototypeEntry[];
 };
 
 // --- The checks: one per page type, named after it.
@@ -220,6 +222,7 @@ export interface Checks {
   TicketPlan: Copy<TicketPlan, ServerPlan>;
   PlanDependency: Copy<PlanDependency, ServerPlan['waits_for'][number]>;
   PlannerSessionView: Copy<PlannerSessionView, NonNullable<ReturnType<typeof Dashboard.plannerSessionView>>>;
+  PrototypeEntry: Copy<PrototypeEntry, Prototypes.PrototypeEntry>;
   DigestList: Copy<DigestList, ServerDigests>;
   DigestSummary: Copy<DigestSummary, ServerDigests['digests'][number]>;
   DigestRecord: Copy<DigestRecord, ServerDigest>;

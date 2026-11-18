@@ -16,10 +16,11 @@
 // screen reads the file lists and the file versions of the iterations (src/changes.ts), read-only.
 // The planned ticket page reads a ticket's Task file, its plan in plain words, its check, its
 // history and its planner session in one payload, and saves the Task file (only over the version
-// it read); the planner session is read, started and ended through DashboardPlanner. A ticket's
-// images are uploaded as raw bytes, served and removed through the attachments module's rules
-// (src/attachments.ts). The pins of the page's point mode are read and written through the pins
-// store (src/pins.ts), the same as sf pins.
+// it read); the planner session is read, started and ended through DashboardPlanner; a ticket's
+// prototypes are listed there and shown read-only, each in a sandboxed frame of a page of the
+// factory's (src/prototypes.ts). A ticket's images are uploaded as raw bytes, served and removed
+// through the attachments module's rules (src/attachments.ts). The pins of the page's point mode
+// are read and written through the pins store (src/pins.ts), the same as sf pins.
 // This module keeps the listeners (ports, origins, logins, token and cookies, the request's
 // method and target rule in handle) and builds one DashboardContext (src/dashboard-context.ts)
 // for the rest: the payloads (src/dashboard-payloads.ts), the change feed
@@ -325,11 +326,14 @@ function printableLogin(login: string): string {
 // two ports are checked here too (invalid_config), for a caller that did not check them; health:
 // the health checks, none without (GET api/health answers 404, the stream sends no health
 // event); planner: the planned ticket page's planner session, none without (the planner routes
-// answer an empty 404 and the page payload's planner_session is null).
+// answer an empty 404 and the page payload's planner_session is null); prototypes: the planners'
+// prototypes folder (src/prototypes.ts prototypesRoot), none without (the prototype routes answer
+// an empty 404 and a ticket's lists are empty).
 export async function startDashboard(
   port: number, stateDir: string, jobs: JobStore, actions: DashboardActions, setup: DashboardSetup = NO_SETUP,
-  { gate: gateOn = true, checks, queue, onWorkspacesChanged, digests, health, planner, remoteOrigins = [], remoteLogins = [], remotePort = DEFAULT_DASHBOARD_REMOTE_PORT }: {
+  { gate: gateOn = true, checks, queue, onWorkspacesChanged, digests, health, planner, prototypes, remoteOrigins = [], remoteLogins = [], remotePort = DEFAULT_DASHBOARD_REMOTE_PORT }: {
     gate?: boolean; checks?: DashboardChecks; queue?: DashboardQueue; onWorkspacesChanged?: () => void; digests?: DashboardDigests; health?: DashboardHealth; planner?: DashboardPlanner;
+    prototypes?: string;
     remoteOrigins?: readonly string[]; remoteLogins?: readonly string[]; remotePort?: number;
   } = {},
 ): Promise<RunningDashboard> {
@@ -424,7 +428,7 @@ export async function startDashboard(
 
   // origin, the exact origin of the page, is known once the listener has its port.
   const ctx: DashboardContext = {
-    stateDir, gateOn, remoteOrigins, onWorkspacesChanged, jobs, actions, setup, checks, queue, digests, health, planner, tokenText, cookies, files, streams,
+    stateDir, gateOn, remoteOrigins, onWorkspacesChanged, jobs, actions, setup, checks, queue, digests, health, planner, prototypes, tokenText, cookies, files, streams,
     toolCalls, changes, history, stats, send, empty, body, refuseRead, jobsOf, origin: '',
   };
   const feed = changeFeed(ctx);

@@ -520,6 +520,8 @@ interface TicketPage {
   history: Array<{ ts: string | null; text: string }>;
   // The ticket's planner session while one runs, else null.
   planner_session: PlannerSessionView | null;
+  // The ticket's prototypes, newest first ([] without any).
+  prototypes: PrototypeEntry[];
 }
 // The plan in plain words: src/dashboard.ts planOf. The page updates waits_for's states from the
 // tickets payload.
@@ -541,6 +543,11 @@ interface PlannerSessionView {
   name: string;
   started_at: string;
   link: string | null;
+}
+// One of a ticket's prototypes as the planned ticket page lists it: src/prototypes.ts PrototypeEntry.
+interface PrototypeEntry {
+  name: string;
+  modified: string;
 }
 
 // The morning digests, api/digests: src/digest-run.ts Digests.list, newest first.

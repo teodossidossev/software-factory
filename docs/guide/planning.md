@@ -156,7 +156,9 @@ own terminal, not through an agent's session, whose transcript would keep the UR
 `sf planner setup <workspace>` does this for a planning copy: a clone of the workspace's repository
 in `~/planning/<workspace>` (`SF_PLANNING_DIR`), with the server registered for that folder only,
 the factory's planning skill and `.claude/planning-copy.md` (README, The planning copy). Run
-`sf planner trust <workspace>` once and accept Claude Code's trust dialog there. The copy is
+`sf planner trust <workspace>` once and accept Claude Code's trust dialog there. With
+`SF_PLANNER_TRUST=auto` in the factory's configuration ([Configuration](configuration.md)), `sf
+planner setup` accepts it for you. The copy is
 read-only to the planner: its shell commands run in Claude Code's sandbox, and the factory's
 secrets are denied to every tool. The planner writes only its prototypes, into
 `<planning folder>/prototypes/<workspace>/<ticket>/`, and publishes none: Claude Code's artifacts
@@ -228,7 +230,7 @@ is none. To use it by hand:
    repository's code and its `CLAUDE.md` files, never its Claude Code configuration: what it tracks
    under `.claude/` folders, and its `.mcp.json`, stay out, so none of its hooks, skills, agents or
    MCP servers run. Then run `sf planner trust my-app` once and accept Claude Code's trust dialog
-   there.
+   there. (With `SF_PLANNER_TRUST=auto`, the setup has accepted it for you.)
 2. Start Claude Code there and send `/planning-tasks workspace my-app, ticket APP-12`, followed by
    your words, or the first message the ticket's page offers.
 
@@ -236,7 +238,8 @@ Or let the factory start that session: `sf planner start my-app APP-12` starts C
 copy with Remote Control, as "Planner my-app APP-12", and sends it `/planning-tasks workspace
 my-app, ticket APP-12`; open it in the Claude app or on claude.ai/code. One session runs per ticket,
 it keeps running when `sf serve` restarts, and `sf planner stop my-app APP-12` ends it. The copy
-must be trusted first (step 1), and its planning tools need `sf serve`.
+must be trusted first (step 1; with `SF_PLANNER_TRUST=auto`, start accepts the dialog itself), and
+its planning tools need `sf serve`.
 
 ## 3. New ticket on the dashboard, then plan on its page
 

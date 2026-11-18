@@ -261,7 +261,8 @@ The factory itself, as you: `git fetch`, the worktrees, the commit and rebase at
 the merge request on the Git host, the hand-over to your checkout, the notifications, and
 `sf planner setup`: the copy's clone and fetch, and `claude mcp add` for the copy's folder; and
 `sf planner start`: the planner's Claude Code in the copy, whose shell commands run in Claude Code's
-own sandbox. None of these
+own sandbox; and, with `SF_PLANNER_TRUST=auto`, in both commands, Claude Code in the copy for its
+trust dialog alone, ended once the answer is read. None of these
 are open to an agent; the agent only writes files in its worktree, and the factory decides what
 to commit. It commits only what the reviewers saw: the tree it stages must be the one the reviewed
 iteration recorded when it was published; otherwise nothing is committed, and the worktree goes

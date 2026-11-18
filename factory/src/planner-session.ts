@@ -6,8 +6,11 @@
 // Start takes the ticket's lock and answers with the session that runs, if any; else it checks, in
 // this order, the workspace, the copy set up (.claude/planning-copy.md), none of the repository's
 // Claude Code configuration in the copy's working tree, and the copy's own entry trusted in Claude
-// Code's global config (read, never written), before it spawns anything. It never refreshes the
-// copy. A session whose record cannot be written is ended before the lock is released.
+// Code's global config (read, never written), before it spawns anything. An untrusted copy is
+// refused with SF_PLANNER_TRUST=ask (the default: the user runs sf planner trust); with auto, start
+// first answers Claude Code's trust dialog for the copy itself (acceptTrustDialog), under the lock,
+// and refuses only when that fails. It never refreshes the copy. A session whose record cannot be
+// written is ended before the lock is released.
 import { type ChildProcess, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { closeSync, openSync, readFileSync } from 'node:fs';
@@ -16,7 +19,7 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { writeFileAtomic } from './atomic.js';
 import { checkJob, checkName, UsageError } from './commands.js';
-import { planningDir } from './config.js';
+import { planningDir, plannerTrustSetting } from './config.js';
 import { FactoryError } from './errors.js';
 import { localTime } from './local-time.js';
 import { type HeldLock, ownerAlive, startTime, tryLock } from './pid-lock.js';
@@ -29,6 +32,7 @@ import { TICKET_PATTERN } from './task-file.js';
 
 export const START_CHECK_MS = 3_000;   // how long start watches a new session
 export const STOP_GRACE_MS = 10_000;   // how long stop waits after SIGTERM
+export const TRUST_DIALOG_MS = 30_000; // from the trust run's spawn to the saved answer
 
 export interface SessionDeps {
   env: NodeJS.ProcessEnv;   // SF_PLANNING_DIR, HOME, CLAUDE_CONFIG_DIR, and what the session's environment keeps
@@ -57,6 +61,13 @@ const POLL_MS = 100;
 const KILL_WAIT_MS = 2_000;
 // How long stop waits for the ticket's lock beyond a start's watch (its checks and the spawn).
 const LOCK_WAIT_MORE_MS = 10_000;
+// The trust run: how long after the dialog showed Down is sent, how much output the match reads,
+// how long after Down Claude Code has to write its selection mark again, and the keys.
+const TRUST_SETTLE_MS = 500;
+const TRUST_OUTPUT_CHARS = 64 * 1024;
+const TRUST_MARK_MS = 2_000;
+const DOWN = '\x1b[B';
+const MARK = '❯';
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -140,7 +151,10 @@ function writeRecord(file: string, session: PlannerSession): Promise<void> {
   return writeFileAtomic(file, Buffer.from(`${JSON.stringify({ workspace, ticket, name, id, pid, pid_start, started_at, link }, null, 2)}\n`), 0o600);
 }
 
-const alive = (session: PlannerSession): boolean => ownerAlive({ pid: session.pid, start: session.pid_start });
+// A session's process, or the trust run's script.
+type ProcessRef = Pick<PlannerSession, 'pid' | 'pid_start'>;
+
+const alive = (session: ProcessRef): boolean => ownerAlive({ pid: session.pid, start: session.pid_start });
 
 // The ticket's record while its process lives. A file that is no live record is removed: at once
 // with locked (the caller holds the ticket's lock), else only when one try takes the lock and the
@@ -209,6 +223,7 @@ const startFailed = (workspace: string, ticket: string, why: string): FactoryErr
 // Starts the ticket's session, or answers with the one that runs (started false).
 export async function startPlanner(workspace: string, ticket: string, deps: SessionDeps): Promise<{ started: boolean; session: PlannerSession }> {
   const [w, t] = checkJob([workspace, ticket], 'planner start');
+  const trust = plannerTrustSetting(deps.env);
   const file = sessionFile(deps.stateDir, w, t);
   const taken = await tryLock(lockFile(file));
   if ('owner' in taken) {
@@ -221,7 +236,13 @@ export async function startPlanner(workspace: string, ticket: string, deps: Sess
     }
     const copy = await safeCopy(w, deps, 'start the planner again');
     if (!(await copyTrusted(copy, deps.env))) {
-      throw new FactoryError('planning_copy_untrusted', `Claude Code does not trust the planning copy of ${w} yet: run sf planner trust ${w}, accept its trust dialog, then start the planner again.`);
+      if (trust === 'ask') {
+        throw new FactoryError('planning_copy_untrusted', `Claude Code does not trust the planning copy of ${w} yet: run sf planner trust ${w}, accept its trust dialog, then start the planner again.`);
+      }
+      const why = await acceptTrustDialog(w, deps.env);
+      if (why !== undefined) {
+        throw new FactoryError('planning_copy_untrusted', `Claude Code does not trust the planning copy of ${w} yet, and the factory could not accept its trust dialog: ${why}. Run sf planner trust ${w}, accept its trust dialog, then start the planner again.`);
+      }
     }
     return { started: true, session: await launch(w, t, copy, file, deps.env) };
   } finally {
@@ -275,6 +296,140 @@ export async function trustPlanner(workspace: string, deps: SessionDeps & { prin
     throw new FactoryError('planning_copy_untrusted', `Claude Code still does not trust the planning copy of ${w}: its trust dialog was not accepted. Run sf planner trust ${w} again.`);
   }
   deps.print(`Claude Code trusts the planning copy of ${w} now: start its planner with sf planner start ${w} <ticket>.`);
+}
+
+// Claude Code's trust dialog is on the screen: the output, escape sequences removed, holds its
+// accepting choice "Yes, I trust this folder" in its letters alone.
+export function trustDialogShown(output: string): boolean {
+  const letters = output
+    .replace(/\x1b\][\s\S]*?(?:\x07|\x1b\\)/g, '')   // OSC, up to BEL or ESC \
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')         // CSI
+    .replace(/\x1b[\s\S]?/g, '')                     // any other ESC and the character after it
+    .toLowerCase()
+    .replace(/[^a-z]/g, '');
+  return letters.includes('yesitrustthisfolder');
+}
+
+// SF_PLANNER_TRUST=auto: Claude Code in the workspace's planning copy, in a terminal of its own
+// (script), its trust dialog recognised on the screen, its selection moved from the default
+// "No, exit" to "Yes, I trust this folder" with Down and, once Claude Code has written its
+// selection mark again, confirmed with Enter; the answer read back with copyTrusted. Claude Code is
+// always ended before it returns. undefined when Claude Code trusts the copy, else why not. Never
+// writes Claude Code's config; its output is matched and dropped, never printed or kept.
+export async function acceptTrustDialog(workspace: string, env: NodeJS.ProcessEnv, limitMs = TRUST_DIALOG_MS): Promise<string | undefined> {
+  const copy = join(planningDir(env), checkName(workspace));
+  const pointers = await lstat(join(copy, '.claude', 'planning-copy.md')).catch(() => undefined);
+  if (pointers === undefined || !pointers.isFile()) {
+    return 'the copy is not set up';
+  }
+  const paths = await repositoryConfigIn(copy);
+  if (paths.length > 0) {
+    return `${paths[0]} is in the copy, and Claude Code would load it`;
+  }
+
+  const child = spawn('script', ['-qfec', 'exec claude', '/dev/null'], {
+    cwd: copy, env: { ...baseEnvironment(env), TERM: 'xterm-256color' }, stdio: ['pipe', 'pipe', 'ignore'],
+  });
+  const deadline = Date.now() + limitMs;
+  child.stdin.on('error', () => undefined); // the process gone: nothing more to answer
+  let ended = false;
+  let endedAt = 0;
+  // Before any await, so an early exit is not missed.
+  const exited = new Promise<void>((resolve) => child.once('exit', () => {
+    ended = true;
+    endedAt = Date.now();
+    resolve();
+  }));
+  try {
+    await new Promise<void>((resolve, reject) => {
+      child.once('spawn', resolve);
+      child.on('error', reject);
+    });
+  } catch (error) {
+    child.stdout.destroy();
+    child.stdin.destroy();
+    return `script could not run (${(error as NodeJS.ErrnoException).code})`;
+  }
+  const run: ProcessRef ={ pid: child.pid!, pid_start: startTime(child.pid!) };
+
+  // The output: kept (its tail) until the dialog shows, then only what follows Down, until it holds
+  // the mark; each chunk wakes the step that waits for it.
+  let kept = '';
+  let shown = false;
+  let afterDown: string | undefined;
+  let wake = (): void => undefined;
+  child.stdout.setEncoding('utf8');
+  child.stdout.on('data', (chunk: string) => {
+    if (!shown) {
+      kept = `${kept}${chunk}`.slice(-TRUST_OUTPUT_CHARS);
+      shown = trustDialogShown(kept);
+      if (shown) {
+        kept = '';
+      }
+    } else if (afterDown !== undefined && !afterDown.includes(MARK)) {
+      afterDown += chunk;
+    }
+    wake();
+  });
+  // Until ms passed, script exited or (output true) output arrived.
+  const pause = (ms: number, output: boolean): Promise<void> => {
+    let timer: NodeJS.Timeout | undefined;
+    const outputCame = output ? new Promise<void>((resolve) => (wake = resolve)) : new Promise<void>(() => undefined);
+    return Promise.race([exited, outputCame, new Promise<void>((resolve) => (timer = setTimeout(resolve, Math.max(0, ms))))]).finally(() => {
+      clearTimeout(timer);
+      wake = () => undefined;
+    });
+  };
+  const running = (): boolean => !ended && Date.now() < deadline;
+
+  let entered = false;
+  // Read when the wait ends, before Claude Code is ended: whether script exited of itself before
+  // the deadline, and whether the dialog showed in time (output read while it is ended does not count).
+  let endedEarly = false;
+  let shownInTime = false;
+  try {
+    while (!shown && running()) {
+      await pause(deadline - Date.now(), true);
+    }
+    if (shown && running()) {
+      const settled = Math.min(Date.now() + TRUST_SETTLE_MS, deadline);
+      while (!ended && Date.now() < settled) {
+        await pause(settled - Date.now(), false);
+      }
+    }
+    if (shown && running()) {
+      afterDown = '';
+      child.stdin.write(DOWN);
+      const moved = Math.min(Date.now() + TRUST_MARK_MS, deadline);
+      while (!afterDown.includes(MARK) && !ended && Date.now() < moved) {
+        await pause(moved - Date.now(), true);
+      }
+      if (afterDown.includes(MARK) && running()) {
+        child.stdin.write('\r');
+        entered = true;
+        while (running() && !(await copyTrusted(copy, env))) {
+          await pause(Math.min(POLL_MS, deadline - Date.now()), false);
+        }
+      }
+    }
+  } finally {
+    endedEarly = ended && endedAt < deadline;
+    shownInTime = shown;
+    if (!ended) {
+      await endSession(run);
+      await exited;
+    }
+    child.stdin.destroy();
+    child.stdout.destroy();
+  }
+
+  if (await copyTrusted(copy, env)) {
+    return undefined;
+  }
+  if (!shownInTime) {
+    return endedEarly ? 'Claude Code ended before the dialog showed' : `the dialog did not show within ${limitMs / 1000} s`;
+  }
+  return entered ? 'Claude Code did not save the answer' : 'the selection did not move to "Yes, I trust this folder"';
 }
 
 // The session's input: a FIFO beside the record, opened for reading and writing (the open never
@@ -381,7 +536,7 @@ function zombie(pid: number): boolean {
 }
 
 // Waits, polling every POLL_MS, at most ms, until the session ended; whether it did.
-async function waitEnded(session: PlannerSession, ms: number): Promise<boolean> {
+async function waitEnded(session: ProcessRef,ms: number): Promise<boolean> {
   const deadline = Date.now() + ms;
   for (;;) {
     if (!alive(session) || zombie(session.pid)) {
@@ -418,7 +573,7 @@ export async function stopPlanner(workspace: string, ticket: string, deps: Sessi
 
 // SIGTERM to the session's Claude Code (SIGKILL to script when it has no child), SIGKILL to both
 // when it still runs after STOP_GRACE_MS; then at most KILL_WAIT_MS more.
-async function endSession(session: PlannerSession): Promise<void> {
+async function endSession(session: ProcessRef): Promise<void> {
   const child = firstChild(session.pid);
   if (child !== undefined) {
     signal(child, 'SIGTERM');

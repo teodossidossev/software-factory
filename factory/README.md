@@ -539,7 +539,11 @@ at any time and refreshes the copy in place. The steps, in order:
    settings, the hooks, and
    what to do next: let Claude Code trust the copy once, accepting its folder trust dialog, then
    `/planning-tasks workspace <workspace>, ticket <ticket>`. The factory never accepts that dialog
-   for you. `sf planner trust <workspace>` opens Claude Code there for it; the last lines name that
+   for you unless you set `SF_PLANNER_TRUST=auto`: then the setup accepts it here, for a copy
+   Claude Code does not trust yet (section The planner session), and the last lines say `Trust: the
+   factory accepted Claude Code's trust dialog for this folder (SF_PLANNER_TRUST=auto)`, or, when it
+   could not, a warning with the reason and the line that names `sf planner trust`.
+   `sf planner trust <workspace>` opens Claude Code there for it; the last lines name that
    command, or say `Trust: Claude Code trusts this folder already`.
 
 Every error and warning names paths as `<copy>`, `<planning folder>`, `<checkout>`, `<origin>`,
@@ -565,8 +569,8 @@ naming the first path; the copy trusted, its own entry in `projects` of Claude C
 (`$CLAUDE_CONFIG_DIR/.claude.json`, else `~/.claude.json`), by its path or its real path, with
 `hasTrustDialogAccepted: true` (a trusted parent folder does not count): `planning_copy_untrusted`.
 The factory reads that file and never writes it: you accept the trust dialog yourself, once
-(`sf planner trust`, below; the refusal names it). Start never refreshes the copy; `sf planner
-setup` does.
+(`sf planner trust`, below; the refusal names it), unless you set `SF_PLANNER_TRUST=auto` (below).
+Start never refreshes the copy; `sf planner setup` does.
 
 **The session** is `script -qfec '<command>' /dev/null`, run in the copy: a terminal of its own for
 Claude Code, whose input is an open FIFO that nothing writes (an input that ends would reach Claude
@@ -618,7 +622,8 @@ ends the session at once, or the session ended within 3 s), and
 `sf planner trust <workspace>` is the one-time step before the first start: it checks the copy as
 start does (set up, none of the repository's Claude Code configuration), then runs `claude` in the
 copy in your terminal, without the factory's tokens and settings, and waits until you leave it.
-Accept the trust dialog, then `/exit`. The factory never accepts the dialog for you: it only reads
+Accept the trust dialog, then `/exit`. With the default `SF_PLANNER_TRUST=ask` the factory never
+accepts the dialog for you: it only reads
 Claude Code's answer, `hasTrustDialogAccepted` of the copy in Claude Code's global config, before (a
 trusted copy opens nothing) and after (still not trusted: `planning_copy_untrusted`). Ctrl+C goes to
 Claude Code while it runs. `sf planner start` refuses an untrusted copy with a message that names
@@ -627,6 +632,30 @@ this command. Its error codes: `planning_copy_missing` and `planning_copy_unsafe
 `planning_copy_untrusted`. With `sf serve` running, the dashboard starts, reads and ends it too
 (section Dashboard, The planned ticket page): `sf serve` gives it these functions with its own
 environment and folders.
+
+**With `SF_PLANNER_TRUST=auto`** you give your consent once, in the factory's configuration, and the
+factory accepts the trust dialog of its own planning copies for you: `sf planner setup`, and `sf
+planner start` for a copy Claude Code does not trust yet, run `script -qfec 'exec claude' /dev/null`
+in the copy, with the environment of `sf planner trust` (no token or marker of the factory) and
+`TERM=xterm-256color`. Only for the folder `sf planner setup` made for the workspace, by its name,
+never another path: nothing opens unless `.claude/planning-copy.md` is a regular file there and the
+copy's working tree holds none of the repository's Claude Code configuration (once trusted, Claude
+Code loads the copy's settings). The dialog is recognised on the screen by its accepting choice: the
+output, its escape sequences removed, lower-cased and kept to its letters `a` to `z`, holds
+`yesitrustthisfolder`, so colours, cursor moves and a line break do not hide it. Its default is "No,
+exit", so 500 ms after the match the factory sends one Down; when Claude Code writes its selection
+mark `❯` again within 2 s, one Enter follows at once, and nothing else is ever sent. All of it has
+30 s from the start of `script`; after Enter the factory reads Claude Code's global config every
+100 ms until the copy is trusted, and once more after Claude Code has ended, which decides. Claude
+Code is ended as stop ends a session, whatever happened, and nothing is retried. Its output is
+matched and dropped, never printed, logged or kept. When it fails, the reason is one of: "the copy
+is not set up", "<path> is in the copy, and Claude Code would load it", "script could not run
+(<code>)", "Claude Code ended before the dialog showed", "the dialog did not show within 30 s", "the
+selection did not move to "Yes, I trust this folder"" or "Claude Code did not save the answer".
+Setup then warns with it and names `sf planner trust`, and exits 0; start refuses with
+`planning_copy_untrusted`, naming the reason and `sf planner trust`. Start holds the ticket's lock
+while the dialog runs, so a stop meanwhile may answer `planner_starting`. The factory never writes
+Claude Code's global config: Claude Code saves the answer itself.
 
 ## Environment
 
@@ -645,6 +674,7 @@ environment and folders.
 | `SF_STATE_DIR` | `${XDG_STATE_HOME:-~/.local/state}/software-factory` | Job state and the `sf.sock` socket. |
 | `SF_WORKTREE_ROOT` | `${SF_STATE_DIR}/worktrees` | Where every job's worktree is created: `<root>/<workspace>/<ticket>`; absolute. |
 | `SF_PLANNING_DIR` | `~/planning` | Where `sf planner setup` keeps each workspace's planning copy, `<dir>/<workspace>`, and the planners' prototypes, `<dir>/prototypes/<workspace>/<ticket>/`; absolute. |
+| `SF_PLANNER_TRUST` | `ask` | Who accepts Claude Code's trust dialog for a planning copy: `ask`, you, once per copy (`sf planner trust`); `auto`, the factory, for its own planning copies only (section The planner session). Read by `sf planner setup` and `sf planner start` at their start; empty is the default, anything else stops them (`invalid_config`). |
 | `SF_MAX_JOBS` | `3` | The default of the run queue's limit `max_running` (section Run queue), within 1-20, while `queue.json` does not exist yet; `sf queue limit` and the board's stepper change the limit from then on. |
 | `SF_SENSITIVE_PATHS` | empty | Comma-separated globs added to the sensitive paths of `src/rules.ts`. |
 | `SF_CHECK_AFTER_START_MIN` | `15` | `check_after_minutes` in the result of a start and of the job's status during the first iteration. |

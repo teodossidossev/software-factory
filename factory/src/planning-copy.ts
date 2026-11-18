@@ -29,7 +29,10 @@
 // 8. the factory's MCP server registered for that folder only (claude mcp, local scope: the token
 //    stays in Claude Code's ~/.claude.json), removed and added again so a rotated token arrives;
 // 9. the result, and what the user does next: sf planner trust <workspace> while Claude Code does
-//    not trust the copy yet (the trust dialog is the user's, read here, never written).
+//    not trust the copy yet (the trust dialog is the user's, read here, never written). With
+//    SF_PLANNER_TRUST=auto (read before step 1), an untrusted copy's dialog is first answered here
+//    (acceptTrustDialog); when that fails, a warning with the reason, the sf planner trust line, and
+//    the setup still succeeds.
 // Every message names paths relative to the planning folder, never an absolute path, except the
 // result lines for the user's terminal; a file system error on the way is planning_copy_failed,
 // its paths shown with the same placeholders.
@@ -41,13 +44,13 @@ import { basename, dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { writeFileAtomic, writeFileAtomicWith } from './atomic.js';
 import { checkName, UsageError } from './commands.js';
-import { envFilePath, planningDir, stateDir } from './config.js';
+import { envFilePath, planningDir, plannerTrustSetting, stateDir } from './config.js';
 import { CLONE_TIMEOUT_MS, FETCH_TIMEOUT_MS, GIT_TIMEOUT_MS, originUrl, reason } from './digest.js';
 import { FactoryError } from './errors.js';
 import { withoutHostTokens } from './forge.js';
 import { type GitResult, runGit } from './git.js';
 import { PACKAGE_ROOT } from './package-root.js';
-import { copyTrusted, plannerSessionCommand, recordLink } from './planner-session.js';
+import { acceptTrustDialog, copyTrusted, plannerSessionCommand, recordLink } from './planner-session.js';
 import { plannerWaiting } from './planner-waiting.js';
 import { checkPrototypes, preparePrototypes, PROTOTYPES_DIR, prototypesRoot } from './prototypes.js';
 import { loadRegistry, resolveWorkspace } from './registry.js';
@@ -74,7 +77,7 @@ export const PLANNER_USAGE: readonly string[] = [
   "  sf planner waiting <workspace> [permission]           The planning copy's hook (Stop; Notification with permission): tells you that the planner waits for you, through the factory's notifications",
   "  sf planner start <workspace> <ticket>                 Start the ticket's planner: Claude Code with Remote Control in the workspace's planning copy (set up and trusted), its first message /planning-tasks workspace <workspace>, ticket <ticket>; one per ticket; it keeps running when sf serve restarts; again while it runs: since when, and its link once known",
   "  sf planner stop <workspace> <ticket>                  End the ticket's planner session",
-  "  sf planner trust <workspace>                          Once per planning copy: open Claude Code there, in this terminal, to accept its trust dialog (the factory never accepts it for you); refused while the copy holds the repository's Claude Code configuration",
+  "  sf planner trust <workspace>                          Once per planning copy: open Claude Code there, in this terminal, to accept its trust dialog (with SF_PLANNER_TRUST=auto, sf planner setup and start accept it for you); refused while the copy holds the repository's Claude Code configuration",
 ];
 
 // Every Git command here: never a prompt (the values of the digest's).
@@ -223,6 +226,7 @@ export async function plannerCommand(args: string[], deps: PlannerDeps): Promise
   if (name === PROTOTYPES_DIR) {
     throw new FactoryError('planning_copy_unusable', `A workspace named ${PROTOTYPES_DIR} gets no planning copy: the planning folder's ${PROTOTYPES_DIR}/ holds the planners' prototypes.`);
   }
+  const trust = plannerTrustSetting(deps.env);
   const ws = await resolveWorkspace(name, deps.configDir);
 
   // 1. Where: the copy and the workspace's prototypes folder.
@@ -247,7 +251,7 @@ export async function plannerCommand(args: string[], deps: PlannerDeps): Promise
     ...(url.startsWith('/') ? [[url, '<origin>'] as [string, string]] : []),
     ...(deps.env.HOME ? [[deps.env.HOME, '~'] as [string, string]] : []),
   ]);
-  const planning: Planning = { name, checkout: ws.readCheckout, dir, copy, temp, url, relative };
+  const planning: Planning = { name, checkout: ws.readCheckout, dir, copy, temp, url, relative, trust };
   try {
     await prepare(planning, deps);
   } catch (error) {
@@ -268,6 +272,7 @@ interface Planning {
   temp: string;
   url: string;
   relative: (text: string) => string;
+  trust: 'ask' | 'auto'; // SF_PLANNER_TRUST
 }
 
 // Steps 3 to 9.
@@ -291,54 +296,76 @@ async function prepare(planning: Planning, deps: PlannerDeps): Promise<void> {
   const skills = join(copy, '.claude', 'skills');
   await copyAfresh(SKILL_SOURCE, join(skills, SKILL));
   // The planner role's skills, copied from the skills snapshot as it is (its link read once); one it
-  // lacks is a warning, and the copy keeps what it has at that path.
+  // lacks is a warning, and the copy keeps what it has at that path. The warnings wait for step 9,
+  // so the trust dialog is answered before any line is printed; a later step that fails prints
+  // them before its error.
   const snapshot = await realpath(skillsSnapshot(deps.stateDir)).catch(() => undefined);
   const installed: string[] = [];
+  const lacking: string[] = [];
   for (const skill of plannerSkills) {
     if (snapshot !== undefined && (await stat(join(snapshot, skill)).then((info) => info.isDirectory(), () => false))) {
       await copyAfresh(join(snapshot, skill), join(skills, skill));
       installed.push(skill);
     } else {
-      deps.print(`warning: the planner's skill ${skill} is not in the factory's skills snapshot; the copy goes without it (sf skills shows what is installed).`);
+      lacking.push(`warning: the planner's skill ${skill} is not in the factory's skills snapshot; the copy goes without it (sf skills shows what is installed).`);
     }
   }
+  let lines: string[];
+  try {
+    // 6b. The prototypes folder: the one place the planner writes.
+    const prototypes = await preparePrototypes(planning.dir, name);
 
-  // 6b. The prototypes folder: the one place the planner writes.
-  const prototypes = await preparePrototypes(planning.dir, name);
+    // 7. The pointers.
+    const text = await pointersText(name, base, deps, prototypes);
+    await writeFileAtomic(join(copy, POINTERS), Buffer.from(text, 'utf8'), 0o644);
 
-  // 7. The pointers.
-  const text = await pointersText(name, base, deps, prototypes);
-  await writeFileAtomic(join(copy, POINTERS), Buffer.from(text, 'utf8'), 0o644);
+    // 7b. The settings: permissions, sandbox and enableArtifact replaced at every run (the copy's
+    // spellings denied to Write and Edit, the prototypes folder allowed, artifacts off). Every other
+    // skill off for the planner, by name, and the claude.ai account's skills; the factory sets both
+    // keys at every run.
+    const settings = plannerSettings(deps.env, deps.stateDir, [...new Set([copy, await realpath(copy)])], prototypes);
+    const home = deps.env.HOME || homedir();
+    const off = await skillsOff(join(claudeConfigDir(deps.env, home), 'skills'), skills, [SKILL, ...plannerSkills]);
+    await writeSettings(copy, name, settings, { skillOverrides: Object.fromEntries(off.map((skill) => [skill, 'off'])), syncClaudeAiSkills: false });
 
-  // 7b. The settings: permissions, sandbox and enableArtifact replaced at every run (the copy's
-  // spellings denied to Write and Edit, the prototypes folder allowed, artifacts off). Every other
-  // skill off for the planner, by name, and the claude.ai account's skills; the factory sets both
-  // keys at every run.
-  const settings = plannerSettings(deps.env, deps.stateDir, [...new Set([copy, await realpath(copy)])], prototypes);
-  const home = deps.env.HOME || homedir();
-  const off = await skillsOff(join(claudeConfigDir(deps.env, home), 'skills'), skills, [SKILL, ...plannerSkills]);
-  await writeSettings(copy, name, settings, { skillOverrides: Object.fromEntries(off.map((skill) => [skill, 'off'])), syncClaudeAiSkills: false });
+    // 8. The MCP server.
+    const token = await requireMcpToken(deps.stateDir);
+    const port = await deps.mcpPort();
+    await registerMcp(planning, token, port, deps.env);
 
-  // 8. The MCP server.
-  const token = await requireMcpToken(deps.stateDir);
-  const port = await deps.mcpPort();
-  await registerMcp(planning, token, port, deps.env);
-
-  // 9. The result.
-  const short = out(await git(copy, ['rev-parse', '--short', 'HEAD']));
-  for (const line of [
-    ...notes,
-    `Planning copy of ${name}: ${copy} (${base} at ${short})`,
-    `MCP server ${SERVER_NAME}: registered for this folder only (Claude Code local scope)`,
-    `${installed.length > 0 ? 'Skills' : 'Skill'} ${[SKILL, ...installed].join(', ')}: installed in .claude/skills`,
-    `Skills switched off for the planner: ${off.length} of yours (skillOverrides), and your claude.ai skills (syncClaudeAiSkills false)`,
-    `Pointers: ${POINTERS}`,
-    `Prototypes: ${prototypes}/<ticket>/, the one folder the planner writes`,
-    "Settings: the copy read-only; Write and Edit in the prototypes folder only; shell commands in Claude Code's sandbox (no writes, no network); secrets denied; no artifacts",
-    'Hooks: the phone hears when the planner waits for you (sf planner waiting)',
-    (await copyTrusted(copy, deps.env)) ? 'Trust: Claude Code trusts this folder already' : `Next: let Claude Code trust the copy once: sf planner trust ${name}`,
-    `Then plan a ticket: /${SKILL} workspace ${name}, ticket <ticket>`,
-  ]) {
+    // 9. The result, and with SF_PLANNER_TRUST=auto the trust dialog of a copy not trusted yet
+    // answered first.
+    const short = out(await git(copy, ['rev-parse', '--short', 'HEAD']));
+    const trusted = await copyTrusted(copy, deps.env);
+    let trustLine = trusted ? 'Trust: Claude Code trusts this folder already' : `Next: let Claude Code trust the copy once: sf planner trust ${name}`;
+    if (!trusted && planning.trust === 'auto') {
+      const why = await acceptTrustDialog(name, deps.env);
+      if (why === undefined) {
+        trustLine = "Trust: the factory accepted Claude Code's trust dialog for this folder (SF_PLANNER_TRUST=auto)";
+      } else {
+        notes.push(`warning: the factory could not accept Claude Code's trust dialog for the copy: ${why}.`);
+      }
+    }
+    lines = [
+      ...notes,
+      `Planning copy of ${name}: ${copy} (${base} at ${short})`,
+      `MCP server ${SERVER_NAME}: registered for this folder only (Claude Code local scope)`,
+      `${installed.length > 0 ? 'Skills' : 'Skill'} ${[SKILL, ...installed].join(', ')}: installed in .claude/skills`,
+      `Skills switched off for the planner: ${off.length} of yours (skillOverrides), and your claude.ai skills (syncClaudeAiSkills false)`,
+      `Pointers: ${POINTERS}`,
+      `Prototypes: ${prototypes}/<ticket>/, the one folder the planner writes`,
+      "Settings: the copy read-only; Write and Edit in the prototypes folder only; shell commands in Claude Code's sandbox (no writes, no network); secrets denied; no artifacts",
+      'Hooks: the phone hears when the planner waits for you (sf planner waiting)',
+      trustLine,
+      `Then plan a ticket: /${SKILL} workspace ${name}, ticket <ticket>`,
+    ];
+  } catch (error) {
+    for (const line of lacking) {
+      deps.print(line);
+    }
+    throw error;
+  }
+  for (const line of [...lacking, ...lines]) {
     deps.print(line);
   }
 }

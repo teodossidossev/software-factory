@@ -155,10 +155,15 @@ test('a part starts from the prepared commit of the part it builds on with its P
     assert.equal(remoteTip(p.origin, PART_TWO), undefined);
     assert.equal(remoteTip(p.origin, PART_ONE), undefined);
 
-    // Part one is pushed and merged: Approve gets past the check (here, to the push).
+    // Part one is pushed and merged: Approve is refused until part two is moved.
     await setPartOne(p, 'pushed', second, { mr: { host: 'github', number: 1, url: 'https://github.com/acme/app/pull/1', state: 'merged' } });
-    const pushed = await runCli(p.env, ['approve', 'app', 'T-2']);
-    assert.ok(!pushed.stderr.includes(message), pushed.stderr);
+    const notMoved = 'T-2 is still built on T-1, which is merged: the factory moves T-2 onto main first and tells you when it is ready to submit.';
+    assert.deepEqual(await refusedSocket(p.env, 'approve', ['app', 'T-2']), { code: 'builds_on_not_moved', message: notMoved });
+    const createdOnPart = await runCli(p.env, ['mr', 'create', 'app', 'T-2']);
+    assert.equal(createdOnPart.code, 1, createdOnPart.stdout + createdOnPart.stderr);
+    assert.ok(createdOnPart.stderr.includes(notMoved), createdOnPart.stderr);
+    assert.equal((await p.jobs.read('app', 'T-2'))!.state, 'ready_for_human_review');
+    assert.equal(remoteTip(p.origin, PART_TWO), undefined);
   } finally {
     await stop(served);
   }
@@ -303,6 +308,11 @@ test('once the part it builds on is merged, Merged — archive moves a part wait
     assert.equal(events.filter((event) => event.type === 'tests_started').length, 2);
     assert.deepEqual((await stateChanges(p, 'T-2')).slice(-2), ['ready_for_human_review → preparing_mr', 'preparing_mr → ready_for_human_review']);
     assert.equal(remoteTip(p.origin, PART_TWO), undefined);
+
+    // Moved onto its base: Approve pushes the moved tip.
+    const approved = await runCli(p.env, ['approve', 'app', 'T-2']);
+    assert.equal(approved.code, 0, approved.stdout + approved.stderr);
+    assert.equal(remoteTip(p.origin, PART_TWO), rev(p.repo, PART_TWO));
   } finally {
     await stop(served);
   }

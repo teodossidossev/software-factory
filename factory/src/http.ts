@@ -81,8 +81,8 @@ export const ERROR_STATUS: Readonly<Record<string, number>> = {
   // The morning digest: one run at a time; its settings.
   digest_running: 409, invalid_digest_settings: 400,
   // A part that builds on another ticket: that ticket has no prepared commit to build on, or is
-  // not merged yet at Approve.
-  builds_on_not_ready: 409, builds_on_not_merged: 409,
+  // not merged yet at Approve, or the part still sits on it once it is merged (not moved yet).
+  builds_on_not_ready: 409, builds_on_not_merged: 409, builds_on_not_moved: 409,
   // The run queue.
   already_queued: 409, not_queued: 409, invalid_limit: 400, invalid_position: 400, invalid_rule: 400,
   // A ticket's images: not an image, too large, too many, and a Task file that refers to

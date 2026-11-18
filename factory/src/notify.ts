@@ -7,6 +7,7 @@ import { constants } from 'node:fs';
 import { access } from 'node:fs/promises';
 import { delimiter, join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { sitsOnPart } from './builds-on.js';
 import { pushedBranch } from './continues.js';
 import { withoutHostTokens } from './forge.js';
 import type { Job, JobState, JobStore } from './jobs.js';
@@ -100,11 +101,13 @@ export function notifiedStates(config: NotifyConfig): readonly JobState[] {
 
 // The notification for a job that reached state (or whose merge request was opened or merged);
 // extra: the MR title and link (or the merge request's) when pushed, the
-// sensitive, out-of-scope and deleted paths of the iteration.
+// sensitive, out-of-scope and deleted paths of the iteration. A part whose change is on its base
+// and that waits for the user is titled ready to submit (src/builds-on.ts sitsOnPart).
 export function jobNotification(job: Job, extra: string[] = []): Notification {
   // A chain that went on by itself after a turn limit says so in one line.
   const turnLimit = turnLimitLine(job);
   const lines = turnLimit !== undefined ? [turnLimit, ...extra] : extra;
+  const readyToSubmit = (job.state === 'ready_for_human_review' || job.state === 'handed_over') && job.builds_on !== null && !sitsOnPart(job);
   if (job.state === 'awaiting_review') {
     return {
       title: `${job.ticket}: ${job.state}`,
@@ -137,7 +140,7 @@ export function jobNotification(job: Job, extra: string[] = []): Notification {
   if (job.state === 'handed_over') {
     // The changes wait in the user's checkout; extra holds the MR title and the file lines.
     return {
-      title: `${job.ticket}: in your checkout`,
+      title: readyToSubmit ? `${job.ticket}: ready to submit` : `${job.ticket}: in your checkout`,
       body: [`in your checkout on ${job.branch}`, ...(job.error !== undefined ? [`${job.error.code}: ${job.error.message}`] : []), ...lines].slice(0, 3).join('\n'),
       priority: jobPriority(job.state),
       tags: 'eyes',
@@ -151,7 +154,7 @@ export function jobNotification(job: Job, extra: string[] = []): Notification {
   // A pushed job's merge request on the Git host names the title once it is opened or merged.
   const mr = job.state === 'pushed' && job.mr !== null && job.mr !== undefined ? job.mr : undefined;
   return {
-    title: mr !== undefined ? `${job.ticket}: merge request #${mr.number} ${mr.state === 'open' ? 'opened' : mr.state}` : `${job.ticket}: ${job.state}`,
+    title: mr !== undefined ? `${job.ticket}: merge request #${mr.number} ${mr.state === 'open' ? 'opened' : mr.state}` : readyToSubmit ? `${job.ticket}: ready to submit` : `${job.ticket}: ${job.state}`,
     body: body.join('\n'),
     priority: jobPriority(job.state),
     tags: job.state === 'pushed' ? 'white_check_mark' : job.state === 'ready_for_human_review' ? 'eyes' : 'warning',

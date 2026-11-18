@@ -123,6 +123,12 @@ export function notMerged(ticket: string, buildsOn: string): FactoryError {
   return new FactoryError('builds_on_not_merged', `${ticket} builds on ${buildsOn}, which is not merged yet: submit ${buildsOn} first.`);
 }
 
+// The refusal of Approve (the push, sf mr create) of ticket while its change still sits on the
+// prepared commit of buildsOn, which is merged: the move onto base comes first.
+export function notMoved(ticket: string, buildsOn: string, base: string): FactoryError {
+  return new FactoryError('builds_on_not_moved', `${ticket} is still built on ${buildsOn}, which is merged: the factory moves ${ticket} onto ${base} first and tells you when it is ready to submit.`);
+}
+
 // A Task of the chain a Task builds on, as its check reads it.
 export interface ChainTask {
   ticket: string;

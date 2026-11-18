@@ -89,7 +89,7 @@ test('statusOf maps each code as the dashboard did before SF-139; any other code
     mr_text_invalid: 400, branch_locked: 409, base_unrelated: 409,
     push_check_failed: 502,
     digest_running: 409, invalid_digest_settings: 400,
-    builds_on_not_ready: 409, builds_on_not_merged: 409,
+    builds_on_not_ready: 409, builds_on_not_merged: 409, builds_on_not_moved: 409,
     already_queued: 409, not_queued: 409, invalid_limit: 400, invalid_position: 400, invalid_rule: 400,
     attachment_type: 400, attachment_too_large: 413, attachment_limit: 409, attachment_missing: 400, attachment_invalid: 409,
     // SF-208: the planner's suggestion and the planning chat link.

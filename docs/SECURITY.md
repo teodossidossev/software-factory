@@ -172,9 +172,10 @@ refused), and the factory's test command passed in a sandbox without network on 
   ticket of the same workspace whose change is not merged yet. Its job then starts from the commit
   that ticket's job prepared, taken from the workspace's checkout: nothing is fetched or pushed for
   it. The Patch and both reviews show this part's own change alone, so each part is reviewed once,
-  in its own job. Approve (the push) is refused until the ticket it builds on is merged, and MR
-  preparation replays the part onto that ticket's latest prepared commit, so a branch whose base is
-  not merged never reaches the Git host. Once that ticket is merged the factory moves the part onto
+  in its own job. Approve (the push) is refused until the ticket it builds on is merged and the
+  part has been moved onto the base, and MR preparation replays the part onto that ticket's latest
+  prepared commit, so a branch whose base is not merged, or that still carries the change of a
+  merged part, never reaches the Git host. Once that ticket is merged the factory moves the part onto
   the base by itself; a part in your checkout is first taken back, only while your checkout is as
   the factory left it, as Take it back does, so nothing of yours is touched.
 - **The GitLab token goes only to gitlab.com or the host of `SF_GITLAB_URL`.** A workspace on any

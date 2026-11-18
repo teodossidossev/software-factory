@@ -69,8 +69,11 @@ build a throwaway prototype, let the user try it, and turn their reactions into 
      language and words.
    - **Never published.** No artifact, no claude.ai page, no document, no connector: a company
      ticket's prototype holds company content and stays on this machine.
-3. **Hand it over.** For each prototype, tell the user the question, the file's path and what to
-   try. When the user asks for another case or variant, change the file in place and say so.
+3. **Hand it over.** For each prototype, tell the user the question, the file's name and what to
+   try. In a planning copy, the ticket's page on the factory's dashboard lists the ticket's
+   prototypes, newest first, and its header links the newest, on the phone too; elsewhere give the
+   file's path. When the user asks for another case or variant, change the file in place and say
+   so: the page shows the new version when it is opened again.
 4. **Turn reactions into decisions.** Each reaction the user confirms becomes a decision of the
    delivery plan (`D-n`) that names the prototype's file; one that changes an earlier answer
    reopens it as a grilling round. Record each prototype under **Prototypes**.

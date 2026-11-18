@@ -2,7 +2,8 @@
 // ticket-page.js, built from web/planner.ts into dist/web/: the planner session of a planned
 // ticket (src/planner-session.ts, through api/tickets/<ws>/<ticket>/planner): its lines in the
 // ticket page's Planning conversation card and its link in the page's header, Start the planner,
-// End (asked first in setup.js's ticket confirmation), and its read again every
+// End (asked first in setup.js's ticket confirmation), the ticket's prototypes in that card and the
+// newest in the header, and its read again every
 // TK_PLANNER_POLL_MS while it runs. A classic script, loaded in order with defer, sharing the
 // page's globals with the others. This file has no import or export on purpose: the compiler
 // keeps it a script, so its top-level names stay the page's globals.
@@ -21,6 +22,66 @@ const TK_PLANNER_LINK = /^https:\/\/claude\.ai\/code\/[A-Za-z0-9_-]{1,128}$/;
 const tkPlanner: { key: string | null; session: PlannerSessionView | null; ended: boolean; timer: ReturnType<typeof setTimeout> | null; answers: Map<string, number> } = {
   key: null, session: null, ended: false, timer: null, answers: new Map(),
 };
+
+// The page's check of a prototype's name: the server's (src/prototypes.ts).
+const TK_PROTO_NAME = /^[a-z0-9][a-z0-9-]{0,58}\.html$/;
+
+// The prototypes of the ticket the page shows ("<ws>/<ticket>"), newest first, as the last read gave them.
+const tkProtos: { key: string | null; list: PrototypeEntry[] } = { key: null, list: [] };
+
+// A ticket's prototypes from a payload or the planner GET: each entry with a TK_PROTO_NAME name and
+// a string time, in the server's order; anything else gives [].
+function tkProtoList(value: unknown): PrototypeEntry[] {
+  return Array.isArray(value)
+    ? value.flatMap((entry) => (isRecord(entry) && typeof entry.name === 'string' && TK_PROTO_NAME.test(entry.name) && typeof entry.modified === 'string' ? [{ name: entry.name, modified: entry.modified }] : []))
+    : [];
+}
+
+// The prototypes of ticket key as a payload or a read gives them: every read replaces the list.
+function tkProtosSeen(key: string, value: unknown): void {
+  tkProtos.key = key;
+  tkProtos.list = tkProtoList(value);
+}
+
+// A prototype's page, at the root, through the dashboard's cookie: never under the token.
+function tkProtoHref(key: string, name: string): string {
+  return `/prototypes/${jobPath(key)}/${name}`;
+}
+
+// The ticket's prototypes in the Planning conversation card, newest first: each its time and a link
+// that opens it in a new tab; nothing when the ticket has none.
+function tkProtoLines(key: string): HTMLElement[] {
+  const list = tkProtos.key === key ? tkProtos.list : [];
+  if (list.length === 0) {
+    return [];
+  }
+  const items = el('ul', 'hist');
+  items.append(...list.map((entry) => {
+    const item = el('li');
+    const when = el('span', 't', day(entry.modified));
+    when.setAttribute('title', entry.modified);
+    item.append(when, tabLink('', `${entry.name} ↗`, tkProtoHref(key, entry.name)));
+    return item;
+  }));
+  return [el('div', 'fs13', 'Prototypes the planner made, newest first:'), items];
+}
+
+// The header's links of the ticket's planning: the planner session's, once its hook recorded it, and
+// the newest prototype's; none without either.
+function tkPlannerHeadLinks(key: string): HTMLAnchorElement[] {
+  const links: HTMLAnchorElement[] = [];
+  const href = tkPlannerHref(tkPlanner.key === key ? tkPlanner.session : null);
+  if (href !== null) {
+    links.push(tabLink('btn linkbtn', 'Open the planner session ↗', href));
+  }
+  const newest = tkProtos.key === key ? tkProtos.list[0] : undefined;
+  if (newest !== undefined) {
+    const link = tabLink('btn linkbtn', `${newest.name} ↗`, tkProtoHref(key, newest.name));
+    link.setAttribute('title', `The newest prototype of ${key}`);
+    links.push(link);
+  }
+  return links;
+}
 
 // The count of the answers of Start the planner and End for ticket key so far: a read records it
 // when sent.
@@ -79,7 +140,9 @@ function tkPlannerSeen(key: string, session: PlannerSessionView | null, answers?
 
 // GET api/tickets/<ws>/<ticket>/planner while the page shows ticket key: none once it shows another
 // ticket or page (opening it again reads the payload, and the reads go on from there); while the
-// page is hidden there is no read and the timer goes on; a failed read keeps the session shown.
+// page is hidden there is no read and the timer goes on; a failed read keeps the session and the
+// prototypes shown. The answer's prototypes replace the list whatever Start's and End's answers,
+// once the page still shows the ticket (the answer of a ticket left never replaces another's).
 async function tkPlannerRead(key: string): Promise<void> {
   tkPlanner.timer = null;
   if (!tkPlannerShows(key) || tkPlanner.key !== key) {
@@ -87,13 +150,20 @@ async function tkPlannerRead(key: string): Promise<void> {
   }
   const answers = tkPlannerAnswers(key);
   let session = tkPlanner.session;
+  // The answer's prototypes, as it gave them; none read yet.
+  let prototypes: { value: unknown } | null = null;
   if (document.visibilityState !== 'hidden') {
     try {
-      session = tkPlannerSession(fieldOf(await getJson(`api/tickets/${jobPath(key)}/planner`), 'session'));
-    } catch { // no answer, an HTTP error or a body that is not JSON: the session shown stays until the next read
+      const answer = await getJson(`api/tickets/${jobPath(key)}/planner`);
+      session = tkPlannerSession(fieldOf(answer, 'session'));
+      prototypes = { value: fieldOf(answer, 'prototypes') };
+    } catch { // no answer, an HTTP error or a body that is not JSON: the session and the prototypes shown stay until the next read
     }
   }
   if (tkPlannerShows(key)) {
+    if (prototypes !== null) {
+      tkProtosSeen(key, prototypes.value);
+    }
     tkPlannerSeen(key, session, answers);
     renderTicket();
   }
@@ -101,18 +171,19 @@ async function tkPlannerRead(key: string): Promise<void> {
 
 // The session's lines in the Planning conversation card: for a ticket Claude Code plans, and for any
 // ticket whose session runs or starts (so a running one can always be ended). A line, then a row
-// with Open the planner session ↗ and End, or Start the planner; the line alone while it starts.
+// with Open the planner session ↗ and End, or Start the planner; the line alone while it starts;
+// then the ticket's prototypes (any owner).
 function tkPlannerLines(key: string, row: TicketEntry): HTMLElement[] {
   const session = tkPlanner.key === key ? tkPlanner.session : null;
   const starting = state.setupPending.has(`planner:${key}`);
   if (row.owner !== 'claude_code' && session === null && !starting) {
-    return [];
+    return tkProtoLines(key);
   }
   const line = el('p', 'fs13');
   line.setAttribute('role', 'status');
   if (starting) {
     line.textContent = `Starting the planner in the planning copy of ${row.workspace}…`;
-    return [line];
+    return [line, ...tkProtoLines(key)];
   }
   const acts = el('div', 'planner-acts');
   if (session !== null) {
@@ -132,7 +203,7 @@ function tkPlannerLines(key: string, row: TicketEntry): HTMLElement[] {
     start.setAttribute('title', `Starts Claude Code with Remote Control in the planning copy of ${row.workspace}, with /planning-tasks workspace ${row.workspace}, ticket ${row.ticket}`);
     acts.append(start);
   }
-  return [line, acts];
+  return [line, acts, ...tkProtoLines(key)];
 }
 
 // Start the planner, and Create & plan with Claude Code (setup.js): POST

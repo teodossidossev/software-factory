@@ -205,6 +205,14 @@ refused), and the factory's test command passed in a sandbox without network on 
     (`VISION_PAGE_CSP`): an opaque origin that can use neither the dashboard's cookie and storage
     nor its API, and loads nothing. Every Markdown text on it is escaped, and its only script is
     the factory's.
+  - A ticket's prototypes, which the Claude Code planner writes into
+    `<planning folder>/prototypes/`, are shown behind the token like every page, read-only, through
+    folders that follow no link, each a regular file of at most 4 MiB. Each opens in a page of the
+    factory's that holds it in a sandboxed frame (`PROTOTYPE_PAGE_CSP`, `PROTOTYPE_FRAME_CSP`): an
+    opaque origin that can use neither the dashboard's cookie and storage nor its API, loads
+    nothing, cannot move the page or open a window, and whose navigations stay on the dashboard's
+    origin. The file itself is served only to that frame, at an address that never holds the
+    token.
   - A pin of point mode stores the page's hash or another page's address, a selector, up to 200
     characters of the element's text, its position and the note, in `<state dir>/pins.json`
     (mode 0600), on this machine only. It is written only through the dashboard's checked POSTs (the exact Origin, JSON, the
@@ -259,6 +267,11 @@ refused), and the factory's test command passed in a sandbox without network on 
 - **A planner's other tools ask you first.** Your claude.ai connectors load in the planner's
   sessions; one that can publish (a document, a page, a message) asks before each call, like every
   tool outside the planner's list. For a company ticket, answer no.
+- **A prototype's script runs in your browser.** It is the planner's, written from what it read.
+  Its policy keeps it from loading or sending anything over the network and from navigating away,
+  but a browser has channels a page's policy does not close everywhere (a WebRTC connection where
+  `webrtc 'block'` is unknown, a DNS lookup). Open a company ticket's prototypes only in a browser
+  you trust.
 - **A phone that is lost unlocked** opens the dashboard. The dangerous actions still need the
   ticket typed. Keep the QR code with the token private.
 

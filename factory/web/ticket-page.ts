@@ -315,6 +315,7 @@ async function loadTicket(key: string, reset: boolean): Promise<void> {
   state.tk.data = data;
   state.tk.check = data.check ?? null;
   tkPlannerSeen(key, tkPlannerSession(data.planner_session), answers);
+  tkProtosSeen(key, data.prototypes);
   const s = tkState(key);
   if (reset || !tkDirty(s)) {
     Object.assign(s, { text: data.task.text, saved: data.task.text, sha256: data.task.sha256, conflict: false });
@@ -408,9 +409,9 @@ function tkCheckWord(row: TicketEntry, view: CheckView | null): string {
 }
 
 // The header (the prototype's renderTicket header): ← Board, the key, the workspace, the title and
-// the draft tag; the ChatGPT conversation's link or the planner session's (planner.js), Check the
-// plan and Start now; the line with what it waits for, where it starts from and the plan check in
-// words.
+// the draft tag; the ChatGPT conversation's link, or the planner session's and the newest
+// prototype's (planner.js), Check the plan and Start now; the line with what it waits for, where it
+// starts from and the plan check in words.
 function tkHead(key: string, row: TicketEntry, view: CheckView | null): HTMLElement {
   const backButton = button('btn back', '← Board ', { back: '' });
   backButton.append(el('span', 'kbd', 'Esc'));
@@ -427,10 +428,7 @@ function tkHead(key: string, row: TicketEntry, view: CheckView | null): HTMLElem
   if (url !== null) {
     tools.append(tabLink('btn linkbtn', 'Open the ChatGPT conversation ↗', url));
   }
-  const planner = tkPlannerHref(tkPlanner.key === key ? tkPlanner.session : null);
-  if (planner !== null) {
-    tools.append(tabLink('btn linkbtn', 'Open the planner session ↗', planner));
-  }
+  tools.append(...tkPlannerHeadLinks(key));
   if (view !== null) {
     const checking = tkChecking(key, view);
     const check = button('btn', checking ? 'Checking…' : view.check !== null ? 'Check again' : 'Check the plan', { tk: 'check' });

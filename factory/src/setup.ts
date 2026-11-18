@@ -8,6 +8,7 @@ import { lstat, mkdir, readdir, readFile, realpath, rename, rm } from 'node:fs/p
 import { dirname, isAbsolute, join } from 'node:path';
 import { addAttachment, type Attachment, canHaveAttachments, listAttachments, readAttachment, removeAttachment } from './attachments.js';
 import { writeFileAtomic } from './atomic.js';
+import { chainRows, type ChainRow } from './chains.js';
 import { ownerOf, planningChatUrl, storedChatUrl, type TicketOwner } from './conversation.js';
 import { FactoryError } from './errors.js';
 import type { ExclusiveScope, Retired } from './execution.js';
@@ -496,8 +497,9 @@ export class Setup {
 
   // The Task files of every usable workspace, sorted by workspace and ticket, each with its fields,
   // its text and its job. A file that is not a Task file (no front matter, another ticket, no
-  // title) is skipped, as `start` would refuse it anyway.
-  async #taskFiles(): Promise<Array<{ name: string; workspace: Workspace; ticket: string; fields: Map<string, string>; content: string; job: Job | undefined }>> {
+  // title) is skipped, as `start` would refuse it anyway. With withArchived, the archived ones too
+  // (.software-factory/archive/, archived: true), after the active ones of each workspace.
+  async #taskFiles(withArchived = false): Promise<Array<{ name: string; workspace: Workspace; ticket: string; fields: Map<string, string>; content: string; job: Job | undefined; archived: boolean }>> {
     const { workspaces } = await loadRegistry(this.#configDir);
     const files = [];
     for (const name of Object.keys(workspaces).sort()) {
@@ -507,30 +509,33 @@ export class Setup {
       } catch { // an unusable workspace: its Task files are skipped
         continue;
       }
-      let names: string[];
-      try {
-        names = (await readdir(join(workspace.workCheckout, TASK_DIR), { withFileTypes: true })).filter((entry) => entry.isFile()).map((entry) => entry.name).sort();
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-          continue;
+      for (const dir of withArchived ? [TASK_DIR, join(TASK_DIR, ARCHIVE_DIR)] : [TASK_DIR]) {
+        const archived = dir !== TASK_DIR;
+        let names: string[];
+        try {
+          names = (await readdir(join(workspace.workCheckout, dir), { withFileTypes: true })).filter((entry) => entry.isFile()).map((entry) => entry.name).sort();
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+            continue;
+          }
+          throw error;
         }
-        throw error;
-      }
-      for (const file of names) {
-        const match = /^(.+)\.md$/.exec(file);
-        const ticket = match?.[1];
-        if (ticket === undefined || ticket.endsWith('.mr') || !TICKET_PATTERN.test(ticket)) {
-          continue;
+        for (const file of names) {
+          const match = /^(.+)\.md$/.exec(file);
+          const ticket = match?.[1];
+          if (ticket === undefined || ticket.endsWith('.mr') || !TICKET_PATTERN.test(ticket)) {
+            continue;
+          }
+          const content = await readFile(join(workspace.workCheckout, dir, file), 'utf8');
+          if (Buffer.byteLength(content) > MAX_TASK_BYTES) {
+            continue;
+          }
+          const fields = parseFrontMatter(content);
+          if (fields === undefined || fields.get('ticket') !== ticket || !fields.get('title') || !fields.get('base')) {
+            continue;
+          }
+          files.push({ name, workspace, ticket, fields, content, archived, job: await this.#jobs.read(name, ticket).catch((error: unknown) => (archived ? undefined : Promise.reject(error))) });
         }
-        const content = await readFile(join(workspace.workCheckout, TASK_DIR, file), 'utf8');
-        if (Buffer.byteLength(content) > MAX_TASK_BYTES) {
-          continue;
-        }
-        const fields = parseFrontMatter(content);
-        if (fields === undefined || fields.get('ticket') !== ticket || !fields.get('title') || !fields.get('base')) {
-          continue;
-        }
-        files.push({ name, workspace, ticket, fields, content, job: await this.#jobs.read(name, ticket) });
       }
     }
     return files;
@@ -566,6 +571,12 @@ export class Setup {
       }
     }
     return rows;
+  }
+
+  // The chains of parts of the Task files, active and archived (src/chains.ts), with the
+  // dependency rule's states.
+  async chains(): Promise<ChainRow[]> {
+    return chainRows(await this.#taskFiles(true), this.#dependencyStates());
   }
 
   // The states of the tickets refs names (the run queue's merged check), in their order;

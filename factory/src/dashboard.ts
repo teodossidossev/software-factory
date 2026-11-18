@@ -138,14 +138,14 @@ export type DashboardActions = Pick<Execution, 'start' | 'approve' | 'abort' | '
   | 'sendSuggestion' | 'dismissSuggestion'>;
 
 // The start screen's data and changes: the workspace registry and the Task files (src/setup.ts).
-// jobDependencies: the tickets a live job's Task file lands after. taskFile and saveTask:
-// the planned ticket page's Task file and its Save. addAttachment, removeAttachment and
-// readAttachment: a ticket's images. setTicketOwner: the ticket page's switch of who plans it.
+// jobDependencies: the tickets a live job's Task file lands after. chains: the chains of parts
+// (src/chains.ts). taskFile and saveTask: the planned ticket page's Task file and its Save.
+// addAttachment, removeAttachment and readAttachment: a ticket's images. setTicketOwner: the ticket page's switch of who plans it.
 // setPlanningChat and planningOf: a ticket's planning chat link, and the job payloads' planner block.
 // editWorkspace, workspaceSettings and saveDigestSettings: the Workspaces dialog's Edit, the
 // payload's settings and the Morning digest section. handoffOf: a workspace's hand-over setting,
 // for the rules of a job's actions.
-export type DashboardSetup = Pick<Setup, 'workspaces' | 'addWorkspace' | 'editWorkspace' | 'workspaceSettings' | 'handoffOf' | 'saveDigestSettings' | 'removeWorkspace' | 'tickets' | 'jobDependencies' | 'createTicket' | 'archiveTicket' | 'restoreTicket' | 'deleteTicket' | 'setTicketOwner' | 'archivedTickets' | 'taskText' | 'taskTitle'
+export type DashboardSetup = Pick<Setup, 'workspaces' | 'addWorkspace' | 'editWorkspace' | 'workspaceSettings' | 'handoffOf' | 'saveDigestSettings' | 'removeWorkspace' | 'tickets' | 'jobDependencies' | 'chains' | 'createTicket' | 'archiveTicket' | 'restoreTicket' | 'deleteTicket' | 'setTicketOwner' | 'archivedTickets' | 'taskText' | 'taskTitle'
   | 'taskFile' | 'saveTask' | 'addAttachment' | 'removeAttachment' | 'readAttachment' | 'setPlanningChat' | 'planningOf'>;
 
 // The morning digest: the list, one record, a manual run.
@@ -182,6 +182,7 @@ const NO_SETUP: DashboardSetup = {
   handoffOf: async () => 'checkout',
   tickets: async () => [],
   jobDependencies: async () => [],
+  chains: async () => [],
   archivedTickets: async () => [],
   taskTitle: async () => null,
   taskText: unavailable,

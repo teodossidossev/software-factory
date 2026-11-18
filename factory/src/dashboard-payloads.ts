@@ -416,7 +416,8 @@ async function checkOf(checks: DashboardChecks, workspace: string, ticket: strin
 // null, and queue_error, the queue's failed start or null; queue_reason, why its plan holds
 // it in the queue or null, queue_force, whether Start anyway was given, and queue_retry, the next try
 // of a start that could not fetch or null); job_lands_after: the same for the
-// tickets with a live job, for the job page's Waits for and the board's Needed by; queue: the run
+// tickets with a live job, for the job page's Waits for and the board's Needed by; chains: each
+// chain of parts with an active Task file (src/chains.ts), for the board's line; queue: the run
 // queue's limit, running count, hold and next ticket (null without a queue).
 export async function ticketsPayload(setup: DashboardSetup, checks: DashboardChecks | undefined, queue: DashboardQueue | undefined) {
   const view = queue === undefined ? undefined : await queue.view();
@@ -435,7 +436,7 @@ export async function ticketsPayload(setup: DashboardSetup, checks: DashboardChe
     });
   }
   return {
-    tickets, archived: await setup.archivedTickets(), job_lands_after: await setup.jobDependencies(),
+    tickets, archived: await setup.archivedTickets(), job_lands_after: await setup.jobDependencies(), chains: await setup.chains(),
     queue: view === undefined ? null : {
       max_running: view.max_running, running: view.running, held: view.held, hold_reason: view.hold_reason, next: view.next, on_limit: view.on_limit, limit_hold: view.limit_hold,
     },

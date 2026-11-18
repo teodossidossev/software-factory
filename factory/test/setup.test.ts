@@ -523,6 +523,53 @@ test('setup (SF-084): lands_after with each dependency state from the jobs, the 
   assert.deepEqual(await setup.jobDependencies(), []);
 });
 
+// A Task file with the front matter lines front, written raw into .software-factory/ (or its archive/).
+async function putPart(repo: string, ticket: string, front: string, archived = false): Promise<void> {
+  const dir = join(repo, '.software-factory', ...(archived ? ['archive'] : []));
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, `${ticket}.md`), `---\nticket: ${ticket}\ntitle: Title ${ticket}\nbase: main\n${front}---\n\n# ${ticket}\n`);
+}
+
+test('setup (SF-262): chains reads the active and archived Task files; the live job\'s state first, else the dependency rule\'s; an active copy wins; no slice, no part; a broken archived job record counts as none', async () => {
+  const env = await newEnv('setup-chains');
+  const repo = await newRepo(env, 'setup-chains-app', true);
+  const jobs = new JobStore(env.state);
+  const setup = setupOf(env.config, jobs);
+  assert.deepEqual(await setup.chains(), []);
+
+  // T-1: archived, its pushed job recorded merged archived with it.
+  await putPart(repo, 'T-1', 'part_of: APP-12\nslice: 1/4\n', true);
+  await jobs.write({ ...jobOf('app', 'T-1', 'pushed'), mr: { host: 'github', number: 1, url: 'https://example.test/1', state: 'merged' } });
+  await jobs.archive('app', 'T-1');
+  // T-2: active, waits for review still on the part before it.
+  await putPart(repo, 'T-2', 'part_of: APP-12\nslice: 2/4\n');
+  await jobs.write({ ...jobOf('app', 'T-2', 'ready_for_human_review'), builds_on: 'T-1', builds_on_commit: 'c'.repeat(40) });
+  // T-3: active and archived (another slice in the archive), no job.
+  await putPart(repo, 'T-3', 'part_of: APP-12\nslice: 3/4\n');
+  await putPart(repo, 'T-3', 'part_of: APP-12\nslice: 4/5\n', true);
+  // T-4: part_of without slice.
+  await putPart(repo, 'T-4', 'part_of: APP-12\n');
+  // T-6: archived, not a part, its job record broken.
+  await putPart(repo, 'T-6', '', true);
+  await mkdir(join(env.state, 'jobs', 'app', 'T-6'), { recursive: true });
+  await writeFile(join(env.state, 'jobs', 'app', 'T-6', 'job.json'), '{');
+
+  assert.deepEqual(await setup.chains(), [{
+    workspace: 'app', ticket: 'APP-12', count: 4, parts: [
+      { ticket: 'T-1', n: 1, base: 'main', state: 'merged' },
+      { ticket: 'T-2', n: 2, base: 'main', state: 'on_part' },
+      { ticket: 'T-3', n: 3, base: 'main', state: 'planned' },
+    ],
+  }]);
+  // tickets and jobDependencies read the active Task files only, as before.
+  assert.deepEqual((await setup.tickets()).map((row) => row.ticket), ['T-3', 'T-4']);
+  assert.deepEqual(await setup.jobDependencies(), []);
+  // An active Task file's broken job record still fails the reads.
+  await putPart(repo, 'T-6', '');
+  await refused(setup.chains(), 'job_invalid');
+  await refused(setup.tickets(), 'job_invalid');
+});
+
 test('setup (SF-064): the images folder moves with archive and restore, goes with delete; restore over an existing folder is refused; a new ticket starts without images', async () => {
   const env = await newEnv('setup-images');
   const repo = await newRepo(env, 'setup-images-repo', false);

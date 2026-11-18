@@ -6,6 +6,7 @@
 // servedDetail).
 import assert from 'node:assert/strict';
 import { get, request, type IncomingMessage } from 'node:http';
+import type { ChainRow } from '../../src/chains.js';
 import type { TicketOwner } from '../../src/conversation.js';
 import type { DashboardActions, DashboardSetup } from '../../src/dashboard.js';
 import { FactoryError } from '../../src/errors.js';
@@ -262,7 +263,7 @@ export type SetupCall = ['saveTask', string, string, string, string] | ['addWork
   | ['addAttachment', string, string, string, string | null] | ['removeAttachment', string, string, string];
 
 export interface FakeSetup extends DashboardSetup {
-  rows: { workspaces: WorkspaceRow[]; tickets: TicketRow[]; archived: ArchivedRow[]; jobDependencies: JobDependencies[] };
+  rows: { workspaces: WorkspaceRow[]; tickets: TicketRow[]; archived: ArchivedRow[]; jobDependencies: JobDependencies[]; chains: ChainRow[] };
   // The Task files taskText reads, by "<ws>/<ticket>" (archived: "<ws>/archive/<ticket>"); a
   // missing one is task_not_found. taskTitle reads the title of the active one.
   texts: Map<string, string>;
@@ -294,7 +295,7 @@ export function ticketRow(workspace: string, ticket: string, title = `Ticket ${t
 // Error; awaited when it is a function) or, by default, with a plausible result.
 export function fakeSetup(workspaces: WorkspaceRow[] = [], tickets: TicketRow[] = [], archived: ArchivedRow[] = []): FakeSetup {
   const fake: FakeSetup = {
-    rows: { workspaces, tickets, archived, jobDependencies: [] },
+    rows: { workspaces, tickets, archived, jobDependencies: [], chains: [] },
     texts: new Map(),
     reads: [],
     mtime: '2026-11-05T09:00:00.000Z',
@@ -338,6 +339,7 @@ export function fakeSetup(workspaces: WorkspaceRow[] = [], tickets: TicketRow[] 
     workspaces: async () => fake.rows.workspaces,
     tickets: async () => fake.rows.tickets,
     jobDependencies: async () => fake.rows.jobDependencies,
+    chains: async () => fake.rows.chains,
     archivedTickets: async () => fake.rows.archived,
     archiveTicket: (workspace, ticket) => reply(['archiveTicket', workspace, ticket], { workspace, ticket, path: `.software-factory/archive/${ticket}.md`, jobArchived: false }),
     restoreTicket: (workspace, ticket) => reply(['restoreTicket', workspace, ticket], { workspace, ticket, path: `.software-factory/${ticket}.md` }),

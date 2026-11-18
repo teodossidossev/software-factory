@@ -2,16 +2,16 @@
 // pushed or merged within the daily's two days, current and archived, as daily material; which open
 // branches of mine are live (a commit of mine in the two days, or a current job not done with it);
 // the dailies built from both; the prompt's daily lines and its two languages; and the jobs in
-// progress now (inProgressOf).
+// progress now (inProgressOf); and the count of jobs landed today (landedToday).
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { dailiesOf, dailyDays, type DigestWorkspace } from '../src/digest-run.js';
-import { inProgressOf, jobsOf, liveBranch } from '../src/digest-jobs.js';
+import { inProgressOf, jobsOf, landedToday, liveBranch } from '../src/digest-jobs.js';
 import type { LiveBranch, MyCommit } from '../src/digest.js';
-import { type Job, type JobState, JobStore } from '../src/jobs.js';
+import { type EventRecord, type Job, type JobState, JobStore } from '../src/jobs.js';
 import { digestPrompt } from '../src/prompts.js';
 
 let temp: string;
@@ -84,6 +84,37 @@ test('jobsOf: a pushed job sf serve found on its target and archived (merged_on_
   await put(store, job('backend', 'SHOP-10', 'pushed', new Date(Date.parse(threeDaysAgo) - 2 * 86_400_000).toISOString(), { mr: mr('closed') }));
   const { done } = await jobsOf(store, ['backend'], days);
   assert.deepEqual(done.map((entry) => [entry.ticket, entry.title, entry.state, entry.at]), [['SHOP-9', 'Merged by hand', 'merged', today]]);
+});
+
+test('landedToday: the jobs of every workspace merged since local midnight, archived too, counted once each', async () => {
+  const store = new JobStore(join(temp, 'state-landed-today'));
+  // Local times, so the test holds in any time zone; the events files are written now, after that
+  // midnight, so none is skipped by its mtime.
+  const local = (day: number, hour: number, minute: number): string => new Date(2026, 10, day, hour, minute).toISOString();
+  const pushedAt = local(15, 12, 0);
+  const merge = (at: string): EventRecord => ({ ts: at, iteration: 1, type: 'merge_request', action: 'updated', host: 'github', number: 7, url: 'https://example.invalid/pull/7', mr_state: 'merged' });
+  const found = (at: string): EventRecord => ({ ts: at, iteration: 1, type: 'merged_on_target', commit: 'a'.repeat(40), target: 'main' });
+  // A current job, its merge request merged at 00:01: counted.
+  await put(store, job('backend', 'SHOP-1', 'pushed', pushedAt, { mr: mr('merged') }));
+  await store.appendEvent('backend', 'SHOP-1', merge(local(17, 0, 1)));
+  // An archived job of another workspace, found on its target at 00:10: counted.
+  await put(store, job('frontend', 'WEB-1', 'pushed', pushedAt));
+  await store.appendEvent('frontend', 'WEB-1', found(local(17, 0, 10)));
+  await store.archive('frontend', 'WEB-1');
+  // An archived job found on its target at 23:59 the day before: not counted.
+  await put(store, job('backend', 'SHOP-2', 'pushed', pushedAt));
+  await store.appendEvent('backend', 'SHOP-2', found(local(16, 23, 59)));
+  await store.archive('backend', 'SHOP-2');
+  // Merged at 00:40, after now: not counted.
+  await put(store, job('backend', 'SHOP-3', 'pushed', pushedAt, { mr: mr('merged') }));
+  await store.appendEvent('backend', 'SHOP-3', merge(local(17, 0, 40)));
+  // Pushed with an open merge request, and handed over at 00:05: not counted.
+  await put(store, job('backend', 'SHOP-4', 'pushed', local(17, 0, 2), { mr: mr('open') }));
+  await put(store, job('backend', 'SHOP-5', 'handed_over', local(17, 0, 5)));
+
+  assert.equal(await landedToday(store, new Date(2026, 10, 17, 0, 30)), 2);
+  // An empty store lands none.
+  assert.equal(await landedToday(new JobStore(join(temp, 'state-landed-none')), new Date(2026, 10, 17, 0, 30)), 0);
 });
 
 const branch = (name: string): LiveBranch => ({

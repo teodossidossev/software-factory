@@ -15,6 +15,7 @@ import type * as Changes from '../../src/changes.js';
 import type * as Coordinator from '../../src/coordinator.js';
 import type * as CoordinatorSkills from '../../src/coordinator-skills.js';
 import type * as Dashboard from '../../src/dashboard.js';
+import type * as DashboardReads from '../../src/dashboard-reads.js';
 import type * as JobStream from '../../src/job-stream.js';
 import type * as Pins from '../../src/pins.js';
 import type * as ReviewJob from '../../src/review-job.js';
@@ -259,7 +260,7 @@ export interface Checks {
   CoordinatorColumn: Copy<CoordinatorColumn, CoordinatorSkills.CoordinatorColumn>;
   SkillText: Copy<SkillText, Awaited<ReturnType<typeof Skills.skillText>>>;
   CoordinatorQuestion: Copy<CoordinatorQuestion, Coordinator.CoordinatorQuestion>;
-  CoordinatorState: Copy<CoordinatorState, Awaited<ReturnType<typeof Coordinator.readCoordinator>>>;
+  CoordinatorState: Copy<CoordinatorState, Awaited<ReturnType<typeof DashboardReads.coordinatorView>>>;
   Pin: Copy<Pin, Pins.Pin>;
   PinsView: Copy<PinsView, Awaited<ReturnType<typeof Pins.readPins>>>;
 }

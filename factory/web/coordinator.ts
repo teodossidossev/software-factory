@@ -162,14 +162,15 @@ function coordSpeechTimer(speech: CoordSpeech, ms: number, then: () => void): vo
   speech.timers.add(timer);
 }
 
-// Zen speaks the status of text (the last speech ended first): the small lights spell a random
-// number from 1 to 511 (the page holds no count of the jobs landed today), and the bar flickers for
+// Zen speaks the status of text (the last speech ended first): the small lights spell landed, the
+// jobs landed today that sf serve counted for this read of api/coordinator, up to 511 (all nine
+// on); without it (an older sf serve) a random number from 1 to 511. The bar flickers for
 // min(7 s, 1.5 s + 35 ms per character), then is off for one 300 ms step, and the speech ends. With
 // reduced motion: the pattern and the bar on for one 1 s step.
-function coordSpeak(text: string): void {
+function coordSpeak(text: string, landed: number | null): void {
   coordSpeechEnd();
   const speech: CoordSpeech = {
-    pattern: coordZenPattern(coordDraw(1, 511)), bar: true, switched: new Set(), spent: 0,
+    pattern: coordZenPattern(landed === null ? coordDraw(1, 511) : Math.min(511, landed)), bar: true, switched: new Set(), spent: 0,
     length: Math.min(7000, 1500 + 35 * [...text].length), nextSwitch: coordDraw(1500, 3000), timers: new Set(),
   };
   coordSpeech = speech;
@@ -317,7 +318,9 @@ function coordStateOf(data: unknown): CoordinatorState {
     .map(({ id, text, at }) => ({ id, text, at }));
   const requested = file.status_requested_at;
   const statusRequestedAt = typeof requested === 'string' && Number.isFinite(Date.parse(requested)) ? requested : null;
-  return { status, questions, link: chatHref(file.link), status_requested_at: statusRequestedAt };
+  const landed = file.landed_today;
+  const landedToday = typeof landed === 'number' && Number.isSafeInteger(landed) && landed >= 0 ? landed : null;
+  return { status, questions, link: chatHref(file.link), status_requested_at: statusRequestedAt, landed_today: landedToday };
 }
 
 // Reads the state and renders the card; a read that fails keeps the card as it was (the next
@@ -338,7 +341,7 @@ async function readCoordinatorCard(): Promise<void> {
       }
       coordState = next;
       if (statusChanged && next.status !== null && asked === 'open' && next.status_requested_at === null) {
-        coordSpeak(next.status.text);
+        coordSpeak(next.status.text, next.landed_today ?? null);
       }
       renderCoordinator();
     }

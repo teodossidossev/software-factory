@@ -126,7 +126,9 @@ At rest; thinking; speaking. While Zen speaks, the small lights left on spell a 
 Read them like a page, left to right and top to bottom: the two above the bar, the four down the
 right, then below the bar the two upper ones (left, right) and last the lower one between them;
 the first is the largest bit (256), the last is 1. Lights 000000110 = 4 + 2 = 6;
-000001001 = 8 + 1 = 9. For now the number is a random one; it will be the jobs landed today.
+000001001 = 8 + 1 = 9. The number is how many jobs landed today: jobs of every workspace whose
+merge request was merged, or that sf serve found merged on their target, since midnight in sf
+serve's time zone.
 
 ## 4. Planning with ChatGPT and running locally
 

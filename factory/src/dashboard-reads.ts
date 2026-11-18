@@ -6,14 +6,15 @@
 // planner session that ended, which its read removes (src/planner-session.ts plannerSession);
 // every answer is written through the context.
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { readCoordinator } from './coordinator.js';
+import { type CoordinatorState, readCoordinator } from './coordinator.js';
 import { type DashboardContext, iterationParam, jobKey, matchPath, noQuery, plannerSessionView } from './dashboard-context.js';
 import { jobDetail, planOf, ticketEntry, ticketsPayload, workspacesPayload } from './dashboard-payloads.js';
 import { mergeRequestOverviewRead, mergeRequestThreadsRead, openMergeRequestsRead } from './dashboard-routes.js';
+import { landedToday } from './digest-jobs.js';
 import { FactoryError } from './errors.js';
 import { sendJson, statusOf } from './http.js';
 import { lineEntries, type StreamEntry, streamContext } from './job-stream.js';
-import type { Job } from './jobs.js';
+import type { Job, JobStore } from './jobs.js';
 import { readPins } from './pins.js';
 import { WORKSPACE_NAME_PATTERN } from './registry.js';
 import { skillsForClients, skillsView, skillText } from './skills.js';
@@ -42,6 +43,19 @@ interface GetRoute {
   handler: (get: GetRequest) => Promise<void> | void;
 }
 
+// GET api/coordinator: the coordinator's state and landed_today, the jobs landed today
+// (landedToday, counted at each read, never stored). When they cannot be counted, a warning line
+// and no landed_today: the state still answers.
+export async function coordinatorView(stateDir: string, jobs: JobStore): Promise<CoordinatorState & { landed_today?: number }> {
+  const state = await readCoordinator(stateDir);
+  try {
+    return { ...state, landed_today: await landedToday(jobs) };
+  } catch (error) {
+    console.error(`warning: the jobs landed today could not be counted: ${error instanceof Error ? error.message : String(error)}`);
+    return state;
+  }
+}
+
 // route: a GET through the route table, an empty 404 when no route matches; checkView: GET
 // api/tickets/<ws>/<ticket>/check.
 export function readHandlers(ctx: DashboardContext) {
@@ -59,8 +73,9 @@ export function readHandlers(ctx: DashboardContext) {
     { pattern: 'api/stats', handler: ({ res, query }) => statsView(res, query) },
     // The health checks' last result.
     { pattern: 'api/health', when: (query) => health !== undefined && noQuery(query), handler: ({ res }) => sendJson(res, 200, health!.list()) },
-    // The coordinator's state (src/coordinator.ts), which sf coordinator writes; POST api/coordinator/request writes its status_requested_at.
-    { pattern: 'api/coordinator', when: noQuery, handler: async ({ res }) => sendJson(res, 200, await readCoordinator(ctx.stateDir)) },
+    // The coordinator's state (src/coordinator.ts), which sf coordinator writes; POST api/coordinator/request writes its status_requested_at;
+    // and landed_today, counted at the read (src/digest-jobs.ts).
+    { pattern: 'api/coordinator', when: noQuery, handler: async ({ res }) => sendJson(res, 200, await coordinatorView(ctx.stateDir, jobs)) },
     // A workspace's vision page (src/vision.ts), which only sf vision writes: user content, under
     // its own policy (an opaque origin that loads nothing); the security headers set before stay.
     { pattern: 'vision/*', when: noQuery, handler: ({ res, params: [workspace] }) => visionRead(res, workspace!) },

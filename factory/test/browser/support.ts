@@ -271,6 +271,10 @@ export class FakeSetup implements DashboardSetup {
     return [];
   }
 
+  async chains() {
+    return [];
+  }
+
   async archivedTickets() {
     return [...this.archived].map(([ticket, entry]) => ({ workspace: WS, ticket, title: entry.title }));
   }

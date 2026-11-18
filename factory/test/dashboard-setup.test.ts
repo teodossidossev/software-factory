@@ -11,6 +11,7 @@ import { mkdir, readdir, readFile, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { MAX_ATTACHMENT_BYTES } from '../src/attachments.js';
+import type { ChainRow } from '../src/chains.js';
 import { type DashboardPlanner, MAX_ACTION_BODY_BYTES, MAX_TASK_BODY_BYTES, startDashboard } from '../src/dashboard.js';
 import { FactoryError } from '../src/errors.js';
 import { CHATGPT_PREFILL_URL, conversationUrl, ticketConversation } from '../src/conversation.js';
@@ -67,6 +68,15 @@ test('dashboard setup: the reads, the method rules per path and the token; nothi
     assert.deepEqual([again.tickets[0].lands_after, again.job_lands_after], [[{ workspace: 'app', ticket: 'T-9', state: 'missing' }], waits]);
     setup.rows.tickets = listed;
     setup.rows.jobDependencies = [];
+    // SF-262: the chains of parts as the setup lists them, on api/tickets and the stream's tickets event; [] with none.
+    assert.deepEqual(JSON.parse(tickets.body).chains, []);
+    const chains: ChainRow[] = [{ workspace: 'app', ticket: 'APP-12', count: 4, parts: [{ ticket: 'T-1', n: 1, base: 'main', state: 'merged' }, { ticket: 'T-2', n: 2, base: 'main', state: 'on_part' }] }];
+    setup.rows.chains = chains;
+    assert.deepEqual(JSON.parse((await fetchRaw(new URL('api/tickets', base))).body).chains, chains);
+    const chainStream = await openStream(new URL('api/stream', base));
+    assert.deepEqual((await chainStream.next('tickets')).chains, chains);
+    chainStream.close();
+    setup.rows.chains = [];
     // The conversation: the message names the connector, guide, the draft, write_task with the
     // Review brief, and the hand-back to the User, who starts on the dashboard; ChatGPT only plans.
     const message = rows[0].conversation.message as string;

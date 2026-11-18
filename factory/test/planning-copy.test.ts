@@ -4,7 +4,8 @@
 // Next line naming sf planner trust until Claude Code trusts the copy, with SF_PLANNER_TRUST=auto
 // the trust dialog accepted by the setup (fake script and claude), and
 // every refusal with its code; the repository's Claude Code configuration kept out of the copy by
-// its sparse checkout; plannerSettings for a given environment.
+// its sparse checkout; the prototypes folder, the one place the planner writes, and its refusals;
+// plannerSettings for a given environment.
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { chmod, lstat, mkdir, readdir, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
@@ -15,15 +16,26 @@ import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { FactoryError } from '../src/errors.js';
-import { plannerCommand, plannerSettings, skillsOff } from '../src/planning-copy.js';
+import { plannerCommand, type PlannerSettings, plannerSettings, skillsOff } from '../src/planning-copy.js';
+import { saveRegistry } from '../src/registry.js';
+import { absoluteRule } from '../src/sandbox-denials.js';
 import { rolesOf, writeRoles } from '../src/skill-roles.js';
 import { syncSkills } from '../src/skills.js';
 import { type Env, git, newEnv, newRepo, processEnv, runCli, skillsSourceDir, temp } from './support/harness.js';
 
 const TOKEN = 'ab'.repeat(32);
 const SKILL_SOURCE = fileURLToPath(new URL('../../skills/planning-tasks/', import.meta.url));
-// The pointers' last item without a vision of the workspace.
+// The pointers' vision item without a vision of the workspace.
 const NO_VISION = '- **The product vision:** none is stored for this workspace.';
+// The pointers' last item, for the real path of the workspace's prototypes folder.
+const prototypesItem = (folder: string): string[] => [
+  "- **The ticket's prototypes:** the one folder you write, with the Write and Edit tools: one",
+  '  self-contained HTML file per question (the `planning-tasks` skill, step 3), in',
+  `  \`${folder}/<ticket>/\``,
+];
+// The real path of app's prototypes folder for an Env of plannerEnv.
+const appPrototypes = async (env: Env): Promise<string> => join(await realpath(join(env.home, 'planning')), 'prototypes', 'app');
+const SETTINGS_LINE = "Settings: the copy read-only; Write and Edit in the prototypes folder only; shell commands in Claude Code's sandbox (no writes, no network); secrets denied; no artifacts";
 
 // The warning for a planner skill the snapshot lacks.
 const missingSkill = (skill: string): string =>
@@ -111,7 +123,9 @@ test('a first run clones the workspace, installs the skill and the pointers, and
     assert.deepEqual(await readFile(join(copy, '.claude', 'skills', 'planning-tasks', file)), await readFile(join(SKILL_SOURCE, file)), file);
   }
 
-  // PC-3: the pointers, with the request's path and the one rules file there is.
+  // PC-3: the pointers, with the request's path and the one rules file there is; the prototypes
+  // folder last (PF-4).
+  const prototypes = await appPrototypes(env);
   assert.equal(await readFile(join(copy, '.claude', 'planning-copy.md'), 'utf8'), [
     '# Planning copy of `app`',
     '',
@@ -124,6 +138,7 @@ test('a first run clones the workspace, installs the skill and the pointers, and
     "- **The user's rules for this workspace.** The Task check and the reviewers enforce them. Read",
     `  them before any test plan: \`${join(env.config, 'rules', 'app.md')}\``,
     NO_VISION,
+    ...prototypesItem(prototypes),
     '',
   ].join('\n'));
 
@@ -150,7 +165,8 @@ test('a first run clones the workspace, installs the skill and the pointers, and
     'Skill planning-tasks: installed in .claude/skills',
     'Skills switched off for the planner: 0 of yours (skillOverrides), and your claude.ai skills (syncClaudeAiSkills false)',
     'Pointers: .claude/planning-copy.md',
-    "Settings: read-only; shell commands in Claude Code's sandbox (no writes, no network); secrets denied",
+    `Prototypes: ${prototypes}/<ticket>/, the one folder the planner writes`,
+    SETTINGS_LINE,
     'Hooks: the phone hears when the planner waits for you (sf planner waiting)',
     'Next: let Claude Code trust the copy once: sf planner trust app',
     'Then plan a ticket: /planning-tasks workspace app, ticket <ticket>',
@@ -311,7 +327,7 @@ test('a second run fast-forwards a clean copy, leaves a changed one, and replace
   assert.deepEqual(await readdir(outside), ['SKILL.md']);
   assert.equal(await readFile(join(outside, 'SKILL.md'), 'utf8'), 'theirs\n');
   assert.match(await readFile(join(copy, '.claude', 'planning-copy.md'), 'utf8'),
-    new RegExp(`test plan: \`${join(env.config, 'rules', 'app.md')}\` and \`${join(env.config, 'rules', 'global.md')}\`\n${escaped(NO_VISION)}\n$`));
+    new RegExp(`test plan: \`${join(env.config, 'rules', 'app.md')}\` and \`${join(env.config, 'rules', 'global.md')}\`\n${escaped([NO_VISION, ...prototypesItem(await appPrototypes(env))].join('\n'))}\n$`));
 
   // The registered checkout was never fetched into or moved.
   assert.equal(git(repo, 'rev-parse', 'HEAD'), checkoutHead);
@@ -440,116 +456,134 @@ test('sf planner setup refuses what it cannot use, each with its code', async ()
 });
 
 const PLANNER_ALLOW = ['mcp__software-factory', 'Read', 'Grep', 'Glob', 'Skill', 'Agent', 'Task', 'TodoWrite', 'ToolSearch'];
-const PLANNER_DENY_TOOLS = ['Edit', 'Write', 'NotebookEdit', 'WebFetch', 'WebFetch(domain:*)', 'WebSearch'];
-const sandboxWith = (denyRead: string): unknown => ({
-  enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false, filesystem: { denyWrite: ['.'], denyRead: [denyRead] },
+const PLANNER_DENY_TOOLS = ['NotebookEdit', 'WebFetch', 'WebFetch(domain:*)', 'WebSearch', 'Artifact'];
+const sandboxWith = (denyRead: string, prototypes = '/p/prototypes/app'): unknown => ({
+  enabled: true, failIfUnavailable: true, autoAllowBashIfSandboxed: true, allowUnsandboxedCommands: false, filesystem: { denyWrite: ['.', `/${prototypes}`], denyRead: [denyRead] },
+});
+// The permissions for the copy /p/app and the prototypes folder /p/prototypes/app, with these Read
+// rules.
+const permissionsWith = (reads: string[]): unknown => ({
+  allow: [...PLANNER_ALLOW, 'Edit(//p/prototypes/app/**)'],
+  deny: ['Edit(//p/app/**)', ...PLANNER_DENY_TOOLS, ...reads],
+  additionalDirectories: ['/p/prototypes/app'],
+  blockWritesOutsideWorkingDirectories: true,
 });
 
-test('plannerSettings: read-only tools, the secrets of this environment denied, the shell sandboxed', () => {
+test('plannerSettings: reading tools, Write and Edit in the prototypes folder alone, the secrets of this environment denied, the shell sandboxed', () => {
   // SF_ENV_FILE and HOME only: Claude Code's configuration and the tunnel profile under HOME, and
   // ~/.claude/.credentials.json once, with Claude Code's configuration (not again with the home
   // directory's credentials).
-  const plain = plannerSettings({ SF_ENV_FILE: '/srv/sf/auth.env', HOME: '/home/u' }, '/var/sf/state');
+  const plain = plannerSettings({ SF_ENV_FILE: '/srv/sf/auth.env', HOME: '/home/u' }, '/var/sf/state', ['/p/app'], '/p/prototypes/app');
   assert.deepEqual(plain, {
-    permissions: {
-      allow: PLANNER_ALLOW,
-      deny: [
-        ...PLANNER_DENY_TOOLS,
-        'Read(//srv/sf/auth.env)',
-        'Read(//var/sf/state/mcp-token)',
-        'Read(//var/sf/state/dashboard-token)',
-        'Read(//home/u/.claude/settings.json)',
-        'Read(//home/u/.claude.json)',
-        'Read(//home/u/.claude/.credentials.json)',
-        'Read(//home/u/.claude/backups/**)',
-        'Read(//home/u/.ssh/**)',
-        'Read(//home/u/.codex/**)',
-        'Read(//home/u/.aws/**)',
-        'Read(//home/u/.config/gh/**)',
-        'Read(//home/u/.git-credentials)',
-        'Read(//home/u/.config/git/credentials)',
-        'Read(//home/u/.netrc)',
-        'Read(//home/u/.npmrc)',
-        'Read(//home/u/.gnupg/**)',
-        'Read(//home/u/.kube/**)',
-        'Read(//home/u/.config/glab-cli/**)',
-        'Read(//home/u/.docker/config.json)',
-        'Read(//home/u/.config/tunnel-client/software-factory.yaml)',
-      ],
-    },
+    permissions: permissionsWith([
+      'Read(//srv/sf/auth.env)',
+      'Read(//var/sf/state/mcp-token)',
+      'Read(//var/sf/state/dashboard-token)',
+      'Read(//home/u/.claude/settings.json)',
+      'Read(//home/u/.claude.json)',
+      'Read(//home/u/.claude/.credentials.json)',
+      'Read(//home/u/.claude/backups/**)',
+      'Read(//home/u/.ssh/**)',
+      'Read(//home/u/.codex/**)',
+      'Read(//home/u/.aws/**)',
+      'Read(//home/u/.config/gh/**)',
+      'Read(//home/u/.git-credentials)',
+      'Read(//home/u/.config/git/credentials)',
+      'Read(//home/u/.netrc)',
+      'Read(//home/u/.npmrc)',
+      'Read(//home/u/.gnupg/**)',
+      'Read(//home/u/.kube/**)',
+      'Read(//home/u/.config/glab-cli/**)',
+      'Read(//home/u/.docker/config.json)',
+      'Read(//home/u/.config/tunnel-client/software-factory.yaml)',
+    ]),
     sandbox: sandboxWith('//var/sf/state'),
+    enableArtifact: false,
   });
 
   // Every override: the rules follow them; the state directory's glob characters are escaped in the
   // rules, not in denyRead.
   const moved = plannerSettings({
     SF_ENV_FILE: '/etc/sf/auth.env', HOME: '/home/v', CLAUDE_CONFIG_DIR: '/opt/claude', TUNNEL_CLIENT_PROFILE_DIR: '/opt/tunnel', XDG_CONFIG_HOME: '/home/v/xdg',
-  }, '/data/sf(2)/state');
+  }, '/data/sf(2)/state', ['/p/app'], '/p/prototypes/app');
   assert.deepEqual(moved, {
-    permissions: {
-      allow: PLANNER_ALLOW,
-      deny: [
-        ...PLANNER_DENY_TOOLS,
-        'Read(//etc/sf/auth.env)',
-        'Read(//data/sf\\(2\\)/state/mcp-token)',
-        'Read(//data/sf\\(2\\)/state/dashboard-token)',
-        'Read(//opt/claude/settings.json)',
-        'Read(//opt/claude/.claude.json)',
-        'Read(//opt/claude/.credentials.json)',
-        'Read(//opt/claude/backups/**)',
-        'Read(//home/v/.ssh/**)',
-        'Read(//home/v/.codex/**)',
-        'Read(//home/v/.aws/**)',
-        'Read(//home/v/.config/gh/**)',
-        'Read(//home/v/.git-credentials)',
-        'Read(//home/v/.config/git/credentials)',
-        'Read(//home/v/.netrc)',
-        'Read(//home/v/.npmrc)',
-        'Read(//home/v/.claude/.credentials.json)',
-        'Read(//home/v/.gnupg/**)',
-        'Read(//home/v/.kube/**)',
-        'Read(//home/v/.config/glab-cli/**)',
-        'Read(//home/v/.docker/config.json)',
-        'Read(//opt/tunnel/software-factory.yaml)',
-      ],
-    },
+    permissions: permissionsWith([
+      'Read(//etc/sf/auth.env)',
+      'Read(//data/sf\\(2\\)/state/mcp-token)',
+      'Read(//data/sf\\(2\\)/state/dashboard-token)',
+      'Read(//opt/claude/settings.json)',
+      'Read(//opt/claude/.claude.json)',
+      'Read(//opt/claude/.credentials.json)',
+      'Read(//opt/claude/backups/**)',
+      'Read(//home/v/.ssh/**)',
+      'Read(//home/v/.codex/**)',
+      'Read(//home/v/.aws/**)',
+      'Read(//home/v/.config/gh/**)',
+      'Read(//home/v/.git-credentials)',
+      'Read(//home/v/.config/git/credentials)',
+      'Read(//home/v/.netrc)',
+      'Read(//home/v/.npmrc)',
+      'Read(//home/v/.claude/.credentials.json)',
+      'Read(//home/v/.gnupg/**)',
+      'Read(//home/v/.kube/**)',
+      'Read(//home/v/.config/glab-cli/**)',
+      'Read(//home/v/.docker/config.json)',
+      'Read(//opt/tunnel/software-factory.yaml)',
+    ]),
     sandbox: sandboxWith('//data/sf(2)/state'),
+    enableArtifact: false,
   });
 
   // SF_ENV_FILE empty: no environment file, no rule for one.
-  const noEnvFile = plannerSettings({ SF_ENV_FILE: '', HOME: '/home/w' }, '/home/w/.local/state/software-factory');
+  const noEnvFile = plannerSettings({ SF_ENV_FILE: '', HOME: '/home/w' }, '/home/w/.local/state/software-factory', ['/p/app'], '/p/prototypes/app');
+  const noEnvFileReads = [
+    'Read(//home/w/.local/state/software-factory/mcp-token)',
+    'Read(//home/w/.local/state/software-factory/dashboard-token)',
+    'Read(//home/w/.claude/settings.json)',
+    'Read(//home/w/.claude.json)',
+    'Read(//home/w/.claude/.credentials.json)',
+    'Read(//home/w/.claude/backups/**)',
+    'Read(//home/w/.ssh/**)',
+    'Read(//home/w/.codex/**)',
+    'Read(//home/w/.aws/**)',
+    'Read(//home/w/.config/gh/**)',
+    'Read(//home/w/.git-credentials)',
+    'Read(//home/w/.config/git/credentials)',
+    'Read(//home/w/.netrc)',
+    'Read(//home/w/.npmrc)',
+    'Read(//home/w/.gnupg/**)',
+    'Read(//home/w/.kube/**)',
+    'Read(//home/w/.config/glab-cli/**)',
+    'Read(//home/w/.docker/config.json)',
+    'Read(//home/w/.config/tunnel-client/software-factory.yaml)',
+  ];
   assert.deepEqual(noEnvFile, {
-    permissions: {
-      allow: PLANNER_ALLOW,
-      deny: [
-        ...PLANNER_DENY_TOOLS,
-        'Read(//home/w/.local/state/software-factory/mcp-token)',
-        'Read(//home/w/.local/state/software-factory/dashboard-token)',
-        'Read(//home/w/.claude/settings.json)',
-        'Read(//home/w/.claude.json)',
-        'Read(//home/w/.claude/.credentials.json)',
-        'Read(//home/w/.claude/backups/**)',
-        'Read(//home/w/.ssh/**)',
-        'Read(//home/w/.codex/**)',
-        'Read(//home/w/.aws/**)',
-        'Read(//home/w/.config/gh/**)',
-        'Read(//home/w/.git-credentials)',
-        'Read(//home/w/.config/git/credentials)',
-        'Read(//home/w/.netrc)',
-        'Read(//home/w/.npmrc)',
-        'Read(//home/w/.gnupg/**)',
-        'Read(//home/w/.kube/**)',
-        'Read(//home/w/.config/glab-cli/**)',
-        'Read(//home/w/.docker/config.json)',
-        'Read(//home/w/.config/tunnel-client/software-factory.yaml)',
-      ],
-    },
+    permissions: permissionsWith(noEnvFileReads),
     sandbox: sandboxWith('//home/w/.local/state/software-factory'),
+    enableArtifact: false,
   });
 
-  // RO-2: the planner reads the user's rules and requests with the Read tool.
-  for (const settings of [plain, moved, noEnvFile]) {
+  // PF-3: the copy's two spellings, each denied, in their order; a prototypes folder whose path
+  // holds [ is escaped in the Edit rule, plain in additionalDirectories and denyWrite.
+  const linked = plannerSettings({ SF_ENV_FILE: '', HOME: '/home/w' }, '/home/w/.local/state/software-factory', ['/p/link/app', '/p/real/app'], '/p/x[1]/prototypes/app');
+  assert.deepEqual(linked, {
+    permissions: {
+      allow: [...PLANNER_ALLOW, 'Edit(//p/x\\[1\\]/prototypes/app/**)'],
+      deny: ['Edit(//p/link/app/**)', 'Edit(//p/real/app/**)', ...PLANNER_DENY_TOOLS, ...noEnvFileReads],
+      additionalDirectories: ['/p/x[1]/prototypes/app'],
+      blockWritesOutsideWorkingDirectories: true,
+    },
+    sandbox: sandboxWith('//home/w/.local/state/software-factory', '/p/x[1]/prototypes/app'),
+    enableArtifact: false,
+  });
+  // A spelling given twice is denied once.
+  assert.deepEqual(plannerSettings({ SF_ENV_FILE: '', HOME: '/home/w' }, '/home/w/.local/state/software-factory', ['/p/app', '/p/app'], '/p/prototypes/app'), noEnvFile);
+
+  for (const settings of [plain, moved, noEnvFile, linked]) {
+    // RO-2: the planner reads the user's rules and requests with the Read tool.
     assert.deepEqual(settings.permissions.deny.filter((rule) => /\/(rules|requests)\b/.test(rule)), []);
+    // No bare Edit or Write is denied: the allow rule would not carve the folder out of it.
+    assert.deepEqual(settings.permissions.deny.filter((rule) => rule === 'Edit' || rule === 'Write' || rule.startsWith('Write')), []);
   }
 });
 
@@ -563,30 +597,36 @@ const HOOKS = {
 test("sf planner setup writes the copy's settings and keeps the file's other keys", async () => {
   const { env, copy } = await plannerEnv('planner-settings');
   const file = join(copy, '.claude', 'settings.local.json');
-  const expected = plannerSettings(processEnv(env), env.state);
-  assert.ok(expected.permissions.deny.includes(`Read(/${join(env.state, 'mcp-token')})`));
 
   // A first run: the file made, mode 0600, the token in it nowhere.
   const first = await setup(env);
-  assert.match(first.stdout, /^Settings: read-only; shell commands in Claude Code's sandbox \(no writes, no network\); secrets denied$/m);
+  const expected = plannerSettings(processEnv(env), env.state, [...new Set([copy, await realpath(copy)])], await appPrototypes(env));
+  assert.ok(expected.permissions.deny.includes(`Read(/${join(env.state, 'mcp-token')})`));
+  assert.ok(first.stdout.split('\n').includes(SETTINGS_LINE), first.stdout);
   assert.deepEqual(JSON.parse(await readFile(file, 'utf8')), { ...expected, hooks: HOOKS, skillOverrides: {}, syncClaudeAiSkills: false });
+  assert.deepEqual(Object.keys(JSON.parse(await readFile(file, 'utf8'))), ['permissions', 'sandbox', 'enableArtifact', 'hooks', 'skillOverrides', 'syncClaudeAiSkills']);
   assert.equal((await stat(file)).mode & 0o777, 0o600);
   assert.equal((await readFile(file, 'utf8')).includes(TOKEN), false);
 
   // The user's keys kept with their values and in their place, permissions and skillOverrides
-  // replaced whole, sandbox and syncClaudeAiSkills last; the hooks' Stop and Notification replaced,
-  // PreToolUse kept (PW-6); written in place, the file keeps its mode 0600.
+  // replaced whole, sandbox, enableArtifact and syncClaudeAiSkills last; the hooks' Stop and
+  // Notification replaced, PreToolUse kept (PW-6); written in place, the file keeps its mode 0600.
+  // An enableArtifact of the user's keeps its place and becomes false.
   const preToolUse = [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'echo checked' }] }];
   const hooks = { Stop: [{ hooks: [{ type: 'command', command: 'echo stopped' }] }], PreToolUse: preToolUse };
   await writeFile(file, `${JSON.stringify({ model: 'opus', permissions: { allow: ['Bash(awk:*)'], defaultMode: 'acceptEdits' }, skillOverrides: { mine: 'off' }, hooks })}\n`);
   const second = await setup(env);
   assert.match(second.stdout, /^Settings: /m);
   const written = JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>;
-  assert.deepEqual(Object.keys(written), ['model', 'permissions', 'skillOverrides', 'hooks', 'sandbox', 'syncClaudeAiSkills']);
+  assert.deepEqual(Object.keys(written), ['model', 'permissions', 'skillOverrides', 'hooks', 'sandbox', 'enableArtifact', 'syncClaudeAiSkills']);
   assert.deepEqual(written, {
-    model: 'opus', permissions: expected.permissions, skillOverrides: {}, hooks: { PreToolUse: preToolUse, ...HOOKS }, sandbox: expected.sandbox, syncClaudeAiSkills: false,
+    model: 'opus', permissions: expected.permissions, skillOverrides: {}, hooks: { PreToolUse: preToolUse, ...HOOKS }, sandbox: expected.sandbox, enableArtifact: false, syncClaudeAiSkills: false,
   });
   assert.equal(JSON.stringify(written).includes('Bash(awk:*)'), false);
+  await writeFile(file, `${JSON.stringify({ enableArtifact: true, model: 'opus' })}\n`);
+  await setup(env);
+  assert.deepEqual(Object.keys(JSON.parse(await readFile(file, 'utf8'))).slice(0, 2), ['enableArtifact', 'model']);
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).enableArtifact, false);
   assert.equal((await stat(file)).mode & 0o777, 0o600);
 
   // Another mode the user gave the file is kept.
@@ -936,7 +976,8 @@ test('the pointers name the workspace\'s English vision, or say there is none', 
   await mkdir(join(env.state, 'vision', 'other', 'en'), { recursive: true });
   await writeFile(join(env.state, 'vision', 'other', 'en', 'VISION.md'), '# Other\n');
   await setup(env);
-  assert.ok((await readFile(pointers, 'utf8')).endsWith(`\`\n${NO_VISION}\n`));
+  const prototypes = prototypesItem(await appPrototypes(env));
+  assert.ok((await readFile(pointers, 'utf8')).endsWith(`\`\n${[NO_VISION, ...prototypes].join('\n')}\n`));
 
   // app's English vision: its folder, after the first put.
   const dir = join(env.state, 'vision', 'app', 'en');
@@ -948,8 +989,156 @@ test('the pointers name the workspace\'s English vision, or say there is none', 
     '- **The product vision** of this workspace, in English: the folder below. Read its `VISION.md`',
     '  first, with the Read tool (the shell does not see the folder), then what the ticket needs of',
     `  its \`CODEMAP.md\` and \`chapters/\`: \`${dir}\``,
+    ...prototypes,
     '',
   ].join('\n')), await readFile(pointers, 'utf8'));
+});
+
+// plannerCommand setup <workspace> for env refused with code and message, no absolute path in it.
+async function refusedSetup(env: Env, code: string, message: string, workspace = 'app'): Promise<void> {
+  await assert.rejects(plannerCommand(['setup', workspace], {
+    env: processEnv(env), stateDir: env.state, configDir: env.config, mcpPort: async () => 18787, print: () => undefined,
+  }), (error: unknown) => {
+    assert.ok(error instanceof FactoryError, String(error));
+    assert.equal(error.code, code);
+    assert.equal(error.message, message);
+    assert.equal(error.message.includes(temp), false, error.message);
+    return true;
+  });
+}
+
+test('sf planner setup makes the prototypes folder and lets the planner write there alone', async () => {
+  const { env } = await plannerEnv('planner-prototypes');
+  // SF_PLANNING_DIR a link to a real folder.
+  const real = join(temp, 'planner-prototypes-real');
+  await mkdir(real);
+  const link = join(temp, 'planner-prototypes-link');
+  await symlink(real, link);
+  env.extra = { ...env.extra, SF_PLANNING_DIR: link };
+  const first = await setup(env);
+  const planning = await realpath(real);
+  const folder = join(planning, 'prototypes', 'app');
+
+  // PF-1: both folders 0700.
+  for (const path of [join(planning, 'prototypes'), folder]) {
+    assert.equal((await stat(path)).mode & 0o777, 0o700, path);
+  }
+  // PF-5: the Prototypes line right after the Pointers line, with the real path.
+  const lines = first.stdout.trim().split('\n');
+  assert.equal(lines[lines.indexOf('Pointers: .claude/planning-copy.md') + 1], `Prototypes: ${folder}/<ticket>/, the one folder the planner writes`);
+
+  // PF-2: Write and Edit allowed in the real folder alone; the copy denied by both its spellings,
+  // the link's and the real one; the shell denied the folder too; artifacts off.
+  const file = join(link, 'app', '.claude', 'settings.local.json');
+  const settings = JSON.parse(await readFile(file, 'utf8')) as PlannerSettings;
+  assert.equal(settings.permissions.allow.at(-1), `Edit(${absoluteRule(folder)}/**)`);
+  assert.deepEqual(settings.permissions.allow.filter((rule) => rule.startsWith('Edit') || rule.startsWith('Write')), [`Edit(${absoluteRule(folder)}/**)`]);
+  assert.deepEqual(settings.permissions.deny.slice(0, 7), [
+    `Edit(${absoluteRule(join(link, 'app'))}/**)`, `Edit(${absoluteRule(join(planning, 'app'))}/**)`, 'NotebookEdit', 'WebFetch', 'WebFetch(domain:*)', 'WebSearch', 'Artifact',
+  ]);
+  assert.deepEqual(settings.permissions.additionalDirectories, [folder]);
+  assert.equal(settings.permissions.blockWritesOutsideWorkingDirectories, true);
+  assert.deepEqual(settings.sandbox.filesystem.denyWrite, ['.', `/${folder}`]);
+  assert.equal(settings.enableArtifact, false);
+  // PF-4: the pointers name the same real folder, last.
+  assert.ok((await readFile(join(link, 'app', '.claude', 'planning-copy.md'), 'utf8')).endsWith(`${prototypesItem(folder).join('\n')}\n`));
+
+  // PF-1: a ticket's prototype survives a second run.
+  await mkdir(join(folder, 'APP-12'));
+  await writeFile(join(folder, 'APP-12', 'layout.html'), '<p>mine</p>\n');
+  await setup(env);
+  assert.equal(await readFile(join(folder, 'APP-12', 'layout.html'), 'utf8'), '<p>mine</p>\n');
+  assert.deepEqual(await readdir(join(planning, 'prototypes')), ['app']);
+});
+
+test('a workspace named prototypes gets no planning copy', async () => {
+  const { env, repo } = await plannerEnv('planner-prototypes-name');
+  await saveRegistry({ workspaces: { prototypes: { read_checkout: repo, work_checkout: repo } } }, env.config);
+  const message = "A workspace named prototypes gets no planning copy: the planning folder's prototypes/ holds the planners' prototypes.";
+  const result = await runCli(env, ['planner', 'setup', 'prototypes']);
+  assert.equal(result.code, 1, result.stdout);
+  assert.equal(result.stderr.trim(), `sf: ${message}`);
+  await refusedSetup(env, 'planning_copy_unusable', message, 'prototypes');
+  assert.equal(existsSync(join(env.home, 'planning')), false);
+});
+
+test('the prototypes folder must not be or hold a checkout', async () => {
+  const { env, copy } = await plannerEnv('planner-prototypes-checkout');
+  const inner = join(env.home, 'planning', 'prototypes', 'app', 'inner');
+  await mkdir(inner, { recursive: true });
+  git(inner, 'init', '-q');
+  assert.equal((await runCli(env, ['workspace', 'add', 'inner', '--read', inner])).code, 0);
+  const message = 'The prototypes folder of app would be the checkout of workspace inner: set SF_PLANNING_DIR to another folder.';
+  const result = await runCli(env, ['planner', 'setup', 'app']);
+  assert.equal(result.code, 1, result.stdout);
+  assert.equal(result.stderr.trim(), `sf: ${message}`);
+  await refusedSetup(env, 'planning_copy_unusable', message);
+  assert.equal(existsSync(copy), false);
+});
+
+test("a link or a file in the prototypes folder's place is refused", async () => {
+  const { env, repo, copy } = await plannerEnv('planner-prototypes-unsafe');
+  const planning = join(env.home, 'planning');
+  const unsafe = (shown: string): string => `${shown} in the planning folder is a link or not a folder: remove it and run sf planner setup again.`;
+
+  // A link at prototypes: its target untouched.
+  const target = join(temp, 'planner-prototypes-unsafe-target');
+  await mkdir(target);
+  await mkdir(planning, { recursive: true, mode: 0o700 });
+  await symlink(target, join(planning, 'prototypes'));
+  await refusedSetup(env, 'planning_copy_unsafe', unsafe('prototypes'));
+  assert.deepEqual(await readdir(target), []);
+  assert.equal((await lstat(join(planning, 'prototypes'))).isSymbolicLink(), true);
+
+  // A link into a registered checkout, at prototypes or at prototypes/app: refused as a link in
+  // step 1, before the checkout guard follows it and before anything is cloned; the checkout
+  // untouched.
+  await rm(join(planning, 'prototypes'));
+  await rm(copy, { recursive: true, force: true });
+  await symlink(repo, join(planning, 'prototypes'));
+  const viaCli = await runCli(env, ['planner', 'setup', 'app']);
+  assert.equal(viaCli.code, 1, viaCli.stdout);
+  assert.equal(viaCli.stderr.trim(), `sf: ${unsafe('prototypes')}`);
+  await refusedSetup(env, 'planning_copy_unsafe', unsafe('prototypes'));
+  await rm(join(planning, 'prototypes'));
+  await mkdir(join(planning, 'prototypes'), { mode: 0o700 });
+  await symlink(repo, join(planning, 'prototypes', 'app'));
+  await refusedSetup(env, 'planning_copy_unsafe', unsafe('prototypes/app'));
+  assert.equal(existsSync(copy), false);
+  assert.equal(existsSync(join(repo, 'app')), false);
+  assert.equal(git(repo, 'status', '--porcelain'), '');
+
+  // A file at prototypes/app: kept.
+  await rm(join(planning, 'prototypes'), { recursive: true });
+  await mkdir(join(planning, 'prototypes'), { mode: 0o700 });
+  await writeFile(join(planning, 'prototypes', 'app'), 'mine\n');
+  const result = await runCli(env, ['planner', 'setup', 'app']);
+  assert.equal(result.code, 1, result.stdout);
+  assert.equal(result.stderr.trim(), `sf: ${unsafe('prototypes/app')}`);
+  await refusedSetup(env, 'planning_copy_unsafe', unsafe('prototypes/app'));
+  assert.equal(await readFile(join(planning, 'prototypes', 'app'), 'utf8'), 'mine\n');
+});
+
+test('a prototypes folder that cannot be checked stops sf planner setup before anything is cloned or written', async () => {
+  const { env, copy, bin } = await plannerEnv('planner-prototypes-unchecked');
+  const planning = join(env.home, 'planning');
+  // prototypes without read or execute permission: prototypes/app cannot be checked.
+  await mkdir(join(planning, 'prototypes'), { recursive: true, mode: 0o700 });
+  await chmod(join(planning, 'prototypes'), 0o000);
+  const message = 'prototypes/app in the planning folder cannot be checked (EACCES): fix its permissions and run sf planner setup again.';
+  try {
+    const result = await runCli(env, ['planner', 'setup', 'app']);
+    assert.equal(result.code, 1, result.stdout);
+    assert.equal(result.stderr.trim(), `sf: ${message}`);
+    await refusedSetup(env, 'prototypes_folder_unchecked', message);
+  } finally {
+    await chmod(join(planning, 'prototypes'), 0o700);
+  }
+  // Nothing cloned or written: the planning folder holds only prototypes, still empty; claude never ran.
+  assert.equal(existsSync(copy), false);
+  assert.deepEqual(await readdir(planning), ['prototypes']);
+  assert.deepEqual(await readdir(join(planning, 'prototypes')), []);
+  assert.equal(existsSync(join(bin, 'claude.log')), false);
 });
 
 test('skillsOff: the skill folders of both folders but the kept ones, once each, by name', async () => {

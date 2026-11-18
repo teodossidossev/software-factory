@@ -249,7 +249,9 @@ goes too. `suggest_changes` sends nothing out; it stores a note you send or dism
 
 A Claude Code planner in a planning copy (`sf planner setup`) reads the copy with its own tools
 (the planner's skills included) and, with the Read tool, the user's request and rules files and
-the English files of the workspace's vision; the same files go to Anthropic. Its
+the English files of the workspace's vision; the same files go to Anthropic. It writes only its
+prototypes, with Claude Code's Write and Edit tools, into the workspace's prototypes folder outside
+the copy; what it writes goes to Anthropic too, and nothing is published. Its
 shell commands run in Claude Code's sandbox; the secret files are denied to every tool (README,
 The planning copy).
 
@@ -264,7 +266,9 @@ trust dialog alone, ended once the answer is read. None of these
 are open to an agent; the agent only writes files in its worktree, and the factory decides what
 to commit. It commits only what the reviewers saw: the tree it stages must be the one the reviewed
 iteration recorded when it was published; otherwise nothing is committed, and the worktree goes
-back to review as a new iteration.
+back to review as a new iteration. The planner of a planning copy writes only its prototypes, with
+Write and Edit, which run outside its sandbox and which its settings hold to the workspace's
+prototypes folder.
 
 No Git call of the factory runs the repository's hooks or its fsmonitor: every one starts in one
 place (`factory/src/git.ts`) with `-c core.hooksPath=/dev/null -c core.fsmonitor=false`, and no

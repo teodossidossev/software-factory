@@ -380,14 +380,21 @@ started by the run queue as before.
 `sf planner setup <workspace>` (`src/planning-copy.ts`, no `sf serve` needed) prepares the folder a
 Claude Code session plans the workspace's tickets in: a clone of the workspace's repository with
 the factory's MCP server, its planning skill and a file that points the planner at your request and
-rules. It runs again at any time and refreshes the copy in place. The steps, in order:
+rules; beside it, the workspace's prototypes folder, the one place the planner writes. It runs again
+at any time and refreshes the copy in place. The steps, in order:
 
 1. **The folder** is `<SF_PLANNING_DIR>/<workspace>` (default `~/planning/<workspace>`; a relative
    `SF_PLANNING_DIR` is `invalid_config`). Its path is made real through its nearest existing
    folder, so a link anywhere in `SF_PLANNING_DIR` or its parents is followed. A path that is, holds
    or lies inside the checkout of any registered workspace is refused with `planning_copy_unusable`
    ("set SF_PLANNING_DIR to another folder"): the factory never fetches into, fast-forwards or
-   writes a checkout of yours.
+   writes a checkout of yours. A workspace named `prototypes` gets no planning copy
+   (`planning_copy_unusable`): that folder of the planning folder holds the prototypes. The
+   workspace's prototypes folder, `<SF_PLANNING_DIR>/prototypes/<workspace>`, is checked the same
+   way, before anything is written; a link at it or at `<SF_PLANNING_DIR>/prototypes` is refused
+   first, never followed (`planning_copy_unsafe`, step 6), and a path there that cannot be checked
+   (its `lstat` or `realpath` fails, say `EACCES`) is `prototypes_folder_unchecked`, naming the path
+   relative to the planning folder.
 2. **The origin** is the checkout's `origin` remote (a relative local path made absolute against
    the checkout); a checkout without one is `no_origin`.
 3. **The clone.** A missing folder is cloned from the origin with the checkout's objects as a
@@ -420,24 +427,41 @@ rules. It runs again at any time and refreshes the copy in place. The steps, in 
 6. **The skill.** `.claude/skills/planning-tasks` is removed (a link there is removed itself, never
    its target) and the factory's `skills/planning-tasks/` copied in its place: a copy, so it does
    not follow whatever branch the factory's checkout is on.
+
+   **The prototypes folder.** `<SF_PLANNING_DIR>/prototypes` and its folder of the workspace are
+   made with mode 0700 when missing; either one that is a link or not a folder is
+   `planning_copy_unsafe`, never followed. The planner writes a ticket's prototypes into
+   `<that folder>/<ticket>/` (the planning skill's Prototype step); a later run removes nothing
+   there.
 7. **The pointers.** `.claude/planning-copy.md` names the copy's workspace and base branch, the path
    of the request file of a ticket created on the dashboard
-   (`<state dir>/requests/<workspace>/<ticket>.md`), and your rules files that exist
-   (`rules/<workspace>.md`, then `rules/global.md`, in the config directory); the skill reads it
-   and every file it names.
+   (`<state dir>/requests/<workspace>/<ticket>.md`), your rules files that exist
+   (`rules/<workspace>.md`, then `rules/global.md`, in the config directory), the product vision
+   and, last, the ticket's prototypes folder (`<real prototypes folder>/<ticket>/`, the one folder
+   the planner writes); the skill reads it and every file it names.
 
    **The settings.** `.claude/settings.local.json` makes the copy read-only to the planner
-   (`plannerSettings`). Its `permissions` and `sandbox` keys are replaced whole at every run, and in
+   (`plannerSettings`) and lets it write the workspace's prototypes folder alone. Its
+   `permissions`, `sandbox` and `enableArtifact` keys are replaced whole at every run, and in
    `hooks` the events `Stop` and `Notification`; every other key (your own) and
    every other hook event keeps its value and its place, and a rule you added to `permissions` is
    dropped, so the copy stays read-only.
    - `permissions.allow`: the factory's MCP tools (`mcp__software-factory`) and the reading tools
-     `Read`, `Grep`, `Glob`, with `Skill`, `Agent`, `Task`, `TodoWrite` and `ToolSearch`. No
+     `Read`, `Grep`, `Glob`, with `Skill`, `Agent`, `Task`, `TodoWrite` and `ToolSearch`, and last
+     an `Edit` rule for the real path of the workspace's prototypes folder,
+     `Edit(//<folder>/**)` (it covers `Write`). No
      `Bash(...)` rule: a list of commands is not read-only (`sed` and `awk` run commands,
      `git diff --output` and `find -fprint` write files), so the sandbox is the boundary. Any other
      tool but the sandboxed shell asks you first.
-   - `permissions.deny`: `Edit`, `Write`, `NotebookEdit`, `WebFetch`, `WebFetch(domain:*)` and
-     `WebSearch` (a query or a URL could carry what the planner read), then a `Read` rule, denied to
+   - `permissions.additionalDirectories` holds the prototypes folder (file access only: no
+     settings, skills or `CLAUDE.md` load from it), and `blockWritesOutsideWorkingDirectories:
+     true` makes `Write` and `Edit` refuse every other path outside the copy without a prompt,
+     Claude Code's own files such as its plan files excepted (Claude Code 2.1.314 or later).
+   - `permissions.deny`: an `Edit` rule for each spelling of the copy, its path and its real path
+     (`Edit(//<copy>/**)`), in place of `Edit` and `Write` (an allow rule cannot carve the
+     prototypes folder out of a tool denied by name); `NotebookEdit`, `WebFetch`,
+     `WebFetch(domain:*)` and `WebSearch` (a query or a URL could carry what the planner read), and
+     `Artifact`; then a `Read` rule, denied to
      every tool and to the sandboxed commands, for each secret of the environment `sf planner setup`
      runs in, each once: the environment file (`SF_ENV_FILE`, else `auth.env` in the config
      directory; none with `SF_ENV_FILE` empty); the MCP and dashboard token files in the state
@@ -455,11 +479,17 @@ rules. It runs again at any time and refreshes the copy in place. The steps, in 
      `autoAllowBashIfSandboxed`, so they run without a prompt and the planner reads as freely as
      before; `allowUnsandboxedCommands: false`, so the model cannot ask to leave it;
      `failIfUnavailable`, so without a working sandbox the session does not start (fail closed);
-     `filesystem.denyWrite: ["."]`, so the commands write nowhere in the copy (nor anywhere else; the
-     factory, at its next run, is the copy's only writer, and the planner's `git fetch` reaches no
-     network); `filesystem.denyRead` with the state directory, which holds `sf.sock`, the jobs and
-     the tokens, hidden from the shell. The `Read` tool still reads your request files there, which
-     `.claude/planning-copy.md` names; the token files are denied to it by the rules above.
+     `filesystem.denyWrite: [".", "//<folder>"]`, so the commands write nowhere in the copy nor in
+     the prototypes folder, which the `Edit` allow rule and the additional directory would open to
+     them (nor anywhere else; the factory, at its next run, is the copy's only writer, and the
+     planner's `git fetch` reaches no network; no command can put a link into the prototypes
+     folder, and `Write` and `Edit` refuse to write through one); `filesystem.denyRead` with the
+     state directory, which holds `sf.sock`, the jobs and the tokens, hidden from the shell. The
+     `Read` tool still reads your request files there, which `.claude/planning-copy.md` names; the
+     token files are denied to it by the rules above.
+   - `enableArtifact: false`, with the `Artifact` denial: Claude Code publishes an artifact, a page
+     on claude.ai, without a prompt, so the copy's sessions publish none; a prototype stays in its
+     folder.
    - `hooks` (SF-245): `Stop` runs `'<factory>/bin/sf' planner waiting '<workspace>'`, and
      `Notification` with the matcher `permission_prompt` the same with `permission`, each a command
      hook with a 30-second timeout; the factory's `bin/sf` and the workspace's name are in single
@@ -489,10 +519,11 @@ rules. It runs again at any time and refreshes the copy in place. The steps, in 
    stay, and a skill of your Claude Code skills folder with a `planner` skill's name, or named
    `planning-tasks`, is the one Claude Code runs (personal over project). The output names the
    skills installed (`Skills planning-tasks, grilling, prototype: installed in .claude/skills`)
-   and how many were switched off. `.claude/planning-copy.md` ends with the product vision: the folder
-   `<state dir>/vision/<workspace>/en` (section Vision), its `VISION.md` first, to read with the
-   Read tool, when the store holds the workspace's English vision; else the line that none is
-   stored. The setup reads the store at each run: after the first `sf vision put`, run it again.
+   and how many were switched off. `.claude/planning-copy.md` names, before the prototypes folder,
+   the product vision: the folder `<state dir>/vision/<workspace>/en` (section Vision), its
+   `VISION.md` first, to read with the Read tool, when the store holds the workspace's English
+   vision; else the line that none is stored. The setup reads the store at each run: after the
+   first `sf vision put`, run it again.
 8. **The MCP server.** With the MCP token (`no_mcp_token` without one) and the MCP port (`SF_PORT`,
    else the running `sf serve`'s), `claude` from `PATH` (the Claude Code you open the copy with;
    `claude_not_found` without it) runs in the copy `claude mcp remove software-factory --scope
@@ -504,7 +535,8 @@ rules. It runs again at any time and refreshes the copy in place. The steps, in 
    timeout or a failed `add` is `planner_mcp_failed`, with the end of its output, the token shown
    as `<token>`.
 9. **The output.** The warnings and notes of step 3, then the copy's path with its base branch and
-   short commit, the MCP registration, the skill, the pointers file, the settings, the hooks, and
+   short commit, the MCP registration, the skill, the pointers file, the prototypes folder, the
+   settings, the hooks, and
    what to do next: let Claude Code trust the copy once, accepting its folder trust dialog, then
    `/planning-tasks workspace <workspace>, ticket <ticket>`. The factory never accepts that dialog
    for you unless you set `SF_PLANNER_TRUST=auto`: then the setup accepts it here, for a copy
@@ -641,7 +673,7 @@ Claude Code's global config: Claude Code saves the answer itself.
 | `SF_PLAN_SKILL` | the `planner` role's skills in the skills snapshot (`<state dir>/skills/grilling/SKILL.md`, then `<state dir>/skills/prototype/SKILL.md`, by default) | The planning skill whose body (without front matter) ends the instructions and `guide` as `## Planning method` (section MCP endpoint); set, it wins over the `planner` role's choice; empty: none. A missing file: the Quick start alone, and one warning at start. |
 | `SF_STATE_DIR` | `${XDG_STATE_HOME:-~/.local/state}/software-factory` | Job state and the `sf.sock` socket. |
 | `SF_WORKTREE_ROOT` | `${SF_STATE_DIR}/worktrees` | Where every job's worktree is created: `<root>/<workspace>/<ticket>`; absolute. |
-| `SF_PLANNING_DIR` | `~/planning` | Where `sf planner setup` keeps each workspace's planning copy: `<dir>/<workspace>`; absolute. |
+| `SF_PLANNING_DIR` | `~/planning` | Where `sf planner setup` keeps each workspace's planning copy, `<dir>/<workspace>`, and the planners' prototypes, `<dir>/prototypes/<workspace>/<ticket>/`; absolute. |
 | `SF_PLANNER_TRUST` | `ask` | Who accepts Claude Code's trust dialog for a planning copy: `ask`, you, once per copy (`sf planner trust`); `auto`, the factory, for its own planning copies only (section The planner session). Read by `sf planner setup` and `sf planner start` at their start; empty is the default, anything else stops them (`invalid_config`). |
 | `SF_MAX_JOBS` | `3` | The default of the run queue's limit `max_running` (section Run queue), within 1-20, while `queue.json` does not exist yet; `sf queue limit` and the board's stepper change the limit from then on. |
 | `SF_SENSITIVE_PATHS` | empty | Comma-separated globs added to the sensitive paths of `src/rules.ts`. |

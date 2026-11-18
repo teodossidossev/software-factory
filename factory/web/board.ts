@@ -480,6 +480,30 @@ function dependencyLines(key: string, graph: DependencyGraph, className: 'div' |
   return { waits, needed, cycle, lines: [waits, needed, cycle].filter((line) => line !== null), open };
 }
 
+// The phrase of a chain's first part not merged, by its state (src/chains.ts ChainState).
+const CHAIN_PHRASES: Readonly<Record<ChainState, (part: ChainPart) => string>> = {
+  ready: () => 'ready to submit', on_part: (part) => `to be moved onto ${part.base}`, submitted: () => 'submitted',
+  working: () => 'in progress', stopped: () => 'waits for you', planned: () => 'planned', merged: () => 'merged',
+};
+
+// How far each chain the card's ticket belongs to is (a part of it, or its main ticket): one line
+// per chain. k counts the numbers 1..count with a merged part (parts may merge out of order); the
+// phrase is that of the first number with none (its first part by ticket: parts come sorted).
+function chainLinesOf(key: string): HTMLElement[] {
+  const rows = state.chains.filter((row) => `${row.workspace}/${row.ticket}` === key || row.parts.some((part) => `${row.workspace}/${part.ticket}` === key));
+  return rows.map((row) => {
+    const numbers = Array.from({ length: row.count }, (_, index) => index + 1);
+    const merged = (n: number): boolean => row.parts.some((part) => part.n === n && part.state === 'merged');
+    const k = numbers.filter(merged).length;
+    const n = numbers.find((number) => !merged(number));
+    if (n === undefined) {
+      return el('div', 'meta chain', `${row.ticket}: ${row.count}/${row.count} merged`);
+    }
+    const part = row.parts.find((candidate) => candidate.n === n);
+    return el('div', 'meta chain', `${row.ticket}: ${k}/${row.count} merged, ${ordinal(n)} ${part === undefined ? 'not written yet' : CHAIN_PHRASES[part.state](part)}`);
+  });
+}
+
 // The card of a ticket on the board, or null.
 const cardOf = (key: string): HTMLElement | null => [...document.querySelectorAll<HTMLElement>('#cols .card')].find((card) => card.dataset.key === key) ?? null;
 
@@ -589,6 +613,7 @@ function jobCard(job: JobRow): HTMLLIElement {
   const item = boardCard(key, job.workspace);
   item.dataset.open = key;
   item.append(cardRow(job), el('div', 'title', titleOf(job)));
+  item.append(...chainLinesOf(key));
   const progress = RUNNING.includes(job.state) ? progressBlock(job, nowLine(job).what, true) : [];
   if (job.state === 'waiting_limit') {
     // Parked on a usage limit, holding its slot; once the reset passed under the rule wait,
@@ -873,6 +898,7 @@ function queueCard(row: TicketRow): HTMLLIElement {
   };
   head.append(noteChip('tag cnote'));
   item.append(head, el('div', 'title', row.title), noteChip('tag cnote below'));
+  item.append(...chainLinesOf(key));
   const { lines, open } = dependencyLines(key, board.graph, 'div');
   item.append(...lines);
   if (state.queue !== null && row.queue_error !== null && typeof row.queue_error === 'object') {

@@ -442,6 +442,23 @@ interface JobDependencies {
   ticket: string;
   lands_after: DependencyRow[];
 }
+// The state of a part of a chain: src/chains.ts ChainState.
+type ChainState = 'merged' | 'submitted' | 'ready' | 'on_part' | 'stopped' | 'working' | 'planned';
+// A part of a chain, its number from slice: N/M: src/chains.ts ChainPart.
+interface ChainPart {
+  ticket: string;
+  n: number;
+  base: string;
+  state: ChainState;
+}
+// A chain of parts (the tickets payload's chains): ticket is the main ticket (part_of), count the
+// largest M, parts sorted by number: src/chains.ts ChainRow.
+interface ChainRow {
+  workspace: string;
+  ticket: string;
+  count: number;
+  parts: ChainPart[];
+}
 
 // An archived ticket: src/setup.ts ArchivedRow.
 interface ArchivedRow {
@@ -503,6 +520,7 @@ interface TicketsPayload {
   tickets: TicketRow[];
   archived: ArchivedRow[];
   job_lands_after: JobDependencies[];
+  chains: ChainRow[];
   queue: QueueView | null;
   changed?: Array<{ workspace: string; ticket: string }>;
 }

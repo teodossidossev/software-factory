@@ -2,7 +2,8 @@
 // within the daily's two days (handed over to the checkout, pushed, or merged), current and
 // archived, and which open branches of mine are live. The factory's work counts as mine, though
 // I commit a hand-over later; a branch with no recent work and no job going is parked and stays out
-// of the daily. And the jobs in progress now: the current ones not in a terminal state.
+// of the daily. And the jobs in progress now: the current ones not in a terminal state. And the
+// count of jobs landed today, of every workspace, for the Coordinator card (landedToday).
 import { readFile, stat } from 'node:fs/promises';
 import type { Span } from './digest-run.js';
 import type { LiveBranch, MyCommit } from './digest.js';
@@ -168,6 +169,38 @@ export async function jobsOf(store: JobStore, workspaces: string[], days: Days):
     done.push({ workspace: job.workspace, ticket: job.ticket, title, state: merged ? 'merged' : job.state, at, branch: job.branch });
   }
   return { done: done.sort((a, b) => Date.parse(a.at) - Date.parse(b.at)), current };
+}
+
+// The count of jobs landed today, for the Coordinator card: the jobs of every workspace, current and
+// archived, merged as jobsOf decides it (pushed, and the merge request merged or merged_on_target),
+// each once, whose merge time (the last merge event's ts, else updated_at) lies from midnight of
+// now's local day to now, both included. A pushed job whose events.jsonl was last changed before
+// that midnight holds no merge event in the day and is not read; any other state is skipped from its
+// job.json alone.
+export async function landedToday(store: JobStore, now = new Date()): Promise<number> {
+  const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const end = now.getTime();
+  const mergeLine = (line: EventLine): boolean => (line.type === 'merge_request' && line.mr_state === 'merged') || onTarget(line);
+  let count = 0;
+  for (const dir of await store.listAll()) {
+    const job = dir.job;
+    if (job?.state !== 'pushed') {
+      continue;
+    }
+    const path = store.eventsPath(dir.workspace, dir.name);
+    if (await stat(path).then((info) => info.mtimeMs < midnight, () => false)) {
+      continue;
+    }
+    const lines = await events(path);
+    if (job.mr?.state !== 'merged' && !lines.some(onTarget)) {
+      continue;
+    }
+    const at = Date.parse(lastTs(lines, mergeLine) ?? job.updated_at);
+    if (at >= midnight && at <= end) {
+      count += 1;
+    }
+  }
+  return count;
 }
 
 // Whether an open branch of mine (not landed) is live: a commit of mine on it within the two days,

@@ -5073,7 +5073,7 @@ POST (anything else `405` with `Allow: GET, POST`):
 | `api/digests` | `{running, digests: [{id, trigger, period, ended_at, counts: {landed, live_branches, impact}, cost_usd, error}]}`, newest first (SF-103); the counts from the Git data, never from the model; 404 without the digest (in-process dashboards) |
 | `api/digests/<id>` | the stored record `digest/<id>.json` (SF-103); an unknown id or any query is an empty 404 |
 | `api/pins` | the dashboard's pins (section Pins), `pins.json` read as `sf pins` reads it: `{pins: [{id, route, selector, text, rect: {x, y, w, h, vw, vh}, note, url?, at, resolved}]}` (`url`, with `route` `""`, only on a pin of another page), every stored pin in id order, open and resolved; any query is an empty 404; `409 pins_unreadable` for a file that is not JSON or not this shape |
-| `api/coordinator` | the coordinator's state, `coordinator.json` read as `sf coordinator` reads it (section Coordinator card): `{version, status: {text, at} \| null, questions: [{id, text, at}], link, next_question, status_requested_at}`; any query is an empty 404; written by `sf coordinator` and, for `status_requested_at` only, by `POST api/coordinator/request` |
+| `api/coordinator` | the coordinator's state, `coordinator.json` read as `sf coordinator` reads it (section Coordinator card): `{version, status: {text, at} \| null, questions: [{id, text, at}], link, next_question, status_requested_at, landed_today}`; any query is an empty 404; written by `sf coordinator` and, for `status_requested_at` only, by `POST api/coordinator/request`; `landed_today` is not stored but counted at each read (`src/digest-jobs.ts` `landedToday`): the jobs of every workspace, current and archived, pushed with their merge request merged or found merged on their target (`merged_on_target`), each once, whose last such event (else `updated_at`) lies from midnight of `sf serve`'s local day to now; when the job directories cannot be listed `sf serve` logs "warning: the jobs landed today could not be counted: <message>" and the field is left out |
 | `vision/<workspace>` | the workspace's vision page (section Vision), `page.html` as `sf vision` stored it, `text/html; charset=utf-8` under its own `content-security-policy` (`VISION_PAGE_CSP`: a sandbox with scripts only, an opaque origin that loads nothing), with `cache-control: no-store`, `nosniff`, `no-referrer` and `x-frame-options: DENY` kept; a name without a page, any query or a longer path is an empty 404; another method `405`; written only by `sf vision` |
 | `api/tickets` | `{tickets: [{workspace, ticket, title, base, draft, request, job, lands_after, attachments, conversation: {message, url}, queue_position, queue_error, queue_reason, queue_force, queue_retry}], archived: [{workspace, ticket, title}], job_lands_after: [{workspace, ticket, lands_after}], queue: {max_running, running, held, hold_reason, next, on_limit, limit_hold}}`: the Task files without a live job; `queue_position` its 1-based place in the run queue or `null`, `queue_error` the queue's failed start `{code, message}` or `null`, `queue_reason` why its plan holds it in the queue ("plan not ready: N blocker, M major", "plan check failed", "plan being checked", "plan not checked") or `null`, `queue_force` whether Start anyway was given (SF-086), `queue_retry` the next try of a queued start that could not fetch `{code: "fetch_failed", at, retries}` or `null` (SF-236), `queue` the run queue (`next`: `{workspace, ticket}` of the first entry that waits for nothing and whose plan does not hold it, or `null`; `on_limit` the rule at a usage limit's reset and `limit_hold` `{parked, resets_at}` while a job is parked, else `null`, SF-072; the whole `queue` is `null` without a run queue) (SF-071, section Run queue); `lands_after` the tickets its Task file waits for, `[{workspace, ticket, state}]` with `state` `merged`, `pushed`, `running`, `planned` or `missing` (SF-084, section Dashboard), and `job_lands_after` the same for the Task files with a live job; `attachments` its images `[{name, bytes, type}]` (SF-064, section Ticket images); `draft` is true for a skeleton; `request` the user's words of New ticket or `null`; `job` is the last job's state or `null`; `url` is `https://chatgpt.com/?q=<message URL-encoded>`, or `null` when too long |
 | `api/jobs/<ws>/<ticket>/iterations/<n>/report` | the Report, `text/markdown` |
@@ -5586,7 +5586,8 @@ else on the dashboard writes the state, answers go to the chat.
   taken only when it parses with `URL` as `https:`, host exactly `claude.ai`, the default port and
   no user or password (`bad_link` otherwise: `http:`, `claude.ai.evil.com`, `user@claude.ai`,
   `javascript:`, ...).
-- **Reading it**: `GET api/coordinator` answers the state as JSON (any query or longer path is an
+- **Reading it**: `GET api/coordinator` answers the state as JSON, with the jobs landed today
+  counted at the read (`landed_today`, its row in section Dashboard) (any query or longer path is an
   empty 404 but `POST api/coordinator/request`; no other method or route touches it). After each
   write of `sf coordinator`, and after a `POST api/coordinator/request` that opened a request, `sf serve` marks the change
   feed's `coordinator` kind: every open page gets a `coordinator` event (no data), and the card
@@ -5651,8 +5652,10 @@ else on the dashboard writes the state, answers go to the chat.
   to 3 s one, rarely two, small lights switch for under a second and come back; then the screen
   rests. A page that loads with a status there shows it and speaks nothing; a new status or a
   click ends a speech at once. The small lights left on while Zen speaks spell a 9-bit number in
-  binary; for now each speech draws a random one from 1 to 511 (the page holds no count of the
-  jobs landed today, which a later ticket gives it). The first `jobs` event the
+  binary: the jobs landed today, `landed_today` of the `api/coordinator` read that brought the
+  status, taken when it is a whole number from 0 (0 lights none; above 511 all nine are on); when
+  the answer has none (an older `sf serve`) or another value, each speech draws a random one from
+  1 to 511. The first `jobs` event the
   page receives only sets the starting list, so opening the dashboard does not flash; after a reconnect the first `jobs`
   event compares with the last list seen, so a change made while away flashes once. Another
   change while lit starts the 3 s again (one timer at a time; none while nothing changed). The
@@ -5669,7 +5672,9 @@ else on the dashboard writes the state, answers go to the chat.
   Read them like a page, left to right and top to bottom: the two above the bar, the four down the
   right, then below the bar the two upper ones (left, right) and last the lower one between them;
   the first is the largest bit (256), the last is 1. Lights 000000110 = 4 + 2 = 6;
-  000001001 = 8 + 1 = 9. For now the number is a random one; it will be the jobs landed today.
+  000001001 = 8 + 1 = 9. The number is how many jobs landed today: jobs of every workspace whose
+  merge request was merged, or that sf serve found merged on their target, since midnight in sf
+  serve's time zone.
 - **Asking for a status**: a click on Zen's screen posts `POST api/coordinator/request` with `{}`
   (strict: anything else is `400 invalid_body`), with the transport checks of every action (the
   cookie or the `/d/<token>/` path, the exact Origin, `application/json`), allowed from another

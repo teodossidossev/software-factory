@@ -217,23 +217,30 @@ test('dashboard (SF-153): GET api/health is the checks\' last result; the stream
   });
 });
 
-test('dashboard: GET api/coordinator answers the coordinator\'s file (empty without); no write route but POST api/coordinator/request; the stream sends coordinator on connect and on coordinatorChanged', async () => {
-  await withDashboard('dash-coordinator', fakeActions(), async (dashboard, { state }) => {
+test('dashboard: GET api/coordinator answers the coordinator\'s file (empty without) and the jobs landed today; no write route but POST api/coordinator/request; the stream sends coordinator on connect and on coordinatorChanged', async () => {
+  await withDashboard('dash-coordinator', fakeActions(), async (dashboard, { state, jobs, job }) => {
     const base = dashboard.url;
     const read = async (): Promise<unknown> => {
       const reply = await fetchRaw(new URL('api/coordinator', base));
       assert.deepEqual([reply.status, reply.headers['content-type'], reply.headers['content-security-policy']], [200, 'application/json; charset=utf-8', CSP]);
       return JSON.parse(reply.body);
     };
-    assert.deepEqual(await read(), { version: 1, status: null, questions: [], link: null, next_question: 1, status_requested_at: null });
+    assert.deepEqual(await read(), { version: 1, status: null, questions: [], link: null, next_question: 1, status_requested_at: null, landed_today: 0 });
     await setStatus(state, 'Planning SF-210', new Date('2026-11-13T09:00:00.000Z'));
     await askQuestion(state, 'Merge <b>SF-204</b> first?', new Date('2026-11-13T09:01:00.000Z'));
     await setLink(state, 'https://claude.ai/chat/abc');
-    assert.deepEqual(await read(), {
+    const filled = {
       version: 1, status: { text: 'Planning SF-210', at: '2026-11-13T09:00:00.000Z' },
       questions: [{ id: 'q1', text: 'Merge <b>SF-204</b> first?', at: '2026-11-13T09:01:00.000Z' }], link: 'https://claude.ai/chat/abc', next_question: 2,
       status_requested_at: null,
-    });
+    };
+    assert.deepEqual(await read(), { ...filled, landed_today: 0 });
+    // A job merged a minute ago (not before local midnight, so the test holds just after it).
+    const now = new Date();
+    const merged = new Date(Math.max(now.getTime() - 60_000, new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime())).toISOString();
+    await jobs.write({ ...job, ticket: 'T-2', branch: 'T-2', state: 'pushed', updated_at: merged, mr: { host: 'github', number: 2, url: 'https://example.invalid/pull/2', state: 'merged' } });
+    await jobs.appendEvent('app', 'T-2', { ts: merged, iteration: 1, type: 'merge_request', action: 'merged', host: 'github', number: 2, url: 'https://example.invalid/pull/2', mr_state: 'merged' });
+    assert.deepEqual(await read(), { ...filled, landed_today: 1 });
     // No route but POST api/coordinator/request writes it (its test follows).
     for (const path of ['api/coordinator', 'api/coordinator/status', 'api/coordinator/ask', 'api/coordinator/link']) {
       for (const method of ['POST', 'PUT', 'DELETE'] as const) {

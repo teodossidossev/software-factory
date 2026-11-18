@@ -1955,14 +1955,15 @@ test('board client: Zen thinks with its small lights and speaks the requested st
   const numberOf = (on: number[]): number => READING.reduce((sum, light, position) => sum + (on.includes(light) ? 2 ** (8 - position) : 0), 0);
   const TEXT = 'Landed SF-301 and 02';
   assert.equal([...TEXT].length, 20);
-  // A page that had a request open (SR-6 a) and then gets its status (SR-7).
-  const speaking = async (globals: Record<string, unknown> = {}) => {
+  // A page that had a request open (SR-6 a) and then gets its status (SR-7), the answer with landed
+  // (its landed_today, if any).
+  const speaking = async (globals: Record<string, unknown> = {}, landed: Record<string, unknown> = {}) => {
     let shown: unknown = { ...coordStatus('Planning'), status_requested_at: secondsAgo(10) };
     const page = await openCoordinator(() => shown, '', globals);
     await coordChanged(page);
     assert.equal(zenShown(page).lit, true);
     const start = page.timers.length;
-    shown = { ...coordStatus(TEXT), status: { text: TEXT, at: secondsAgo(1) }, status_requested_at: null };
+    shown = { ...coordStatus(TEXT), status: { text: TEXT, at: secondsAgo(1) }, status_requested_at: null, ...landed };
     await coordChanged(page);
     return { page, start, change: async (state: unknown) => {
       shown = state;
@@ -2001,6 +2002,20 @@ test('board client: Zen thinks with its small lights and speaks the requested st
   assert.ok(bars.every((bar, index) => bar === (index % 2 === 0)), bars.join(','));
   assert.ok(last !== undefined && last >= 2200 && last < 2200 + 260, String(last));
   assert.deepEqual(zenShown(page), { lit: false, speaking: false, bar: false, on: [] });
+
+  // The small lights spell landed_today, read at the speech's start (no switch yet): 6 is lights 6
+  // and 8; above 511 all nine; 0 none.
+  for (const [landed, on] of [[6, [6, 8]], [511, [0, 1, 2, 3, 4, 5, 6, 7, 8]], [600, [0, 1, 2, 3, 4, 5, 6, 7, 8]], [0, []]] as const) {
+    const spoken = zenShown((await speaking({}, { landed_today: landed })).page);
+    assert.deepEqual([spoken.speaking, spoken.on], [true, on], String(landed));
+  }
+  // No landed_today, or one that is not a whole number from 0: the random number (Math.random 0.5
+  // draws 256, small light 4 alone).
+  const half = Object.assign(Object.create(Math) as Math, { random: () => 0.5 });
+  for (const landed of [{}, { landed_today: -1 }, { landed_today: 1.5 }, { landed_today: '6' }, { landed_today: null }]) {
+    const spoken = zenShown((await speaking({ Math: half }, landed)).page);
+    assert.deepEqual([spoken.speaking, spoken.on], [true, [4]], JSON.stringify(landed));
+  }
 
   // SR-12: a page whose first read has a status speaks nothing.
   const loaded = await openCoordinator(() => coordStatus(TEXT));

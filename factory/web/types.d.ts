@@ -871,7 +871,8 @@ interface SkillText {
 }
 
 // GET api/coordinator: the coordinator's state for the board's Coordinator card (src/coordinator.ts
-// CoordinatorState, which sf coordinator writes, and POST api/coordinator/request its status_requested_at); the card reads only these fields.
+// CoordinatorState, which sf coordinator writes, and POST api/coordinator/request its status_requested_at; with landed_today,
+// counted at the read: src/dashboard-reads.ts coordinatorView); the card reads only these fields.
 interface CoordinatorQuestion {
   id: string;
   text: string;
@@ -883,6 +884,10 @@ interface CoordinatorState {
   link: string | null;
   // The time of the dashboard's last request for a status, until a status answers it.
   status_requested_at: string | null;
+  // The jobs landed today, which sf serve counts at the read; absent from an answer that has none
+  // (an older sf serve, or one that could not count); null in the page's state when the answer has
+  // none or not a whole number from 0.
+  landed_today?: number | null;
 }
 
 // The job created from review comments: src/review-job.ts ReviewJobResult.

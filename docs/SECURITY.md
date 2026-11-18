@@ -147,6 +147,14 @@ refused), and the factory's test command passed in a sandbox without network on 
   configuration file with changes of yours, or a `.mcp.json` Git does not track, stays in the
   copy: the setup names it in a warning, and it loads until you remove it. `sf planner start`
   refuses a copy whose working tree holds any of it.
+- **The factory accepts Claude Code's trust dialog only for its own planning copies, and only
+  with your consent.** With `SF_PLANNER_TRUST=auto`, set once in the factory's configuration, `sf
+  planner setup` and `sf planner start` accept Claude Code's trust dialog for the workspace's
+  planning copy, which holds none of the repository's Claude Code configuration: only for the
+  folder `sf planner setup` made for that workspace, only while its working tree holds none of
+  that configuration, and only by answering the dialog in a terminal of their own as you would,
+  so Claude Code saves the answer itself; the factory never writes Claude Code's global config.
+  With the default, `ask`, you accept the dialog yourself (`sf planner trust`).
 - **The read-only sessions load no MCP server.** The morning digest, which reads other people's
   commit messages, the reviews and the Task check start without your MCP servers and deny every
   MCP tool, so nothing they read can drive one.

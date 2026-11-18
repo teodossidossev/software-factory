@@ -1,15 +1,16 @@
 // sf planner start and stop: the ticket's planner session (fake script and claude first on PATH),
 // one per ticket, its record and its environment; a session that ended is no session; every refusal
 // of start with its code; sf planner trust (a fake claude that accepts the dialog, or not) and its
-// refusals; the hook's link written into its own session's record only; copyTrusted.
+// refusals; the hook's link written into its own session's record only; copyTrusted; with
+// SF_PLANNER_TRUST=auto, the trust run against a fake Claude Code faithful to the captured dialog.
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { chmod, mkdir, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { FactoryError } from '../src/errors.js';
-import { copyTrusted, sessionFile, startPlanner } from '../src/planner-session.js';
+import { acceptTrustDialog, copyTrusted, sessionFile, startPlanner, trustDialogShown } from '../src/planner-session.js';
 import { type Env, git, newEnv, newRepo, processEnv, runCli, temp } from './support/harness.js';
 
 const COMMAND_LINE = "exec claude --remote-control 'Planner app APP-12' '/planning-tasks workspace app, ticket APP-12'";
@@ -24,7 +25,8 @@ async function writeClaude(bin: string, body: string): Promise<void> {
 
 // Workspace app with its planning copy set up and trusted, auth.env with Anthropic credentials, and
 // a fake script and claude first on PATH. The fake script logs as script.log, runs its command with
-// sh -c in the background and, like the real one, ignores SIGTERM; its child does not.
+// sh -c in the background, its own input passed on (a background command gets /dev/null otherwise),
+// and, like the real one, ignores SIGTERM; its child does not.
 async function sessionEnv(name: string): Promise<{ env: Env; copy: string; bin: string; file: string }> {
   const env = await newEnv(name);
   // newRepo registers it as workspace app.
@@ -45,7 +47,8 @@ async function sessionEnv(name: string): Promise<{ env: Env; copy: string; bin: 
     `for arg in "$@"; do echo "arg=$arg" >> '${log}'; done`,
     `if [ -p /dev/stdin ]; then echo "stdin=fifo" >> '${log}'; fi`,
     `echo "$$" >> '${join(bin, 'script.pids')}'`,
-    'sh -c "$2" &',
+    'exec 3<&0',
+    'sh -c "$2" <&3 &',
     "trap '' TERM",
     'wait $!',
     `echo "exit=$?" >> '${log}'`,
@@ -276,14 +279,21 @@ test('sf planner start refuses what it cannot run, each with its code', async ()
     assert.match(usage.stderr, /^sf: planner needs setup <workspace>, waiting <workspace> \[permission\], start <workspace> <ticket>, stop <workspace> <ticket> or trust <workspace>\./);
   } finally {
     await killLeft(file);
-    // The fake script is no terminal: a SIGKILL to it leaves its child, which the real script's
-    // hang-up ends; the test ends it itself.
-    const pids = await readFile(join(bin, 'claude.pids'), 'utf8').catch(() => '');
-    for (const pid of pids.split('\n').filter((text) => text !== '').map(Number)) {
-      forceKill(pid);
-    }
+    await killClaudes(bin);
   }
 });
+
+// The pids the fake claudes wrote to claude.pids, in order.
+const claudePids = async (bin: string): Promise<number[]> =>
+  (await readFile(join(bin, 'claude.pids'), 'utf8').catch(() => '')).split('\n').filter((text) => text !== '').map(Number);
+
+// The fake script is no terminal: a SIGKILL to it leaves its child, which the real script's hang-up
+// ends; the test ends every fake claude itself.
+async function killClaudes(bin: string): Promise<void> {
+  for (const pid of await claudePids(bin)) {
+    forceKill(pid);
+  }
+}
 
 // sessionEnv's workspace with its copy untrusted, and a fake claude that logs its folder, arguments
 // and environment to claude.log, then accepts the trust dialog as Claude Code would (accept true) by
@@ -455,4 +465,212 @@ test('copyTrusted reads the copy\'s own entry', async () => {
   assert.equal(await copyTrusted(copy, { HOME: home, CLAUDE_CONFIG_DIR: cc }), false);
   await config(cc, trusted(copy));
   assert.equal(await copyTrusted(copy, { HOME: home, CLAUDE_CONFIG_DIR: cc }), true);
+});
+
+// Claude Code 2.1.325's trust dialog after its first line and the folder, as captured: \r\n line
+// ends, the selection mark coloured on "No, exit".
+const DIALOG = [
+  '',
+  'Quick safety check: Is this a project you created or one you trust? (Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what\'s in this folder first.',
+  '',
+  "Claude Code'll be able to read, edit, and execute files here.",
+  '',
+  'Security guide',
+  '',
+  '\x1b[36m❯\x1b[39m No, exit',
+  '  Yes, I trust this folder',
+  '',
+  'Enter to confirm · Esc to cancel',
+  '',
+].join('\r\n');
+// What Claude Code 2.1.325 writes after Down: cursor moves and the mark, no option line.
+const MOVED = '\x1b[3A\x1b[1G \x1b[1B\x1b[1G\x1b[36m❯\x1b[39m\x1b[2B\x1b[1G';
+
+// The fake Claude Code of a trust run (no argument; with arguments it is the planner and sleeps):
+// faithful, the captured dialog, its selection on "No, exit"; Down moves it to "Yes, I trust this
+// folder" and writes the mark again; Enter on Yes saves the answer in the global config and stays,
+// on No exits with nothing saved. welcome shows no dialog, exits ends at once, unsaved saves
+// nothing, unmoved writes nothing after Down. Each key read is logged as key=<hex>.
+type TrustFake = 'faithful' | 'welcome' | 'exits' | 'unsaved' | 'unmoved';
+async function trustClaude(bin: string, fake: TrustFake = 'faithful'): Promise<void> {
+  const log = join(bin, 'claude.log');
+  await writeFile(join(bin, 'dialog'), DIALOG);
+  await writeFile(join(bin, 'moved'), MOVED);
+  const hex = "dd bs=1 count=$1 2>/dev/null | od -An -tx1 | tr -d ' \\n'";
+  const save = `printf '%s' "{\\"projects\\":{\\"$(pwd -P)\\":{\\"hasTrustDialogAccepted\\":true}}}" > "\${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json"; `;
+  await writeClaude(bin, [
+    `echo "$$" >> '${join(bin, 'claude.pids')}'`,
+    `if [ $# -gt 0 ]; then ${SLEEPING_CLAUDE}; fi`,
+    ...(fake === 'exits' ? ['exit 1'] : []),
+    fake === 'welcome'
+      ? "printf 'Welcome\\r\\n'"
+      : `printf '\\033[?25lAccessing workspace:\\r\\n%s\\r\\n' "$(pwd -P)"; cat '${join(bin, 'dialog')}'`,
+    `keys() { ${hex}; }`,
+    'selected=no',
+    'while :; do',
+    '  key=$(keys 1)',
+    '  if [ -z "$key" ]; then exit 0; fi',
+    '  if [ "$key" = 1b ]; then key="$key$(keys 2)"; fi',
+    `  echo "key=$key" >> '${log}'`,
+    '  case $key in',
+    `    1b5b42) selected=yes; ${fake === 'unmoved' ? ':' : `cat '${join(bin, 'moved')}'`} ;;`,
+    `    0d) if [ $selected = no ]; then exit 0; fi; ${fake === 'unsaved' ? '' : save}${SLEEPING_CLAUDE} ;;`,
+    '  esac',
+    'done',
+  ].join('\n'));
+}
+
+// sessionEnv's workspace with SF_PLANNER_TRUST=auto, its copy untrusted ({} in the global config)
+// and the trust fake as claude.
+async function autoEnv(name: string, fake: TrustFake = 'faithful'): Promise<{ env: Env; copy: string; bin: string; file: string; config: string }> {
+  const session = await sessionEnv(name);
+  const config = join(session.env.home, 'cc', '.claude.json');
+  await writeFile(config, '{}');
+  await trustClaude(session.bin, fake);
+  session.env.extra = { ...session.env.extra, SF_PLANNER_TRUST: 'auto' };
+  return { ...session, config };
+}
+
+const keysOf = async (bin: string): Promise<string[]> =>
+  (await readFile(join(bin, 'claude.log'), 'utf8').catch(() => '')).split('\n').filter((line) => line.startsWith('key='));
+
+test('with SF_PLANNER_TRUST=auto, sf planner start accepts the trust dialog of an untrusted copy first', async () => {
+  const { env, copy, bin, file, config } = await autoEnv('planner-auto');
+  try {
+    // AT-6: a value that is neither ask nor auto stops start before anything runs.
+    env.extra = { ...env.extra, SF_PLANNER_TRUST: 'yes' };
+    const wrong = await runCli(env, ['planner', 'start', 'app', 'APP-12']);
+    assert.deepEqual([wrong.code, wrong.stdout, wrong.stderr], [1, '', 'sf: SF_PLANNER_TRUST must be ask or auto, got "yes".\n']);
+    assert.equal(await runs(bin), 0);
+    env.extra = { ...env.extra, SF_PLANNER_TRUST: 'auto' };
+
+    // AT-1: the trust run, then the planner and start's two lines.
+    const started = await runCli(env, ['planner', 'start', 'app', 'APP-12']);
+    assert.equal(started.code, 0, started.stderr);
+    const pid = (await recordOf(file)).pid as number;
+    assert.equal(started.stdout, [
+      `Planner of app APP-12 started: Claude Code session "Planner app APP-12" in the planning copy of app (pid ${pid}).`,
+      'Open it in the Claude app or on claude.ai/code under that name; once the planner first waits for you, sf planner start app APP-12 prints its link.',
+      '',
+    ].join('\n'));
+    const scriptLog = (await readFile(join(bin, 'script.log'), 'utf8')).split('\n');
+    assert.deepEqual(scriptLog.filter((line) => line.startsWith('cwd=') || line.startsWith('arg=')), [
+      `cwd=${copy}`, 'arg=-qfec', 'arg=exec claude', 'arg=/dev/null',
+      `cwd=${copy}`, 'arg=-qfec', `arg=${COMMAND_LINE}`, 'arg=/dev/null',
+    ]);
+    const lines = (await readFile(join(bin, 'claude.log'), 'utf8')).split('\n');
+    // Exactly one Down, then one Enter.
+    assert.deepEqual(lines.filter((line) => line.startsWith('key=')), ['key=1b5b42', 'key=0d']);
+    assert.equal(lines.filter((line) => line === 'SF_PLANNER_TICKET=APP-12').length, 1);
+    assert.equal(lines.filter((line) => line === 'TERM=xterm-256color').length, 2);
+    // The trust run: no argument (its lines come before the planner's first), none of the markers
+    // or tokens.
+    const trustRun = lines.slice(0, lines.findIndex((line) => line.startsWith('arg=')));
+    assert.ok(trustRun.includes('TERM=xterm-256color'));
+    const names = trustRun.filter((line) => line.includes('=')).map((line) => line.slice(0, line.indexOf('=')));
+    for (const name of ['SF_PLANNER_TICKET', 'SF_PLANNER_ID', 'SF_GITHUB_TOKEN', 'ANTHROPIC_API_KEY']) {
+      assert.equal(names.includes(name), false, name);
+    }
+    // The trust run's Claude Code was ended; the global config is what it wrote.
+    await gone((await claudePids(bin))[0]!);
+    assert.equal(await readFile(config, 'utf8'), JSON.stringify({ projects: { [copy]: { hasTrustDialogAccepted: true } } }));
+
+    const stopped = await runCli(env, ['planner', 'stop', 'app', 'APP-12']);
+    assert.deepEqual([stopped.code, stopped.stdout], [0, `Stopped the planner of app APP-12 (pid ${pid}).\n`]);
+  } finally {
+    await killLeft(file);
+    await killClaudes(bin);
+  }
+});
+
+test('acceptTrustDialog says why it could not accept the dialog, and ends Claude Code', async () => {
+  const { env, copy, bin, file } = await autoEnv('planner-auto-fails', 'welcome');
+  const procEnv = processEnv(env);
+  const log = join(bin, 'claude.log');
+  const lastGone = async (): Promise<void> => gone((await claudePids(bin)).at(-1)!);
+  try {
+    // AT-2: no dialog within the limit: nothing sent.
+    assert.equal(await acceptTrustDialog('app', procEnv, 1_000), 'the dialog did not show within 1 s');
+    assert.deepEqual(await keysOf(bin), []);
+    await lastGone();
+    assert.equal(await copyTrusted(copy, procEnv), false);
+
+    // AT-3: a dialog answered but not saved.
+    await rm(log);
+    await trustClaude(bin, 'unsaved');
+    assert.equal(await acceptTrustDialog('app', procEnv, 2_000), 'Claude Code did not save the answer');
+    assert.deepEqual(await keysOf(bin), ['key=1b5b42', 'key=0d']);
+    await lastGone();
+    assert.equal(await copyTrusted(copy, procEnv), false);
+
+    // AT-3b: no mark after Down: no Enter.
+    await rm(log);
+    await trustClaude(bin, 'unmoved');
+    assert.equal(await acceptTrustDialog('app', procEnv, 4_000), 'the selection did not move to "Yes, I trust this folder"');
+    assert.deepEqual(await keysOf(bin), ['key=1b5b42']);
+    await lastGone();
+    assert.equal(await copyTrusted(copy, procEnv), false);
+
+    // AT-3: Claude Code ends before the dialog; start refuses with the reason and runs no planner.
+    await trustClaude(bin, 'exits');
+    const before = await runs(bin);
+    const deps = { env: procEnv, stateDir: env.state, configDir: env.config };
+    await assert.rejects(startPlanner('app', 'APP-12', deps), (error: unknown) => {
+      assert.ok(error instanceof FactoryError, String(error));
+      assert.deepEqual([error.code, error.message], ['planning_copy_untrusted',
+        'Claude Code does not trust the planning copy of app yet, and the factory could not accept its trust dialog: Claude Code ended before the dialog showed. Run sf planner trust app, accept its trust dialog, then start the planner again.']);
+      return true;
+    });
+    assert.equal(existsSync(file), false);
+    assert.equal(await runs(bin), before + 1);
+    await lastGone();
+
+    // AT-4: no Claude Code for a copy not set up, one holding .mcp.json, or without script.
+    const opened = await runs(bin);
+    const pointers = join(copy, '.claude', 'planning-copy.md');
+    await rm(pointers);
+    assert.equal(await acceptTrustDialog('app', procEnv), 'the copy is not set up');
+    await writeFile(pointers, 'pointers\n');
+    await writeFile(join(copy, '.mcp.json'), '{}\n');
+    assert.equal(await acceptTrustDialog('app', procEnv), '.mcp.json is in the copy, and Claude Code would load it');
+    await rm(join(copy, '.mcp.json'));
+    const empty = join(temp, 'planner-auto-empty-path');
+    await mkdir(empty);
+    assert.equal(await acceptTrustDialog('app', { ...procEnv, PATH: empty }), 'script could not run (ENOENT)');
+    assert.equal(await runs(bin), opened);
+  } finally {
+    await killLeft(file);
+    await killClaudes(bin);
+  }
+});
+
+test('trustDialogShown finds "Yes, I trust this folder" through escape sequences, and nothing else', () => {
+  const captured = `Accessing workspace:\r\n/tmp/trustprobe.Ty63\r\n${DIALOG}`;
+  for (const output of [
+    'Yes, I trust this folder',
+    captured,
+    'Yes, \x1b[1mI trust\x1b[22m this folder',
+    'Yes, I trust\r\n  this folder',
+    'Yes,\x1b[1CI\x1b[1Ctrust\x1b[1Cthis\x1b[1Cfolder',
+    'Yes, I tr\x1b[1must\x1b[22m this fol\x1b[36mder',
+    '\x1b]0;claude\x07YES, I TRUST THIS FOLDER',
+  ]) {
+    assert.equal(trustDialogShown(output), true, JSON.stringify(output));
+  }
+  for (const output of ['Do you trust the files in this folder?', '❯ No, exit', 'I trust this folder', '']) {
+    assert.equal(trustDialogShown(output), false, JSON.stringify(output));
+  }
+});
+
+test("the trust fake is faithful: a lone Enter on the dialog's default leaves the copy untrusted", async () => {
+  const { env, copy, bin, config } = await autoEnv('planner-auto-fake');
+  try {
+    const ran = spawnSync('sh', [join(bin, 'claude')], { cwd: copy, input: '\r', env: { ...processEnv(env), CLAUDE_CONFIG_DIR: join(env.home, 'cc') } });
+    assert.equal(ran.status, 0, ran.stderr.toString());
+    assert.deepEqual(await keysOf(bin), ['key=0d']);
+    assert.equal(await readFile(config, 'utf8'), '{}');
+    assert.equal(await copyTrusted(copy, processEnv(env)), false);
+  } finally {
+    await killClaudes(bin);
+  }
 });

@@ -131,6 +131,30 @@ test('stateNotifier: brief keeps the title, priority and tags and gives ntfy one
   assert.equal(other!.ntfyBody, undefined);
 });
 
+test('a part on its base that waits for the user is titled ready to submit, with its state\'s body, priority and tags; a part still on the part before it and a job without builds_on keep their titles; brief sends ntfy the title and the workspace', async () => {
+  const onBase = { builds_on: 'T-0', builds_on_commit: null };
+  const onPart = { builds_on: 'T-0', builds_on_commit: 'a'.repeat(40) };
+  const handedOver = jobNotification(job('handed_over', onBase));
+  const review = jobNotification(job('ready_for_human_review', onBase));
+  assert.deepEqual(handedOver, { ...jobNotification(job('handed_over')), title: 'T-1: ready to submit' });
+  assert.deepEqual(review, { ...jobNotification(job('ready_for_human_review')), title: 'T-1: ready to submit' });
+  assert.deepEqual([handedOver.body, handedOver.priority, handedOver.tags], ['in your checkout on T-1-secret-branch', 'high', 'eyes']);
+  assert.deepEqual([review.body, review.priority, review.tags], ['branch: T-1-secret-branch', 'high', 'eyes']);
+  for (const extra of [onPart, {}]) {
+    assert.equal(jobNotification(job('handed_over', extra)).title, 'T-1: in your checkout');
+    assert.equal(jobNotification(job('ready_for_human_review', extra)).title, 'T-1: ready_for_human_review');
+  }
+  // Only a part waiting for the user: another state of a part on its base keeps its title.
+  assert.equal(jobNotification(job('needs_human', onBase)).title, 'T-1: needs_human');
+  assert.equal(jobNotification(job('pushed', onBase)).title, 'T-1: pushed');
+
+  const { sent, send } = recorder();
+  const notify = stateNotifier(CONFIG, NO_EVENTS, async () => 'brief', send);
+  await notify(job('ready_for_human_review', onBase), 'preparing_mr');
+  assert.equal(sent.length, 1);
+  assert.deepEqual([sent[0]!.title, sent[0]!.ntfyBody], ['T-1: ready to submit', 'app']);
+});
+
 test('sendNotification: ntfy sends ntfyBody with the title, priority and tags; the desktop shows the full body', async () => {
   const bin = join(temp, 'bin');
   const log = join(temp, 'desktop.log');

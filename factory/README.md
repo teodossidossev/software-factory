@@ -3194,7 +3194,11 @@ The worktree stays until the hand-over or the push (SF-073).
 `sf approve` then pushes that commit and nothing else. For a job with `builds_on` (section Jobs)
 whose ticket is not merged yet, `sf approve` and `sf mr create` (and their buttons) are refused
 with `builds_on_not_merged` (409): "<ticket> builds on X, which is not merged yet: submit X
-first.", so nothing of a part is pushed before the part it builds on is merged; the hand-over to
+first.", and once X is merged they are refused with `builds_on_not_moved` (409) while the job's
+change still sits on X's prepared commit (`sitsOnPart`): "<ticket> is still built on X, which is
+merged: the factory moves <ticket> onto <base> first and tells you when it is ready to submit.",
+until the move onto the base (below) is done; so nothing of a part is pushed before the part it
+builds on is merged; the hand-over to
 the checkout is not affected, and a push the user makes from there is theirs.
 
 **The move onto the base.** Once the ticket a part builds on is merged, the parts phase of the
@@ -4212,8 +4216,10 @@ usage limit reset, where nothing is to do. The body has at most
 three lines: the branch, the error, or the MR title and link when pushed, and the marked paths of
 the iteration on one line. Once the factory opens
 or merges a merge request (SF-048), the title is `<ticket>: merge request #<n> opened` (or `merged`)
-and the body has its link. A failure never changes
-the job; it is appended to `events.jsonl` as `{type: "notify_failed", channel, message}` and shown
+and the body has its link. A part with `builds_on` whose change is on its base (`builds_on_commit`
+`null`) that reaches `ready_for_human_review` or `handed_over` is titled `<ticket>: ready to
+submit`, with that state's body; a `brief` workspace sends ntfy that title and its name. A failure
+never changes the job; it is appended to `events.jsonl` as `{type: "notify_failed", channel, message}` and shown
 by `sf watch`. An ntfy POST that gets no HTTP response (a network error or its timeout) is sent once
 more after 3 s (SF-231), and its result says `after a retry`; an HTTP error status is not retried.
 `sf notify-test` sends one test notification on both channels, that of a job that waits for you

@@ -6,7 +6,7 @@ import { createReadStream } from 'node:fs';
 import { type FileHandle, realpath } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { resolve as resolvePath } from 'node:path';
-import { buildsOnPoint, buildsOnTarget, MOVE_STATES, notMerged, notReadyAtPreparation, sitsOnPart } from '../builds-on.js';
+import { buildsOnPoint, buildsOnTarget, MOVE_STATES, notMerged, notMoved, notReadyAtPreparation, sitsOnPart } from '../builds-on.js';
 import { envFilePath, handoffOffNotice } from '../config.js';
 import { FactoryError } from '../errors.js';
 import { type Forge, type ForgeKind, forgeFor } from '../forge.js';
@@ -809,12 +809,13 @@ export class MrPart {
     }
   }
 
-  // Refuses (builds_on_not_merged) the push of a job that builds on a ticket not merged yet
-  // (src/builds-on.ts), by the dependency rule asked in checkout.
+  // Refuses the push of a job that builds on a ticket not merged yet (builds_on_not_merged), or whose change still
+  // sits on that ticket's prepared commit once it is merged (builds_on_not_moved: the move onto the base comes first).
   async #checkBuildsOnMerged(job: Job, checkout: string): Promise<void> {
     const buildsOn = job.builds_on;
-    if (buildsOn !== null && !(await ticketMerged(this.#store.jobs, { workspace: job.workspace, ticket: buildsOn }, checkout))) {
-      throw notMerged(job.ticket, buildsOn);
+    const refusal = buildsOn === null ? undefined : !(await ticketMerged(this.#store.jobs, { workspace: job.workspace, ticket: buildsOn }, checkout)) ? notMerged(job.ticket, buildsOn) : sitsOnPart(job) ? notMoved(job.ticket, buildsOn, job.base) : undefined;
+    if (refusal !== undefined) {
+      throw refusal;
     }
   }
 
@@ -822,7 +823,7 @@ export class MrPart {
   // is opened after the push and before the job moves to pushed, so the one notification carries
   // its link; a merge request that fails to open leaves the job pushed, with the failure in the
   // outcome. A job that builds on a ticket not merged yet is refused (builds_on_not_merged): nothing
-  // of it is pushed before that ticket is merged. Only under the lock.
+  // of it is pushed before that ticket is merged, nor before the job is moved onto the base (builds_on_not_moved). Only under the lock.
   async #approve(job: Job, workspace: Workspace, asIs: boolean, open?: { forge: Forge; content: MrContent }): Promise<MrOutcome> {
     const { workspace: workspaceName, ticket } = job;
     const checkout = workspace.workCheckout;

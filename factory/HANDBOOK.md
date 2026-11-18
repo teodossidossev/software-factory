@@ -202,7 +202,10 @@ in `builds_on:`, part 3 names part 2, and every part keeps the branch its merge 
 as `base:`. The factory builds each part on the change of the part before it as that part's job
 left it, locally, with nothing pushed, so each part's Patch and reviews show its own change
 alone; it refuses to push a part before the part it builds on is merged, so a reviewer never sees
-a merge request whose base is not merged yet.
+a merge request whose base is not merged yet. Once a part is merged, the factory moves the next
+part onto the base by itself (its own commit replayed, the workspace's test command run; a
+conflict goes to the conflict turn and back to review) and tells the user it is ready to submit;
+a part still built on the part before it is never pushed.
 
 ## Task file format
 
@@ -276,7 +279,8 @@ keeps its title and description. `base:` stays the merge request's target. Refus
 builds on (`## Slicing a solution`). While that ticket is not merged, the job starts from the
 commit that ticket's job prepared, once it is ready for review, handed over or pushed, and MR
 preparation moves this part onto that ticket's latest prepared commit; Approve is refused until
-that ticket is merged. Once it is merged, the job starts from `base` as any job. A queued
+that ticket is merged and this part is on `base`: once it is merged, the factory moves a prepared
+part onto `base` by itself, and a job started then starts from `base` as any job. A queued
 ticket waits for it ("Waits for" on its card); a start by hand before that ticket has a prepared
 commit is refused. Refused when it names the ticket itself, is not a ticket key, or comes with
 `continues:`. `lands_after:` keeps its own meaning beside it. The Task check of this part reads

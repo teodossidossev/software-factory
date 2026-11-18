@@ -197,6 +197,7 @@ interface PageState {
   ticketSubmits: number;
   wantFocus: 'composer' | 'stop' | null;
   jobLandsAfter: unknown[];
+  chains: ChainRow[];
   openMenu: string | null;
   queue: QueueView | null;
   drag: string | null;
@@ -290,8 +291,10 @@ const state: PageState = {
   // Where the job page's focus goes once its detail is shown (a card's button): 'composer', 'stop' or null.
   wantFocus: null,
   // The tickets the live jobs' Task files land after (the tickets payload's
-  // job_lands_after), and the Queue card whose ⋯ menu is open.
+  // job_lands_after), and the chains of parts (the tickets payload's chains); and the Queue card
+  // whose ⋯ menu is open.
   jobLandsAfter: [],
+  chains: [],
   openMenu: null,
   // The run queue as the tickets payload sends it ({max_running, running, held,
   // hold_reason, next}; null without one) and the queued card being dragged.
@@ -574,6 +577,13 @@ const money = (value: unknown): string => (typeof value === 'number' ? `$${value
 // split always returns at least one part.
 const firstLine = (text: unknown): string => (typeof text === 'string' ? (text.split('\n')[0] ?? '').trim() : '');
 const counted = (n: number, word: string, many = `${word}s`): string => `${n} ${n === 1 ? word : many}`;
+// 1st, 2nd, 3rd, 4th …; 11th, 12th and 13th end in th.
+const ordinal = (n: number): string => {
+  const tens = n % 100;
+  const unit = n % 10;
+  const suffix = tens >= 11 && tens <= 13 ? 'th' : unit === 1 ? 'st' : unit === 2 ? 'nd' : unit === 3 ? 'rd' : 'th';
+  return `${n}${suffix}`;
+};
 const pendingId = (action: string, key: string): string => `${action}\n${key}`;
 
 async function getText(path: string): Promise<string> {

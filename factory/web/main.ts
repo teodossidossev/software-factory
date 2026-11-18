@@ -63,6 +63,7 @@ function openStream(): void {
     state.tickets = data.tickets;
     state.archived = Array.isArray(data.archived) ? data.archived : [];
     state.jobLandsAfter = Array.isArray(data.job_lands_after) ? data.job_lands_after : [];
+    state.chains = Array.isArray(data.chains) ? data.chains : [];
     state.queue = data.queue !== null && typeof data.queue === 'object' ? data.queue : null;
     renderSetup();
     openAwaitedTicket();

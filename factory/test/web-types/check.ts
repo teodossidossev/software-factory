@@ -212,6 +212,9 @@ export interface Checks {
   DependencyState: Same<DependencyState, ServerTicketRow['lands_after'][number]['state']>;
   DependencyRow: Copy<DependencyRow, ServerTicketRow['lands_after'][number]>;
   JobDependencies: Copy<JobDependencies, ServerTickets['job_lands_after'][number]>;
+  ChainState: Same<ChainState, ServerTickets['chains'][number]['parts'][number]['state']>;
+  ChainPart: Copy<ChainPart, ServerTickets['chains'][number]['parts'][number]>;
+  ChainRow: Copy<ChainRow, ServerTickets['chains'][number]>;
   ArchivedRow: Copy<ArchivedRow, ServerTickets['archived'][number]>;
   WorkspaceRow: Copy<WorkspaceRow, ServerWorkspaces['workspaces'][number]>;
   QueueView: Copy<QueueView, NonNullable<ServerTickets['queue']>>;

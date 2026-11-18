@@ -4631,6 +4631,13 @@ job not merged, a pushed one included) and no live job; **missing** otherwise. `
 event) gives each ticket `lands_after: [{workspace, ticket, state}]` and, for the tickets with a
 live job, `job_lands_after: [{workspace, ticket, lands_after}]`.
 
+**Chains of parts** (SF-263). The card of each part of a chain (the Task files with the same
+`part_of` and a `slice`, the tickets payload's `chains`) and the card of its main ticket get one
+line: `<main>: <k>/<M> merged, <ordinal> <phrase>` for the first number with no merged part
+(`ready to submit`, `to be moved onto <base>`, `submitted`, `in progress`, `waits for you`,
+`planned`, or `not written yet` when no Task file has that number), or `<main>: <M>/<M> merged`.
+For example `APP-12: 2/4 merged, 3rd ready to submit`.
+
 **Workspace colours** (SF-084). Each workspace has a colour of the palette blue, teal, green,
 olive, orange, red, purple and grey (`--ws-<name>` in `static/app.css`, a light and a dark value,
 each at least 4:1 against the page's backgrounds): its `color` in `workspaces.json`, else the

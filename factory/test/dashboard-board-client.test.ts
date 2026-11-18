@@ -1378,6 +1378,68 @@ test('board client (SF-084): a dependency cycle of any length shows on each of i
     ['Dependency cycle: A → B → C → A', 'Dependency cycle: B → C → A → B', 'Dependency cycle: C → A → B → C', 'Dependency cycle: S → S', undefined, undefined]);
 });
 
+// SF-263: the chains of parts, as the server sends them in the tickets payload (src/chains.ts).
+const chainPart = (ticket: string, n: number, state: string, base = 'main') => ({ ticket, n, base, state });
+const chain = (ticket: string, count: number, parts: Array<ReturnType<typeof chainPart>>) => ({ workspace: 'app', ticket, count, parts });
+const chainLines = (page: Page, key: string): string[] => card(page, key).all().filter((element) => element.classList.contains('chain')).map((element) => element.textContent);
+
+test('board client (SF-263): the cards of a chain\'s parts and of its main ticket say how far the chain is, right after the title; other cards and a payload without chains get no line', async () => {
+  const tickets = [ticket('app/APP-12-4'), ticket('app/APP-12'), ticket('app/T-9')];
+  const page = await openBoard([job('APP-12-3', 'ready_for_human_review'), job('J-9', 'working')], tickets);
+  // BL-4: a tickets event without chains (an older sf serve) draws none.
+  for (const key of ['app/APP-12-3', 'app/APP-12-4', 'app/APP-12', 'app/T-9', 'app/J-9']) {
+    assert.deepEqual(chainLines(page, key), [], key);
+  }
+  const app12 = chain('APP-12', 4, [chainPart('APP-12-1', 1, 'merged'), chainPart('APP-12-2', 2, 'merged'), chainPart('APP-12-3', 3, 'ready'), chainPart('APP-12-4', 4, 'planned')]);
+  page.streams.at(-1)!.emit('tickets', { tickets, archived: [], job_lands_after: [], chains: [app12] });
+  // BL-1: the job card and the Queue card of the parts, and the main ticket's Queue card.
+  for (const key of ['app/APP-12-3', 'app/APP-12-4', 'app/APP-12']) {
+    assert.deepEqual(chainLines(page, key), ['APP-12: 2/4 merged, 3rd ready to submit'], key);
+  }
+  for (const key of ['app/APP-12-3', 'app/APP-12']) {
+    const children = card(page, key).children as FakeElement[];
+    const title = children.findIndex((child) => child.classList.contains('title'));
+    const line = children.findIndex((child) => child.classList.contains('chain'));
+    assert.equal(children[line]!.className, 'meta chain');
+    assert.ok(line > title, key);
+  }
+  // A card outside every chain is unchanged.
+  assert.deepEqual([chainLines(page, 'app/T-9'), chainLines(page, 'app/J-9')], [[], []]);
+  // BL-4: an empty chains list draws none.
+  page.streams.at(-1)!.emit('tickets', { tickets, archived: [], job_lands_after: [], chains: [] });
+  for (const key of ['app/APP-12-3', 'app/APP-12-4', 'app/APP-12']) {
+    assert.deepEqual(chainLines(page, key), [], key);
+  }
+});
+
+test('board client (SF-263): the phrase of the first number with no merged part, by its state; k counts numbers, not parts; the ordinals', async () => {
+  const merged = (main: string, upTo: number) => Array.from({ length: upTo }, (_, index) => chainPart(`${main}-${index + 1}`, index + 1, 'merged'));
+  // BL-2: one chain per phrase, read on the main ticket's Queue card.
+  const phrases: Array<[string, ReturnType<typeof chain>, string]> = [
+    ['C-1', chain('C-1', 2, [...merged('C-1', 1), chainPart('C-1-2', 2, 'on_part', 'main')]), 'C-1: 1/2 merged, 2nd to be moved onto main'],
+    ['C-2', chain('C-2', 2, [...merged('C-2', 1), chainPart('C-2-2', 2, 'submitted')]), 'C-2: 1/2 merged, 2nd submitted'],
+    ['C-3', chain('C-3', 2, [...merged('C-3', 1), chainPart('C-3-2', 2, 'working')]), 'C-3: 1/2 merged, 2nd in progress'],
+    ['C-4', chain('C-4', 2, [...merged('C-4', 1), chainPart('C-4-2', 2, 'stopped')]), 'C-4: 1/2 merged, 2nd waits for you'],
+    ['C-5', chain('C-5', 2, [...merged('C-5', 1), chainPart('C-5-2', 2, 'planned')]), 'C-5: 1/2 merged, 2nd planned'],
+    ['C-6', chain('C-6', 3, [...merged('C-6', 1), chainPart('C-6-3', 3, 'planned')]), 'C-6: 1/3 merged, 2nd not written yet'],
+    ['C-7', chain('C-7', 4, merged('C-7', 4)), 'C-7: 4/4 merged'],
+    // Out of order, and two parts with one number: 1 and 3 merged count 2; the 2nd's first part by ticket.
+    ['C-8', chain('C-8', 3, [chainPart('C-8-1a', 1, 'merged'), chainPart('C-8-1b', 1, 'merged'), chainPart('C-8-2a', 2, 'ready'), chainPart('C-8-2b', 2, 'planned'), chainPart('C-8-3', 3, 'merged')]),
+      'C-8: 2/3 merged, 2nd ready to submit'],
+  ];
+  // BL-3: count 20, the parts merged up to n - 1.
+  const ordinals: Array<[number, string]> = [[1, '1st'], [2, '2nd'], [3, '3rd'], [4, '4th'], [11, '11th'], [12, '12th'], [13, '13th'], [20, '20th']];
+  for (const [n, word] of ordinals) {
+    phrases.push([`O-${n}`, chain(`O-${n}`, 20, [...merged(`O-${n}`, n - 1), chainPart(`O-${n}-${n}`, n, 'planned')]), `O-${n}: ${n - 1}/20 merged, ${word} planned`]);
+  }
+  const tickets = phrases.map(([main]) => ticket(`app/${main}`));
+  const page = await openBoard([], tickets);
+  page.streams.at(-1)!.emit('tickets', { tickets, archived: [], job_lands_after: [], chains: phrases.map(([, row]) => row) });
+  for (const [main, , line] of phrases) {
+    assert.deepEqual(chainLines(page, `app/${main}`), [line], main);
+  }
+});
+
 test('board client (SF-084): each card has its workspace stripe and chip; the configured colour wins over the hash; a long name is shown whole (SF-280)', async () => {
   const long = 'customer-portal-frontend-app';
   const page = await openBoard([job('T-1', 'working'), { ...job('L-1', 'needs_human'), workspace: long }], [ticket('web/W-1'), ticket(`${long}/L-2`)],

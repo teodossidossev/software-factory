@@ -103,6 +103,7 @@ export interface MrHandover {
   handOver(job: Job, workspace: Workspace, content: MrContent): Promise<{ ok: true; job: Job } | { ok: false; job: Job; error: { code: string; message: string } }>;
   handoverNote(job: Job, note: string): Promise<void>;
   leaveCheckout(job: Job, workspace: Workspace, pushed: boolean): Promise<Job>;
+  takenBack(job: Job, workspace: Workspace, command: string): Promise<Job>;
 }
 
 export interface MrReviews {
@@ -508,43 +509,53 @@ export class MrPart {
   }
 
   // The state check of the move of a part onto its base (sf serve and the runner): a part waiting
-  // for review (MOVE_STATES) whose change sits on the ticket it builds on (sitsOnPart), with no
-  // step of the hand-over cut off.
+  // for the user's review, in its worktree or in the user's checkout (MOVE_STATES), whose change
+  // sits on the ticket it builds on (sitsOnPart), with no step of the hand-over cut off.
   checkMove(job: Job): void {
     if (job.handover !== undefined && job.handover.step !== null) {
       throw cutOffError(job, job.handover.step);
     }
     if (!MOVE_STATES.includes(job.state) || !sitsOnPart(job)) {
-      throw new FactoryError('invalid_state', `The move onto the base needs ready_for_human_review and a change on the part ${job.ticket} builds on; ${job.workspace}/${job.ticket} is ${job.state}${sitsOnPart(job) ? '' : ', on its base'}.`);
+      throw new FactoryError('invalid_state', `The move onto the base needs ready_for_human_review or handed_over and a change on the part ${job.ticket} builds on; ${job.workspace}/${job.ticket} is ${job.state}${sitsOnPart(job) ? '' : ', on its base'}.`);
     }
   }
 
   // The move in the runner, once the ticket the part builds on is merged: its one prepared commit
   // replayed onto origin/<base> (`git rebase -q --onto <target> <base commit>`), without a new MR
-  // text turn and without a new review. The checks, the fetch and the branch in the user's checkout
-  // come first and change nothing. Then the job is preparing_mr (move) without its prepared commit;
-  // a clean rebase runs the workspace's test command on the moved worktree (the test step), then
-  // #ready gives the part back; a conflict takes the conflict turn (its resolution goes back to
+  // text turn and without a new review. The checks, the fetch and, for a part in ready_for_human_review,
+  // the branch in the user's checkout come first and change nothing; a part in handed_over is then
+  // taken back from the checkout as Take it back does (HandoverPart.takenBack), only while the
+  // checkout is as the factory left it. Then the job is preparing_mr (move) without its prepared
+  // commit; a clean rebase runs the workspace's test command on the moved worktree (the test step),
+  // then #ready gives the part back; a conflict takes the conflict turn (its resolution goes back to
   // review through mrIdle and conflictIdle); any failure stops the job (needs_human, move).
   moveInRunner(workspaceName: string, ticket: string): Promise<{ state: JobState; iteration: number; branch: string }> {
     return this.#locks.locked(async () => {
-      const job = await this.#store.job(workspaceName, ticket);
+      let job = await this.#store.job(workspaceName, ticket);
       this.checkMove(job);
       const workspace = await this.#settings.resolve(workspaceName);
       const buildsOn = job.builds_on!;
       if (!(await ticketMerged(this.#store.jobs, { workspace: workspaceName, ticket: buildsOn }, workspace.workCheckout))) {
         throw notMerged(job.ticket, buildsOn);
       }
-      if (job.worktree === null || !(await exists(job.worktree))) {
+      // stored: the job before the take back; the checkout holds a handed-over part's branch until then.
+      const stored = job;
+      const handedOver = stored.state === 'handed_over';
+      if (!handedOver && (stored.worktree === null || !(await exists(stored.worktree)))) {
         throw new FactoryError('worktree_missing', `The worktree of ${workspaceName}/${ticket} is missing; sf reset the ticket and start again.`);
       }
-      const cwd = job.worktree;
       const target = await this.#locks.gitLocked(workspaceName, async () => {
-        // No move while the user's checkout holds the branch.
-        await checkBranchFree(workspace.workCheckout, cwd, job.branch, ticket);
-        return resolveTarget(workspace.workCheckout, targetBranch(job));
+        if (!handedOver) {
+          // No move while the user's checkout holds the branch.
+          await checkBranchFree(workspace.workCheckout, stored.worktree!, stored.branch, ticket);
+        }
+        return resolveTarget(workspace.workCheckout, targetBranch(stored));
       });
-      // from: ready_for_human_review (checkMove)
+      if (handedOver) {
+        job = await this.#peers.handover.takenBack(stored, workspace, 'The move onto the base');
+      }
+      const cwd = job.worktree!;
+      // from: ready_for_human_review, handed_over (checkMove)
       let current = await this.#store.transition({ ...job, prepared_commit: null, target_commit: target.commit, builds_on_commit: null, mr_conflict_turn: false }, 'preparing_mr', 'move');
       try {
         const moved = await this.#locks.gitLocked(workspaceName, () => rebaseOnto(cwd, target.commit, job.base_commit!));

@@ -30,8 +30,9 @@ export function buildsOnCommit(job: Pick<Job, 'state' | 'prepared_commit'> | und
   return job !== undefined && BUILDS_ON_STATES.includes(job.state) ? job.prepared_commit : null;
 }
 
-// The states a part is moved onto its base from: it waits for the user's review.
-export const MOVE_STATES: readonly JobState[] = ['ready_for_human_review'];
+// The states a part is moved onto its base from: it waits for the user's review, in its worktree or
+// in the user's checkout.
+export const MOVE_STATES: readonly JobState[] = ['ready_for_human_review', 'handed_over'];
 
 // Whether the job's change sits on the prepared commit of the ticket it builds on
 // (builds_on_commit, set at the start and by every MR preparation, null once the change is on

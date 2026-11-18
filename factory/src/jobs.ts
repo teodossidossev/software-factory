@@ -129,7 +129,7 @@ export const JOB_TRANSITIONS: readonly JobTransition[] = Object.freeze([
   ...rows('mr_retry', ['needs_human'], ['needs_human']),
   ...rows('ready', ['preparing_mr'], ['needs_human', 'ready_for_human_review', 'handed_over']),
   // The move of a part onto its base once the ticket it builds on is merged (src/builds-on.ts), and its stop.
-  ...rows('move', ['ready_for_human_review'], ['preparing_mr']),
+  ...rows('move', ['ready_for_human_review', 'handed_over'], ['preparing_mr']),
   ...rows('move', ['preparing_mr'], ['needs_human']),
   ...rows('hand_over', ['ready_for_human_review'], ['needs_human', 'handed_over']),
   ...rows('take_back', ['handed_over'], ['ready_for_human_review']),

@@ -6,16 +6,17 @@
 // ready again; Approve is refused while that ticket is not merged; a start by hand is refused
 // while it has no prepared commit; once it is merged the job starts from origin/<base>; and once it
 // is merged, Merged — archive moves a part waiting for review onto origin/<base> (its test command
-// run again), a conflict of the move taking the conflict turn.
+// run again), a conflict of the move taking the conflict turn; a handed-over part is taken back
+// from the checkout, moved and handed over again, unless the checkout changed since the hand-over.
 import assert from 'node:assert/strict';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { callSocket } from '../src/ipc.js';
 import { type Job, type JobState, JobStore, now } from '../src/jobs.js';
 import { saveRegistry } from '../src/registry.js';
 import { writeTask } from '../src/task-file.js';
-import { call, type Env, git, newEnv, newRepo, refused, reviewScript, runCli, script, serve, stop, temp, waitFor } from './support/harness.js';
+import { call, type Env, git, newEnv, newRepo, refused, reviewScript, runCli, script, serve, type Served, stop, temp, waitFor } from './support/harness.js';
 import { mrText, remoteTip, rev } from './support/handoff.js';
 
 const PART_ONE = 'T-1-part-one';
@@ -247,6 +248,20 @@ async function squashOnOrigin(p: Parts, files: Record<string, string>): Promise<
   return git(p.repo, 'rev-parse', 'origin/main').trim();
 }
 
+// origin's main gets one commit with files, as squashOnOrigin, made in a clone of the origin: the
+// checkout holds a handed-over part and is not touched. Returns the commit.
+async function squashInClone(p: Parts, files: Record<string, string>): Promise<string> {
+  const clone = await mkdtemp(join(temp, 'squash-clone-'));
+  git(temp, 'clone', '-q', p.origin, clone);
+  for (const [path, text] of Object.entries(files)) {
+    await writeFile(join(clone, path), text);
+  }
+  git(clone, 'add', ...Object.keys(files));
+  git(clone, 'commit', '-q', '-m', 'feat(T-1): Part one (#1)');
+  git(clone, 'push', '-q', 'origin', 'main');
+  return rev(clone, 'HEAD');
+}
+
 // The state changes of the job's events.jsonl, in order, as "from → to".
 async function stateChanges(p: Parts, ticket: string): Promise<string[]> {
   const lines = (await readFile(p.jobs.eventsPath('app', ticket), 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as { type?: string; state?: { from: string; to: string } });
@@ -319,6 +334,65 @@ test('a conflict while moving takes the conflict turn', TIMEOUT, async () => {
     assert.deepEqual([job.base_commit, job.builds_on_commit, job.prepared_commit], [merged, null, null]);
     assert.doesNotMatch(await readFile(join(job.worktree!, 'README.md'), 'utf8'), /^(<<<<<<< |=======$|>>>>>>> )/m);
     assert.equal(remoteTip(p.origin, PART_TWO), undefined);
+  } finally {
+    await stop(served);
+  }
+});
+
+// T-2 started and cleaned with hand-over on: handed over, the checkout on its branch; then T-1 is
+// squash-merged on origin (in a clone: the checkout holds T-2) and pushed by its job. Returns the
+// merge commit.
+async function handedOverPart(p: Parts, served: Served): Promise<string> {
+  await script(p.env, [{ write: { 'README.md': 'hello part two\n' } }, { write: { '.software-factory/T-2.mr.md': mrText('feat(T-2): Part two') } }]);
+  await call(served, 'start', { workspace: 'app', ticket: 'T-2' });
+  await waitFor(served, 'T-2', 'awaiting_review', 1);
+  await call(served, 'mark_clean', { workspace: 'app', ticket: 'T-2' });
+  await waitFor(served, 'T-2', 'handed_over', 1);
+  assert.equal(git(p.repo, 'branch', '--show-current').trim(), PART_TWO);
+  const merged = await squashInClone(p, { 'part1.txt': 'part one\n' });
+  await setPartOne(p, 'pushed', p.first);
+  return merged;
+}
+
+test('a handed-over part is taken back, moved onto origin/<base> and handed over again', TIMEOUT, async () => {
+  const p = await parts('builds-on-move-handed', { SF_HANDOFF: 'checkout' });
+  const served = await serve(p.env);
+  try {
+    const merged = await handedOverPart(p, served);
+    assert.equal((await p.jobs.read('app', 'T-2'))!.builds_on_commit, p.first);
+
+    const done = await runCli(p.env, ['handed-done', 'app', 'T-1', '--merged']);
+    assert.equal(done.code, 0, done.stdout + done.stderr);
+
+    const job = (await p.jobs.read('app', 'T-2'))!;
+    assert.deepEqual([job.state, job.builds_on_commit, job.handover?.base], ['handed_over', null, merged]);
+    assert.equal(git(p.repo, 'rev-parse', 'origin/main').trim(), merged);
+    assert.equal(rev(p.repo, 'HEAD'), merged);
+    assert.equal(git(p.repo, 'branch', '--show-current').trim(), PART_TWO);
+    assert.match(git(p.repo, 'status', '--porcelain'), /README\.md/);
+    assert.deepEqual((await stateChanges(p, 'T-2')).slice(-2), ['handed_over → preparing_mr', 'preparing_mr → handed_over']);
+    assert.equal(remoteTip(p.origin, PART_TWO), undefined);
+  } finally {
+    await stop(served);
+  }
+});
+
+test('a handed-over part whose checkout changed stays in it', TIMEOUT, async () => {
+  const p = await parts('builds-on-move-handed-changed', { SF_HANDOFF: 'checkout' });
+  const served = await serve(p.env);
+  try {
+    await handedOverPart(p, served);
+    const before = (await p.jobs.read('app', 'T-2'))!;
+    await appendFile(join(p.repo, 'README.md'), 'a line of the user\n');
+
+    const done = await runCli(p.env, ['handed-done', 'app', 'T-1', '--merged']);
+    assert.equal(done.code, 0, done.stdout + done.stderr);
+
+    const job = (await p.jobs.read('app', 'T-2'))!;
+    assert.deepEqual([job.state, job.builds_on_commit], ['handed_over', p.first]);
+    assert.deepEqual(job.handover, before.handover);
+    assert.equal(git(p.repo, 'branch', '--show-current').trim(), PART_TWO);
+    assert.match(await readFile(join(p.repo, 'README.md'), 'utf8'), /a line of the user\n$/);
   } finally {
     await stop(served);
   }

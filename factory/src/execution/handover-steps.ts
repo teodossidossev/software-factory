@@ -397,18 +397,28 @@ export class HandoverPart {
       this.checkHandedOverJob(await this.#store.job(workspaceName, ticket), 'sf takeback');
       await this.#peers.mr.settled(workspaceName, ticket);
       const job = await this.#store.job(workspaceName, ticket);
-      const handover = this.checkHandedOverJob(job, 'sf takeback');
-      const workspace = await this.#settings.resolve(workspaceName);
-      const worktree = job.worktree ?? this.worktreePath(workspaceName, ticket);
-      await this.#locks.gitLocked(workspaceName, async () => {
-        // The config is restored after the switch back: a lock kept for a running job refuses first.
-        await this.#freeConfig(job, workspace.workCheckout, 'takeback');
-        await takeBack(workspace.workCheckout, worktree, ticket, handover);
-      });
+      const taken = await this.takenBack(job, await this.#settings.resolve(workspaceName), 'sf takeback');
       // from: handed_over (checkHandedOverJob)
-      const next = await this.#store.transition({ ...(await this.#endHandover(job)), worktree, prepared_commit: handover.saved }, 'ready_for_human_review', 'take_back');
-      return { state: next.state, branch: next.branch, worktree };
+      const next = await this.#store.transition(taken, 'ready_for_human_review', 'take_back');
+      return { state: next.state, branch: next.branch, worktree: taken.worktree! };
     }));
+  }
+
+  // The job taken back from the checkout, as Take it back does, only while the checkout is as the
+  // factory left it (takeBack's refusals: takeback_changed, handover_refused, takeback_switch_failed,
+  // checkout_busy; config_locked first while another job's sandbox may hold the config lock): the
+  // job as the caller transitions it, without its hand-over record (ended in the event log), with its
+  // worktree on the branch and the saved commit as prepared_commit. A refusal changes nothing.
+  // command names the caller in checkHandedOverJob's refusal. Only under the lock.
+  async takenBack(job: Job, workspace: Workspace, command: string): Promise<Job> {
+    const handover = this.checkHandedOverJob(job, command);
+    const worktree = job.worktree ?? this.worktreePath(job.workspace, job.ticket);
+    await this.#locks.gitLocked(job.workspace, async () => {
+      // The config is restored after the switch back: a lock kept for a running job refuses first.
+      await this.#freeConfig(job, workspace.workCheckout, 'takeback');
+      await takeBack(workspace.workCheckout, worktree, job.ticket, handover);
+    });
+    return { ...(await this.#endHandover(job)), worktree, prepared_commit: handover.saved };
   }
 
   // A handed-over job with no step of the hand-over in progress, and its record; invalid_state otherwise.

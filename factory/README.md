@@ -2435,9 +2435,9 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   origin only that fetch (a move it asks for fetches in the part's runner, as MR preparation
   does); it never deletes a branch or a commit. The dependency rule (`lands_after`)
   and the morning digest count a job with `merged_on_target` as merged, whatever its `how`.
-  Then the parts phase (`moveParts`): every job in `ready_for_human_review` whose change sits on
-  the prepared commit of the ticket it builds on (`sitsOnPart`, `src/builds-on.ts`), with no
-  hand-over step in progress, whose workspace resolves and whose `builds_on` ticket is merged by
+  Then the parts phase (`moveParts`): every job in `ready_for_human_review` or `handed_over` whose
+  change sits on the prepared commit of the ticket it builds on (`sitsOnPart`, `src/builds-on.ts`),
+  with no hand-over step in progress, whose workspace resolves and whose `builds_on` ticket is merged by
   the dependency rule, is asked to move onto its base: a `move` request to its runner (section MR
   preparation, The move onto the base). A refusal or failure is logged once per job, the job stays
   as it was, and the next pass asks again. Merged — archive runs the parts phase too, after its
@@ -2978,6 +2978,7 @@ any other is refused with `illegal_transition`.
 | `handed_over` | `needs_human` | `repair_handover` |
 | `handed_over` | `needs_human` | `ask_for_changes` |
 | `handed_over` | `ready_for_human_review` | `take_back` |
+| `handed_over` | `preparing_mr` | `move` |
 | `handed_over` | `pushed` | `push` |
 | `handed_over` | `pushed` | `pushed_by_user` |
 | `handed_over` | `pushed` | `marked_done` |
@@ -3199,12 +3200,18 @@ the checkout is not affected, and a push the user makes from there is theirs.
 pass of merged jobs (and of Merged — archive; section Jobs) asks the part's runner for a `move`
 (`MrPart.moveInRunner`), without a new MR text turn and without a new review: the reviewed commit
 is replayed as MR preparation's own clean rebase is. First the checks, which change nothing: the
-job must be in `ready_for_human_review` with its change on the prepared commit of the ticket it
-builds on (`builds_on_commit` set) and no cut-off hand-over step (`invalid_state`), that ticket
-must be merged by the dependency rule (`builds_on_not_merged`), the worktree must exist
-(`worktree_missing`), the branch must not be checked out in the user's checkout, and
-`git fetch origin <base>` (60 s) must work (`fetch_failed`, `base_not_found`); a refusal leaves the
-job as it was and the next pass asks again. Then the job goes to `preparing_mr` by `move`, without
+job must be in `ready_for_human_review` or `handed_over` with its change on the prepared commit of
+the ticket it builds on (`builds_on_commit` set) and no cut-off hand-over step (`invalid_state`),
+that ticket must be merged by the dependency rule (`builds_on_not_merged`), for a job in
+`ready_for_human_review` the worktree must exist (`worktree_missing`) and the branch must not be
+checked out in the user's checkout, and `git fetch origin <base>` (60 s) must work
+(`fetch_failed`, `base_not_found`); a refusal leaves the job as it was and the next pass asks
+again. A part in `handed_over` is first taken back from the checkout as Take it back does (section
+Hand-over to your checkout), only while the checkout is as the factory left it; a refusal
+(`takeback_changed`, `handover_refused`, `takeback_switch_failed`, `checkout_busy`,
+`config_locked`) leaves it in the checkout, logged once, and the next pass tries again; Ask for
+changes sends your edits to the job instead, and its next MR preparation targets the base. Its end
+hands it over again as the hand-over setting says. Then the job goes to `preparing_mr` by `move`, without
 its prepared commit, with `target_commit` the commit of `origin/<base>` and `builds_on_commit`
 `null`, and the factory runs `git rebase -q --onto <origin/base> <base commit>` of the part's one
 commit, its message (the MR text) kept. A clean rebase makes `origin/<base>` the job's
@@ -4018,6 +4025,9 @@ Then `git reset -q --mixed S`, `git switch` back, the config restored, the workt
 on the branch again, and the job in `ready_for_human_review` with `prepared_commit` S. A switch
 back that fails is undone and refused with `takeback_switch_failed`: the checkout and the branch
 are as before.
+
+The factory takes a handed-over part back by itself to move it onto its base once the part it
+builds on is merged (section MR preparation, The move onto the base), with the same checks.
 
 **Approve on a handed-over job** (`sf approve`, the board's Approve, `sf mr create`) reads the
 branch's tip T in the checkout: T is B (the user did not commit): `git push origin

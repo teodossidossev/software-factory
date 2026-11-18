@@ -63,6 +63,7 @@ plan ─► Task file ─► Task check ─► Start / queue ─► iteration �
 | --- | --- | --- |
 | **Workspace** | Workspaces | A registered repository: a name and the path of your local checkout (the one open in your IDE). Task files live in it; every job's worktree is created from it. |
 | **Task file** | Task | `.software-factory/<ticket>.md` in the workspace's checkout: front matter, the task, the `## Review brief`, and the `## Fix N` sections the factory appends. The complete instruction for the Implementer and the brief for the reviewers. |
+| **Important ticket** | | A ticket whose Task file says `important: true`: none of the three loop limits (`SF_MAX_ITERATIONS`, `SF_GATE_MAX_ROUNDS`, the gate's token budget) stops its job; churn, disputes, escalations, the turn limit, failed tests, failures, usage limits and you still do. |
 | **Ticket draft** (skeleton) | `draft` | A Task file written by New ticket before anyone planned it: front matter and a status line. It cannot be started or queued. |
 | **Context owner** | Context owner, Plan with (ChatGPT or Claude Code) | The model you plan with. It only plans: reads the repository, writes the Task file. It never starts, reviews or approves. |
 | **Task check** (`sf check-task`) | Check, Check the plan, Plan check | A fresh read-only Claude session that reads the Task file, the Tasks it builds on and the repository before Start and gives `ready`, `not_ready` or `failed`, with findings. Only advises; the queue waits for `ready`. |
@@ -77,6 +78,7 @@ plan ─► Task file ─► Task check ─► Start / queue ─► iteration �
 | **Codex gate** | Codex gate | The review by the Codex CLI: in the same round as the Claude review, at the same time, or alone on a job without it. On a job with the Claude review, its **gate level** (`full`, `light`, `none`) decides how much of it an iteration gets; alone, it reviews every iteration. |
 | **Joint round** | | The review of an iteration by the Claude review and the Codex gate at the same time; their findings make one Fix section, and the iteration is clean only when both verdicts are. |
 | **Fix section** | Fix N | `## Fix N`, appended by the factory from a verdict with a blocker or major item; it starts the next iteration. |
+| **Round without progress** | | A review round that asks for a Fix while no fewer blocker and major findings are open than after any earlier round that asked for one, or that brings a fixed or left one back. The first round with a Fix sets the low and does not count. The round limits count only these; your message at the stop starts the count again. |
 | **Severity** | blocker, major, nit | The weight of a finding. Only blockers and majors make a fix; nits never block and go into the MR text. |
 | **Ledger** | findings, R7 | `ledger.json`: every finding that went into a Fix section, with an id and its status (open, fixed, contested, escalated, left, accepted risk, must fix). |
 | **Clean** | "Reviews are clean" | The round's verdict that no further fix is needed (in a joint round, both reviews'). It starts MR preparation. |

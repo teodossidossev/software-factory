@@ -313,7 +313,10 @@ ask you a question between Start and your own review, so leave no decision open.
 
 - **The front matter** (all keys: [Configuration](configuration.md#the-task-files-front-matter)):
   `ticket`, `title` and `base` are required; `scope`, `may_touch`, `lands_after` and `check` are
-  optional but worth it.
+  optional but worth it. Add `important: true` only for a ticket you call important: none of the
+  three loop limits (`SF_MAX_ITERATIONS`, `SF_GATE_MAX_ROUNDS`, the gate's token budget) then stops
+  its job, so a reviewer that keeps finding new things costs rounds until churn, a dispute, the turn
+  limit, failed tests, a failure, a usage limit or you stop it.
 - **The task**: what to build, where, the decisions made in planning and why, the acceptance
   criteria, and what is out of scope. Reference the repository's standards by path instead of
   copying them; the coding rules reach the agents by themselves.

@@ -82,11 +82,15 @@ set `SF_CLAUDE_REVIEW=always`; otherwise the Codex gate is the only reviewer. Wi
 
 Limits: the run queue starts its tickets while fewer than its limit `max_running` of jobs run in
 every workspace together (1-20, the user sets it; `SF_MAX_JOBS`, default 3, is only its default); a
-start by hand is never held by it; each job in its own worktree; after three Fix sections
-(`SF_MAX_ITERATIONS`) the next one is refused and the job goes to `needs_human` (a user message
-does not count): its findings stay open in the ledger, and the user may accept the iteration as it
-is, with them listed in the MR text, or give a direction; the Implementer session stays alive
-until the user decides.
+start by hand is never held by it; each job in its own worktree; a review round that asks for a
+Fix while no fewer blocker and major findings are open than after any earlier round that asked for
+one, or that reopens a fixed or left finding, is a round without progress (the first round with a
+Fix sets the low and does not count); the third such round (`SF_MAX_ITERATIONS`) has its Fix
+refused and the job goes to `needs_human` (a user message does not count, and at the stop it
+starts the count again): its findings stay open in the ledger, and the user may accept the
+iteration as it is, with them listed in the MR text, tell it to go on, or give a direction; the
+Implementer session stays alive until the user decides. A Task with `important: true` is never
+stopped by this limit, by `SF_GATE_MAX_ROUNDS` or by the gate budget.
 
 The factory reviews every published iteration: Codex (the gate) in the job's worktree, read-only,
 with the Task file (its `## Review brief` too), the Report, the Patch and the review rules below.
@@ -103,7 +107,7 @@ and the next iteration starts; a clean round goes to Clean.
 At Clean, when the workspace has a test command, the factory first runs it itself on the reviewed
 worktree, in a sandbox without network: a failure becomes the next `## Fix N: Tests` (with the
 command and the end of its output) and a new iteration, at most twice per job, and then the job
-stops for the user; a Tests Fix does not count toward the three Fix sections. Then the Implementer
+stops for the user; a Tests Fix does not count toward `SF_MAX_ITERATIONS`. Then the Implementer
 writes the merge request text, the factory adds the test result under `### Checks` of
 `## Testing`, and commits and rebases. It commits only the change the reviewers saw: when the
 worktree no longer matches the reviewed iteration (the test run or the MR text turn changed a file

@@ -44,6 +44,12 @@ _Avoid_: worker, daemon, job process
 **Ticket**:
 A Jira issue. Its key names the Task file and the Job.
 
+**Important ticket**:
+A Ticket whose Task file says `important: true`. None of the three loop limits
+(`SF_MAX_ITERATIONS`, `SF_GATE_MAX_ROUNDS`, the Gate's token budget) stops its Job; Churn,
+disputes, Escalations, the turn limit, failed tests, failures, usage limits and the User still do.
+_Avoid_: priority, urgent ticket, unlimited ticket
+
 **Workspace**:
 A registered application repository: a name and its local checkout (the User's IDE checkout,
 read by the Context owner, where the Task files live and from which every Job's Worktree is
@@ -217,12 +223,21 @@ blocker and major item was caused by earlier fixes. It stops the Job with one qu
 User: accept and prepare the MR, continue, or go back to planning.
 _Avoid_: loop, ping-pong
 
+**Round without progress**:
+A Round that asks for a Fix section while the Ledger holds no fewer open blocker and major
+entries than after any earlier Round of the Job that asked for one, or that reopens a fixed or
+left entry. The first Round with a Fix sets the low and does not count. The Job's round limits
+count only these, so a Job whose Rounds keep lowering its findings goes on; the User's message at
+a limit stop starts the count again.
+_Avoid_: stalled round, wasted round
+
 **Gate**:
 The Codex Review of an Iteration. On a Job with the Claude Review it runs in the same Round as the
 Claude Review, at the same time, and the Iteration is Clean only when both verdicts are clean. It
 runs by the Codex CLI on the User's ChatGPT plan in a read-only sandbox in the Worktree; its
-verdict is acted on by the same rule as the Review's; it is limited in rounds and tokens per Job,
-and off when no Codex is found. Its Gate level decides whether it runs on an Iteration. A failed
+verdict is acted on by the same rule as the Review's; it is limited per Job in Rounds without
+progress and in tokens by the size of the change, except on an Important ticket, and off when no
+Codex is found. Its Gate level decides whether it runs on an Iteration. A failed
 Gate hands the Job to the User unless the Claude Review of the same Round gives a fix; the Gate
 then runs again in the next Round.
 _Avoid_: OpenAI reviewer, second opinion

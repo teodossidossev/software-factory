@@ -106,9 +106,13 @@ typical durations (a working turn 10 to 32 min, a review 2 min, the MR text 1 mi
 file the card still shows the phase and the range. The job's page shows the same block in its
 header, the steps always open.
 
-The limits that stop the loop for you: `SF_MAX_ITERATIONS` fix sections (3), `SF_GATE_MAX_ROUNDS`
-gate fix rounds (5, only on a job with the Claude review), `SF_GATE_MAX_TOKENS` gate tokens
-(5,000,000), and the ledger's own stops (escalations, disputes, churn). See
+The limits stop a loop, not hard work: `SF_MAX_ITERATIONS` (3) and `SF_GATE_MAX_ROUNDS` (5, only
+on a job with the Claude review) count only the review rounds that made no progress (the open
+blocker and major findings did not fall below their lowest, or a fixed or left one came back; the
+first round with a Fix sets the low and does not count), and the gate's tokens stop at
+`SF_GATE_MAX_TOKENS` (5,000,000) for every started 2,000 changed lines. The ledger's own stops
+(escalations, disputes, churn) catch the loops. At a limit stop, Tell it to go on starts the counts
+again; a ticket with `important: true` is never stopped by these three limits. See
 [When a job stops](when-a-job-stops.md).
 
 ## The job's page
@@ -163,7 +167,8 @@ sf say my-app APP-12 "Use the date helper in src/util/date.ts instead of a new o
 - In `awaiting_review`, `needs_human` or `ready_for_human_review`, it starts a new turn right away
   (from `ready_for_human_review` the worktree is opened again from the branch, and the prepared
   commit is dropped: the change goes through review and Clean again). Its iteration is reviewed like
-  any other, but it is not a Fix section and does not count toward `SF_MAX_ITERATIONS`.
+  any other, but it is not a Fix section and does not count toward `SF_MAX_ITERATIONS`; at a limit
+  stop it starts the limits' counts again.
 - In `handed_over` it is **Ask for changes**: your edits in the checkout go back into the job first
   ([Review and merge](review-and-merge.md#ask-for-changes)).
 - In `preparing_mr` no message is taken; in `waiting_limit` it is refused (use Resume with a

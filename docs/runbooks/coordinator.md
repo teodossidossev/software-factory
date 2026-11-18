@@ -54,8 +54,8 @@ rule changes, change it here, through a pull request like any other change.
   Start. Check on the board or `sf check-task <ws> <ticket>` runs one in any case.
 - **Reviewers (experiment from the merge of SF-131, two weeks).** The Codex gate is the main
   reviewer; the Claude review runs only on tickets with `review: claude` in the front matter
-  (`SF_CLAUDE_REVIEW=ticket`), and fix rounds are capped at 3 (`SF_MAX_ITERATIONS`). Give
-  `review: claude` to risky tickets: authentication, the sandbox, the state format, and the product
+  (`SF_CLAUDE_REVIEW=ticket`), and review rounds without progress are capped at 3
+  (`SF_MAX_ITERATIONS`). Give `review: claude` to risky tickets: authentication, the sandbox, the state format, and the product
   tickets the user names. At the cap, Accept takes the iteration with its open findings listed in
   the MR text. After the two weeks, open Stats over the experiment's days, read the "Claude review
   on/off" table and report to the user, per arm, the cost per delivered ticket, the Codex findings

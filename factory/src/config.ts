@@ -401,6 +401,16 @@ export function tunnelSetting(env: NodeJS.ProcessEnv = process.env): 'auto' | 'o
   return mode;
 }
 
+// SF_PLANNER_TRUST: ask (the default: the user accepts Claude Code's trust dialog of a planning
+// copy, sf planner trust) or auto (sf planner setup and start accept it for the factory's own copies).
+export function plannerTrustSetting(env: NodeJS.ProcessEnv = process.env): 'ask' | 'auto' {
+  const mode = env.SF_PLANNER_TRUST || 'ask';
+  if (mode !== 'ask' && mode !== 'auto') {
+    throw new FactoryError('invalid_config', `SF_PLANNER_TRUST must be ask or auto, got "${mode}".`);
+  }
+  return mode;
+}
+
 // SF_TASK_CHECK_AUTO: on (the default) or off.
 export function taskCheckAutoSetting(env: NodeJS.ProcessEnv = process.env): boolean {
   const mode = env.SF_TASK_CHECK_AUTO || 'on';

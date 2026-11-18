@@ -470,7 +470,8 @@ export class TurnsPart {
   // The work of request_fix, also run for a fix verdict of the review: appends ## Fix N and starts
   // the next iteration. SF_MAX_ITERATIONS limits the review rounds without progress
   // (roundProgress): the one that reaches it is refused; an sf say turn does not count, and a
-  // message at a limit stop starts the limits' counts again.
+  // message at a limit stop starts the limits' counts again. An important job's Fix is never refused
+  // at SF_MAX_ITERATIONS.
   // counts: what else the Fix counts for (the gate's gate_fixes and gate_stalled). Only under the lock.
   // ledger: the findings ledger with the section's items, written once the section is.
   // fromStop: the Fix of the user's settlement or Simplify, from needs_human.
@@ -499,7 +500,7 @@ export class TurnsPart {
       const stalled = (job.stalled_fixes ?? 0) + (round.progress ? 0 : 1);
       const { maxIterations } = this.#settings.config;
       judged = { stalled_fixes: stalled, least_open: round.least };
-      if (!round.progress && stalled >= maxIterations) {
+      if (!round.progress && stalled >= maxIterations && job.important !== true) {
         // The refused verdict's items become open ledger entries with ids: the stop lists
         // them, and an Accept leaves them unapplied in the MR text.
         if (ledger !== undefined) {

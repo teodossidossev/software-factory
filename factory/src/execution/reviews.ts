@@ -173,7 +173,7 @@ export class ReviewsPart {
       place, ledger: await this.#store.jobs.readLedger(workspace, ticket), iteration,
       claude: place !== 'only' ? { record: review, extra: await extra(review), ...ends.claude } : undefined,
       gate: place === 'only' || place === 'joint' ? { record: gate, extra: await extra(gate), ...ends.gate } : undefined,
-      gateFixes: job.gate_fixes, least: job.least_open, gateStalled: job.gate_stalled ?? 0, gateTokens: countedTokens(job), maxRounds: config.gateMaxRounds,
+      gateFixes: job.gate_fixes, least: job.least_open, gateStalled: job.gate_stalled ?? 0, gateTokens: countedTokens(job), maxRounds: job.important === true ? Infinity : config.gateMaxRounds,
       maxTokens: limit.budget, lines: limit.lines,
     });
     if (review !== undefined && 'verdict' in review && (outcome.dropped.claude?.length ?? 0) > 0) {
@@ -579,7 +579,8 @@ export class ReviewsPart {
   // The job's gate budget (gateBudget) from the changed lines of its change at the reviewed
   // iteration (its meta.json files), for every job, with the Claude review or without. The lines
   // are a lower bound when the Patch was truncated; a meta.json that cannot be read, or holds no
-  // file list, leaves them unknown and the budget SF_GATE_MAX_TOKENS once. It never throws.
+  // file list, leaves them unknown and the budget SF_GATE_MAX_TOKENS once. An important job's budget
+  // is Infinity (its lines as for any job): the gate budget never stops it. It never throws.
   async #gateBudget(job: Job): Promise<GateBudget> {
     let lines: number | undefined;
     try {
@@ -589,7 +590,7 @@ export class ReviewsPart {
     } catch (error) {
       console.error(error);
     }
-    return { budget: gateBudget(this.#settings.config.gateMaxTokens, lines), lines };
+    return { budget: job.important === true ? Infinity : gateBudget(this.#settings.config.gateMaxTokens, lines), lines };
   }
 
   // The may_touch of the Task file in the work checkout, as the marks of the job's files read it

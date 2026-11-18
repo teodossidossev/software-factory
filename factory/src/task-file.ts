@@ -83,6 +83,13 @@ export function taskSize(fields: Map<string, string>): TaskSize {
   return value === 'small' || value === 'complex' ? value : 'medium';
 }
 
+// Whether the Task is important: `important: true` (quoted or with a comment too). Any other value,
+// or none, is not; an important job is never stopped by SF_MAX_ITERATIONS, SF_GATE_MAX_ROUNDS or
+// the gate budget.
+export function taskImportant(fields: Map<string, string>): boolean {
+  return fields.get('important') === 'true';
+}
+
 // Which slice of a task a Task is (Handbook: Slicing a solution): `part_of: <ticket>`,
 // `slice: N/M` and `kind:` in the front matter.
 export const SLICE_KINDS = ['mechanical', 'preparation', 'change', 'switch', 'cleanup'] as const;

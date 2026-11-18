@@ -221,3 +221,19 @@ setting edited and `sf serve` restarted. The user who answers the stop has looke
 decided to spend more on it.
 
 The rest of this ADR stands.
+
+## Amendment 2026-11-16 (SF-297): an important ticket is not stopped by the three loop limits
+
+What changes: a ticket whose Task file says `important: true` (read once, at Start) is not
+stopped by `SF_MAX_ITERATIONS`, by `SF_GATE_MAX_ROUNDS` or by the gate's token ceiling.
+Everything else that stops a job still stops its job: churn, a disputed contest, an escalation,
+the turn limit, failing tests, a failure, a usage limit and the user. For such a ticket this
+lifts the caps of the SF-292 and SF-293 amendments and the token ceiling of the SF-295 amendment
+above; "The token ceiling protects the subscription's limits" (the SF-039 amendment) does not
+hold for it.
+
+Why: the user's decision of 2026-11-16 (SF-290): when a task is important and complex, these
+limits go. The price is said plainly: reviewers that keep finding new, narrower items spend
+rounds until one of the stops above ends them, and one job can use up the plan's allowance.
+
+The rest of this ADR stands.

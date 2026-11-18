@@ -214,6 +214,7 @@ scope: [src/export/**, test/export.test.ts, README.md]   # optional: every file 
 lands_after: [PROJ-120, web/WEB-7]   # optional: the tickets this one waits for; another workspace's as <workspace>/<ticket>
 check: required       # optional: required (always a Task check) or skip (never); without it only a Task that is not small is checked
 review: claude        # optional: claude (the Claude review and the Codex gate in one round) or codex (the gate alone); without it the user's SF_CLAUDE_REVIEW decides
+important: true       # optional: only when the user calls the ticket important: the three loop limits (SF_MAX_ITERATIONS, SF_GATE_MAX_ROUNDS, the gate budget) do not stop its job
 size: medium          # optional: small, medium or complex, your estimate; picks the job's lead-time target (any other value or none: medium)
 part_of: PROJ-100     # optional: the task this slice belongs to (a ticket name)
 slice: 2/5            # optional: this slice's number and the count, 1 <= N <= M <= 20
@@ -288,6 +289,12 @@ the Codex gate, in the same round: give it to risky tickets (authentication, the
 product tickets the user names). `review: codex` has the gate alone even when the user set
 `SF_CLAUDE_REVIEW=always`. Without the key the user's setting decides (by default the gate alone).
 Any other value is ignored. It is read once, at Start.
+
+`important: true` marks a ticket the user calls important: none of the three loop limits
+(`SF_MAX_ITERATIONS`, `SF_GATE_MAX_ROUNDS`, the gate's token budget) stops its job; churn,
+disputes, escalations, the turn limit, failed tests, failures, usage limits and the user still do.
+Set it only when the user says so: a reviewer that keeps finding new, narrower items then costs
+rounds until one of those stops it. Any other value is not important. It is read once, at Start.
 
 `part_of:`, `slice:` and `kind:` say which slice of a task the Task is (`## Slicing a solution`);
 with both `part_of` and `slice`, the merge request's `## Special things to note` begins "Slice N

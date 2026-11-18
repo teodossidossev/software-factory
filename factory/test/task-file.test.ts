@@ -8,7 +8,7 @@ import { after, before, test } from 'node:test';
 import { FactoryError } from '../src/errors.js';
 import { JobStore } from '../src/jobs.js';
 import type { Workspace } from '../src/registry.js';
-import { appendFix, checkNeed, checkTaskContent, landsAfter, MAX_TASK_BYTES, mayTouch, parseFrontMatter, taskReview, taskScope, taskSha256, taskSize, taskSlice, writeTask } from '../src/task-file.js';
+import { appendFix, checkNeed, checkTaskContent, landsAfter, MAX_TASK_BYTES, mayTouch, parseFrontMatter, taskImportant, taskReview, taskScope, taskSha256, taskSize, taskSlice, writeTask } from '../src/task-file.js';
 
 const VALID = '---\nticket: PROJ-1\ntitle: Export as CSV\nbase: master\n---\n\n# PROJ-1: Export as CSV\n';
 
@@ -158,6 +158,15 @@ test('taskReview (SF-131) reads review: claude or codex, quoted or with a commen
   assert.equal(taskReview(fields('review: "codex"  # the gate alone')), 'codex');
   for (const other of ['review: Claude', 'review: both', 'review:', 'scope: [a]']) {
     assert.equal(taskReview(fields(other)), undefined, other);
+  }
+});
+
+test('taskImportant (SF-297) is true for important: true, quoted or with a comment too; any other value or no key is not important', () => {
+  const fields = (text: string) => parseFrontMatter(`---\nticket: T-1\ntitle: t\nbase: main\n${text}\n---\n`)!;
+  assert.equal(taskImportant(fields('important: true')), true);
+  assert.equal(taskImportant(fields('important: "true"  # the user said so')), true);
+  for (const other of ['important: True', 'important: yes', 'important:', 'scope: [a]']) {
+    assert.equal(taskImportant(fields(other)), false, other);
   }
 });
 

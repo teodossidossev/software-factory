@@ -158,7 +158,9 @@ in `~/planning/<workspace>` (`SF_PLANNING_DIR`), with the server registered for 
 the factory's planning skill and `.claude/planning-copy.md` (README, The planning copy). Run
 `sf planner trust <workspace>` once and accept Claude Code's trust dialog there. The copy is
 read-only to the planner: its shell commands run in Claude Code's sandbox, and the factory's
-secrets are denied to every tool.
+secrets are denied to every tool. The planner writes only its prototypes, into
+`<planning folder>/prototypes/<workspace>/<ticket>/`, and publishes none: Claude Code's artifacts
+are off in the copy.
 Your phone hears when the planner waits for you, or for a permission; a tap opens the session.
 
 Then, with `sf serve` running, start from the dashboard:

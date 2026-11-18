@@ -128,9 +128,13 @@ refused), and the factory's test command passed in a sandbox without network on 
   the job waits for you, and is bounded at 4000 characters. The planning chat link is only ever a
   `https://chatgpt.com/` link, checked when it is saved and again before the page links it, and is
   opened only by your click.
-- **The Claude Code planner can only read.** `sf planner setup` gives the planning copy's sessions
-  the factory's planning tools and reading tools; web search and fetch are denied, and any other
-  tool but the sandboxed shell asks you first. Their shell commands run in Claude Code's sandbox:
+- **The Claude Code planner can only read, and write its prototypes.** `sf planner setup` gives
+  the planning copy's sessions the factory's planning tools, reading tools, and Write and Edit in one
+  folder outside the copy, the workspace's prototypes folder (`<planning folder>/prototypes/<workspace>/`);
+  those two refuse every other path without asking (Claude Code 2.1.314 or later; Claude Code's own
+  files, such as its plan files, excepted). Web search and fetch are denied, Claude Code's artifacts
+  are off, so nothing is published to claude.ai, and any other tool but the sandboxed shell asks you
+  first. Their shell commands run in Claude Code's sandbox:
   they write nowhere, reach no network, and cannot see the factory's state folder; without a
   working sandbox the session does not start. Reads of the environment file, the MCP and dashboard
   tokens, Claude Code's own configuration and credentials, the tunnel profile, and SSH, cloud, Git
@@ -243,7 +247,10 @@ refused), and the factory's test command passed in a sandbox without network on 
   from it, with the state folder.
 - **A planner session answers to your Claude account.** `sf planner start` starts it with Remote
   Control: any device signed in to your Claude account can write to it and answer its permission
-  prompts. It can still only read.
+  prompts. It can still only read, and write its prototypes.
+- **A planner's other tools ask you first.** Your claude.ai connectors load in the planner's
+  sessions; one that can publish (a document, a page, a message) asks before each call, like every
+  tool outside the planner's list. For a company ticket, answer no.
 - **A phone that is lost unlocked** opens the dashboard. The dangerous actions still need the
   ticket typed. Keep the QR code with the token private.
 

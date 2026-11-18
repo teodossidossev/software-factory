@@ -3,7 +3,9 @@
 // workspace's origin made with the checkout's objects as a reference (dissociated), never a
 // registered checkout, never inside or around one. The steps, in this order:
 // 1. the copy's path, made real through its nearest existing folder, is refused when it is, holds or
-//    lies inside a registered workspace's checkout;
+//    lies inside a registered workspace's checkout, and so is the workspace's prototypes folder
+//    (src/prototypes.ts; a link at it or at the prototypes folder is refused first, never followed,
+//    and so is a path there that cannot be checked; a workspace named prototypes gets no copy);
 // 2. the checkout's origin URL;
 // 3. the clone (into a temporary sibling, then renamed), or for an existing copy a check that it is a
 //    clone of that origin with a .git folder of its own, a fetch (a failure is a warning) and a
@@ -16,9 +18,12 @@
 //    planner role's skills among them) refused when the repository tracks them;
 // 6. the factory's planning-tasks skill copied into .claude/skills, then the planner role's skills
 //    from the skills snapshot as it is (src/skills.ts; nothing synced);
-// 7. .claude/planning-copy.md: where the user's request, rules and the workspace's English vision are;
-// 7b. .claude/settings.local.json: permissions and sandbox replaced with plannerSettings' (read-only
-//    tools, the shell in Claude Code's sandbox, the secrets denied), its hooks' Stop and Notification
+// 6b. <planning folder>/prototypes/<workspace>, made 0700 when missing, never through a link;
+// 7. .claude/planning-copy.md: where the user's request, rules, the workspace's English vision and
+//    the ticket's prototypes folder are;
+// 7b. .claude/settings.local.json: permissions, sandbox and enableArtifact replaced with
+//    plannerSettings' (the copy read-only, Write and Edit in the prototypes folder alone, the shell
+//    in Claude Code's sandbox, the secrets denied, no artifacts), its hooks' Stop and Notification
 //    with sf planner waiting, skillOverrides switching off every skill but the planner's and
 //    syncClaudeAiSkills false, the file's other keys and hook events kept;
 // 8. the factory's MCP server registered for that folder only (claude mcp, local scope: the token
@@ -44,6 +49,7 @@ import { type GitResult, runGit } from './git.js';
 import { PACKAGE_ROOT } from './package-root.js';
 import { copyTrusted, plannerSessionCommand, recordLink } from './planner-session.js';
 import { plannerWaiting } from './planner-waiting.js';
+import { checkPrototypes, preparePrototypes, PROTOTYPES_DIR, prototypesRoot } from './prototypes.js';
 import { loadRegistry, resolveWorkspace } from './registry.js';
 import { absoluteRule, claudeConfigDir, claudeUserSettings, HOME_CREDENTIALS } from './sandbox-denials.js';
 import { DASHBOARD_TOKEN_FILE, MCP_TOKEN_FILE } from './secrets.js';
@@ -86,11 +92,13 @@ const POINTERS = '.claude/planning-copy.md';
 const SETTINGS = '.claude/settings.local.json';
 const EXCLUDE_LINE = '/.claude/';
 
-// The planner's tools: the factory's MCP tools and reading tools; every other tool but the
-// sandboxed shell asks first.
+// The planner's tools: the factory's MCP tools and reading tools (and Write and Edit in the
+// prototypes folder, plannerSettings); every other tool but the sandboxed shell asks first.
 const ALLOWED_TOOLS = [`mcp__${SERVER_NAME}`, 'Read', 'Grep', 'Glob', 'Skill', 'Agent', 'Task', 'TodoWrite', 'ToolSearch'];
-// Writing tools, and the web: a search query or a fetched URL could carry what the planner read.
-const DENIED_TOOLS = ['Edit', 'Write', 'NotebookEdit', 'WebFetch', 'WebFetch(domain:*)', 'WebSearch'];
+// Notebooks, the web (a search query or a fetched URL could carry what the planner read) and
+// artifacts (published to claude.ai without a prompt). Write and Edit are not denied by name: an
+// allow rule cannot carve the prototypes folder out of such a denial.
+const DENIED_TOOLS = ['NotebookEdit', 'WebFetch', 'WebFetch(domain:*)', 'WebSearch', 'Artifact'];
 // The folders of HOME_CREDENTIALS (its other entries are files).
 const HOME_CREDENTIAL_FOLDERS = new Set(['.ssh', '.codex', '.aws', '.config/gh']);
 // Credentials in the home directory beyond HOME_CREDENTIALS, true for a folder: GnuPG, Kubernetes,
@@ -98,18 +106,25 @@ const HOME_CREDENTIAL_FOLDERS = new Set(['.ssh', '.codex', '.aws', '.config/gh']
 const MORE_HOME_SECRETS: Array<[string, boolean]> = [['.gnupg', true], ['.kube', true], ['.config/glab-cli', true], ['.docker/config.json', false]];
 
 export interface PlannerSettings {
-  permissions: { allow: string[]; deny: string[] };
+  permissions: { allow: string[]; deny: string[]; additionalDirectories: string[]; blockWritesOutsideWorkingDirectories: true };
   sandbox: { enabled: true; failIfUnavailable: true; autoAllowBashIfSandboxed: true; allowUnsandboxedCommands: false; filesystem: { denyWrite: string[]; denyRead: string[] } };
+  enableArtifact: false;
 }
 
 // The settings of a planning copy for the environment env (SF_ENV_FILE and SF_CONFIG_DIR through
 // envFilePath, HOME, CLAUDE_CONFIG_DIR, TUNNEL_CLIENT_PROFILE_DIR, XDG_CONFIG_HOME) and the
-// factory's state directory stateDir (the token rules and denyRead follow this argument).
-// The shell's boundary is the sandbox, not a list of commands: it writes nowhere (the factory is the
-// copy's only writer), reaches no network and cannot see the state folder (its socket, jobs and
-// tokens); without a working sandbox the session does not start. The Read tool still reads the
-// user's request files under the state folder. The secret files are denied to every tool.
-export function plannerSettings(env: NodeJS.ProcessEnv, stateDir: string): PlannerSettings {
+// factory's state directory stateDir (the token rules and denyRead follow this argument), the
+// copy's spellings copy (its path and its real path, each once) and the real path prototypes of
+// its workspace's prototypes folder, the one place Write and Edit reach.
+// Write and Edit: an Edit rule allows the prototypes folder (it covers Write) and one denies each
+// spelling of the copy; the folder is an additional directory (file access only, no configuration
+// loads from it), and blockWritesOutsideWorkingDirectories refuses every other path without a
+// prompt. The shell's boundary is the sandbox, not a list of commands: it writes nowhere, the
+// prototypes folder included (the factory is the copy's only writer), reaches no network and
+// cannot see the state folder (its socket, jobs and tokens); without a working sandbox the session
+// does not start. The Read tool still reads the user's request files under the state folder. The
+// secret files are denied to every tool. Artifacts are off, and denied.
+export function plannerSettings(env: NodeJS.ProcessEnv, stateDir: string, copy: readonly string[], prototypes: string): PlannerSettings {
   const home = env.HOME || homedir();
   const envFile = envFilePath(env);
   const configDir = claudeConfigDir(env, home);
@@ -128,16 +143,24 @@ export function plannerSettings(env: NodeJS.ProcessEnv, stateDir: string): Plann
   // A path an earlier step gave keeps its place and is not repeated.
   const seen = new Set<string>();
   const reads = secrets.filter(([path]) => !seen.has(path) && seen.add(path)).map(([path, folder]) => `Read(${absoluteRule(path)}${folder ? '/**' : ''})`);
+  const copyEdits = [...new Set(copy)].map((path) => `Edit(${absoluteRule(path)}/**)`);
   return {
-    permissions: { allow: [...ALLOWED_TOOLS], deny: [...DENIED_TOOLS, ...reads] },
+    permissions: {
+      allow: [...ALLOWED_TOOLS, `Edit(${absoluteRule(prototypes)}/**)`],
+      deny: [...copyEdits, ...DENIED_TOOLS, ...reads],
+      additionalDirectories: [prototypes],
+      blockWritesOutsideWorkingDirectories: true,
+    },
     sandbox: {
       enabled: true,
       failIfUnavailable: true,
       autoAllowBashIfSandboxed: true,
       allowUnsandboxedCommands: false,
-      // The path as it is: the sandbox's path lists have no escape for glob characters.
-      filesystem: { denyWrite: ['.'], denyRead: [`/${stateDir}`] },
+      // The paths as they are: the sandbox's path lists have no escape for glob characters. denyWrite
+      // wins over the write access the Edit allow rule and the additional directory give the shell.
+      filesystem: { denyWrite: ['.', `/${prototypes}`], denyRead: [`/${stateDir}`] },
     },
+    enableArtifact: false,
   };
 }
 
@@ -197,13 +220,20 @@ export async function plannerCommand(args: string[], deps: PlannerDeps): Promise
     throw new UsageError('planner needs setup <workspace>, waiting <workspace> [permission], start <workspace> <ticket>, stop <workspace> <ticket> or trust <workspace>.');
   }
   const name = checkName(args[1]);
+  if (name === PROTOTYPES_DIR) {
+    throw new FactoryError('planning_copy_unusable', `A workspace named ${PROTOTYPES_DIR} gets no planning copy: the planning folder's ${PROTOTYPES_DIR}/ holds the planners' prototypes.`);
+  }
   const ws = await resolveWorkspace(name, deps.configDir);
 
-  // 1. Where.
+  // 1. Where: the copy and the workspace's prototypes folder.
   const dir = planningDir(deps.env);
   const copy = join(dir, name);
   const target = await nearestReal(copy);
-  await refuseCheckouts(name, target, deps.configDir);
+  await refuseCheckouts(`The planning copy of ${name}`, target, deps.configDir);
+  // A link at either prototypes folder, or a path there that cannot be checked, is refused before
+  // the guard follows it and before anything is cloned or written.
+  await checkPrototypes(dir, name);
+  await refuseCheckouts(`The prototypes folder of ${name}`, await nearestReal(join(prototypesRoot(dir), name)), deps.configDir);
 
   // 2. The origin.
   const url = await originUrl(ws.readCheckout);
@@ -273,15 +303,21 @@ async function prepare(planning: Planning, deps: PlannerDeps): Promise<void> {
     }
   }
 
+  // 6b. The prototypes folder: the one place the planner writes.
+  const prototypes = await preparePrototypes(planning.dir, name);
+
   // 7. The pointers.
-  const text = await pointersText(name, base, deps);
+  const text = await pointersText(name, base, deps, prototypes);
   await writeFileAtomic(join(copy, POINTERS), Buffer.from(text, 'utf8'), 0o644);
 
-  // 7b. The settings. Every other skill off for the planner, by name, and the claude.ai account's
-  // skills; the factory sets both keys at every run.
+  // 7b. The settings: permissions, sandbox and enableArtifact replaced at every run (the copy's
+  // spellings denied to Write and Edit, the prototypes folder allowed, artifacts off). Every other
+  // skill off for the planner, by name, and the claude.ai account's skills; the factory sets both
+  // keys at every run.
+  const settings = plannerSettings(deps.env, deps.stateDir, [...new Set([copy, await realpath(copy)])], prototypes);
   const home = deps.env.HOME || homedir();
   const off = await skillsOff(join(claudeConfigDir(deps.env, home), 'skills'), skills, [SKILL, ...plannerSkills]);
-  await writeSettings(copy, name, deps, { skillOverrides: Object.fromEntries(off.map((skill) => [skill, 'off'])), syncClaudeAiSkills: false });
+  await writeSettings(copy, name, settings, { skillOverrides: Object.fromEntries(off.map((skill) => [skill, 'off'])), syncClaudeAiSkills: false });
 
   // 8. The MCP server.
   const token = await requireMcpToken(deps.stateDir);
@@ -297,7 +333,8 @@ async function prepare(planning: Planning, deps: PlannerDeps): Promise<void> {
     `${installed.length > 0 ? 'Skills' : 'Skill'} ${[SKILL, ...installed].join(', ')}: installed in .claude/skills`,
     `Skills switched off for the planner: ${off.length} of yours (skillOverrides), and your claude.ai skills (syncClaudeAiSkills false)`,
     `Pointers: ${POINTERS}`,
-    "Settings: read-only; shell commands in Claude Code's sandbox (no writes, no network); secrets denied",
+    `Prototypes: ${prototypes}/<ticket>/, the one folder the planner writes`,
+    "Settings: the copy read-only; Write and Edit in the prototypes folder only; shell commands in Claude Code's sandbox (no writes, no network); secrets denied; no artifacts",
     'Hooks: the phone hears when the planner waits for you (sf planner waiting)',
     (await copyTrusted(copy, deps.env)) ? 'Trust: Claude Code trusts this folder already' : `Next: let Claude Code trust the copy once: sf planner trust ${name}`,
     `Then plan a ticket: /${SKILL} workspace ${name}, ticket <ticket>`,
@@ -389,14 +426,14 @@ async function nearestReal(path: string, depth = 0): Promise<string> {
 // a is b or holds it.
 const holds = (a: string, b: string): boolean => a === b || b.startsWith(a.endsWith(sep) ? a : `${a}${sep}`);
 
-// Refuses a copy that is, holds or lies inside a registered workspace's checkout (one whose path
-// cannot be made real is skipped).
-async function refuseCheckouts(name: string, target: string, configDir: string): Promise<void> {
+// Refuses a folder, named subject in the message, whose real path target is, holds or lies inside a
+// registered workspace's checkout (one whose path cannot be made real is skipped).
+async function refuseCheckouts(subject: string, target: string, configDir: string): Promise<void> {
   const { workspaces } = await loadRegistry(configDir);
   for (const [other, entry] of Object.entries(workspaces)) {
     const checkout = await realpath(entry.read_checkout).catch(() => undefined);
     if (checkout !== undefined && (holds(checkout, target) || holds(target, checkout))) {
-      throw new FactoryError('planning_copy_unusable', `The planning copy of ${name} would be the checkout of workspace ${other}: set SF_PLANNING_DIR to another folder.`);
+      throw new FactoryError('planning_copy_unusable', `${subject} would be the checkout of workspace ${other}: set SF_PLANNING_DIR to another folder.`);
     }
   }
 }
@@ -491,9 +528,10 @@ async function prepareClaudeFolder(copy: string, name: string, planner: readonly
 }
 
 // The text of .claude/planning-copy.md: the request's path, the user's rules files that exist
-// (rules/<workspace>.md, then rules/global.md, once), and the workspace's English vision folder or
-// that none is stored.
-async function pointersText(name: string, base: string, deps: PlannerDeps): Promise<string> {
+// (rules/<workspace>.md, then rules/global.md, once), the workspace's English vision folder or
+// that none is stored, and last the ticket's folder under prototypes, the real path of the
+// workspace's prototypes folder.
+async function pointersText(name: string, base: string, deps: PlannerDeps, prototypes: string): Promise<string> {
   const candidates = [...new Set([join(deps.configDir, 'rules', `${name}.md`), join(deps.configDir, 'rules', 'global.md')])];
   const rules: string[] = [];
   for (const path of candidates) {
@@ -529,6 +567,11 @@ async function pointersText(name: string, base: string, deps: PlannerDeps): Prom
   } else {
     lines.push('- **The product vision:** none is stored for this workspace.');
   }
+  lines.push(
+    "- **The ticket's prototypes:** the one folder you write, with the Write and Edit tools: one",
+    '  self-contained HTML file per question (the `planning-tasks` skill, step 3), in',
+    `  \`${prototypes}/<ticket>/\``,
+  );
   return `${lines.join('\n')}\n`;
 }
 
@@ -551,13 +594,13 @@ function plannerHooks(name: string): Record<'Stop' | 'Notification', unknown[]> 
 }
 
 // .claude/settings.local.json, missing or a regular file (never a link), a JSON object: its
-// permissions and sandbox replaced whole with plannerSettings', its hooks' Stop and Notification
-// with plannerHooks' (the other hook events kept), skillOverrides and syncClaudeAiSkills replaced
-// whole with skills', every other key kept in its place (a new key last, in this order); written
-// atomically with the file's mode, else 0600. The checks go by path: the planner cannot write in
-// the copy and the factory is its only writer, so a link there comes only from the repository or
-// an earlier tool.
-async function writeSettings(copy: string, name: string, deps: PlannerDeps, skills: { skillOverrides: Record<string, string>; syncClaudeAiSkills: false }): Promise<void> {
+// permissions, sandbox and enableArtifact replaced whole with settings' (plannerSettings'), its
+// hooks' Stop and Notification with plannerHooks' (the other hook events kept), skillOverrides and
+// syncClaudeAiSkills replaced whole with skills', every other key kept in its place (a new key
+// last, in this order); written atomically with the file's mode, else 0600. The checks go by path:
+// the planner cannot write in the copy and the factory is its only writer, so a link there comes
+// only from the repository or an earlier tool.
+async function writeSettings(copy: string, name: string, settings: PlannerSettings, skills: { skillOverrides: Record<string, string>; syncClaudeAiSkills: false }): Promise<void> {
   const path = join(copy, SETTINGS);
   const found = await lstat(path).catch((error: NodeJS.ErrnoException) => (error.code === 'ENOENT' ? undefined : Promise.reject(error)));
   if (found !== undefined && !found.isFile()) {
@@ -577,9 +620,10 @@ async function writeSettings(copy: string, name: string, deps: PlannerDeps, skil
   if (typeof data !== 'object' || data === null || Array.isArray(data)) {
     throw new FactoryError('planning_copy_unusable', `${SETTINGS} in ${name}'s planning copy is not a JSON object: fix or remove it.`);
   }
-  const settings = plannerSettings(deps.env, deps.stateDir);
   const hooks = 'hooks' in data && typeof data.hooks === 'object' && data.hooks !== null && !Array.isArray(data.hooks) ? data.hooks : {};
-  const written = { ...data, permissions: settings.permissions, sandbox: settings.sandbox, hooks: { ...hooks, ...plannerHooks(name) }, ...skills };
+  const written = {
+    ...data, permissions: settings.permissions, sandbox: settings.sandbox, enableArtifact: settings.enableArtifact, hooks: { ...hooks, ...plannerHooks(name) }, ...skills,
+  };
   const mode = found === undefined ? 0o600 : found.mode & 0o777;
   await writeFileAtomicWith(path, async (handle) => {
     await handle.chmod(mode);

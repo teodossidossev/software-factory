@@ -147,7 +147,7 @@ effect and says only whether each token is set.
 | `SF_DASHBOARD` | on | `off` | `off` starts no dashboard and removes the saved token. |
 | `SF_STATE_DIR` | `${XDG_STATE_HOME:-~/.local/state}/software-factory` | path | Jobs, the queue, the socket `sf.sock`, the dashboard token, the MCP token. The socket path must fit 107 bytes (`socket_path_too_long`). |
 | `SF_WORKTREE_ROOT` | `<state dir>/worktrees` | absolute path | Where each job's worktree is created: `<root>/<workspace>/<ticket>`. |
-| `SF_PLANNING_DIR` | `~/planning` | absolute path | Where `sf planner setup` keeps each workspace's planning copy, `<dir>/<workspace>`. Under your home directory the factory's job sandboxes cannot read it. |
+| `SF_PLANNING_DIR` | `~/planning` | absolute path | Where `sf planner setup` keeps each workspace's planning copy, `<dir>/<workspace>`, and the planners' prototypes, `<dir>/prototypes/<workspace>/<ticket>/`; a workspace named `prototypes` gets no planning copy. Under your home directory the factory's job sandboxes cannot read it. |
 | `SF_CONFIG_DIR` | `${XDG_CONFIG_HOME:-~/.config}/software-factory` | path | `workspaces.json`, `auth.env` and `rules/`. |
 | `SF_COORDINATOR_WORKSPACE` | `software-factory` | a workspace name | The workspace whose checkout holds your coordinating Claude Code session: the Skills page's Coordinator column and `sf skills set coordinator` switch its skills in `<checkout>/.claude/settings.local.json` ([The Skills page](#the-skills-page)). Not registered: the column has no boxes (`no_coordinator_workspace`). |
 | `SF_ENV_FILE` | `<config dir>/auth.env` | path, or empty for none | The environment file (above). |

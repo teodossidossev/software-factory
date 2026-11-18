@@ -793,10 +793,18 @@ test('dashboard end to end: a fake cycle, the stream across mark_clean (the bran
     const base = served.dashboard!;
     assert.ok(base !== undefined);
     // SF-256: sf serve passes the planner: a ticket without a planner record reads as no session
-    // (without the planner, the route would be an empty 404); sf serve passes no prototypes folder
-    // yet, so the list is empty.
+    // (without the planner, the route would be an empty 404); the ticket has no prototypes yet.
     const plannerRead = await fetchRaw(new URL('api/tickets/app/T-9/planner', base));
     assert.deepEqual([plannerRead.status, JSON.parse(plannerRead.body)], [200, { session: null, prototypes: [] }]);
+    // sf serve passes the prototypes folder of its planning folder (here <home>/planning): a file
+    // the planner writes there is listed with the session and served to the factory's frame.
+    const prototype = '<!doctype html><p>try it</p>\n';
+    await mkdir(join(env.home, 'planning', 'prototypes', 'app', 'T-9'), { recursive: true });
+    await writeFile(join(env.home, 'planning', 'prototypes', 'app', 'T-9', 'x.html'), prototype);
+    const listed = JSON.parse((await fetchRaw(new URL('api/tickets/app/T-9/planner', base))).body);
+    assert.deepEqual(listed.prototypes.map((entry: { name: string }) => entry.name), ['x.html']);
+    const frame = await fetchRaw(new URL('prototype-frames/app/T-9/x.html', base), { headers: { 'sec-fetch-dest': 'iframe' } });
+    assert.deepEqual([frame.status, frame.body], [200, prototype]);
     // The MCP endpoint, the dashboard and its remote listener (SF-126).
     const open = await listeners(served.child.pid!);
     assert.ok(open === undefined || open === 3, `listeners: ${open}`);
@@ -875,6 +883,17 @@ test('dashboard end to end: a fake cycle, the stream across mark_clean (the bran
     assert.equal(JSON.parse((await fetchRaw(new URL('api/jobs/app/T-1', base))).body).job.state, 'pushed');
   } finally {
     await stop(served);
+  }
+
+  // A relative SF_PLANNING_DIR: sf serve still starts, with one warning line, and lists no prototypes.
+  const relative = await serve({ ...env, extra: { SF_PLANNING_DIR: 'planning' } });
+  try {
+    const warning = 'warning: SF_PLANNING_DIR must be an absolute path. The dashboard shows no prototypes.\n';
+    assert.equal(relative.output.split(warning).length, 2, relative.output);
+    const read = await fetchRaw(new URL('api/tickets/app/T-9/planner', relative.dashboard!));
+    assert.deepEqual([read.status, JSON.parse(read.body)], [200, { session: null, prototypes: [] }]);
+  } finally {
+    await stop(relative);
   }
 
   // SF_DASHBOARD=off: no dashboard line, no listener, and the old token is removed.

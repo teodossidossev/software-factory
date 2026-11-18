@@ -218,7 +218,8 @@ A Claude Code session that runs in the workspace's checkout may also simply writ
 
 The factory ships its planning method as a Claude Code skill, `factory/skills/planning-tasks`: it
 grills you; for what you will see, or a state model you reason about, it builds a throwaway
-prototype, an HTML file you try before anything is cut, and turns your reactions into decisions;
+prototype, an HTML file you open from the ticket's page and try before anything is cut, and turns
+your reactions into decisions;
 then it cuts the work into slices by the slicing rules, has a sub-agent trace each slice through
 the code before the slice's Task file is written, and fixes what the Task check finds until the
 check is ready. It builds the prototypes with your installed `prototype` skill (`npx skills add`
@@ -254,7 +255,10 @@ you can then:
   matter included), *Save* (Ctrl+S). A save that would overwrite a newer version (ChatGPT wrote
   meanwhile) is refused with `task_changed` and your text is kept; *Reload* loads the file;
 - **check the plan**: *Check the plan* (the Task check, below);
-- **start it**: *Start now*.
+- **start it**: *Start now*;
+- **open the planner's prototypes**: the Planning conversation card lists them, newest first, and
+  the header links the newest; each opens full-screen in a new tab, on the phone too. A prototype
+  runs in a sandbox: it can use nothing of the dashboard and loads nothing from the network.
 
 Refer to an image the Task needs with plain Markdown, the path relative to the Task file:
 `![the export dialog after the error](APP-12/1.png)`. Only the images the Task file refers to go to

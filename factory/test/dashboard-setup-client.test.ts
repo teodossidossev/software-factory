@@ -402,20 +402,22 @@ const SESSION: SessionView = { name: 'Planner app T-5', started_at: '2026-11-16T
 const SESSION_DAY = new Date(SESSION.started_at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
 const HINT = ' Its link shows here once it first waits for you; until then find it under that name in the Claude app or on claude.ai/code.';
 
-// The planned ticket page's payload of a row, its planner session the last key.
-function pagePayload(row: ReturnType<typeof ticket>, session: SessionView | null = null) {
+// The planned ticket page's payload of a row, its planner session and then its prototypes the last
+// keys (prototypes undefined: a payload without the key).
+function pagePayload(row: ReturnType<typeof ticket>, session: SessionView | null = null, prototypes: unknown[] | undefined = []) {
   const text = `---\nticket: ${row.ticket}\ntitle: ${row.title}\nbase: main\n---\n`;
   return {
     ticket: row, task: { text, sha256: 'a'.repeat(64) }, plan: { starts_from: 'main', files: [], scoped: false, waits_for: [] }, check: null, history: [], queue: null, planner_session: session,
+    ...(prototypes !== undefined ? { prototypes } : {}),
   };
 }
 
 // The planned ticket page of a Queue card (SF-081): a click on the card, its page answered from
-// the card's row (and the planner session, none by default).
-async function openTaskOf(page: Page, key: string, row: ReturnType<typeof ticket>, session: SessionView | null = null): Promise<void> {
+// the card's row (and the planner session and the prototypes, none by default).
+async function openTaskOf(page: Page, key: string, row: ReturnType<typeof ticket>, session: SessionView | null = null, prototypes: unknown[] | undefined = []): Promise<void> {
   items(page, 'qlist').find((item) => item.dataset.ticket === key)!.click();
   await page.flush();
-  page.requests.find((request) => request.path === `api/tickets/${key}/page`)!.respond(200, pagePayload(row, session));
+  page.requests.find((request) => request.path === `api/tickets/${key}/page`)!.respond(200, pagePayload(row, session, prototypes));
   await page.flush();
 }
 
@@ -734,6 +736,106 @@ test('setup client: a ticket ChatGPT plans has no planner line unless its sessio
   assert.equal(named(conversationCard(running), 'End').disabled, false);
   assert.equal(named(conversationCard(running), 'Start the planner'), undefined);
   assert.equal(pageLinks(conversationCard(running))[0]!.textContent, 'Open the ChatGPT conversation ↗');
+});
+
+// A ticket's prototypes as the server lists them (the payload's prototypes, GET .../planner's), newest first.
+interface ProtoEntry { name: string; modified: string }
+const PROTOS: ProtoEntry[] = [{ name: 'b-states.html', modified: '2026-11-16T14:03:00.000Z' }, { name: 'a-layout.html', modified: '2026-11-16T12:00:00.000Z' }];
+// A time as the page shows it (ticket-page.js day, in this machine's time).
+const shownDay = (ts: string): string => new Date(ts).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+// The card's list of prototypes: per row its time, the time's title, the link's text, href, target and rel.
+const protoRows = (page: Page): string[][] => (conversationCard(page).querySelector('ul.hist')?.querySelectorAll('li') ?? []).map((item) => {
+  const when = item.querySelector('span.t')!;
+  const link = item.querySelector('a')!;
+  return [when.textContent, when.getAttribute('title') ?? '', link.textContent, link.href, link.target, link.rel];
+});
+const protoRow = (entry: ProtoEntry, key = 'app/T-5'): string[] => [shownDay(entry.modified), entry.modified, `${entry.name} ↗`, `/prototypes/${key}/${entry.name}`, '_blank', 'noopener noreferrer'];
+// The header's link to the newest prototype: its text, href, title, target and rel; null without one.
+const headProto = (page: Page): string[] | null => {
+  const link = pageLinks(ticketHead(page)).find((element) => element.href.startsWith('/prototypes/'));
+  return link === undefined ? null : [link.textContent, link.className, link.href, link.getAttribute('title') ?? '', link.target, link.rel];
+};
+const LISTED = 'Prototypes the planner made, newest first:';
+
+test('setup client: a ticket\'s prototypes in the card, newest first, and the newest in the header', async () => {
+  const row = claudeRow();
+  const page = await openPage([], [workspace('app')], [row]);
+  const href = 'https://claude.ai/code/session_01Ab';
+  await openTaskOf(page, 'app/T-5', row, { ...SESSION, link: href }, PROTOS);
+  // After the session's line and its row: the words, then the list in the server's order.
+  // The card's children: its title, Plan with, the session's line and row, the words and the list.
+  const [, , line, acts, words, list] = conversationCard(page).children as FakeElement[];
+  assert.equal(line!.textContent, `Planner session "Planner app T-5" runs since ${SESSION_DAY}.`);
+  assert.equal(acts!.className, 'planner-acts');
+  assert.deepEqual([words!.tagName, words!.className, words!.textContent], ['DIV', 'fs13', LISTED]);
+  assert.deepEqual([list!.tagName, list!.className], ['UL', 'hist']);
+  assert.deepEqual(protoRows(page), [protoRow(PROTOS[0]!), protoRow(PROTOS[1]!)]);
+  // The header: the planner session's link, then the newest prototype's.
+  const head = pageLinks(ticketHead(page)).map((link) => link.textContent);
+  assert.deepEqual(head, ['Open the planner session ↗', 'b-states.html ↗']);
+  assert.deepEqual(headProto(page), ['b-states.html ↗', 'btn linkbtn', '/prototypes/app/T-5/b-states.html', 'The newest prototype of app/T-5', '_blank', 'noopener noreferrer']);
+});
+
+test('setup client: a ChatGPT ticket lists its prototypes too', async () => {
+  const row = ticket('app/T-7');
+  const page = await openPage([], [workspace('app')], [row]);
+  await openTaskOf(page, 'app/T-7', row, null, [PROTOS[1]!]);
+  assert.equal(plannerLine(page), null);
+  assert.equal(conversationCard(page).all().find((element) => element.textContent === LISTED)?.tagName, 'DIV');
+  assert.deepEqual(protoRows(page), [protoRow(PROTOS[1]!, 'app/T-7')]);
+  assert.deepEqual(headProto(page), ['a-layout.html ↗', 'btn linkbtn', '/prototypes/app/T-7/a-layout.html', 'The newest prototype of app/T-7', '_blank', 'noopener noreferrer']);
+  assert.ok(pageLinks(conversationCard(page)).some((link) => link.textContent === 'Open the ChatGPT conversation ↗'));
+});
+
+test('setup client: prototypes with a bad name or time are left out; none draws nothing', async () => {
+  const row = claudeRow();
+  const bad = [
+    { name: 'X.html', modified: PROTOS[0]!.modified }, { name: '../x.html', modified: PROTOS[0]!.modified }, { name: 'x.htm', modified: PROTOS[0]!.modified },
+    { name: 'no-time.html' }, { name: 'num-time.html', modified: 5 }, 'a.html', null, PROTOS[1]!,
+  ];
+  const page = await openPage([], [workspace('app')], [row]);
+  await openTaskOf(page, 'app/T-5', row, null, bad);
+  assert.deepEqual(protoRows(page), [protoRow(PROTOS[1]!)]);
+  assert.equal(headProto(page)![2], '/prototypes/app/T-5/a-layout.html');
+
+  // An empty list, and a payload without the key: neither the list, its words nor the header link.
+  for (const prototypes of [[], undefined]) {
+    const none = await openPage([], [workspace('app')], [row]);
+    await openTaskOf(none, 'app/T-5', row, null, prototypes);
+    const card = conversationCard(none);
+    assert.equal(card.querySelector('ul.hist'), null);
+    assert.equal(card.all().some((element) => element.textContent === LISTED), false);
+    assert.equal(headProto(none), null);
+    assert.equal(pageLinks(ticketHead(none)).length, 0);
+  }
+});
+
+test('setup client: the session\'s read every 10 s brings a new prototype; a failed read keeps the list', async () => {
+  const row = claudeRow();
+  const page = await openPage([], [workspace('app')], [row]);
+  await openTaskOf(page, 'app/T-5', row, SESSION, PROTOS);
+  assert.deepEqual(protoRows(page), [protoRow(PROTOS[0]!), protoRow(PROTOS[1]!)]);
+  const third = { name: 'c-flow.html', modified: '2026-11-16T15:30:00.000Z' };
+  assert.equal(page.tick(10000), 1);
+  await page.flush();
+  sessionReads(page)[0]!.respond(200, { session: SESSION, prototypes: [third, ...PROTOS] });
+  await page.flush();
+  assert.deepEqual(protoRows(page), [protoRow(third), protoRow(PROTOS[0]!), protoRow(PROTOS[1]!)]);
+  assert.equal(headProto(page)![0], 'c-flow.html ↗');
+  // A failed read keeps the list and the header link.
+  assert.equal(page.tick(10000), 1);
+  await page.flush();
+  sessionReads(page)[1]!.fail();
+  await page.flush();
+  assert.deepEqual(protoRows(page), [protoRow(third), protoRow(PROTOS[0]!), protoRow(PROTOS[1]!)]);
+  assert.equal(headProto(page)![0], 'c-flow.html ↗');
+  // The read that finds the session ended still gives the list.
+  assert.equal(page.tick(10000), 1);
+  await page.flush();
+  sessionReads(page)[2]!.respond(200, { session: null, prototypes: [third] });
+  await page.flush();
+  assert.equal(plannerLine(page)!.textContent, 'The planner session ended.');
+  assert.deepEqual(protoRows(page), [protoRow(third)]);
 });
 
 // New ticket's images (SF-064): the bytes each type is told by.

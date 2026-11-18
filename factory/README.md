@@ -657,6 +657,11 @@ Setup then warns with it and names `sf planner trust`, and exits 0; start refuse
 while the dialog runs, so a stop meanwhile may answer `planner_starting`. The factory never writes
 Claude Code's global config: Claude Code saves the answer itself.
 
+The ticket's prototypes, which the planner writes into `<planning folder>/prototypes/<workspace>/<ticket>/`,
+are listed in the card and read again with the session every 10 s; `sf serve` serves them from the
+planning folder of its own environment (`SF_PLANNING_DIR` in `auth.env`, else `~/planning`); a
+relative one is one warning at start, and the dashboard then shows none.
+
 ## Environment
 
 | Variable | Default | Meaning |
@@ -673,7 +678,7 @@ Claude Code's global config: Claude Code saves the answer itself.
 | `SF_PLAN_SKILL` | the `planner` role's skills in the skills snapshot (`<state dir>/skills/grilling/SKILL.md`, then `<state dir>/skills/prototype/SKILL.md`, by default) | The planning skill whose body (without front matter) ends the instructions and `guide` as `## Planning method` (section MCP endpoint); set, it wins over the `planner` role's choice; empty: none. A missing file: the Quick start alone, and one warning at start. |
 | `SF_STATE_DIR` | `${XDG_STATE_HOME:-~/.local/state}/software-factory` | Job state and the `sf.sock` socket. |
 | `SF_WORKTREE_ROOT` | `${SF_STATE_DIR}/worktrees` | Where every job's worktree is created: `<root>/<workspace>/<ticket>`; absolute. |
-| `SF_PLANNING_DIR` | `~/planning` | Where `sf planner setup` keeps each workspace's planning copy, `<dir>/<workspace>`, and the planners' prototypes, `<dir>/prototypes/<workspace>/<ticket>/`; absolute. |
+| `SF_PLANNING_DIR` | `~/planning` | Where `sf planner setup` keeps each workspace's planning copy, `<dir>/<workspace>`, and the planners' prototypes, `<dir>/prototypes/<workspace>/<ticket>/`; absolute; `sf serve` reads it too, for the prototypes it serves: set it in `auth.env`, since the service copies none from your shell. |
 | `SF_PLANNER_TRUST` | `ask` | Who accepts Claude Code's trust dialog for a planning copy: `ask`, you, once per copy (`sf planner trust`); `auto`, the factory, for its own planning copies only (section The planner session). Read by `sf planner setup` and `sf planner start` at their start; empty is the default, anything else stops them (`invalid_config`). |
 | `SF_MAX_JOBS` | `3` | The default of the run queue's limit `max_running` (section Run queue), within 1-20, while `queue.json` does not exist yet; `sf queue limit` and the board's stepper change the limit from then on. |
 | `SF_SENSITIVE_PATHS` | empty | Comma-separated globs added to the sensitive paths of `src/rules.ts`. |
@@ -4749,7 +4754,8 @@ the tickets list is an empty 404, and the page goes back to the board). The head
 (Escape), the key, the workspace, the title and `draft` for a skeleton; *Open the ChatGPT
 conversation ↗* (the server's link only, and only when ChatGPT plans the ticket), *Open the planner
 session ↗* (while the ticket's planner session runs and its hook has recorded its
-`https://claude.ai/code/` link; only such a link), **Check the plan** (*Check again* after a check,
+`https://claude.ai/code/` link; only such a link), and the ticket's newest prototype, `<name> ↗`,
+when it has one (section MCP endpoint, The planning copy), **Check the plan** (*Check again* after a check,
 *Checking…* while one runs; today's `POST api/tickets/<ws>/<ticket>/check`) and **Start now**; its
 line says "waits for …" while a dependency is not merged, "Starts from <branch>" and the plan check
 in words. On the left the **Task file** (`.software-factory/<ticket>.md`): *Preview* (the default)
@@ -4767,7 +4773,7 @@ itself), each card with a short help line:
 | **Files it will change** | `scope` and `may_touch`, in one list | The files the job is expected to create, change or delete (one path or pattern per row). A change outside the list needs your OK before it can ship. 🔒 marks a `may_touch` entry: a sensitive file (build, CI, packages, credentials) the ticket may change on purpose. Without `scope`: "No list: the job may change any file, and nothing is checked." |
 | **Waits for** | `lands_after` | Each ticket with SF-084's state in words: ✓ merged, pushed, not merged yet, running, planned, not started, unknown ticket (another workspace's as `<workspace>/<ticket>`). Start now still starts it. |
 | **Plan check** | (the Task check) | "Ready: …", "Not ready: N blockers, M majors." with the findings (their kind in words: needs a decision, contradicts itself, something is missing, does more than asked, unclear), what the checker understood and the files it expects to change; "Not checked yet.", "Checking…", "The plan changed after this check: check it again."; the date, the model and the cost. It only advises. |
-| **Planning conversation** | | *Plan with: ChatGPT · Claude Code* (the Context owner, switchable); for ChatGPT the link, for Claude Code its planner session (below) and where to paste; the first message and its Copy (below); the ticket's planning chat link (SF-208): *Open the planning chat ↗* when one is stored, and the field *Planning chat link* with Save and Remove. |
+| **Planning conversation** | | *Plan with: ChatGPT · Claude Code* (the Context owner, switchable); for ChatGPT the link, for Claude Code its planner session (below) and where to paste; the first message and its Copy (below); the ticket's planning chat link (SF-208): *Open the planning chat ↗* when one is stored, and the field *Planning chat link* with Save and Remove; then the ticket's prototypes, newest first, each its time and `<name> ↗`, which opens it full-screen in a new tab (`/prototypes/<ws>/<ticket>/<name>`, at the root, through the cookie), for any owner, when it has any. |
 | **Images** | | The ticket's images (SF-064, section Ticket images): each opens whole in a new tab, with **Copy image** and ×; "Paste an image here (Ctrl+V) or drop one." |
 | **History** | | What happened to the plan (below). |
 
@@ -6212,7 +6218,13 @@ end), in a browser:
    and header) opens it on claude.ai, from the phone too; End asks, then the card says "The planner
    session ended.". Remove on a workspace with a live job is off with the reason. Nowhere on
    the page is there a Reviewer line, a reviewer setup, Nudge, Send test event or Subscriptions.
-14. Stream: a running job's entries arrive live at the bottom and the view follows them while it is
+14. With a prototype in `<planning folder>/prototypes/<ws>/<ticket>/` (any single HTML file named
+   like `try-it.html`), open the ticket's page on the desktop and at 390 px on the phone: the card
+   lists it and the header links it; it opens full-screen in a new tab and its buttons work. Its
+   frame's address (`prototype-frames/…`) opened in a tab of its own answers 404. A test prototype
+   that tries `fetch('/api/jobs')`, `localStorage`, `location = 'https://example.com'` and
+   `window.open('https://example.com')` gets none of them (the console names each refusal).
+15. Stream: a running job's entries arrive live at the bottom and the view follows them while it is
    at the bottom (scroll up: it stays where you are). Each tool call is one line with its result;
    `j`, `k`, `G` and Enter select and open entries; long texts say *Show all N lines*; the implement
    prompt's *Task* shows the Task file with its Fix sections and its Task check. A path in a
@@ -6221,7 +6233,7 @@ end), in a browser:
    (open the new URL): the Stream reads again and shows no entry twice. Merge request says there
    is no text until MR preparation wrote it, then shows it, and Copy MR text puts the title, a
    blank line and the body on the clipboard.
-15. Changes: open Changes of a real finished job next to `prototype-full.html` (branch
+16. Changes: open Changes of a real finished job next to `prototype-full.html` (branch
    `prototype-dashboard-v3`) and compare, in light and dark: the tree (folders compacted, M/A/D in
    blue, green and grey struck through, the counts, the filter, the flat list), both diff layouts
    (side by side with Before/After, unified, the changed words, *Collapse unchanged* and a click on
@@ -6241,18 +6253,18 @@ end), in a browser:
    Change the branch before the push (and to `main`: refused with the reason); switch to the
    Stream and back: the draft stays; reload with unsaved changes: the browser asks. List each
    difference from the prototype with its reason.
-16. Layout: Tab reaches each card, its buttons, the job page's *← Board*, the switch, the Stream's
+17. Layout: Tab reaches each card, its buttons, the job page's *← Board*, the switch, the Stream's
    toggles and path links, the composer's message box and buttons and a confirmation's buttons.
    On a phone the header wraps and the composer's buttons go under the message box, each at
    least 44 px high. On a phone a ready job's row wraps with *Abort…* at the right end of its last
    line; More ▾ opens as a sheet and Esc closes it.
-17. Accept and prepare MR (a fake Codex scripted to ask for fixes past `SF_GATE_MAX_ROUNDS=1`): the
+18. Accept and prepare MR (a fake Codex scripted to ask for fixes past `SF_GATE_MAX_ROUNDS=1`): the
    job is under Your turn with "Codex round limit reached", `gate_rounds` and *Decide N findings*;
    its page's stop block says "Your decision" (never red) with the last gate's findings, and the
    composer offers *Accept and prepare MR* first; its confirmation lists the Codex items; Cancel
    sends nothing; confirm: the job goes to MR preparation and Your turn, the Stream shows the state
    changes, and Merge request lists the Codex items not applied.
-18. Simplification (a fake simplification pass scripted to suggest something): the stop block says
+19. Simplification (a fake simplification pass scripted to suggest something): the stop block says
    "Your decision" with each suggestion (its path, what, why and the lines it saves) and no error
    marker anywhere; the composer offers Simplify and Skip, each with its confirmation listing the
    suggestions. An escalated finding (a fake Implementer that escalates) shows its question, a

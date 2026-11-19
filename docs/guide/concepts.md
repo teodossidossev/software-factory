@@ -137,7 +137,7 @@ stateDiagram-v2
 
     preparing_mr --> working: tests
     preparing_mr --> awaiting_review: mr_turn_end
-    preparing_mr --> needs_human: mr_turn_end, tests, ready, pause, recover, repair_handover
+    preparing_mr --> needs_human: mr_turn_end, tests, ready, move, pause, recover, repair_handover
     preparing_mr --> ready_for_human_review: ready, repair_handover
     preparing_mr --> handed_over: ready
     preparing_mr --> aborted: abort
@@ -146,12 +146,14 @@ stateDiagram-v2
     ready_for_human_review --> handed_over: hand_over
     ready_for_human_review --> needs_human: hand_over, push, fix, repair_handover
     ready_for_human_review --> ready_for_human_review: repair_handover
+    ready_for_human_review --> preparing_mr: move
     ready_for_human_review --> pushed: push
     ready_for_human_review --> aborted: abort
 
     handed_over --> working: say
     handed_over --> ready_for_human_review: take_back
     handed_over --> needs_human: ask_for_changes, repair_handover
+    handed_over --> preparing_mr: move
     handed_over --> pushed: push, pushed_by_user, marked_done
     handed_over --> aborted: abort
 
@@ -165,7 +167,8 @@ stateDiagram-v2
 
 `repair_handover` is the repair of a hand-over that was cut off (by a crash or a restart of
 `sf serve`); `recover` is what `sf serve` does at its start with a job whose runner is gone. You
-never trigger either directly.
+never trigger either directly. `move` is the factory moving a part onto its base once the ticket it
+builds on is merged; it stops the part in `needs_human` if the move fails.
 
 `failed`, `aborted` and `pushed` are terminal: a new job of the ticket may start after them. The
 **running** states, which count against the queue's limit, are `starting`, `working`,

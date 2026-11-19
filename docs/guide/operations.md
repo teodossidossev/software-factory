@@ -413,7 +413,7 @@ Use `tailscale serve`, never `tailscale funnel`: Funnel puts the address on the 
 The factory's own tests need no model and no network:
 
 ```sh
-npm test                 # from the repository root, or in factory/: build, then node scripts/run-tests.mjs unit
+npm test                 # from the repository root, or in factory/: npm run check-code, then npm run build, then node scripts/run-tests.mjs unit
 npm test -- --test-name-pattern=foo   # arguments after -- go on to node --test, before the files
 npm run typecheck        # tsc --noEmit
 ```
@@ -435,7 +435,7 @@ running fails; an `sf serve` a test expected to refuse fails the test after 30 s
 The script lines in `factory/package.json`:
 
 ```json
-"test": "npm run build && node scripts/run-tests.mjs unit",
+"test": "npm run check-code && npm run build && node scripts/run-tests.mjs unit",
 "test:browser": "npm run build && node scripts/check-browser.mjs && node scripts/run-tests.mjs browser"
 ```
 

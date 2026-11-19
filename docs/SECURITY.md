@@ -31,10 +31,11 @@ refused), and the factory's test command passed in a sandbox without network on 
   - Its sessions run no hook from a settings file, so a `.claude/settings.json` a job wrote runs
     nothing.
   - Its tools are an allow list: `Bash`, `Read`, `Edit`, `Write`, `NotebookEdit`, `Glob`,
-    `Grep`, `Skill`, `Task`/`Agent` (sub-agents), `TaskOutput`, `TaskStop`, `TodoWrite` and
+    `Grep`, `Skill`, `Task`/`Agent` (sub-agents), `TodoWrite` and
     `ToolSearch` (`IMPLEMENTER_TOOLS` in `factory/src/rules.ts`). Any other tool a Claude Code
     release offers (scheduling, messaging, workflows, WebFetch, WebSearch) does not exist in its
-    session, and those a release has offered so far are also denied by name, sub-agents included.
+    session, and those a release has offered so far (`TaskOutput` and `TaskStop` among them) are
+    also denied by name (`OUTSIDE_TOOLS`), sub-agents included.
   - No MCP server loads in its session: not your claude.ai connectors, not a project's
     `.mcp.json`, not a plugin's, not the factory's own.
   - It is told to write its own changes with Edit and Write only, never through an inline script,

@@ -59,6 +59,8 @@ npm test               # the test suite; npm run typecheck, npm run build
 
 - [The user guide](docs/guide/README.md): concepts, install, configuration, planning, running
   jobs, review and merge, when a job stops, operations, ways of working. Start here.
+- [The architecture](docs/architecture/README.md): how the parts fit, why it is safe to let it
+  run, and why its tests can be trusted.
 - [factory/README.md](factory/README.md): the reference: every command, setting, state and code.
 - [factory/HANDBOOK.md](factory/HANDBOOK.md): what the planning model is told: the cycle, the
   tools, the Task file format, the review and Git rules, the templates.

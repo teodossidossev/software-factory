@@ -117,6 +117,14 @@ rule changes, change it here, through a pull request like any other change.
 - When a job stops (`needs_human`), read the reason first. A gate that keeps finding ever narrower
   items is churn: send the one item worth fixing as a message, then Accept; do not pay for more
   rounds. A turn that hits the turn limit while making progress is resumed with a message.
+- **Follow through, above all with a deadline.** Every job sent off (`sf say`, `sf queue add`, a
+  handover) gets a follower in the background at once:
+  `~/.local/share/sf-coordinator/follow-job.sh -w <ws> <ticket> -- '<verification>'`. It waits for
+  the job's next stop, runs the verification in the checkout when the job is handed over (for a
+  product repository: the changed Cypress specs against the local backend, a flaky one three
+  times), and tells the user on the Coordinator card and the desktop. Never leave a job waiting
+  for the user's next message: a nightly fix sent back at 22:00 sat unverified all night
+  (2026-11-18). Say in the reply that the follower runs and what it will check.
 - Stop the queue when the user says so; start nothing new until the user says to go on.
 
 ## Reviewing a job locally

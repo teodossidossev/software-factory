@@ -3,15 +3,16 @@
 // without review fixes or with SF_SIMPLIFY=off; no suggestions go on to MR preparation; suggestions
 // stop the job (simplify_offered); Simplify writes the Fix section and the ledger entries, a reviewer
 // cannot ask for them back, and the pass never runs twice; Skip (sf accept, gate on) prepares the
-// MR with the suggestions listed; a failed run goes on to MR preparation. SF-125: the suggestions
-// are stored redacted.
+// MR with the suggestions listed on the Merge request screen; a failed run goes on to MR
+// preparation. SF-125: the suggestions are stored redacted.
 import assert from 'node:assert/strict';
 import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { JobStore } from '../src/jobs.js';
-import { SIMPLIFY_HEADING } from '../src/mr.js';
+import { mrNotes } from '../src/mr-notes.js';
 import { REVIEW_DENIED_TOOLS } from '../src/review.js';
+import { SIMPLIFY_HEADING } from '../src/rules.js';
 import { assertPathDenials, call, codexLog, codexScript, fakeCodex, newEnv, newRepo, putTask, reviewLog, reviewScript, runCli, script, serve, stop, waitFor } from './support/harness.js';
 
 const ITEM = { path: 'README.md', problem: 'It greets anyone.', expected: 'Check the reader first.', severity: 'blocker' };
@@ -183,7 +184,7 @@ test('suggestions: simplify_offered; Simplify writes "Fix 2: Simplify" and the l
   }
 });
 
-test('gate on, Skip: the pass runs after the clean gate; sf accept prepares the MR with "Simplifications not applied"', async () => {
+test('gate on, Skip: the pass runs after the clean gate; sf accept prepares the MR, "Simplifications not applied" on the Merge request screen only', async () => {
   const env = await newEnv('simplify-skip', { SF_REVIEW: 'on', SF_SIMPLIFY: 'on', SF_GATE: 'codex', SF_GATE_LEVEL: 'full', SF_CODEX: fakeCodex });
   const repo = await newRepo(env, 'simplify-skip-repo', false);
   await putTask(env, repo, 'S-6', 'Greet the reader');
@@ -205,7 +206,9 @@ test('gate on, Skip: the pass runs after the clean gate; sf accept prepares the 
     await waitFor(served, 'S-6', 'ready_for_human_review', 2);
     const jobs = new JobStore(env.state);
     const mr = (await jobs.readMrText('app', 'S-6'))!;
-    assert.ok(mr.includes(`${SIMPLIFY_HEADING}\n- \`guard.txt\`: The second guard. Why: The first one covers it. (saves about 3 lines; added for R1)\n`), mr);
+    assert.ok(!mr.includes(SIMPLIFY_HEADING) && !mr.includes('The second guard.'), mr);
+    const notes = await mrNotes(jobs, (await jobs.read('app', 'S-6'))!);
+    assert.ok(notes.includes(`${SIMPLIFY_HEADING}\n- \`guard.txt\`: The second guard. Why: The first one covers it. (saves about 3 lines; added for R1)`), notes);
     assert.equal(await jobs.readGateOverride('app', 'S-6', 2), undefined);
     const record = await jobs.readSimplify('app', 'S-6', 2);
     assert.ok(record !== undefined && 'suggestions' in record && typeof record.skipped_at === 'string');

@@ -145,7 +145,7 @@ if (process.env[CHILD] !== undefined) {
       assert.equal(record.reason, `the test run changed ${changed}: the factory does not let a test run change .git, .claude, .mcp.json or .codex`);
       assert.equal(record.output, 'done\n');
       assert.ok(testsFixContent(record).includes(`It exited with 0. It failed because the test run changed ${changed}: the factory`), testsFixContent(record));
-      assert.equal(checksLine(record, 2), `- \`${command}; echo done\`: failed (${record.reason}).`);
+      assert.equal(checksLine(record), `- \`${command}; echo done\`: failed (${record.reason}).`);
       // Nothing is put back.
       assert.equal(existsSync(join(own, changed)), true);
     });
@@ -161,7 +161,7 @@ if (process.env[CHILD] !== undefined) {
       const record = await recordOf('touch ran.txt', { cwd: own, env: anyBwrap() });
       assert.deepEqual([record.outcome, record.exit_code, record.timed_out, record.reason], ['failed', null, false, `the test run did not start: ${name} is a link`]);
       assert.equal(existsSync(join(own, 'ran.txt')), false);
-      assert.equal(checksLine(record, 1), `- \`touch ran.txt\`: failed (the test run did not start: ${name} is a link).`);
+      assert.equal(checksLine(record), `- \`touch ran.txt\`: failed (the test run did not start: ${name} is a link).`);
     }
   });
 
@@ -546,10 +546,11 @@ if (process.env[CHILD] !== undefined) {
     // SF-152: a run killed by a signal from outside (no exit code, no timeout) says so, not "exit ?".
     const killed = { ...base, exit_code: null, duration_ms: 25_140_000 };
     assert.ok(testsFixContent(killed).includes('It was killed by a signal after 6 h 59 min, before it exited.'), testsFixContent(killed));
-    assert.equal(checksLine(killed, 3), '- `npm test`: failed (killed after 6 h 59 min).');
-    assert.equal(checksLine({ ...base, outcome: 'passed', exit_code: 0 }, 3), '- `npm test`: passed in 4 min 12 s on iteration 3.');
-    assert.equal(checksLine({ ...base, outcome: 'accepted_failing', accepted_from: 'failed' }, 3), '- `npm test`: failed (exit 1); accepted by the user without passing tests.');
-    assert.equal(checksLine({ ...base, outcome: 'accepted_failing', accepted_from: 'unavailable', exit_code: 127, reason: 'the command was not found (exit 127)' }, 3),
-      '- `npm test`: could not run (the command was not found (exit 127)); accepted by the user without tests.');
+    assert.equal(checksLine(killed), '- `npm test`: failed (killed after 6 h 59 min).');
+    // The command and its result only: no iteration, no word of who accepted it.
+    assert.equal(checksLine({ ...base, outcome: 'passed', exit_code: 0 }), '- `npm test`: passed in 4 min 12 s.');
+    assert.equal(checksLine({ ...base, outcome: 'accepted_failing', accepted_from: 'failed' }), '- `npm test`: failed (exit 1).');
+    assert.equal(checksLine({ ...base, outcome: 'accepted_failing', accepted_from: 'unavailable', exit_code: 127, reason: 'the command was not found (exit 127)' }),
+      '- `npm test`: could not run (the command was not found (exit 127)).');
   });
 }

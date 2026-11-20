@@ -88,8 +88,8 @@ one, or that reopens a fixed or left finding, is a round without progress (the f
 Fix sets the low and does not count); the third such round (`SF_MAX_ITERATIONS`) has its Fix
 refused and the job goes to `needs_human` (a user message does not count, and at the stop it
 starts the count again): its findings stay open in the ledger, and the user may accept the
-iteration as it is, with them listed in the MR text, tell it to go on, or give a direction; the
-Implementer session stays alive until the user decides. A Task with `important: true` is never
+iteration as it is, with them listed on the job's Merge request screen, tell it to go on, or give
+a direction; the Implementer session stays alive until the user decides. A Task with `important: true` is never
 stopped by this limit, by `SF_GATE_MAX_ROUNDS` or by the gate budget.
 
 The factory reviews every published iteration: Codex (the gate) in the job's worktree, read-only,
@@ -438,8 +438,9 @@ with every iteration. The Context owner does not review.
   - `nit`: style, naming, wording, a narrower variant of a risk already accepted, a nice-to-have.
 - Only a `blocker` or `major` item makes a fix, whatever the verdict says. A `fix` with nits
   only counts as `clean`: the
-  factory records it as given, keeps the nits, and lists them in the MR text as
-  `### Nits not applied`. Nits never block; in a Fix section they come last, as optional.
+  factory records it as given, keeps the nits, and shows them to the user on the job's
+  Merge request screen (`### Nits not applied`); they never go into the MR text. Nits never
+  block; in a Fix section they come last, as optional.
 - Return `clean` only when every earlier blocker and major Fix item is fixed or contested with
   evidence you accept. Earlier nits may stay.
 - Settled findings (the ledger's `<settled_findings>` in the prompt: fixed, contested,

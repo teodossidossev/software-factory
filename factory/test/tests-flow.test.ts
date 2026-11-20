@@ -87,8 +87,8 @@ test('a passing run reaches ready_for_human_review with ### Checks in the MR tex
     assert.equal(runs.length, 1, JSON.stringify(runs));
     assert.deepEqual([runs[0]!.argv.slice(0, 3), runs[0]!.argv.at(-1)], [['--die-with-parent', '--unshare-pid', '--unshare-net'], 'exit 0']);
     const text = await readFile(join(jobDir(env), 'mr.md'), 'utf8');
-    assert.match(text, /\n## Testing\nNot checked: nothing to run\.\n\n### Checks\n- `exit 0`: passed in \d+ s on iteration 1\.\n\n## Screenshots\n/u);
-    assert.match(git(repo, 'log', '-1', '--format=%B', ready.branch), /### Checks\n- `exit 0`: passed in \d+ s on iteration 1\./u);
+    assert.match(text, /\n## Testing\nNot checked: nothing to run\.\n\n### Checks\n- `exit 0`: passed in \d+ s\.\n\n## Screenshots\n/u);
+    assert.match(git(repo, 'log', '-1', '--format=%B', ready.branch), /### Checks\n- `exit 0`: passed in \d+ s\.\n/u);
     const types = (await events(env)).map((event) => event.type).filter((type) => type === 'tests_started' || type === 'tests');
     assert.deepEqual(types, ['tests_started', 'tests']);
     assert.equal((await jobJson(env)).mr_attempts, 1);
@@ -130,7 +130,7 @@ test('a failure writes a Tests Fix and the next iteration runs; the third failur
     await waitFor(served, 'T-1', 'ready_for_human_review', 3);
     const record = await testsRecord(env, 3);
     assert.deepEqual([record.outcome, record.accepted_from, record.exit_code], ['accepted_failing', 'failed', 1]);
-    assert.ok((await readFile(join(jobDir(env), 'mr.md'), 'utf8')).includes('### Checks\n- `echo "not ok 1"; exit 1`: failed (exit 1); accepted by the user without passing tests.\n'));
+    assert.ok((await readFile(join(jobDir(env), 'mr.md'), 'utf8')).includes('### Checks\n- `echo "not ok 1"; exit 1`: failed (exit 1).\n'));
     // The accepted iteration ran no test again.
     assert.equal((await events(env)).filter((event) => event.type === 'tests_started').length, 3);
   } finally {

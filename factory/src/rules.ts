@@ -17,6 +17,13 @@ export const MR_REQUIRED_HEADINGS = [
   '## Checklist',
 ];
 
+export const NITS_HEADING = '### Nits not applied';
+export const SIMPLIFY_HEADING = '### Simplifications not applied';
+export const FINDINGS_HEADING = '### Review findings not fixed';
+export const ACCEPTED_HEADING = '### Accepted over a stop';
+// The headings of the factory's notes for the user (src/mr-notes.ts), which never go into the MR text.
+export const FACTORY_NOTE_HEADINGS: readonly string[] = [NITS_HEADING, SIMPLIFY_HEADING, FINDINGS_HEADING, ACCEPTED_HEADING];
+
 // The lines of one level-2 section of the MR text, without its heading, up to the next level-1 or
 // level-2 heading outside a code fence; empty when the heading is absent.
 export function sectionLines(lines: string[], heading: string): string[] {

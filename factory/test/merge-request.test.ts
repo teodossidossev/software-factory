@@ -498,13 +498,26 @@ const mrEvents = async (world: MrWorld): Promise<Array<Record<string, unknown>>>
   (await readFile(world.jobs.eventsPath('app', 'T-1'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line)).filter((record) => record.type === 'mr_edited');
 const filesOf = async (world: MrWorld): Promise<[string | undefined, string | undefined]> => [await world.jobs.readMrText('app', 'T-1'), await world.jobs.readMrFactoryText('app', 'T-1')];
 
+test('mr-view: the factory\'s notes of the job (a finding not fixed) beside the MR text, which stays as it is', async () => {
+  const world = await mrWorld('mr-notes');
+  const { execution, jobs } = world;
+  await jobs.writeLedger('app', 'T-1', [{
+    id: 'R1', iteration: 1, reviewer: 'claude', severity: 'major', path: 'a.ts', problem: 'Problem of R1.', expected: 'Better.', status: 'accepted_risk',
+    response: '', evidence: '', reopened: 0, asked: 1, caused_by: '', dispute: null, settled: { decision: 'accept', note: 'Known risk.', at: '2026-11-05T00:00:00.000Z' },
+  }]);
+  const view = (await execution.mergeRequestView('app', 'T-1'))!;
+  assert.equal(view.notes, '### Review findings not fixed\n- R1 [major, accepted risk] `a.ts`: Problem of R1. — Known risk.');
+  assert.deepEqual({ title: view.title, body: view.body }, mrMessage(mrText(TITLE)));
+  assert.equal(await jobs.readMrText('app', 'T-1'), mrText(TITLE));
+});
+
 test('SF-080 save: mr.md as the commit message is written, mr-factory.md kept once, the prepared commit reworded with the same tree, author and parent; reset copies the factory text back', async () => {
   const world = await mrWorld('mr-save');
   const { execution, repo } = world;
   const tree = git(repo, 'rev-parse', `${BRANCH}^{tree}`).trim();
   const author = git(repo, 'log', '-1', '--format=%an <%ae> %aI', BRANCH);
   let view = (await execution.mergeRequestView('app', 'T-1'))!;
-  assert.deepEqual([view.edited, view.edited_at, view.factory, view.commit_differs, view.editable, view.readonly_reason, view.problems], [false, null, mrMessage(mrText(TITLE)), false, true, null, []]);
+  assert.deepEqual([view.edited, view.edited_at, view.factory, view.commit_differs, view.editable, view.readonly_reason, view.problems, view.notes], [false, null, mrMessage(mrText(TITLE)), false, true, null, [], '']);
   assert.deepEqual([view.branch, view.base, view.branch_editable, view.branch_reason, view.base_editable, view.target], [BRANCH, 'main', true, null, true, { host: null, repository: null }]);
   assert.deepEqual(view.rules.manual_claim, { source: MANUAL_CLAIM.source, flags: MANUAL_CLAIM.flags });
   assert.deepEqual([view.rules.commit_types, view.rules.max_header_chars, view.rules.required_headings], [COMMIT_TYPES, 72, MR_REQUIRED_HEADINGS]);

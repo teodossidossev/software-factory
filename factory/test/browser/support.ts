@@ -592,7 +592,7 @@ export class FakeActions {
       pushed: false, pushed_at: null, editable, readonly_reason: editable ? null : 'The MR text can be edited while the job is ready for review.',
       target: { host: null, repository: null },
       rules: { commit_types: [...COMMIT_TYPES], max_header_chars: MAX_HEADER_CHARS, required_headings: [...MR_REQUIRED_HEADINGS], manual_claim: { source: MANUAL_CLAIM.source, flags: MANUAL_CLAIM.flags } },
-      commit: null, commit_differs: false,
+      commit: null, commit_differs: false, notes: '',
     };
   }
 

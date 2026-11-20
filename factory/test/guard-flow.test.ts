@@ -9,6 +9,7 @@ import { delimiter, join } from 'node:path';
 import { test } from 'node:test';
 import { JobStore } from '../src/jobs.js';
 import { mrMessage, pushBranch } from '../src/mr.js';
+import { mrNotes } from '../src/mr-notes.js';
 import { act, fetchRaw } from './support/dashboard-client.js';
 import { startFakeForge } from './support/fake-forge.js';
 import { call, type Env, fakeLog, git, newEnv, newRepo, putTask, reviewLog, reviewScript, runCli, script, serve, stop, temp, waitFor } from './support/harness.js';
@@ -164,7 +165,7 @@ test('the MR text: a name of another workspace gets a second MR text turn told t
   }
 });
 
-test('the MR text: a review nit holding a private term reaches it as [removed by the guard], with no extra MR text turn', async () => {
+test('the MR text: a review nit holding a private term stays off it and is listed on the Merge request screen, with no extra MR text turn', async () => {
   const { env, repo } = await guardEnv('guard-nit', true, { SF_REVIEW: 'on' });
   await writeFile(join(env.config, 'guard-terms.txt'), 'ACME\n');
   await putTask(env, repo, 'T-1', 'Change README');
@@ -179,8 +180,9 @@ test('the MR text: a review nit holding a private term reaches it as [removed by
   try {
     await call(served, 'start', { workspace: 'app', ticket: 'T-1' });
     const ready = await waitFor(served, 'T-1', 'ready_for_human_review', 1);
-    assert.ok(ready.mr.includes('- [nit] `README.md`: [removed by the guard] style is off. Expected: Nicer.'), ready.mr);
-    assert.equal(ready.mr.includes('ACME'), false);
+    assert.ok(!ready.mr.includes('style is off') && !ready.mr.includes('[removed by the guard]') && !ready.mr.includes('ACME'), ready.mr);
+    const jobs = new JobStore(env.state);
+    assert.ok((await mrNotes(jobs, (await jobs.read('app', 'T-1'))!)).includes('- [nit] `README.md`: ACME style is off. Expected: Nicer.'));
     assert.equal((await fakeLog(env)).length, 2);
   } finally {
     await stop(served);

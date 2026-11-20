@@ -237,3 +237,22 @@ limits go. The price is said plainly: reviewers that keep finding new, narrower 
 rounds until one of the stops above ends them, and one job can use up the plan's allowance.
 
 The rest of this ADR stands.
+
+## Amendment 2026-11-20 (SF-310): the factory's notes stay off the MR text
+
+What changes: the MR text is the Implementer's text and the factory's `### Checks` line, nothing
+more. The factory's four notes (`### Nits not applied`, `### Simplifications not applied`,
+`### Review findings not fixed` and `### Accepted over a stop`) are shown on the job's Merge
+request screen, under the text, with the same lines; they never go into the commit, `mr.md`, the
+hand-over's message or the merge request. Read the five sentences above that put them in the MR
+text ("Clean go into the MR text as `### Nits not applied`", "The MR text lists the accepted
+risks, contests and nits left", "Skip prepares the MR with the suggestions listed", "its open
+findings are listed in the MR text" and "with its open findings listed in the MR text") as
+"listed on the Merge request screen".
+
+Why: the user's decision (SF-310): the MR text is the description colleagues read and the message
+of the commit they review, and the factory's notes are its process, not the change. A product
+merge request received a contested nit with its ledger id and the argument between reviewer and
+Implementer.
+
+The rest of this ADR stands.

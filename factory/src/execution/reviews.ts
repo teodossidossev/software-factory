@@ -20,7 +20,7 @@ import { actedVerdict, decide, type Verdict, REVIEWER, type ReviewInput, type Re
 import { type DenialScope, gateWrapperFor, type PathDenials, pathDenials, USER_SETTINGS_WEAKEN_SANDBOX } from '../sandbox-denials.js';
 import { factoryTokens } from '../secrets.js';
 import { jobSkills } from '../skills.js';
-import { changedBetween, type FixFiles, fixNumbers, guardSuggestions, offerMessage, runSimplify, SIMPLIFY_CODE, SIMPLIFY_TITLE, simplifyFix, type SimplifyInput, type SimplifyOutput, simplifyPrompt, type Suggestion } from '../simplify.js';
+import { changedBetween, type FixFiles, fixNumbers, guardSuggestions, offerMessage, runSimplify, SIMPLIFY_CODE, SIMPLIFY_TITLE, simplifyFix, type SimplifyInput, type SimplifyOutput, simplifyPrompt } from '../simplify.js';
 import { codesWithAction, settleCodes, withoutDropped } from '../stops.js';
 import { mayTouch, parseFrontMatter, readTask, TASK_DIR } from '../task-file.js';
 import { TEST_CODES, type TestsRecord } from '../test-command.js';
@@ -241,7 +241,7 @@ export class ReviewsPart {
   // paths are the review's accepted_sensitive; with it off no clean review is needed, and
   // the paths are the last gate.json's. The override is recorded first: gate-override.json with what
   // goes unapplied (the Codex items, the gate's error, or the ledger's open findings) and a
-  // gate_overridden event; MR preparation lists it in the MR text.
+  // gate_overridden event; the Merge request screen lists it under the MR text (src/mr-notes.ts).
   acceptGate(workspaceName: string, ticket: string): Promise<{ state: JobState; iteration: number; branch: string }> {
     return this.#peers.control.request(workspaceName, ticket, { kind: 'accept' }) as Promise<{ state: JobState; iteration: number; branch: string }>;
   }
@@ -305,8 +305,9 @@ export class ReviewsPart {
         return this.#acceptTests(job, accepted, gate);
       }
       if (code === SIMPLIFY_CODE) {
-        // Skip: MR preparation as after the clean gate, with the paths both reviewers
-        // accepted; simplify.json is marked skipped, so the suggestions go into the MR text (mrIdle).
+        // Skip: MR preparation as after the clean gate, with the paths both reviewers accepted;
+        // simplify.json is marked skipped, so the Merge request screen lists the suggestions
+        // (src/mr-notes.ts).
         // No gate override: the gate was clean.
         const record = await this.#store.jobs.readSimplify(workspaceName, ticket, job.iteration);
         const sensitive = [...new Set([...accepted, ...gateAccepted])];
@@ -726,18 +727,6 @@ export class ReviewsPart {
   // whether that run ended, failed, was interrupted or the job moved on.
   #simplifyDue(job: Job): boolean {
     return this.#settings.config.simplify && job.fixes >= 1 && job.simplify_iteration === undefined;
-  }
-
-  // The suggestions the user skipped, with the iteration the pass ran on: the simplify.json
-  // marked skipped_at by sf accept. A Simplify, or an answer by sf say, leaves none.
-  async skippedSimplifications(job: Job): Promise<{ suggestions: Suggestion[]; iteration: number } | undefined> {
-    for (let number = job.iteration; number >= 1; number -= 1) {
-      const record = await this.#store.jobs.readSimplify(job.workspace, job.ticket, number);
-      if (record !== undefined) {
-        return 'suggestions' in record && record.skipped_at !== undefined ? { suggestions: record.suggestions, iteration: number } : undefined;
-      }
-    }
-    return undefined;
   }
 
   // Starts the simplification pass after the deciding clean verdict: the job's simplify_iteration is

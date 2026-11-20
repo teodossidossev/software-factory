@@ -1,13 +1,12 @@
 // The simplification pass's pure parts (SF-055): the Task file without its Fix sections, the files
 // each Fix section's iteration changed, the prompt, the guard that drops a suggestion naming a fixed
 // blocker, the Fix section and ledger entries of Simplify, the offer message, how the ledger shows the
-// simplifications to the reviewers and leaves them out of the MR's findings, the MR section of Skip.
+// simplifications to the reviewers and leaves them out of the MR's findings.
 import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { answerFix, applyVerdict, type LedgerEntry, notFixed, settledLines } from '../src/ledger.js';
-import { SIMPLIFY_HEADING, withSimplifications } from '../src/mr.js';
 import { changedBetween, fixNumbers, guardSuggestions, offerMessage, runSimplify, SIMPLIFY_SCHEMA, simplifyFix, simplifyOutput, simplifyPrompt, type Suggestion, withoutFixSections } from '../src/simplify.js';
 import { FAKE, newEnv, reviewLog, reviewScript } from './support/harness.js';
 
@@ -104,17 +103,13 @@ test('the reviewers see a simplification as the user\'s choice; the MR findings 
   assert.deepEqual(notFixed([...ledger, entry('R3', { status: 'accepted_risk' })]).map((found) => found.id), ['R3']);
 });
 
-test('the offer message lists the suggestions and both choices; Skip lists them in the MR text', () => {
+test('the offer message lists the suggestions and both choices', () => {
   const message = offerMessage([SUGGESTION]);
   assert.match(message, /^The simplification pass found 1 thing the review fixes added that the Task does not need \(about 6 lines\): 1\. `src\/a\.ts`: The second null check\./);
   assert.match(message, /sf simplify <workspace> <ticket>.*sf accept <workspace> <ticket>/);
   const many = offerMessage(Array.from({ length: 40 }, (_, index) => ({ ...SUGGESTION, what: `${'x'.repeat(200)} ${index}` })));
   assert.ok(many.length <= 2000);
   assert.match(many, /more suggestions: see simplify\.json\./);
-  const text = ['feat(S-1): Greet', '', '## Special things to note', '- None.', '', '## Change outline', 'x', ''].join('\n');
-  assert.equal(withSimplifications(text, [SUGGESTION], 3), ['feat(S-1): Greet', '', '## Special things to note', SIMPLIFY_HEADING,
-    '- `src/a.ts`: The second null check. Why: The caller never passes null. (saves about 6 lines; added for R2)', '', '## Change outline', 'x', ''].join('\n'));
-  assert.equal(withSimplifications(text, [], 3), text);
 });
 
 test('rule 1 holds for a simplification at every severity: a blocker that reopens it is dropped; an independent blocker is a new item', () => {

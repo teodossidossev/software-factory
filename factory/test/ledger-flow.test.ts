@@ -3,15 +3,17 @@
 // ledger.json, an escalation that stops the job before the review and sf settle that resumes it
 // (the review again, or a Fix with the user's decision), an item that reopens an accepted risk
 // (dropped), a gate that disputes a contest and Accept on review_disputed, churn by both reviewers
-// and Accept on review_churn (refused without a clean Claude review), the MR section, sf reset; a
-// clean verdict of the reviewer that decides the round settles the open entries, a clean Claude
-// verdict beside the gate's fix in a joint round does not.
+// and Accept on review_churn (refused without a clean Claude review), the findings not fixed in the
+// Merge request screen's notes and not in the MR text, sf reset; a clean verdict of the reviewer that
+// decides the round settles the open entries, a clean Claude verdict beside the gate's fix in a joint
+// round does not.
 import assert from 'node:assert/strict';
 import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { JobStore } from '../src/jobs.js';
-import { FINDINGS_HEADING } from '../src/mr.js';
+import { mrNotes } from '../src/mr-notes.js';
+import { FINDINGS_HEADING } from '../src/rules.js';
 import { call, codexLog, codexScript, fakeCodex, newEnv, newRepo, putTask, reviewLog, reviewScript, runCli, script, serve, stop, waitFor } from './support/harness.js';
 
 const ITEM = { path: 'README.md', problem: 'It greets the world.', expected: 'It greets the reader.', severity: 'major' };
@@ -77,9 +79,11 @@ test('escalation: the Fix section has ids, the Implementer escalates R1, the job
     assert.ok(record !== undefined && 'verdict' in record);
     assert.deepEqual(record.dropped, [{ ...reopening, caused_by: '' }]);
     assert.equal((await jobs.read('app', 'L-1'))!.fixes, 1);
-    // The MR text lists it as not fixed.
+    // The Merge request screen's notes list it as not fixed; the MR text does not.
     const mr = (await jobs.readMrText('app', 'L-1'))!;
-    assert.ok(mr.includes(`${FINDINGS_HEADING}\n- R1 [major, accepted risk] \`README.md\`: It greets the world. — English only.\n`), mr);
+    assert.ok(!mr.includes(FINDINGS_HEADING) && !mr.includes('R1 [major'), mr);
+    const notes = await mrNotes(jobs, (await jobs.read('app', 'L-1'))!);
+    assert.ok(notes.includes(`${FINDINGS_HEADING}\n- R1 [major, accepted risk] \`README.md\`: It greets the world. — English only.`), notes);
   } finally {
     await stop(served);
   }
@@ -215,7 +219,9 @@ test('a contested undeclared sensitive path the review still does not accept is 
     await waitFor(served, 'L-7', 'ready_for_human_review', 2);
     assert.equal((await reviewLog(env)).length, 3);
     const mr = (await jobs.readMrText('app', 'L-7'))!;
-    assert.ok(mr.includes('- R1 [major, accepted risk] `package.json`: Undeclared sensitive path. — The tests need npm.'), mr);
+    assert.ok(!mr.includes(FINDINGS_HEADING) && !mr.includes('R1 [major'), mr);
+    const notes = await mrNotes(jobs, (await jobs.read('app', 'L-7'))!);
+    assert.ok(notes.includes('- R1 [major, accepted risk] `package.json`: Undeclared sensitive path. — The tests need npm.'), notes);
   } finally {
     await stop(served);
   }
@@ -253,7 +259,9 @@ test('dispute: the Implementer contests R1 with evidence, the gate reopens it (r
     assert.equal(override?.code, 'review_disputed');
     assert.deepEqual(Array.isArray(override?.unapplied) && override.unapplied.map((item) => item.id ?? item.problem), ['R1']);
     const mr = (await jobs.readMrText('app', 'L-3'))!;
-    assert.ok(mr.includes(`${FINDINGS_HEADING}\n- R1 [major, contested] \`README.md\`: It greets the world. — The reader is greeted already at README.md:1 Evidence: README.md:1.\n`), mr);
+    assert.ok(!mr.includes(FINDINGS_HEADING) && !mr.includes('R1 [major'), mr);
+    const notes = await mrNotes(jobs, (await jobs.read('app', 'L-3'))!);
+    assert.ok(notes.includes(`${FINDINGS_HEADING}\n- R1 [major, contested] \`README.md\`: It greets the world. — The reader is greeted already at README.md:1 Evidence: README.md:1.`), notes);
   } finally {
     await stop(served);
   }

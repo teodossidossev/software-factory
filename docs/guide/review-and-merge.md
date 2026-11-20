@@ -135,9 +135,10 @@ write, and your action.
 The Implementer writes the MR text by the [MR template](../../factory/HANDBOOK.md#mr-template): the
 title `<type>(<ticket>): <summary>` (at most 72 characters, also the commit header), then `## What`,
 `## Why`, `## How`, `## Why the change`, `## Special things to note`, `## Change outline`,
-`## Testing`, `## Screenshots` and `## Checklist`. The factory adds `### Nits not applied`, `###
-Review findings not fixed` and, when you skipped the simplification pass, `### Simplifications not
-applied`.
+`## Testing`, `## Screenshots` and `## Checklist`. The factory adds only the result of the workspace's
+test command, as `### Checks` under `## Testing`. Its own notes (the nits not applied, the review
+findings not fixed, an Accept over a stop and the simplifications you skipped) are shown under the
+text on the Merge request screen, and are never committed or pushed.
 
 On the Merge request screen you can change it in `ready_for_human_review` (and after a failed or
 refused push):

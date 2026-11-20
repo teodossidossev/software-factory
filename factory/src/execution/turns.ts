@@ -47,7 +47,7 @@ const LIMIT_STOPS: readonly string[] = ['iteration_limit', 'gate_rounds', 'gate_
 // SF_MAX_ITERATIONS, round the judgement of the refused round (its open blocker and major findings,
 // those it raised and reopened), iteration the one an Accept takes.
 export function iterationLimitMessage(stalled: number, max: number, round: RoundProgress, iteration: number): string {
-  return `${stalled} of the job's review rounds made no progress (SF_MAX_ITERATIONS is ${max}): each left no fewer open blocker and major findings than the fewest before, or reopened a fixed or left one. Open blocker or major findings: ${round.open} (${round.raised} raised by the last review, ${round.reopened} of them reopened; ${round.open - round.raised} carried from earlier rounds). The user decides how to go on: sf accept takes iteration ${iteration} as it is (the open findings go unapplied and are listed in the MR text), sf say goes on: the count starts again, and the held-back findings go with the message.`;
+  return `${stalled} of the job's review rounds made no progress (SF_MAX_ITERATIONS is ${max}): each left no fewer open blocker and major findings than the fewest before, or reopened a fixed or left one. Open blocker or major findings: ${round.open} (${round.raised} raised by the last review, ${round.reopened} of them reopened; ${round.open - round.raised} carried from earlier rounds). The user decides how to go on: sf accept takes iteration ${iteration} as it is (the open findings go unapplied and are listed on the Merge request screen), sf say goes on: the count starts again, and the held-back findings go with the message.`;
 }
 
 // What TurnsPart calls of the other parts, by just those methods.
@@ -502,7 +502,7 @@ export class TurnsPart {
       judged = { stalled_fixes: stalled, least_open: round.least };
       if (!round.progress && stalled >= maxIterations && job.important !== true) {
         // The refused verdict's items become open ledger entries with ids: the stop lists
-        // them, and an Accept leaves them unapplied in the MR text.
+        // them, and an Accept leaves them unapplied, listed on the Merge request screen.
         if (ledger !== undefined) {
           await this.#store.jobs.writeLedger(workspaceName, ticket, ledger);
         }

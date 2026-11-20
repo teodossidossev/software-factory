@@ -8,9 +8,6 @@ import { join, resolve } from 'node:path';
 import { FactoryError } from './errors.js';
 import { runGit } from './git.js';
 import { changedPaths, writeResolutionPatch } from './patch.js';
-import { itemLine, oneLine, type ReviewItem } from './review.js';
-import { type LedgerEntry, notFixed, notFixedLine } from './ledger.js';
-import { type Suggestion, suggestionLine } from './simplify.js';
 import { COMMIT_TYPES, headerProblem, manualClaim, MAX_HEADER_CHARS, MR_REQUIRED_HEADINGS, testingProblem } from './rules.js';
 import { TASK_DIR } from './task-file.js';
 
@@ -167,9 +164,6 @@ export async function readMrText(cwd: string, ticket: string): Promise<{ ok: tru
   return { ok: true, text };
 }
 
-const SPECIAL_HEADING = '## Special things to note';
-export const NITS_HEADING = '### Nits not applied';
-
 // Within the lines from to to, the index of heading and of the next line that matches stop after
 // it, both outside a code fence (end is to without one); undefined when the heading is absent.
 function sectionRange(lines: string[], heading: string, from: number, to: number, stop: RegExp): { start: number; end: number } | undefined {
@@ -188,44 +182,6 @@ function sectionRange(lines: string[], heading: string, from: number, to: number
   return start === undefined ? undefined : { start, end: to };
 }
 
-// The MR text with the factory's list of the nits not applied: a `### Nits not applied`
-// subsection at the end of `## Special things to note`, one line per nit (withSubsection).
-export function withNits(text: string, nits: ReviewItem[], iteration: number): string {
-  return withSubsection(text, NITS_HEADING, nits.map((item) => `- ${itemLine(item)}`), (rest) => `- … and ${rest} more: see review.json and gate.json of iteration ${iteration}.`);
-}
-
-export const FINDINGS_HEADING = '### Review findings not fixed';
-
-// The MR text with the factory's list of the review findings not fixed: every
-// accepted_risk, contested and left entry of the ledger, one line each with its id, as a
-// `### Review findings not fixed` subsection of `## Special things to note` (withSubsection).
-export function withFindings(text: string, ledger: LedgerEntry[]): string {
-  return withSubsection(text, FINDINGS_HEADING, notFixed(ledger).map(notFixedLine), (rest) => `- … and ${rest} more: see ledger.json of the job.`);
-}
-
-export const ACCEPTED_HEADING = '### Accepted over a stop';
-
-// The MR text with the user's Accept over a stop: a `### Accepted over a stop` subsection
-// of `## Special things to note` (withSubsection) with the stop's code, "No reviewer passed iteration
-// N." when no reviewer did (noReviewer), and what went unapplied: one line per finding, or the
-// gate's error.
-export function withAccepted(text: string, accepted: { code: string; unapplied: Array<ReviewItem & { id?: string }> | string }, iteration: number, noReviewer: boolean): string {
-  const lead = [`- The user accepted iteration ${iteration} over ${accepted.code}.`, ...(noReviewer ? [`- No reviewer passed iteration ${iteration}.`] : [])];
-  const unapplied = typeof accepted.unapplied === 'string'
-    ? [`- The gate failed: ${oneLine(accepted.unapplied)}`]
-    : accepted.unapplied.map((item) => `- ${item.id !== undefined ? `${item.id} ` : ''}${itemLine(item)}`);
-  return withSubsection(text, ACCEPTED_HEADING, [...lead, ...unapplied], (rest) => `- … and ${rest} more: see gate-override.json of iteration ${iteration}.`);
-}
-
-export const SIMPLIFY_HEADING = '### Simplifications not applied';
-
-// The MR text with the suggestions of the simplification pass the user skipped, one line
-// each, as a `### Simplifications not applied` subsection of `## Special things to note`
-// (withSubsection), so they can become a follow-up ticket.
-export function withSimplifications(text: string, suggestions: Suggestion[], iteration: number): string {
-  return withSubsection(text, SIMPLIFY_HEADING, suggestions.map((item) => `- ${suggestionLine(item)}`), (rest) => `- … and ${rest} more: see simplify.json of iteration ${iteration}.`);
-}
-
 // The factory's subsection of the workspace's test command, and the section it ends.
 export const CHECKS_HEADING = '### Checks';
 const TESTING_HEADING = '## Testing';
@@ -234,50 +190,45 @@ const TESTING_HEADING = '## Testing';
 // line of the workspace's test command on the iteration the MR is prepared from, replacing any
 // ### Checks already there (an earlier preparation's, the model's or the user's own).
 export function withChecks(text: string, line: string, iteration: number): string {
-  return withSubsection(text, CHECKS_HEADING, [line], () => `- See tests-${iteration}.json of the job.`, TESTING_HEADING, false);
+  return withSubsection(text, CHECKS_HEADING, [line], () => `- See tests-${iteration}.json of the job.`, TESTING_HEADING);
 }
 
-// The MR text with a subsection the factory writes (heading) at the end of a section (parent,
-// `## Special things to note` by default), one line per entry, replacing any such subsection
-// already there (the model's, or an earlier preparation's). A lone `- None.` there goes (when
-// dropNone). Without entries only the old subsection goes; without either the text stays as it is.
+// The MR text with a subsection the factory writes (heading) at the end of a section (parent), one
+// line per entry, replacing any such subsection already there (the model's, the user's or an
+// earlier preparation's); the rest of the section, a lone `- None.` too, stays. Without entries
+// only the old subsection goes; without either, or without the section, the text stays as it is.
 // The list is cut, with a closing line (more) that counts the rest, so the text stays within
 // MAX_MR_TEXT_BYTES.
-function withSubsection(text: string, heading: string, entries: string[], more: (rest: number) => string, parent = SPECIAL_HEADING, dropNone = true): string {
+function withSubsection(text: string, heading: string, entries: string[], more: (rest: number) => string, parent: string): string {
   const lines = text.split('\n');
-  const special = sectionRange(lines, parent, 0, lines.length, /^#{1,2} /u);
-  if (special === undefined) {
+  const range = sectionRange(lines, parent, 0, lines.length, /^#{1,2} /u);
+  if (range === undefined) {
     return text;
   }
-  const old = sectionRange(lines, heading, special.start + 1, special.end, /^#{1,3} /u);
+  const old = sectionRange(lines, heading, range.start + 1, range.end, /^#{1,3} /u);
   if (entries.length === 0 && old === undefined) {
     return text;
   }
-  let body = lines.slice(special.start + 1, special.end);
-  if (old !== undefined) {
-    body = [...lines.slice(special.start + 1, old.start), ...lines.slice(old.end, special.end)];
-  }
+  const body = old === undefined
+    ? lines.slice(range.start + 1, range.end)
+    : [...lines.slice(range.start + 1, old.start), ...lines.slice(old.end, range.end)];
   while (body.length > 0 && body.at(-1)!.trim() === '') {
     body.pop();
   }
-  const build = (section: string[]): string => [...lines.slice(0, special.start + 1), ...section, ...lines.slice(special.end)].join('\n');
+  const build = (section: string[]): string => [...lines.slice(0, range.start + 1), ...section, ...lines.slice(range.end)].join('\n');
   if (entries.length === 0) {
-    return build(special.end < lines.length ? [...body, ''] : body);
-  }
-  const content = body.filter((line) => line.trim() !== '');
-  if (dropNone && content.length === 1 && /^\s*[-*]\s+None\.?\s*$/iu.test(content[0]!)) {
-    body = body.filter((line) => line.trim() === '');
+    return build(range.end < lines.length ? [...body, ''] : body);
   }
   const lead = body.some((line) => line.trim() !== '') ? [...body, ''] : body;
   for (let shown = entries.length; shown >= 0; shown -= 1) {
     const rest = entries.length - shown;
     const list = [...entries.slice(0, shown), ...(rest > 0 ? [more(rest)] : [])];
-    const result = build([...lead, heading, ...list, ...(special.end < lines.length ? [''] : [])]);
+    const result = build([...lead, heading, ...list, ...(range.end < lines.length ? [''] : [])]);
     if (Buffer.byteLength(result, 'utf8') <= MAX_MR_TEXT_BYTES) {
       return result;
     }
   }
-  return build(special.end < lines.length ? [...body, ''] : body);
+  return build(range.end < lines.length ? [...body, ''] : body);
 }
 
 // The MR text as one message, for the factory's commit and for the forge's merge request alike:

@@ -686,7 +686,7 @@ relative one is one warning at start, and the dashboard then shows none.
 | `SF_CHECK_AFTER_FIX_MIN` | `5` | `check_after_minutes` in the job's status during later iterations. |
 | `SF_MAX_TURNS` | `150` | `maxTurns` of every Implementer turn. |
 | `SF_TURN_LIMIT_CONTINUES` | `1` | Continuations the factory sends by itself, per chain of Implementer turns, after a turn that reached `SF_MAX_TURNS` while making progress (SF-069, below); `0` to `10`, `0` stops at the first limit. |
-| `SF_MAX_ITERATIONS` | `3` | Review rounds without progress a job may have (the job's `stalled_fixes`): a round that asks for a Fix while no fewer blocker and major ledger entries are open than after any earlier such round (the job's `least_open`), or that reopens a fixed or left entry. The round that reaches the limit has its Fix refused (`iteration_limit`, job `needs_human`): its items become open ledger entries, and the stop can be accepted whatever the last verdict (SF-131), with the open findings listed in the MR text. A round that lowers the open findings does not count; the first round that asks for a Fix sets the low. An `sf say` turn does not count, nor a Tests Fix (SF-128, section MR preparation: `TEST_FIX_ROUNDS` bounds those). The job's `fixes` still counts every Fix section. A job whose Task says `important: true` is never stopped by it. |
+| `SF_MAX_ITERATIONS` | `3` | Review rounds without progress a job may have (the job's `stalled_fixes`): a round that asks for a Fix while no fewer blocker and major ledger entries are open than after any earlier such round (the job's `least_open`), or that reopens a fixed or left entry. The round that reaches the limit has its Fix refused (`iteration_limit`, job `needs_human`): its items become open ledger entries, and the stop can be accepted whatever the last verdict (SF-131), with the open findings listed on the Merge request screen. A round that lowers the open findings does not count; the first round that asks for a Fix sets the low. An `sf say` turn does not count, nor a Tests Fix (SF-128, section MR preparation: `TEST_FIX_ROUNDS` bounds those). The job's `fixes` still counts every Fix section. A job whose Task says `important: true` is never stopped by it. |
 | `SF_CLAUDE` | bundled binary | Absolute path of the Claude Code executable (`pathToClaudeCodeExecutable`). |
 | `SF_MODEL` | unset | Model of every Implementer turn, passed as is as the `model` option of `query()`; unset uses the user's Claude Code default. |
 | `SF_REVIEW` | on | `off` runs no Claude review (nor the gate): a published iteration stays in `awaiting_review` until the user goes on with `sf say` or aborts. |
@@ -1998,9 +1998,10 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   Since SF-131 a job without the Claude review needs no clean review for any of these stops, and
   MR preparation goes on with the last `gate.json`'s accepted paths (a marked path they leave is
   still refused, `sensitive_unacknowledged`). For such a job, and at `iteration_limit` for every
-  job, MR preparation lists the override in the MR text: a `### Accepted over a stop` subsection of `## Special things to note` with the code, what went
-  unapplied (the ledger entries already listed as not fixed aside) and, for a job without the
-  Claude review over `gate_failed` or `gate_budget`, `No reviewer passed iteration N.`
+  job, the Merge request screen lists the override in the factory's notes (`src/mr-notes.ts`, never
+  in the MR text): a `### Accepted over a stop` subsection with the code, what went unapplied (the
+  ledger entries already listed as not fixed aside) and, for a job without the Claude review over
+  `gate_failed` or `gate_budget`, `No reviewer passed iteration N.`
 - The **findings ledger** (SF-052, `src/ledger.ts`): `jobs/<ws>/<ticket>/ledger.json`, one entry per
   review item that went into a Fix section: `{id, iteration, reviewer, severity, path, problem,
   expected, status, response, evidence, reopened, asked, caused_by, dispute, settled}`, and
@@ -2321,14 +2322,15 @@ ended. A restart of `sf serve` therefore leaves a working job working.
       the note "removed by the user's choice", asked in that Fix: the reviewers see it as the user's choice,
       an item that reopens it, by its id or the same path and problem text, is dropped whatever its
       severity (SF-052 rule 1), a defect the removal causes is a new item reviewed as usual, and the
-      MR's `### Review findings not fixed` leaves it out. An item the Implementer answers other than `fixed` becomes `left` with its note
+      Merge request screen's `### Review findings not fixed` leaves it out. An item the Implementer answers other than `fixed` becomes `left` with its note
       (no longer the user's removal). Result `{state, iteration, check_after_minutes}`; a
       `simplify_chosen` event (`choice: "simplify"`). Refused with `invalid_state` outside
       `simplify_offered`, and once the ledger holds a Simplify.
     - **Skip**: `sf accept` (*Accept and prepare MR…*), allowed for `simplify_offered`: MR
       preparation with the paths both reviewers accepted; `simplify.json` gets `skipped_at`, a
-      `simplify_chosen` event (`choice: "skip"`), no `gate-override.json`. The suggestions go into
-      the MR text (below). Answering the offer with `sf say` is neither: nothing is listed.
+      `simplify_chosen` event (`choice: "skip"`), no `gate-override.json`. The suggestions are
+      listed on the Merge request screen, never in the MR text (below). Answering the offer with
+      `sf say` is neither: nothing is listed.
   - At most once per job: before the pass starts, the factory writes the iteration it runs on to the
     job (`simplify_iteration` in `job.json`), and a job that has it never gets another pass, whether
     that run ended, failed, was cancelled, or the job moved on (`sf say`) while it ran. A runner that
@@ -3360,24 +3362,25 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    Beyond the Task's rules it also counts a template literal whose command word is a `${}`
    expression as computed, and fails a process function imported from `child_process` under
    another name.
-   Before the commit, the factory writes the nits of the iteration that reached Clean into the MR
-   text (SF-051): those of its `review.json` and `gate.json`, deduplicated by path and problem
-   text, as a `### Nits not applied` list (`- [nit] \`path\`: problem Expected: expected`) at the
-   end of `## Special things to note`. It replaces any such list already there and drops a lone
-   `- None.`; without nits the text stays as written. The list is cut, with a closing line that
-   counts the rest, to keep the text within 64 KiB (`withNits` in `src/mr.ts`). After it the
-   factory writes `### Review findings not fixed` (SF-052, `withFindings`): every `accepted_risk`,
-   `contested` and `left` entry of the ledger, one line each with its id
-   (`- R7 [major, accepted risk] \`path\`: problem — <the user's note or the Implementer's>`), the
-   same way; the user's simplifications are not findings and stay out. When the user skipped the
-   simplification pass (SF-055), `### Simplifications not applied` lists its suggestions before it
-   (`withSimplifications`: the job's last `simplify.json`, when it has `skipped_at`; `- \`path\`: what Why: why (saves about N lines; added for R3)`), so they can become a
-   follow-up ticket.
+   The factory's notes for the user never go into the MR text: `mrNotes` (`src/mr-notes.ts`)
+   computes them when the Merge request screen asks (`mr-view`'s `notes`), from the job's
+   iteration, ledger and records, as Markdown of up to four subsections, uncut, in this order,
+   one blank line between. `### Nits not applied` (SF-051): the nits of the iteration that
+   reached Clean, those of its `review.json` (with the Claude review) and `gate.json`, deduplicated
+   by path and problem text (`- [nit] \`path\`: problem Expected: expected`).
+   `### Simplifications not applied` (SF-055): the suggestions of the job's last `simplify.json`,
+   when it has `skipped_at` (`- \`path\`: what Why: why (saves about N lines; added for R3)`), so
+   they can become a follow-up ticket. `### Review findings not fixed` (SF-052): every
+   `accepted_risk`, `contested` and `left` entry of the ledger, one line each with its id
+   (`- R7 [major, accepted risk] \`path\`: problem — <the user's note or the Implementer's>`); the
+   user's simplifications are not findings and stay out. `### Accepted over a stop`: the user's
+   Accept over a stop (the override of `sf accept`, above). A job whose `mr.md` was written with these
+   subsections keeps them in its text until the user deletes them.
    With a record of the test step for the iteration (SF-128), the factory writes `### Checks` at
    the end of `## Testing` (`withChecks`), replacing any `### Checks` there, at every preparation:
-   one line, ``- `<command>`: passed in 4 min 12 s on iteration N.``, ``- `<command>`: failed (exit
-   1); accepted by the user without passing tests.`` or ``- `<command>`: could not run (<reason>);
-   accepted by the user without tests.`` A text the user saved (SF-080) gets it too, cleaned by the
+   one line, the command and its result, ``- `<command>`: passed in 4 min 12 s.``, ``- `<command>`:
+   failed (exit 1).`` or ``- `<command>`: could not run (<reason>).``, for a run the user accepted
+   too. A text the user saved (SF-080) gets it too, cleaned by the
    guard as the factory's lines are, and is written back to `mr.md` with it, so the commit message
    always carries it.
    The guard (SF-122) then cleans the lines the factory added (every line that is not a line of
@@ -3419,7 +3422,7 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
      published before the factory recorded `commit_tree` is committed without the comparison.
    - An empty index diff is `mr_empty`.
    - `git commit -q --cleanup=verbatim -F <file>`: the commit message is the whole MR text, the
-     factory's subsections included, normalised by `mrMessage` (`src/mr.ts`): CRLF becomes LF,
+     `### Checks` line included, normalised by `mrMessage` (`src/mr.ts`): CRLF becomes LF,
      every line loses its trailing whitespace, the title is the first line and the body the rest
      without the blank lines around it; the message is the title, a blank line and the body (the
      title alone when the body is empty). The file is `git rev-parse --git-path
@@ -3518,7 +3521,7 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    itself. The other codes (`mr_conflict`, `implementer_question`, `mr_text_missing`, `mr_text_invalid`, `mr_empty`, `unreviewed_change`,
    `mr_push_protected`, a failed MR text turn) need the Implementer: `sf say`. On `mr_push_failed`
    `sf retry` is `sf approve` (without `--as-is`, step 7): the push again.
-6. Ready: the MR text, with the nits, is copied to `mr.md` (an MR text the user saved on the Merge
+6. Ready: the MR text is copied to `mr.md` (an MR text the user saved on the Merge
    request screen stays, below), `base_commit` and `target_commit` become the target,
    `prepared_commit` the branch tip, and the worktree stays (SF-073). With hand-over on (the
    workspace's `handoff`, else `SF_HANDOFF`, SF-083) the factory hands the job over to the checkout
@@ -4713,7 +4716,7 @@ confirmation where it has one; *Tell it to go on* is a message, "Go on." when th
 
 | Code | The stop block shows | The composer's actions |
 |---|---|---|
-| `simplify_offered` | each suggestion: its path, what, why and the lines it saves | Simplify, Skip (Accept and prepare MR without them: they are listed in the MR text), Send, Abort… |
+| `simplify_offered` | each suggestion: its path, what, why and the lines it saves | Simplify, Skip (Accept and prepare MR without them: they are listed on the Merge request screen), Send, Abort… |
 | `escalated` | each escalated finding with the Implementer's question, a note and *Accept risk* / *Must fix* (sent at once) | Send, Abort… |
 | `review_disputed` | each contested finding with the contest, its evidence and the reviewer's reason, a note and *Accept risk* / *Must fix* | Accept and prepare MR (with a clean Claude review), Send, Abort… |
 | `review_churn` | the open findings of the ledger (*Accept risk* / *Must fix* on those to settle: the settlement is only recorded, the job stays `needs_human`) | Accept and prepare MR (with a clean Claude review), Send, Abort… |
@@ -5182,7 +5185,7 @@ POST (anything else `405` with `Allow: GET, POST`):
 | `api/jobs/<ws>/<ticket>/iterations/<n>/report` | the Report, `text/markdown` |
 | `api/jobs/<ws>/<ticket>/iterations/<n>/patch` | the Patch, `text/x-diff` |
 | `api/jobs/<ws>/<ticket>/mr` | the MR text, `text/markdown`; 404 until there is one |
-| `api/jobs/<ws>/<ticket>/mr-view` | the Merge request screen (SF-080), `Execution.mergeRequestView`: `{title, body, factory: {title, body}, edited, edited_at, factory_new_at, branch, base, branch_editable, branch_reason, base_editable, base_reason, problems: [{field, message}], pushed, pushed_at, editable, readonly_reason, target: {host, repository}, rules: {commit_types, max_header_chars, required_headings, manual_claim: {source, flags}}, commit: {title, body} \| null, commit_differs}`; `branch_editable` and `base_editable` come from the job only (not pushed, not handed over, no merge request), `editable` is the screen's state, and the page disables the fields while either says no; an empty 404 without MR text or with a query. No network call (section Merge request screen) |
+| `api/jobs/<ws>/<ticket>/mr-view` | the Merge request screen (SF-080), `Execution.mergeRequestView`: `{title, body, factory: {title, body}, edited, edited_at, factory_new_at, branch, base, branch_editable, branch_reason, base_editable, base_reason, problems: [{field, message}], pushed, pushed_at, editable, readonly_reason, target: {host, repository}, rules: {commit_types, max_header_chars, required_headings, manual_claim: {source, flags}}, commit: {title, body} \| null, commit_differs, notes}`; `notes` is the factory's notes for the user (`src/mr-notes.ts`: Markdown, `''` without any; never part of the MR text); `branch_editable` and `base_editable` come from the job only (not pushed, not handed over, no merge request), `editable` is the screen's state, and the page disables the fields while either says no; an empty 404 without MR text or with a query. No network call (section Merge request screen) |
 | `api/jobs/<ws>/<ticket>/changes` | the Changes screen's iterations (SF-079): `{base: {ref, commit}, iterations: [{n, ended_at, truncated, base_commit}]}`; `base.ref` is the job's base branch, `base.commit` the last published iteration's base; an iteration's `base_commit` is `null` when it is not known (section Changes) |
 | `api/jobs/<ws>/<ticket>/changes?from=base\|<N>&to=<N>` | the files of a view: `{files: [{path, status, additions, deletions, binary, unavailable}], more}`, `status` `added`, `modified` or `deleted`, sorted by path, at most 3000 files (`more: true` beyond). Only two pairs: `from=base` with a published `to` (the base of iteration `to` against `to`) and `from=<to − 1>` with `to` ≥ 2; any other pair, a half pair or another parameter is an empty 404 |
 | `api/jobs/<ws>/<ticket>/file?at=base\|<N>&path=<path>` | one side of one file (SF-079): `{kind: "text", text}`, `{kind: "absent"}`, `{kind: "binary", bytes}` (the blob's size, `null` at an iteration whose Patch holds no content), `{kind: "too_large", bytes}` above 1 MiB, or `{kind: "unavailable", reason}`; `at=base` takes `&of=<N>`, the iteration whose base is meant (the last one when left out). Only a path of a `changes` list of a view that shows that side is served (for `at=base&of=N` the list of `from=base&to=N`; for `at=N` those of `from=base&to=N`, `from=N−1&to=N` and `from=N&to=N+1`); any other path, `..`, `.software-factory/`, an iteration not published or another parameter is an empty 404 |
@@ -5379,6 +5382,11 @@ The job page's Merge request screen (SF-080, the prototype's `renderMr`, `render
   saved text is not the factory's, with *Show changes against the factory's text* (a line diff).
   After a new Clean that kept the user's text: "The factory wrote a new text (time). Compare ·
   Reset to factory text".
+- **Not in the MR text.** Under the form, while `mr-view`'s `notes` is not empty: a card of its own
+  (`#mrNotes`) with the hint "The factory's notes for you: they stay on this page and are never
+  committed or pushed." and the notes rendered as the Preview renders Markdown (the nits not
+  applied, the simplifications skipped, the review findings not fixed, an Accept over a stop;
+  section MR preparation). The Description never holds them.
 - **Side panel.** *Commit message* (read-only: the title, a blank line and the whole body; the
   prepared commit's own message with "differs from the MR text: save or reset" while it is not the
   MR text), *Carries* (files with *Open Changes*, the last Claude and Codex verdicts with their

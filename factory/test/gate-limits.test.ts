@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { iterationLimitMessage } from '../src/execution/turns.js';
 import { GATE_OUTPUT_FILE, GATE_SANDBOX_UNAVAILABLE, gateArgs, gateEnvironment, type GateOptions, gatePrompt, runGate } from '../src/gate.js';
 import { JobStore } from '../src/jobs.js';
+import { mrNotes } from '../src/mr-notes.js';
 import { PACKAGE_ROOT } from '../src/package-root.js';
 import { handbookSection } from '../src/prompts.js';
 import { reviewPrompt } from '../src/review.js';
@@ -442,7 +443,9 @@ test('sf accept (SF-115, SF-131): at iteration_limit the job goes on to MR prepa
     const index = events.findIndex((record) => record.type === 'gate_overridden');
     assert.deepEqual({ ...events[index], ts: undefined }, { ts: undefined, iteration: 2, type: 'gate_overridden', code: 'iteration_limit', unapplied: 1 });
     const mr = await readFile(join(env.state, 'jobs', 'app', 'G-15', 'mr.md'), 'utf8');
-    assert.match(mr, /### Accepted over a stop\n- The user accepted iteration 2 over iteration_limit\.\n- R2 \[major\] `a\.txt`: Another problem\. Expected: Solved\./);
+    assert.ok(!mr.includes('### Accepted over a stop') && !mr.includes('The user accepted'), mr);
+    const jobs = new JobStore(env.state);
+    assert.match(await mrNotes(jobs, (await jobs.read('app', 'G-15'))!), /### Accepted over a stop\n- The user accepted iteration 2 over iteration_limit\.\n- R2 \[major\] `a\.txt`: Another problem\. Expected: Solved\./);
     assert.deepEqual((events[index + 1]!.state as { from: string; to: string }), { from: 'needs_human', to: 'preparing_mr' });
   } finally {
     await stop(served);

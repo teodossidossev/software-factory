@@ -655,9 +655,9 @@ function openConfirm(action: string): void {
     accept: job.stop_group === 'tests'
       ? `Accepts iteration ${job.iteration} without passing tests (${testsCommand(key)}); the MR text records it under ### Checks.`
       : job.stop_group === 'simplify'
-      ? `Skips the simplification: iteration ${job.iteration}, which the reviewers found clean, goes on to MR preparation as it is. The suggestions go into the MR text under “Simplifications not applied”, for a follow-up ticket.`
+      ? `Skips the simplification: iteration ${job.iteration}, which the reviewers found clean, goes on to MR preparation as it is. The suggestions are listed on the Merge request screen, under the MR text, for a follow-up ticket.`
       : job.stop_group === 'limit'
-      ? `Accepts iteration ${job.iteration} at the Fix round limit with its open findings unapplied (listed in the MR text). The factory commits it and rebases it onto ${job.base}, and the branch comes back to you to approve. The override is recorded in the job's history.`
+      ? `Accepts iteration ${job.iteration} at the Fix round limit with its open findings unapplied (listed on the Merge request screen). The factory commits it and rebases it onto ${job.base}, and the branch comes back to you to approve. The override is recorded in the job's history.`
       : !claudeOn(job)
       ? `Accepts iteration ${job.iteration}, which only the Codex gate reviewed, over ${job.error?.code}. The factory commits it and rebases it onto ${job.base}, and the branch comes back to you to approve. ${job.stop_group === 'ledger' ? 'The open findings are not applied; the override' : 'The override'} is recorded in the job's history.`
       : job.stop_group === 'ledger'

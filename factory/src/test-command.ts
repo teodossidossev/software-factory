@@ -561,19 +561,14 @@ export function testsFixContent(record: TestsRecord): string {
   return lines.join('\n');
 }
 
-// The ### Checks line of the MR text for the record of the iteration the MR is prepared from.
-export function checksLine(record: TestsRecord, iteration: number): string {
+// The ### Checks line of the MR text for the record of the iteration the MR is prepared from: the
+// command and its result only. An accepted run reads as the run did (could not run, or failed).
+export function checksLine(record: TestsRecord): string {
   const command = inlineCommand(record.command);
   if (record.outcome === 'passed') {
-    return `- ${command}: passed in ${durationText(record.duration_ms)} on iteration ${iteration}.`;
+    return `- ${command}: passed in ${durationText(record.duration_ms)}.`;
   }
-  if (record.outcome === 'accepted_failing' && record.accepted_from === 'unavailable') {
-    return `- ${command}: could not run (${record.reason ?? 'unknown reason'}); accepted by the user without tests.`;
-  }
-  if (record.outcome === 'accepted_failing') {
-    return `- ${command}: failed (${failureText(record)}); accepted by the user without passing tests.`;
-  }
-  if (record.outcome === 'unavailable') {
+  if (record.outcome === 'unavailable' || (record.outcome === 'accepted_failing' && record.accepted_from === 'unavailable')) {
     return `- ${command}: could not run (${record.reason ?? 'unknown reason'}).`;
   }
   return `- ${command}: failed (${failureText(record)}).`;

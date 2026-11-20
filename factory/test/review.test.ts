@@ -14,6 +14,7 @@ import { test } from 'node:test';
 import { iterationLimitMessage } from '../src/execution/turns.js';
 import { gatePrompt } from '../src/gate.js';
 import { JobStore } from '../src/jobs.js';
+import { mrNotes } from '../src/mr-notes.js';
 import { handbookSection, MAX_USER_DECISIONS_CHARS, MAX_USER_MESSAGE_CHARS, userDecisionLines } from '../src/prompts.js';
 import type { FileChange } from '../src/jobs.js';
 import { actedVerdict, decide, fixContent, readOnlySessionOptions, REVIEW_DENIED_TOOLS, REVIEW_SCHEMA, REVIEW_TOOLS, type ReviewItem, reviewPrompt, reviewSessionOptions, runReview, scopeItem, sensitiveItem, unacceptedItems, uniqueNits } from '../src/review.js';
@@ -662,16 +663,14 @@ test('one major among nits is a Fix section with the nits as optional; a fix wit
     assert.deepEqual((await eventsOf(env, 'N-1')).filter((record) => record.type === 'review').map((record) => [record.iteration, record.verdict, record.effective]), [[1, 'fix', undefined], [2, 'fix', 'clean']]);
     assert.match((await runCli(env, ['watch', 'app', 'N-1', '--once'])).stdout, /^\d\d:\d\d:\d\d \[2\] review by claude: fix \(3 items\), acted on as clean$/m);
     assert.equal((await jobs.read('app', 'N-1'))!.fixes, 1);
-    // The nits of the clean iteration, deduplicated, in the MR text by the factory; the model's "- None." goes.
+    // The nits of the clean iteration, deduplicated, in the Merge request screen's notes, never in the MR text.
     const mr = (await jobs.readMrText('app', 'N-1'))!;
-    assert.ok(mr.includes([
-      '## Special things to note',
+    assert.ok(!mr.includes('### Nits not applied') && !mr.includes('[nit]'), mr);
+    assert.equal(await mrNotes(jobs, (await jobs.read('app', 'N-1'))!), [
       '### Nits not applied',
       '- [nit] `README.md`: No capital. Expected: Nicer.',
       '- [nit] `a.txt`: Could say more. Expected: Nicer.',
-      '',
-      '## Change outline',
-    ].join('\n')), mr);
+    ].join('\n'));
   } finally {
     await stop(served);
   }

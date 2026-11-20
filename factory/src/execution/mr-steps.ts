@@ -16,15 +16,15 @@ import { checkBranchFree, isAncestor, savedRef, settleAfterPush, subjectOf } fro
 import { handoffSensitive } from '../handoff-sensitive.js';
 import { claudeReviews, type FileChange, type Handover, type Job, type JobMr, type JobState, now } from '../jobs.js';
 import { pushedBranch, targetBranch } from '../continues.js';
-import { abortRebase, branchesOnOrigin, commitAndRebase, commitMessage, continueRebase, gitFailure, isUnreviewedReport, MAX_UNREVIEWED_PATHS, mergeRequestLink, messageText, mrMessage, mrProblems, mrTextProblem, originUrl, parseOrigin, PROTECTED_BRANCHES, pushBranch, readMrText, rebaseOnto, refuseGuardedLfs, rebaseInProgress, resolveTarget, rewriteMessage, sameMessage, unmergedPaths, unreviewedAgainMessage, unreviewedNote, validBranchName, withAccepted, withChecks, withFindings, withNits, withSimplifications, worktreesOn } from '../mr.js';
-import { type LedgerEntry, notFixed } from '../ledger.js';
+import { abortRebase, branchesOnOrigin, commitAndRebase, commitMessage, continueRebase, gitFailure, isUnreviewedReport, MAX_UNREVIEWED_PATHS, mergeRequestLink, messageText, mrMessage, mrProblems, mrTextProblem, originUrl, parseOrigin, PROTECTED_BRANCHES, pushBranch, readMrText, rebaseOnto, refuseGuardedLfs, rebaseInProgress, resolveTarget, rewriteMessage, sameMessage, unmergedPaths, unreviewedAgainMessage, unreviewedNote, validBranchName, withChecks, worktreesOn } from '../mr.js';
 import { MergeChecks } from '../merge-check.js';
+import { mrNotes } from '../mr-notes.js';
 import { buildPatch, notificationLine, type Patch } from '../patch.js';
 import { conflictPrompt, mrPrompt } from '../prompts.js';
 import { COMMIT_TYPES, DENIED_TOOLS, MANUAL_CLAIM, MAX_HEADER_CHARS, MR_REQUIRED_HEADINGS } from '../rules.js';
 import { configDir, type Workspace } from '../registry.js';
 import { ticketMerged } from '../setup.js';
-import { actedVerdict, type ReviewItem, uniqueNits } from '../review.js';
+import { actedVerdict, type ReviewItem } from '../review.js';
 import { endSession, type IdleOutcome, type ImplementerSession } from '../session.js';
 import { withoutDropped } from '../stops.js';
 import { implementerQuestion } from '../question-stop.js';
@@ -32,7 +32,6 @@ import { readTask } from '../task-file.js';
 import { checksLine, TEST_CODES } from '../test-command.js';
 import { removeWorktree } from '../worktree.js';
 import type { RunnerRequest } from '../runner.js';
-import type { Suggestion } from '../simplify.js';
 import type { JobStorePort, LivePort, LockPort, NoticePort, RunnerPort, SettingsPort, StopPort } from './ports.js';
 import type { MrContent, MrInput, MrOutcome, MrSaved, MrStatusOutcome, MrView } from './dto.js';
 import { MrHostReads } from './mr-host.js';
@@ -107,7 +106,6 @@ export interface MrHandover {
 }
 
 export interface MrReviews {
-  skippedSimplifications(job: Job): Promise<{ suggestions: Suggestion[]; iteration: number } | undefined>;
   startReview(job: Job): Promise<void>;
   unaccepted(job: Job, accepted: string[]): Promise<ReviewItem[]>;
 }
@@ -209,17 +207,10 @@ export class MrPart {
         await needsHuman(written.code, await maskedMrTextFailure(cwd, job.ticket, written, terms));
         return;
       }
-      // The nits of the reviewed iteration go into the MR text by the factory's hand.
-      // So do the ledger's findings not fixed: accepted risks, contests and nits left.
-      const withNitsText = withNits(written.text, await this.#nitsAtClean(job), job.iteration);
-      // And the suggestions of the simplification pass the user skipped.
-      const skipped = await this.#peers.reviews.skippedSimplifications(job);
-      const withSkipped = skipped === undefined ? withNitsText : withSimplifications(withNitsText, skipped.suggestions, skipped.iteration);
-      const ledger = await this.#store.jobs.readLedger(job.workspace, job.ticket);
       // The run of the workspace's test command on this iteration, as ### Checks of ## Testing.
       const tests = await this.#store.jobs.readTests(job.workspace, job.ticket, job.iteration);
-      const checked = (text: string): string => (tests === undefined ? text : withChecks(text, checksLine(tests, job.iteration), job.iteration));
-      const composed = checked(await this.#withAccepted(withFindings(withSkipped, ledger), job, ledger));
+      const checked = (text: string): string => (tests === undefined ? text : withChecks(text, checksLine(tests), job.iteration));
+      const composed = checked(written.text);
       // The guard: the lines the factory added lose every term; the Implementer's own lines are its to reword.
       const factoryText = redactAdded(composed, written.text, terms);
       // The user's own MR text, saved on the Merge request screen, stays the MR text: the commit is made with it,
@@ -295,32 +286,6 @@ export class MrPart {
     const factory = await this.#store.jobs.readMrFactoryText(job.workspace, job.ticket);
     const text = await this.#store.jobs.readMrText(job.workspace, job.ticket);
     return editedText(factory, text) ? text : undefined;
-  }
-
-  // The MR text with the user's Accept over a stop of the iteration, for a job without the
-  // Claude review and at the Fix round limit: its gate override's code and what went unapplied, the
-  // ledger entries the text already lists as not fixed aside (withFindings); with the Claude review
-  // off, after gate_failed or gate_budget, the note that no reviewer passed the iteration. The text
-  // as it is without such an override (an Accept over the gate of a job with the Claude review
-  // leaves the MR text unchanged).
-  async #withAccepted(text: string, job: Job, ledger: LedgerEntry[]): Promise<string> {
-    const override = await this.#store.jobs.readGateOverride(job.workspace, job.ticket, job.iteration);
-    if (override === undefined || (claudeReviews(job) && override.code !== 'iteration_limit')) {
-      return text;
-    }
-    const listed = new Set(notFixed(ledger).map((entry) => entry.id));
-    const unapplied = typeof override.unapplied === 'string' ? override.unapplied : override.unapplied.filter((item) => item.id === undefined || !listed.has(item.id));
-    const noReviewer = !claudeReviews(job) && (override.code === 'gate_failed' || override.code === 'gate_budget');
-    return withAccepted(text, { code: override.code, unapplied }, job.iteration, noReviewer);
-  }
-
-  // The nits of the job's last iteration: those of its Claude review and of its gate, deduplicated
-  // by path and problem; the iteration that reaches Clean leaves them unapplied. Without the Claude
-  // review the gate's alone.
-  async #nitsAtClean(job: Job): Promise<ReviewItem[]> {
-    const { workspace, ticket, iteration } = job;
-    const records = [claudeReviews(job) ? await this.#store.jobs.readReview(workspace, ticket, iteration) : undefined, await this.#store.jobs.readGate(workspace, ticket, iteration)];
-    return uniqueNits(records.flatMap((record) => (record !== undefined && 'items' in record ? [record] : [])));
   }
 
   // The end of the conflict turn: a failed turn, a file still holding a conflict marker or a
@@ -996,8 +961,9 @@ export class MrPart {
   // (mr-factory.md, or the same without one), whether and when the user edited it, the branch and
   // the base and whether each can change, every problem of the saved text, the state of the screen
   // (editable, or why not), the target (the workspace's Git host and the repository of its origin),
-  // the rules the page checks with, and the message of the commit the push would carry. Undefined
-  // without mr.md. No network call: the origin is checked only at Save.
+  // the rules the page checks with, the message of the commit the push would carry, and the
+  // factory's notes for the user (src/mr-notes.ts), never part of the text. Undefined without mr.md.
+  // No network call: the origin is checked only at Save.
   async mergeRequestView(workspaceName: string, ticket: string): Promise<MrView | undefined> {
     const job = await this.#store.job(workspaceName, ticket);
     const text = await this.#store.jobs.readMrText(workspaceName, ticket);
@@ -1047,6 +1013,7 @@ export class MrPart {
       },
       commit: commit ?? null,
       commit_differs: commit !== undefined && !sameMessage(commit, message),
+      notes: await mrNotes(this.#store.jobs, job),
     };
   }
 

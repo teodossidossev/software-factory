@@ -232,7 +232,7 @@ function mrView(extra: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     title: TITLE, body: BODY, factory: { title: TITLE, body: BODY }, edited: false, edited_at: null, factory_new_at: null, branch: 'T-1-demo', base: 'main',
     branch_editable: true, branch_reason: null, base_editable: true, base_reason: null, problems: [], pushed: false, pushed_at: null, editable: true, readonly_reason: null,
-    target: { host: 'github', repository: 'acme/app' }, rules: RULES, commit: { title: TITLE, body: BODY }, commit_differs: false, ...extra,
+    target: { host: 'github', repository: 'acme/app' }, rules: RULES, commit: { title: TITLE, body: BODY }, commit_differs: false, notes: '', ...extra,
   };
 }
 
@@ -316,6 +316,28 @@ test('mr screen (SF-080): the fields with their hints, the side panel (commit me
   // Open Changes goes to the Changes screen.
   cardOf(page, 'Carries').querySelector('button')!.click();
   assert.equal(page.location.hash, '#app/T-1/changes');
+});
+
+test('mr screen: the factory\'s notes show under the text, in a card of their own, never in the description', async () => {
+  const notes = '### Review findings not fixed\n- R1 [major, accepted risk] `a.ts`: Problem of R1. — Known risk.';
+  const { page } = await openMr(job('T-1', 'ready_for_human_review'), mrView({ notes }));
+  const card = page.$('mrNotes');
+  const form = page.$('mrTitle').closest('.card2')!;
+  // After the form card, in the same column.
+  assert.equal(card.parentNode, form.parentNode);
+  const column = card.parentNode!.children as FakeElement[];
+  assert.equal(column.indexOf(card), column.indexOf(form) + 1);
+  assert.equal(card.className, 'card2');
+  assert.equal(card.querySelector('h3')!.textContent, 'Not in the MR text');
+  assert.equal(card.querySelector('.hint')!.textContent, 'The factory\'s notes for you: they stay on this page and are never committed or pushed.');
+  const rendered = card.querySelector('.md')!;
+  assert.equal(rendered.querySelector('h3')!.textContent, 'Review findings not fixed');
+  assert.deepEqual(rendered.querySelectorAll('li').map((item) => item.textContent), ['R1 [major, accepted risk] a.ts: Problem of R1. — Known risk.']);
+  assert.equal(page.$('mrBody').value, BODY);
+  assert.ok(!page.$('mrBody').value.includes('Review findings not fixed'));
+
+  const { page: without } = await openMr(job('T-1', 'ready_for_human_review'), mrView());
+  assert.equal(without.document.getElementById('mrNotes'), null);
 });
 
 test('mr screen (SF-080): the checks run live with the server\'s rules; each problem on its field\'s .bad line; the push buttons are off while there are problems', async () => {

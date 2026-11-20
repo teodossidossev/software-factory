@@ -1,6 +1,6 @@
-// The verifiable part of the Git rules, the Implementer's tools and the deny lists the factory
-// hands to its session per turn, and the sensitive paths. The Handbook (## Git rules, ## MR template)
-// is the prose source.
+// The verifiable part of the Git rules and of the MR text's reader rule, the Implementer's tools
+// and the deny lists the factory hands to its session per turn, and the sensitive paths. The
+// Handbook (## Git rules, ## MR template) is the prose source.
 
 // Conventional Commits types allowed in the commit header.
 export const COMMIT_TYPES = ['feat', 'fix', 'chore', 'refactor', 'docs', 'test', 'perf', 'build', 'ci', 'style', 'revert'];
@@ -64,6 +64,56 @@ export function testingProblem(lines: string[]): string | undefined {
 // The first ## Testing line that claims a manual step as run (testingProblem), or undefined.
 export function manualClaim(lines: string[]): string | undefined {
   return sectionLines(lines, '## Testing').find((line) => MANUAL_CLAIM.test(line) && !/not/iu.test(line));
+}
+
+// The MR text is for the colleagues who review the merge request. The MR prompt states the rule;
+// processProblem refuses what can be told without reading the words: the factory's note headings
+// and the ids of decisions and findings.
+export const MR_READER_RULE = 'The MR text speaks to the colleagues who review the merge request, and to no one else: it says what changed, why, how, how it was tested and what a reviewer should watch. It does not say how the change was made or who decided what: no ids of decisions or findings (such as D-1, T-13 or R7), no "the user accepted" or "the user asked", no "the Task", "the coordinator", "iteration" or "hand-over", and no count of files or lines against a budget or a norm. The factory keeps its own notes (nits, findings not fixed, an accepted stop, skipped simplifications) on the Merge request screen, never in the text';
+// An id of a decision or a finding: one capital letter, a hyphen and digits (D-1, T-13), or R and
+// digits (R7); ticket keys of two letters or more never match. Used only through matchAll.
+export const PROCESS_ID = /(?<![\w-])(?:[A-Z]-\d+|R\d+)(?![\w-])/gu;
+const NOTE_STOP = /^#{1,3} /u;
+
+// Why the description (the MR text's body, as the Merge request screen holds it, one entry per
+// line) is not for the reviewers, or undefined: the lines of every factory note to delete,
+// numbered from 1, else the first line that carries an id of a decision or a finding other than
+// ticket. Lines in code fences are skipped, and inline code spans are removed before the ids are
+// looked for.
+export function processProblem(ticket: string, body: string[]): string | undefined {
+  let fenced = false;
+  const prose = body.map((line) => {
+    if (line.startsWith('```')) {
+      fenced = !fenced;
+      return false;
+    }
+    return !fenced;
+  });
+  const ranges: string[] = [];
+  body.forEach((line, start) => {
+    const heading = line.trimEnd();
+    if (!prose[start] || !FACTORY_NOTE_HEADINGS.includes(heading)) {
+      return;
+    }
+    const next = body.findIndex((other, index) => index > start && prose[index] && NOTE_STOP.test(other));
+    let end = (next < 0 ? body.length : next) - 1;
+    while (end > start && body[end]!.trim() === '') {
+      end -= 1;
+    }
+    const under = end - start;
+    ranges.push(under === 0 ? `${start + 1} ("${heading}")`
+      : `${start + 1}-${end + 1} ("${heading}" and ${under === 1 ? 'the line' : `the ${under} lines`} under it)`);
+  });
+  if (ranges.length > 0) {
+    return `it holds the factory's notes, which never go into the MR text; delete these lines of the description: ${ranges.join(', ')}`;
+  }
+  for (const [index, line] of body.entries()) {
+    const id = prose[index] ? [...line.replace(/`[^`\n]*`/gu, '').matchAll(PROCESS_ID)].find((match) => match[0] !== ticket) : undefined;
+    if (id !== undefined) {
+      return `line ${index + 1} of the description, "${line.trim().slice(0, 100)}", carries "${id[0]}", an id of a decision or a finding: ${MR_READER_RULE}`;
+    }
+  }
+  return undefined;
 }
 
 function escapeRegExp(text: string): string {

@@ -565,6 +565,8 @@ test('SF-080 save: the text passes the factory\'s rules or is refused (mr_text_i
     [{ title: TITLE, body: body.replace('## Why the change\n', '') }, /it lacks the heading\(s\) ## Why the change\.$/],
     [{ title: TITLE, body: body.replace('npm test: passed', '- By hand: opened the page') }, /its ## Testing line "- By hand: opened the page" reads as a check that was run/],
     [{ title: TITLE, body: `${body}\n${'x'.repeat(70 * 1024)}` }, /bytes, more than 65536\.$/],
+    [{ title: TITLE, body: body.replace('- None.\n', '- None.\n### Review findings not fixed\n- R5 [minor] a\n') }, /^The MR text is invalid: it holds the factory's notes, which never go into the MR text; delete these lines of the description: 11-12 \("### Review findings not fixed" and the line under it\)\.$/],
+    [{ title: TITLE, body: body.replace('One line.', 'One line (D-2).') }, /^The MR text is invalid: line 6 of the description, "One line \(D-2\)\.", carries "D-2", an id of a decision or a finding: The MR text speaks to the colleagues who review the merge request, /],
   ];
   for (const [input, message] of cases) {
     const refused = await refusal(execution.saveMr('app', 'T-1', input));
@@ -762,7 +764,18 @@ test('SF-080 approve refuses while mr.md fails the rules or is not the prepared 
   assert.deepEqual(view.problems.map((problem) => problem.message), ['## Why', '## How', '## Why the change', '## Special things to note', '## Change outline', '## Testing', '## Checklist'].map((heading) => `Missing heading: ${heading}.`));
   assert.equal(git(origin, 'branch', '--list', BRANCH), '');
 
-  await execution.saveMr('app', 'T-1', { title: EDIT_TITLE, body: EDIT_BODY });
+  // A text of a job prepared while the factory's notes went into it: refused, naming the lines of
+  // the description to delete; nothing is pushed.
+  await jobs.writeMrText('app', 'T-1', mrText(TITLE).replace('- None.\n', '- None.\n### Review findings not fixed\n- R5 [minor] Rename the helper\n- R6 [nit] Shorter comment\n\n'));
+  const notes = 'it holds the factory\'s notes, which never go into the MR text; delete these lines of the description: 11-13 ("### Review findings not fixed" and the 2 lines under it)';
+  assert.deepEqual(await refusal(execution.approve('app', 'T-1')), { code: 'mr_text_invalid', message: `The MR text is invalid: ${notes}. Save a valid text, or reset it to the factory's, on the Merge request screen.` });
+  view = (await execution.mergeRequestView('app', 'T-1'))!;
+  assert.deepEqual(view.problems, [{ field: 'body', message: `Not for the reviewers: ${notes}.` }]);
+  assert.equal(git(origin, 'branch', '--list', BRANCH), '');
+  // The user deletes exactly those lines of the Description field and saves; approve pushes.
+  const description = view.body.split('\n');
+  assert.deepEqual(description.splice(10, 3), ['### Review findings not fixed', '- R5 [minor] Rename the helper', '- R6 [nit] Shorter comment']);
+  await execution.saveMr('app', 'T-1', { title: EDIT_TITLE, body: description.join('\n') });
   const pushed = await execution.approve('app', 'T-1');
   assert.deepEqual([pushed.state, pushed.title], ['pushed', EDIT_TITLE]);
   const commit = git(origin, 'cat-file', 'commit', `refs/heads/${BRANCH}`);

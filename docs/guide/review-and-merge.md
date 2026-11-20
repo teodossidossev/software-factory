@@ -140,6 +140,11 @@ test command, as `### Checks` under `## Testing`. Its own notes (the nits not ap
 findings not fixed, an Accept over a stop and the simplifications you skipped) are shown under the
 text on the Merge request screen, and are never committed or pushed.
 
+The text speaks to your colleagues: it never names the factory's decisions or findings by id, nor
+who decided what. The factory refuses a text that holds its notes' headings or such an id, and
+names the lines of the description to delete (a job prepared before this rule shows them at Save
+and at Push).
+
 On the Merge request screen you can change it in `ready_for_human_review` (and after a failed or
 refused push):
 

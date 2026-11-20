@@ -11,9 +11,9 @@ import { delimiter, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { sandboxSettings } from '../src/config.js';
-import { commitAndRebase, commitPaths, continueRebase, filesWithMarkers, gitFailure, mergeRequestLink, mrMessage, mrTextProblem, pushBranch, pushProtection, rebaseInProgress, refuseGuardedLfs, submodulePaths, withChecks } from '../src/mr.js';
+import { commitAndRebase, commitPaths, continueRebase, filesWithMarkers, gitFailure, mergeRequestLink, mrMessage, mrProblems, mrTextProblem, pushBranch, pushProtection, rebaseInProgress, refuseGuardedLfs, submodulePaths, withChecks } from '../src/mr.js';
 import { conflictPrompt, FACTORY_PROMPT_RULES, handbookSection, mrPrompt } from '../src/prompts.js';
-import { COMMIT_TYPES, commitHeader, DENIED_TOOLS, headerProblem, testingProblem } from '../src/rules.js';
+import { COMMIT_TYPES, commitHeader, DENIED_TOOLS, headerProblem, MR_READER_RULE, MR_TESTING_RULE, processProblem, testingProblem } from '../src/rules.js';
 
 const HANDBOOK = fileURLToPath(new URL('../../HANDBOOK.md', import.meta.url));
 
@@ -42,6 +42,47 @@ test('mrTextProblem refuses a ## Testing line "By hand" or "Manual" without "not
   assert.equal(mrTextProblem('T-1', VALID_MR_TEXT.replace('## How\nx\n', '## How\nBy hand: none of it\nManual wiring of the routes\n')), undefined);
   assert.match(testingProblem(['## Testing', '- By hand: open the page', '## Screenshots', 'Manual'])!, /^its ## Testing line "- By hand: open the page" reads as a check that was run;/);
   assert.equal(testingProblem(['## Testing', '- ran it', '## Checklist', '- By hand']), undefined);
+});
+
+test('mrTextProblem refuses the factory\'s notes, naming the lines to delete, and the ids of decisions and findings outside code', () => {
+  const replaced = (from: string, to: string[]) => VALID_MR_TEXT.replace(from, `${from}${to.join('\n')}\n`);
+  const noted = (text: string) => `it holds the factory's notes, which never go into the MR text; delete these lines of the description: ${text}`;
+  // Lines are those of the description (the body as mrMessage gives it), from 1: "## Special things to note" is line 9.
+  const notes = replaced('## Special things to note\n- None.\n', [
+    '### Nits not applied', '- R3 [nit] Rename the helper', '- R4 [nit] Shorter comment', '',
+    '### Review findings not fixed', '- R5 [major] a', '- R6 [minor] b', '- R7 [minor] c', '',
+  ]);
+  const both = noted('11-13 ("### Nits not applied" and the 2 lines under it), 15-18 ("### Review findings not fixed" and the 3 lines under it)');
+  assert.equal(mrTextProblem('T-1', notes), both);
+  assert.deepEqual(processProblem('T-1', mrMessage(notes).body.split('\n')), both);
+  assert.deepEqual(mrProblems('T-1', mrMessage(notes), 'T-1-x', 'main'), [{ field: 'body', message: `Not for the reviewers: ${both}.` }]);
+  // A heading alone, one line under a heading, and a subsection that is the text's last.
+  const forms = replaced('## Special things to note\n- None.\n', ['### Accepted over a stop', '', '### Simplifications not applied', '- Inline the helper', ''])
+    .replace('- [x] Branch name\n', '- [x] Branch name\n### Nits not applied\n- R3 a\n- R4 b\n\n');
+  assert.equal(mrTextProblem('T-1', forms), noted('11 ("### Accepted over a stop"), 13-14 ("### Simplifications not applied" and the line under it), 24-26 ("### Nits not applied" and the 2 lines under it)'));
+  // A heading inside a code fence is not a note; a "## " line inside a fence does not end a note.
+  assert.equal(mrTextProblem('T-1', replaced('## Change outline\n', ['```markdown', '### Nits not applied', '```'])), undefined);
+  assert.equal(mrTextProblem('T-1', replaced('## Special things to note\n- None.\n', ['### Nits not applied', '```', '## not a heading', '```', 'last'])), noted('11-15 ("### Nits not applied" and the 4 lines under it)'));
+
+  // An id of a decision or a finding outside code, named by its line.
+  const withHow = (...lines: string[]) => VALID_MR_TEXT.replace('## How\nx\n', `## How\n${lines.join('\n')}\n`);
+  const carried = (line: number, text: string, id: string) => `line ${line} of the description, "${text}", carries "${id}", an id of a decision or a finding: ${MR_READER_RULE}`;
+  assert.equal(mrTextProblem('T-1', withHow('- Keeps the old order (D-14).')), carried(6, '- Keeps the old order (D-14).', 'D-14'));
+  assert.equal(mrTextProblem('T-1', withHow('x', '  Covers T-13 as asked.  ')), carried(7, 'Covers T-13 as asked.', 'T-13'));
+  assert.equal(mrTextProblem('T-1', withHow('Fixes R194, `R7`')), carried(6, 'Fixes R194, `R7`', 'R194'));
+  const long = `${'a'.repeat(120)} R2`;
+  assert.equal(mrTextProblem('T-1', withHow(long)), carried(6, 'a'.repeat(100), 'R2'));
+  assert.deepEqual(mrProblems('T-1', mrMessage(withHow('(A-3)')), 'T-1-x', 'main'), [{ field: 'body', message: `Not for the reviewers: ${carried(6, '(A-3)', 'A-3')}.` }]);
+  // The job's own ticket, ticket keys of two letters or more, words, code and the title pass.
+  for (const line of ['Part of T-1.', 'Builds on SF-310 and ABC-12.', 'The R2D2 parser, PR-12, X-1a, R12b, -R3, D-1-2.', '`D-1` and `R7` in code.', 'Rx and D-x']) {
+    assert.equal(mrTextProblem('T-1', withHow(line)), undefined, line);
+  }
+  assert.equal(mrTextProblem('T-1', withHow('```', 'D-1 R7', '```')), undefined);
+  assert.equal(mrTextProblem('T-1', VALID_MR_TEXT.replace('feat(T-1): Change the README', 'feat(T-1): Change the README (D-1, R7)')), undefined);
+  assert.deepEqual(mrProblems('T-1', mrMessage(withHow('`R7`')), 'T-1-x', 'main'), []);
+  // Every other rule comes first.
+  assert.match(mrTextProblem('T-1', withHow('(D-1)').replace('## Why the change\n', ''))!, /^it lacks the heading\(s\) ## Why the change$/);
+  assert.match(mrTextProblem('T-1', notes.replace('## Testing\nx\n', '## Testing\n- By hand: open the page\n'))!, /^its ## Testing line "- By hand: open the page"/);
 });
 
 test('commitHeader accepts every type with the ticket as scope and refuses the rest', () => {
@@ -368,6 +409,9 @@ test('handbookSection extracts by heading and skips "## " lines inside fences; m
   // SF-058: the template shows a step that was not run.
   assert.match(template, /^## Testing\n<[^>]*`- Not checked: [^`]+`[^>]*>\n\n## Screenshots$/m);
   assert.doesNotMatch(template, /What the factory never does/);
+  // SF-310-2: the template tells the writer who reads the text and that the factory's notes are refused.
+  assert.match(template, /A checklist box is ticked only for what was done\.\n\nThe MR text speaks to the colleagues who review the merge request\s+and to no\s+one else:/);
+  assert.match(template, /A text\s+holding one of their headings, or such an id outside code, is refused \(`mr_text_invalid`\), naming\s+the lines\.\n\n```markdown\n/);
   // SF-040: the Context owner plans only; the user starts; the reviewers review.
   const quick = handbookSection(handbook, '## Quick start');
   // SF-191: the Context owner grills the user by the Planning method and writes after the user
@@ -408,6 +452,9 @@ test('handbookSection extracts by heading and skips "## " lines inside fences; m
   assert.doesNotMatch(prompt, /previous attempt/);
   // SF-058: ## Testing lists only what was run; the rest goes on a `Not checked:` line.
   assert.match(prompt, /^`## Testing` lists only what was run in this job, with its result; anything not run \(manual steps, live checks, browsers\) goes on a line starting with `Not checked:`, saying who can run it\.$/m);
+  // SF-310-2: who reads the MR text, on its own line between the commit line and the testing rule.
+  assert.ok(prompt.includes(`\nThe factory commits, rebases and pushes, not you. It commits the reviewed change as one commit on this branch; the commit message is the whole MR text: the title as the header, then the body. Then it rebases that commit onto origin/main.\n${MR_READER_RULE}.\n${MR_TESTING_RULE}.\n`));
+  assert.match(MR_READER_RULE, /^The MR text speaks to the colleagues who review the merge request, and to no one else: .* never in the text$/);
   // SF-220: one fixed line, after the Testing rule; the writer reads part_of and slice from the Task file.
   assert.match(prompt, /saying who can run it\.\nIf the Task file's front matter has both `part_of:` and `slice: N\/M`, begin `## Special things to note` with the bullet `- Slice N of M of <part_of>\.`\nChange no other file/);
   assert.match(mrPrompt({ ...input, attempt: 2, previousError: 'The MR text is missing.' }), /^This is attempt 2\. The previous attempt failed: The MR text is missing\.$/m);

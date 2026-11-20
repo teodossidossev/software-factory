@@ -6,7 +6,7 @@ import type { CheckChain, PreparedPoint } from './builds-on.js';
 import { checkDecisionLines, type DecisionDocs } from './decisions.js';
 import type { UserMessage } from './job-stream.js';
 import { SEVERITIES, SEVERITY_DEFINITIONS, type Severity } from './review.js';
-import { MR_TESTING_RULE } from './rules.js';
+import { MR_READER_RULE, MR_TESTING_RULE } from './rules.js';
 import { SKILL_BLOCKS_LINE } from './skills.js';
 import { TASK_DIR } from './task-file.js';
 
@@ -102,6 +102,7 @@ export function mrPrompt(input: MrPromptInput): string {
   lines.push(
     `Your only task in this turn: write the MR text to ${path}. Its first line is the title, which is also the commit header by the Git rules below; then a blank line; then the body by the MR template below.`,
     `The factory commits, rebases and pushes, not you. It commits the reviewed change as one commit on this branch; the commit message is the whole MR text: the title as the header, then the body. Then it rebases that commit onto ${targetRef}.`,
+    `${MR_READER_RULE}.`,
     `${MR_TESTING_RULE}.`,
     MR_SLICE_RULE,
     'Change no other file and run no Git command that changes the repository; those commands are denied.',

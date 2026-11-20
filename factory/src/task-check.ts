@@ -9,7 +9,8 @@
 // that are not merged (none when it reads such a prepared commit) and the Task file, and nothing of the Context owner's conversation, the jobs or the ledger; its output is a paraphrase first, then
 // findings, the files it expects to change and a verdict. A check is stored by the sha256 that folds the Task file's images and
 // chain in (taskCheckSha256), and counts while what it read of the ticket it builds on holds (CheckStore.read), under the state directory, never in the work checkout. It only advises: nothing here starts, refuses or changes
-// a job.
+// a job. A Task not written by ChatGPT's write_task is read by Codex too, at the same time in the
+// same checkout (src/task-check-codex.ts), and the record holds both checks.
 import { createHash, randomUUID } from 'node:crypto';
 import { renameSync, rmSync } from 'node:fs';
 import { mkdir, mkdtemp, open, readdir, readFile, realpath, rm, unlink, writeFile } from 'node:fs/promises';
@@ -36,6 +37,7 @@ import { matchesGlob, scopeOf } from './rules.js';
 import { absoluteRule, pathDenials, prepareTaskChecksDir, TASK_CHECK_DIR_UNSAFE } from './sandbox-denials.js';
 import { roleSkillBlocks, type SkillNames } from './skills.js';
 import { sliceFindings } from './slices.js';
+import { type CodexCheck, codexCheckDue, codexCheckLines, type CodexCheckSettings, runCodexCheck } from './task-check-codex.js';
 import { ARCHIVE_DIR, checkNeed, isDraft, mayTouch, parseFrontMatter, readTask, TASK_DIR, taskScope, TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
 import { addDetachedWorktree, removeWorktree } from './worktree.js';
 
@@ -176,6 +178,9 @@ export interface CheckRecord extends SkillNames {
   cost_usd: number | null;
   started_at: string;
   ended_at: string;
+  // The Codex check of the same run, when it was due (src/task-check-codex.ts): absent when Codex did
+  // not check this version.
+  codex?: CodexCheck;
 }
 
 // <state>/checks/<ws>/<ticket>/<sha256, first 16 hex>.json.
@@ -287,9 +292,11 @@ async function readRecord(path: string): Promise<CheckRecord | undefined> {
   }
 }
 
-// What a stored check counts as: its verdict, or failed (never ready).
+// What a stored check counts as: failed when the Claude check failed (never ready); not_ready when
+// its Codex part gave an output that is not ready; else the Claude check's verdict. A failed Codex
+// part holds nothing.
 export const recordVerdict = (record: CheckRecord): CheckVerdict | 'failed' =>
-  record.status === 'failed' || record.output === null ? 'failed' : record.output.verdict;
+  record.status === 'failed' || record.output === null ? 'failed' : record.codex?.output?.verdict === 'not_ready' ? 'not_ready' : record.output.verdict;
 
 // A skeleton is not checked: the Context owner has not written the Task yet.
 export function refuseDraft(ticket: string, task: string): void {
@@ -303,6 +310,19 @@ export function severityCounts(output: CheckOutput | null): Record<Severity, num
   const counts: Record<Severity, number> = { blocker: 0, major: 0, nit: 0 };
   for (const item of output?.findings ?? []) {
     counts[item.severity] += 1;
+  }
+  return counts;
+}
+
+// The counts of a record's findings by severity: the Claude check's and its Codex part's, a Codex
+// finding with the kind, where and problem of a Claude finding counted once.
+export function recordCounts(record: CheckRecord): Record<Severity, number> {
+  const counts = severityCounts(record.output);
+  const claude = record.output?.findings ?? [];
+  for (const item of record.codex?.output?.findings ?? []) {
+    if (!claude.some((other) => other.kind === item.kind && other.where === item.where && other.problem === item.problem)) {
+      counts[item.severity] += 1;
+    }
   }
   return counts;
 }
@@ -349,7 +369,7 @@ export function startNote(summary: Pick<CheckSummary, 'state' | 'stale' | 'block
 // currentSha: the sha256 of the current Task file; undefined when it cannot be read (then a
 // stored check is stale).
 export function checkSummary(record: CheckRecord | undefined, currentSha: string | undefined, running = false): CheckSummary {
-  const counts = severityCounts(record?.output ?? null);
+  const counts = record === undefined ? severityCounts(null) : recordCounts(record);
   const state = record === undefined ? 'none' : recordVerdict(record);
   const stale = record !== undefined && record.sha256 !== currentSha;
   const summary = { state, check_reason: null, stale, running, blockers: counts.blocker, majors: counts.major, nits: counts.nit, ended_at: record?.ended_at ?? null } as const;
@@ -371,6 +391,8 @@ export interface CheckOptions {
   configDir: string;
   // The worktree root (SF_WORKTREE_ROOT): every job's worktree is off limits too.
   worktreeRoot: string;
+  // The Codex check's settings; absent: no Codex check (SF_TASK_CHECK_CODEX=off).
+  codex?: CodexCheckSettings;
   signal?: AbortSignal;
   // Every SDK message of the session, in order; a failing call changes nothing of the outcome.
   onMessage?: (message: SDKMessage) => Promise<void>;
@@ -679,12 +701,26 @@ export async function runTaskCheck(workspace: Workspace, ticket: string, task: s
     // the workspace's decision documents: listed in the check's checkout, at the Task's base.
     let outcome: Awaited<ReturnType<typeof runStructuredSession<CheckOutput>>>;
     const skills = await roleSkillBlocks(options.stateDir, 'task_check');
+    const signal = options.signal ?? new AbortController().signal;
+    // norms never throws: a bad or missing norms.json is the defaults.
+    const maxFiles = (await norms(workspace.name, options.configDir)).norms.slice.change_max_files;
+    // The Codex check, when due, runs beside the session; it never throws, and every way out of the
+    // block below waits for it, so the checkout outlives it.
+    let codex: Promise<CodexCheck> | undefined;
     try {
-      outcome = await runStructuredSession(checkPrompt(ticket, task, rules, skills.text, await workspaceDecisionDocs(workspace.name, cwd, options.configDir), sent.chain, prepared), {
+      const prompt = checkPrompt(ticket, task, rules, skills.text, await workspaceDecisionDocs(workspace.name, cwd, options.configDir), sent.chain, prepared);
+      const due = options.codex === undefined ? { due: false as const } : await codexCheckDue(options.stateDir, workspace.name, ticket, task);
+      if (due.due) {
+        codex = runCodexCheck(prompt, options.codex!, {
+          workspace, root: cwd, images: refs.map((ref) => ref.path), stateDir: options.stateDir, worktreeRoot: options.worktreeRoot, configDir: options.configDir,
+          sandbox: options.sandbox !== undefined, signal, reason: due.reason, schema: CHECK_SCHEMA, output: checkOutput,
+        });
+      }
+      outcome = await runStructuredSession(prompt, {
         cwd, claudePath: options.claudePath, sandbox: options.sandbox, model: options.model, maxTurns: options.maxTurns,
         pathDenials: async (sessionTmp) => ({ ...(await pathDenials({ session: 'task_check', workspace: workspace.name, checkout: workspace.workCheckout, sessionTmp,
           checkFolder: dirname(cwd), stateDir: options.stateDir, worktreeRoot: options.worktreeRoot, configDir: options.configDir })), hooks: undefined }),
-        signal: options.signal ?? new AbortController().signal, images: refs,
+        signal, images: refs,
         // Every message passes the redactor, so a failure after a withheld read is withheld too.
         onMessage: async (message) => {
           redactor.reviewMessage(message);
@@ -695,15 +731,17 @@ export async function runTaskCheck(workspace: Workspace, ticket: string, task: s
         deny: checkDeniedRules(workspace.workCheckout, options.stateDir, options.configDir), hooks: guardHooks(cwd, await tmpRoots()),
       });
     } catch (error) {
+      await codex;
       // Only the path denials throw (runStructuredSession).
       return failed(redactor.failure(`The check could not build its path denials: ${error instanceof Error ? error.message : String(error)}`.slice(0, 1000)));
     }
-    const base = { ...record, ...(sent.record.length > 0 ? { builds_on: sent.record } : {}), ...skills.names, commit: checkout.commit, model: outcome.model ?? options.model ?? null, started_at: startedAt, ended_at: outcome.endedAt };
+    // The Codex part, its output settled by the factory's rules as the Claude check's.
+    const part = await codex;
+    const codexKey = part === undefined ? {} : { codex: part.output === null ? part : { ...part, output: settleCheck(task, part.output, maxFiles) } };
+    const base = { ...record, ...(sent.record.length > 0 ? { builds_on: sent.record } : {}), ...skills.names, commit: checkout.commit, model: outcome.model ?? options.model ?? null, started_at: startedAt, ended_at: outcome.endedAt, ...codexKey };
     if (!outcome.ok) {
       return { ...base, status: 'failed', output: null, error: redactor.failure(outcome.message), cost_usd: null };
     }
-    // norms never throws: a bad or missing norms.json is the defaults.
-    const maxFiles = (await norms(workspace.name, options.configDir)).norms.slice.change_max_files;
     return { ...base, status: 'checked', output: settleCheck(task, outcome.output, maxFiles), error: null, cost_usd: outcome.costUsd };
   } finally {
     await checkout.remove();
@@ -738,11 +776,13 @@ export interface CheckView {
 }
 
 // The check settings of a loaded Config: the review's executable, sandbox and model, the check's
-// turn limit and the directories off limits.
+// turn limit and the directories off limits; with SF_TASK_CHECK_CODEX=auto, the Codex check's from
+// the gate's.
 export function checkSettings(config: Config, configDir: string): Omit<CheckOptions, 'signal' | 'onMessage'> {
   return {
     claudePath: config.claudePath, sandbox: config.sandbox, model: config.reviewModel, maxTurns: config.taskCheckMaxTurns, rulesMaxBytes: config.rulesMaxBytes,
     stateDir: config.stateDir, configDir, worktreeRoot: config.worktreeRoot,
+    ...(config.taskCheckCodex === 'auto' ? { codex: { gate: config.gate, model: config.codexModel, timeoutMs: config.gateTimeoutMs, maxTokens: config.gateMaxTokens } } : {}),
   };
 }
 
@@ -918,8 +958,8 @@ export class TaskChecks {
 
 const indent = (text: string, prefix: string): string[] => text.trimEnd().split(/\r?\n/).map((line) => `${prefix}${line}`);
 
-// A check as sf check-task prints it: the paraphrase first, the findings by severity, the files and
-// the verdict; a failed check with its error.
+// A check as sf check-task prints it: the paraphrase first, the findings by severity, the files, the
+// Codex part when there is one, and the record's verdict and counts; a failed check with its error.
 export function checkLines(record: CheckRecord): string[] {
   const head = [
     `Task check of ${record.workspace}/${record.ticket} (${TASK_DIR}/${record.ticket}.md, sha256 ${checkId(record.sha256)}), model ${record.model ?? 'default'}`,
@@ -929,7 +969,7 @@ export function checkLines(record: CheckRecord): string[] {
     return [...head, `Check failed: ${record.error ?? 'unknown error'}`, 'Verdict: failed (a failed check never counts as ready)'];
   }
   const { output } = record;
-  const counts = severityCounts(output);
+  const counts = recordCounts(record);
   const lines = [...head, '', 'Paraphrase:', ...indent(output.paraphrase, '  '), '', 'Findings:'];
   for (const severity of SEVERITIES) {
     const items = output.findings.filter((item) => item.severity === severity);
@@ -939,6 +979,7 @@ export function checkLines(record: CheckRecord): string[] {
     }
   }
   lines.push('', 'Files:', ...(output.files.length === 0 ? ['  none'] : output.files.map((file) => `  ${file.action} ${file.path}`)));
-  lines.push('', `Verdict: ${output.verdict === 'ready' ? 'ready' : 'not ready'} (${counts.blocker} blocker, ${counts.major} major, ${counts.nit} nit)`);
+  lines.push(...codexCheckLines(record.codex));
+  lines.push('', `Verdict: ${recordVerdict(record) === 'ready' ? 'ready' : 'not ready'} (${counts.blocker} blocker, ${counts.major} major, ${counts.nit} nit)`);
   return lines;
 }

@@ -6,7 +6,8 @@
 // Codex runs inside bubblewrap under the Claude sessions' read denials (the wrapper,
 // src/sandbox-denials.ts) and its socket filter (src/seccomp.ts), and never without them while the
 // sandbox is on; it gets a short list of environment variables, and the raw output file is removed
-// once read.
+// once read. The same runner, runCodex, also runs the Task check's Codex part
+// (src/task-check-codex.ts) with its own schema, output file and reading of the answer.
 import { spawn, type SpawnOptions } from 'node:child_process';
 import { accessSync, constants } from 'node:fs';
 import { readFile, rm, writeFile } from 'node:fs/promises';
@@ -89,7 +90,7 @@ export interface GateOptions {
   timeoutMs: number;
   // Cancels the run (abort, reset, a newer review): the process is killed.
   signal: AbortSignal;
-  // Every JSONL event of stdout that parses, in order, as it arrives; runGate waits for
+  // Every JSONL event of stdout that parses, in order, as it arrives; runCodex waits for
   // the calls before it returns, and a failing call changes nothing of the outcome.
   onEvent?: (event: unknown) => Promise<void>;
   // The Task's images: absolute paths of the job's copy, one --image each.
@@ -105,11 +106,43 @@ export interface GateOptions {
   arch?: NodeJS.Architecture;
 }
 
-export type GateOutcome = { tokens: GateTokens; startedAt: string; endedAt: string } & (
-  | { ok: true; output: ReviewOutput }
+// What one codex exec run is for: its noun in the messages ("gate", "Codex check"), the schema
+// sent with --output-schema, the names of its schema and output files in options.dir, and how its
+// output is read.
+export interface CodexTask<T> {
+  noun: string;
+  schema: Record<string, unknown>;
+  schemaFile: string;
+  outputFile: string;
+  parse: (json: unknown) => { ok: true; output: T } | { ok: false; message: string };
+}
+
+export type CodexOutcome<T> = { tokens: GateTokens; startedAt: string; endedAt: string } & (
+  | { ok: true; output: T }
   // code: the job's error code when it is not gate_failed (gate_sandbox_unavailable).
   | { ok: false; message: string; code?: string }
 );
+
+export type GateOutcome = CodexOutcome<ReviewOutput>;
+
+// The gate's run: the review's strict schema, its files in the iteration's directory, and a
+// verdict that parses as the review's, with items when it is fix.
+export const GATE_TASK: CodexTask<ReviewOutput> = {
+  noun: 'gate',
+  schema: GATE_SCHEMA,
+  schemaFile: GATE_SCHEMA_FILE,
+  outputFile: GATE_OUTPUT_FILE,
+  parse: (json) => {
+    const parsed = reviewOutput.safeParse(json);
+    if (!parsed.success) {
+      return { ok: false, message: `Codex returned an invalid verdict: ${issues(parsed.error)}` };
+    }
+    if (parsed.data.verdict === 'fix' && parsed.data.items.length === 0) {
+      return { ok: false, message: 'Codex returned fix without items.' };
+    }
+    return { ok: true, output: parsed.data };
+  },
+};
 
 // The usage of a run that reported none.
 export const noTokens = (): GateTokens => ({ input: 0, cached_input: 0, output: 0 });
@@ -118,7 +151,7 @@ export const noTokens = (): GateTokens => ({ input: 0, cached_input: 0, output: 
 // A failure message (Codex's stderr or error event) is withheld or redacted like the run's prose
 // (src/redact.ts, failure); a gate the factory refused to start (a code: gate_sandbox_unavailable)
 // keeps its own text, naming the cause. A verdict is redacted.
-export function redactedGateOutcome(outcome: GateOutcome, redactor: Pick<Redactor, 'failure' | 'output'>): GateOutcome {
+export function redactedGateOutcome<T>(outcome: CodexOutcome<T>, redactor: Pick<Redactor, 'failure' | 'output'>): CodexOutcome<T> {
   if (!outcome.ok) {
     return outcome.code === undefined ? { ...outcome, message: redactor.failure(outcome.message) } : outcome;
   }
@@ -129,14 +162,15 @@ export function redactedGateOutcome(outcome: GateOutcome, redactor: Pick<Redacto
 // the memories feature off, and no memories injected should a later Codex read them without it.
 // The user's global AGENTS.md has no documented switch and still loads. The Task's images go
 // before --cd, so each --image is followed by another option, never by the
-// final "-" (--image takes several values).
-export function gateArgs(options: Pick<GateOptions, 'cwd' | 'dir' | 'model' | 'images'>): string[] {
+// final "-" (--image takes several values). files names the schema and output files in options.dir
+// (the gate's by default).
+export function gateArgs(options: Pick<GateOptions, 'cwd' | 'dir' | 'model' | 'images'>, files: Pick<CodexTask<unknown>, 'schemaFile' | 'outputFile'> = GATE_TASK): string[] {
   return [
     'exec', '--ephemeral', '--sandbox', 'read-only',
     '--disable', 'memories', '-c', 'memories.use_memories=false',
     ...(options.images ?? []).flatMap((path) => ['--image', path]),
     '--cd', options.cwd,
-    '--output-schema', join(options.dir, GATE_SCHEMA_FILE), '--output-last-message', join(options.dir, GATE_OUTPUT_FILE), '--json',
+    '--output-schema', join(options.dir, files.schemaFile), '--output-last-message', join(options.dir, files.outputFile), '--json',
     ...(options.model !== undefined ? ['--model', options.model] : []),
     '-',
   ];
@@ -169,21 +203,22 @@ export function findBwrap(env: NodeJS.ProcessEnv = process.env): string | undefi
   return undefined;
 }
 
-// Why the wrapper cannot hold the gate here, or undefined when it can (or there is none).
-function sandboxUnavailable(options: GateOptions): string | undefined {
+// Why the wrapper cannot hold the run here, or undefined when it can (or there is none); noun names
+// the run ("gate", "Codex check").
+function sandboxUnavailable(options: GateOptions, noun: string): string | undefined {
   if (options.wrapper === undefined) {
     return undefined;
   }
   const platform = options.platform ?? process.platform;
   if (platform !== 'linux') {
-    return `The gate did not start: it runs only inside bubblewrap, on Linux, and this is ${platform} (${GATE_SANDBOX_UNAVAILABLE}); SF_SANDBOX=off runs it without (and without the sandbox).`;
+    return `The ${noun} did not start: it runs only inside bubblewrap, on Linux, and this is ${platform} (${GATE_SANDBOX_UNAVAILABLE}); SF_SANDBOX=off runs it without (and without the sandbox).`;
   }
   const arch = options.arch ?? process.arch;
   if (!filterSupports(arch)) {
-    return `The gate did not start: the gate's socket filter does not support ${arch} (${GATE_SANDBOX_UNAVAILABLE}); SF_SANDBOX=off runs it without (and without the sandbox).`;
+    return `The ${noun} did not start: the gate's socket filter does not support ${arch} (${GATE_SANDBOX_UNAVAILABLE}); SF_SANDBOX=off runs it without (and without the sandbox).`;
   }
   if (options.bwrapPath === undefined) {
-    return `The gate did not start: it runs only inside bubblewrap, and there is no bwrap on PATH (${GATE_SANDBOX_UNAVAILABLE}); install bubblewrap, then go on.`;
+    return `The ${noun} did not start: it runs only inside bubblewrap, and there is no bwrap on PATH (${GATE_SANDBOX_UNAVAILABLE}); install bubblewrap, then go on.`;
   }
   return undefined;
 }
@@ -221,26 +256,31 @@ function lastLine(text: string): string | undefined {
   return text.split('\n').map(oneLine).filter((line) => line !== '').at(-1);
 }
 
-// Runs one gate. Never throws: a non-zero exit, a timeout, a Codex error event, or a missing or
-// invalid output is a failed outcome. Nothing is retried.
-export async function runGate(prompt: string, options: GateOptions): Promise<GateOutcome> {
+// Runs one gate (runCodex with GATE_TASK).
+export function runGate(prompt: string, options: GateOptions): Promise<GateOutcome> {
+  return runCodex(prompt, options, GATE_TASK);
+}
+
+// Runs one codex exec for task. Never throws: a non-zero exit, a timeout, a Codex error event, or a
+// missing or invalid output (task.parse) is a failed outcome. Nothing is retried.
+export async function runCodex<T>(prompt: string, options: GateOptions, task: CodexTask<T>): Promise<CodexOutcome<T>> {
   const startedAt = new Date().toISOString();
   const tokens = noTokens();
-  const failed = (message: string, code?: string): GateOutcome => ({ ok: false, message: message.slice(0, 1000), ...(code !== undefined ? { code } : {}), tokens, startedAt, endedAt: new Date().toISOString() });
-  const outputPath = join(options.dir, GATE_OUTPUT_FILE);
-  const unavailable = sandboxUnavailable(options);
+  const failed = (message: string, code?: string): CodexOutcome<T> => ({ ok: false, message: message.slice(0, 1000), ...(code !== undefined ? { code } : {}), tokens, startedAt, endedAt: new Date().toISOString() });
+  const outputPath = join(options.dir, task.outputFile);
+  const unavailable = sandboxUnavailable(options, task.noun);
   if (unavailable !== undefined) {
     return failed(unavailable, GATE_SANDBOX_UNAVAILABLE);
   }
   try {
-    await writeFile(join(options.dir, GATE_SCHEMA_FILE), `${JSON.stringify(GATE_SCHEMA, null, 2)}\n`, { mode: 0o600 });
+    await writeFile(join(options.dir, task.schemaFile), `${JSON.stringify(task.schema, null, 2)}\n`, { mode: 0o600 });
     // A file left by an earlier, killed run is not this run's answer.
     await rm(outputPath, { force: true });
   } catch (error) {
-    return failed(`The gate could not start: ${(error as Error).message}`);
+    return failed(`The ${task.noun} could not start: ${(error as Error).message}`);
   }
   if (options.signal.aborted) {
-    return failed('The gate was cancelled.');
+    return failed(`The ${task.noun} was cancelled.`);
   }
   const errors: string[] = [];
   let stderr = '';
@@ -261,8 +301,8 @@ export async function runGate(prompt: string, options: GateOptions): Promise<Gat
   const ended = await new Promise<{ code: number | null; signal: NodeJS.Signals | null } | { spawnError: Error }>((resolve) => {
     const spawnOptions: SpawnOptions = { cwd: options.cwd, env: gateEnvironment(), stdio: ['pipe', 'pipe', 'pipe'] };
     const child = options.wrapper === undefined
-      ? spawn(options.codexPath, gateArgs(options), spawnOptions)
-      : spawnSeccomped(options.bwrapPath!, options.wrapper, [options.codexPath, ...gateArgs(options)], spawnOptions);
+      ? spawn(options.codexPath, gateArgs(options, task), spawnOptions)
+      : spawnSeccomped(options.bwrapPath!, options.wrapper, [options.codexPath, ...gateArgs(options, task)], spawnOptions);
     let killTimer: NodeJS.Timeout | undefined;
     const kill = (): void => {
       if (child.exitCode !== null || child.signalCode !== null) {
@@ -312,12 +352,12 @@ export async function runGate(prompt: string, options: GateOptions): Promise<Gat
   await delivered;
   // The outcome from the run and its output file, which goes once read: the verdict the
   // factory keeps is the redacted one, never Codex's raw answer.
-  const outcome = async (): Promise<GateOutcome> => {
+  const outcome = async (): Promise<CodexOutcome<T>> => {
     if ('spawnError' in ended) {
-      return failed(`The gate could not start: ${ended.spawnError.message}`);
+      return failed(`The ${task.noun} could not start: ${ended.spawnError.message}`);
     }
     if (options.signal.aborted) {
-      return failed('The gate was cancelled.');
+      return failed(`The ${task.noun} was cancelled.`);
     }
     const detail = errors.at(-1) ?? lastLine(stderr);
     if (timedOut) {
@@ -333,23 +373,20 @@ export async function runGate(prompt: string, options: GateOptions): Promise<Gat
     let text: string;
     try {
       text = await readFile(outputPath, 'utf8');
-    } catch { // no output file: the gate fails, saying so
+    } catch { // no output file: the run fails, saying so
       return failed('Codex wrote no output.');
     }
     let json: unknown;
     try {
       json = JSON.parse(text);
-    } catch { // not JSON: the gate fails, quoting the output
+    } catch { // not JSON: the run fails, quoting the output
       return failed(`Codex returned output that is not JSON: ${oneLine(text).slice(0, 200)}`);
     }
-    const parsed = reviewOutput.safeParse(json);
-    if (!parsed.success) {
-      return failed(`Codex returned an invalid verdict: ${issues(parsed.error)}`);
+    const parsed = task.parse(json);
+    if (!parsed.ok) {
+      return failed(parsed.message);
     }
-    if (parsed.data.verdict === 'fix' && parsed.data.items.length === 0) {
-      return failed('Codex returned fix without items.');
-    }
-    return { ok: true, output: parsed.data, tokens, startedAt, endedAt: new Date().toISOString() };
+    return { ok: true, output: parsed.output, tokens, startedAt, endedAt: new Date().toISOString() };
   };
   try {
     return await outcome();

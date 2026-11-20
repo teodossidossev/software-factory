@@ -89,6 +89,7 @@ effect and says only whether each token is set.
 | `SF_SIMPLIFY` | on | `off` | The simplification pass after a clean verdict of a job that had fix rounds. `off` goes straight to MR preparation. |
 | `SF_TASK_CHECK_AUTO` | `on` | `on`, `off`, empty | `on`: `sf serve` checks a written Task file 60 s after its last change. `off`: only Check on the board and `sf check-task`. |
 | `SF_TASK_CHECK_PARALLEL` | `1` | `1` to `4` | Automatic Task checks that run at once over all workspaces. |
+| `SF_TASK_CHECK_CODEX` | `off` | `auto`, `off`, empty | `auto`: a Task not written by ChatGPT's `write_task` (the Claude Code planner's, one you wrote, a file written by hand) is checked by Codex too, at the same time; the plan is ready only when both checks are; a Codex failure holds nothing. `off`: the Claude check alone. |
 | `SF_TASK_CHECK_MAX_TURNS` | `30` | positive integer | Steps of a Task check. |
 
 ### The Codex gate

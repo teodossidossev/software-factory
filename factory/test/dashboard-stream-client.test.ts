@@ -413,11 +413,11 @@ const STOPS: Array<[string, Record<string, unknown>, Record<string, unknown>, 'Y
   // SF-131: Accept at the Fix round limit whatever the last verdict; the stop's items (the ledger's
   // open blocker and major entries) when the payload has them.
   ['iteration_limit', { fixes: 5 }, { iterations: [iteration(1, { review: CLAUDE_FIX, gate: GATE_FIX })] }, 'Your decision',
-    'The last Fix rounds did not bring the open findings down. Tell it to go on (it gets the held-back findings and a new count), accept the change with its open findings listed in the MR text, or give a direction.', /^#1majorREADME\.md.*#2nita\.txtEmpty\.Expected: A line\.#3majorREADME\.md/, ['Accept and prepare MR', 'Tell it to go on', 'Send', 'Restart…', 'Abort…']],
+    'The last Fix rounds did not bring the open findings down. Tell it to go on (it gets the held-back findings and a new count), accept the change with its open findings listed on the Merge request screen, or give a direction.', /^#1majorREADME\.md.*#2nita\.txtEmpty\.Expected: A line\.#3majorREADME\.md/, ['Accept and prepare MR', 'Tell it to go on', 'Send', 'Restart…', 'Abort…']],
   ['iteration_limit', { fixes: 5 }, { iterations: [iteration(1, { review: CLEAN, gate: GATE_FIX })] }, 'Your decision',
-    'The last Fix rounds did not bring the open findings down. Tell it to go on (it gets the held-back findings and a new count), accept the change with its open findings listed in the MR text, or give a direction.', /^#1majorREADME\.mdIt greets the world\.Expected: It greets the reader\.$/, ['Accept and prepare MR', 'Tell it to go on', 'Send', 'Restart…', 'Abort…']],
+    'The last Fix rounds did not bring the open findings down. Tell it to go on (it gets the held-back findings and a new count), accept the change with its open findings listed on the Merge request screen, or give a direction.', /^#1majorREADME\.mdIt greets the world\.Expected: It greets the reader\.$/, ['Accept and prepare MR', 'Tell it to go on', 'Send', 'Restart…', 'Abort…']],
   ['iteration_limit', { fixes: 3, stop: { items: [ledgerEntry('R4', 'open')], saves_lines: null } }, { iterations: [iteration(1, { review: CLAUDE_FIX })], ledger: [ledgerEntry('R4', 'open')] }, 'Your decision',
-    'The last Fix rounds did not bring the open findings down. Tell it to go on (it gets the held-back findings and a new count), accept the change with its open findings listed in the MR text, or give a direction.', /^R4majorREADME\.mdProblem of R4\.Expected: Better\.$/, ['Accept and prepare MR', 'Tell it to go on', 'Send', 'Restart…', 'Abort…']],
+    'The last Fix rounds did not bring the open findings down. Tell it to go on (it gets the held-back findings and a new count), accept the change with its open findings listed on the Merge request screen, or give a direction.', /^R4majorREADME\.mdProblem of R4\.Expected: Better\.$/, ['Accept and prepare MR', 'Tell it to go on', 'Send', 'Restart…', 'Abort…']],
   // Without the Claude review (SF-131): Accept over the gate's stop with no review at all.
   ['gate_budget', { claude_review: false, gate_tokens: 1200345, stop: { items: [], saves_lines: null } }, { iterations: [iteration(1, {})] }, 'Your decision',
     'The Codex gate used the token budget of this change. Tell it to go on (a new budget), accept the change, which no reviewer passed, or tell the Implementer what to do.', /^The Codex gate used 1,200,345 tokens\.$/, ['Accept and prepare MR', 'Tell it to go on', 'Send', 'Abort…']],
@@ -787,7 +787,7 @@ test('stream client: each confirmation opens inline in the composer before it po
       // Neither a fix the user decided nor a disputed contest is an open entry (SF-131, rule 5).
       ledger: [ledgerEntry('R1', 'open'), ledgerEntry('R2', 'fixed'), ledgerEntry('R3', 'user_fix'), ledgerEntry('R4', 'contested', { dispute: { reviewer: 'codex', iteration: 1, reason: 'Still wrong.' } })],
     }, 'Accept and prepare MR', 'Accept and prepare MR app/T-1?', 'Accept and prepare the MR', [['accept', {}]], (page) => {
-      assert.match(page.$('confirm-text').textContent, /^Accepts iteration \d+ at the Fix round limit with its open findings unapplied \(listed in the MR text\)\. The factory commits it/);
+      assert.match(page.$('confirm-text').textContent, /^Accepts iteration \d+ at the Fix round limit with its open findings unapplied \(listed on the Merge request screen\)\. The factory commits it/);
       assert.doesNotMatch(page.$('confirm-text').textContent, /Claude reviewed clean/);
       assert.equal(page.$('confirm-items-title').textContent, 'Open findings that will not be applied (1):');
     }],

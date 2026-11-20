@@ -93,6 +93,8 @@ export interface MrView {
   rules: { commit_types: string[]; max_header_chars: number; required_headings: string[]; manual_claim: { source: string; flags: string } };
   commit: { title: string; body: string } | null;
   commit_differs: boolean;
+  // The factory's notes for the user (src/mr-notes.ts mrNotes): Markdown, '' without any; never part of the MR text.
+  notes: string;
 }
 
 // What a Save or Reset of the MR text left.

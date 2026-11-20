@@ -1,11 +1,10 @@
 // Unit tests of the findings ledger (SF-052, src/ledger.ts): the ids of a Fix section, the Report
 // table (each answer, a contest without evidence, unreadable rows, left on a major), the five rules
-// of a verdict for both reviewers, the user's settlement, the reviewers' prompt and the MR section;
+// of a verdict for both reviewers, the user's settlement and the reviewers' prompt;
 // what a clean verdict of the reviewer that decides the round settles.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { answerFix, applyVerdict, escalationMessage, type EvidenceContext, findEvidence, headings, heldBackNote, type LedgerEntry, ledgerSchema, reportRows, roundProgress, settle, settledLines, unappliedEntries, unsettled, userFixItems } from '../src/ledger.js';
-import { FINDINGS_HEADING, NITS_HEADING, withFindings, withNits } from '../src/mr.js';
 import { GATE_SCHEMA } from '../src/gate.js';
 import { fixContent, REVIEW_SCHEMA, type ReviewItem, reviewOutput, reviewPrompt, scopeItem, sensitiveItem } from '../src/review.js';
 
@@ -255,29 +254,6 @@ test('the reviewers\' prompt carries the settled findings (every entry not open)
   assert.match(prompt, /set `reopens` to its id and say why/);
   assert.match(prompt, /`caused_by`/);
   assert.deepEqual(settledLines([entry('R1', 'open')]), ['None.']);
-});
-
-test('the MR text lists the findings not fixed (accepted risks, contests, nits left) with their ids, after the nits', () => {
-  const text = ['feat(SF-1): x', '', '## Special things to note', '- None.', '', '## Change outline', 'x', ''].join('\n');
-  const ledger = [
-    entry('R1', 'accepted_risk', { settled: { decision: 'accept', note: 'Known risk.', at: '2026-11-05T00:00:00.000Z' } }),
-    entry('R2', 'contested', { response: 'Already there.', evidence: 'a.ts:7' }),
-    entry('R3', 'left', { severity: 'nit', response: 'Wording stays.' }),
-    entry('R4', 'fixed'),
-  ];
-  const written = withFindings(withNits(text, [item('n.ts', 'Name.', 'nit')], 2), ledger);
-  assert.equal(written, [
-    'feat(SF-1): x', '', '## Special things to note',
-    NITS_HEADING, '- [nit] `n.ts`: Name. Expected: Better.', '',
-    FINDINGS_HEADING,
-    '- R1 [major, accepted risk] `a.ts`: Problem of R1. — Known risk.',
-    '- R2 [major, contested] `a.ts`: Problem of R2. — Already there. Evidence: a.ts:7.',
-    '- R3 [nit, left] `a.ts`: Problem of R3. — Wording stays.', '',
-    '## Change outline', 'x', '',
-  ].join('\n'));
-  // Written again (a later preparation), the subsection is replaced, not repeated.
-  assert.equal(withFindings(written, ledger), written);
-  assert.equal(withFindings(text, [entry('R4', 'fixed')]), text);
 });
 
 for (const reviewer of REVIEWERS) {

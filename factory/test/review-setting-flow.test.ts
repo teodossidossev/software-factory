@@ -3,7 +3,8 @@
 // ticket without review: is reviewed by the gate alone (fix, fix again, clean, MR, no review.json);
 // review: claude runs Claude and the gate in a joint round; review: codex under always runs the gate alone; with
 // the gate off Claude reviews; a runner killed while the gate runs resumes the gate; Accept over
-// review_churn and gate_failed without a Claude review lists what went unapplied in the MR text;
+// review_churn and gate_failed without a Claude review lists what went unapplied on the Merge
+// request screen, not in the MR text;
 // the gate prompt says it is the only reviewer.
 import assert from 'node:assert/strict';
 import { readdir, readFile, stat } from 'node:fs/promises';
@@ -11,6 +12,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { gatePrompt, JOINT_REVIEWER_LINE, ONLY_REVIEWER_LINE } from '../src/gate.js';
 import { JobStore } from '../src/jobs.js';
+import { mrNotes } from '../src/mr-notes.js';
 import { loadHandbook } from '../src/server.js';
 import { writeTask } from '../src/task-file.js';
 import {
@@ -257,7 +259,7 @@ test('a runner killed while the gate of a job without the Claude review runs: th
   }
 });
 
-test('Accept without the Claude review: over review_churn the ledger\'s open findings and the churned item go unapplied and are listed in the MR text; over gate_failed the MR text says no reviewer passed the iteration', async () => {
+test('Accept without the Claude review: over review_churn the ledger\'s open findings and the churned item go unapplied and are listed on the Merge request screen; over gate_failed it says no reviewer passed the iteration', async () => {
   const env = await newEnv('setting-accept', settingEnv());
   const repo = await newRepo(env, 'setting-accept-repo', false);
   await putTask(env, repo, 'S-7', 'Churn');
@@ -285,8 +287,10 @@ test('Accept without the Claude review: over review_churn the ledger\'s open fin
     assert.equal(override?.code, 'review_churn');
     assert.deepEqual(Array.isArray(override?.unapplied) && override.unapplied.map((item) => item.problem), [SECOND.problem]);
     const mr = (await jobs.readMrText('app', 'S-7'))!;
-    assert.match(mr, /### Accepted over a stop\n- The user accepted iteration 2 over review_churn\.\n- \[major\] `README\.md`: It greets no one\. Expected: It greets the reader\./);
-    assert.doesNotMatch(mr, /No reviewer passed/);
+    assert.ok(!mr.includes('### Accepted over a stop') && !mr.includes('The user accepted'), mr);
+    const notes = await mrNotes(jobs, (await jobs.read('app', 'S-7'))!);
+    assert.match(notes, /### Accepted over a stop\n- The user accepted iteration 2 over review_churn\.\n- \[major\] `README\.md`: It greets no one\. Expected: It greets the reader\./);
+    assert.doesNotMatch(notes, /No reviewer passed/);
     assert.deepEqual(await reviewFiles(env, 'S-7'), []);
 
     await call(served, 'start', { workspace: 'app', ticket: 'S-8' });
@@ -296,7 +300,8 @@ test('Accept without the Claude review: over review_churn the ledger\'s open fin
     assert.equal(overFailed.code, 0, overFailed.stderr);
     await waitFor(served, 'S-8', 'ready_for_human_review', 1);
     const text = (await jobs.readMrText('app', 'S-8'))!;
-    assert.match(text, /### Accepted over a stop\n- The user accepted iteration 1 over gate_failed\.\n- No reviewer passed iteration 1\.\n- The gate failed: /);
+    assert.ok(!text.includes('### Accepted over a stop') && !text.includes('No reviewer passed'), text);
+    assert.match(await mrNotes(jobs, (await jobs.read('app', 'S-8'))!), /### Accepted over a stop\n- The user accepted iteration 1 over gate_failed\.\n- No reviewer passed iteration 1\.\n- The gate failed: /);
     assert.equal(await claudeReviewRuns(env), 0);
   } finally {
     await stop(served);

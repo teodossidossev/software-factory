@@ -13,6 +13,7 @@ import { addAttachment } from '../src/attachments.js';
 import { firstPrompt } from '../src/execution.js';
 import { iterationLimitMessage } from '../src/execution/turns.js';
 import { JobStore } from '../src/jobs.js';
+import { mrNotes } from '../src/mr-notes.js';
 import { heldBackNote } from '../src/ledger.js';
 import type { SandboxSettings } from '@anthropic-ai/claude-agent-sdk';
 import { sandboxSettings } from '../src/config.js';
@@ -293,7 +294,7 @@ test('the Fix round limit by default (SF-131): the fourth Fix is refused; its it
     const limited = await waitFor(served, 'LIM-1', 'needs_human', 4);
     assert.deepEqual(limited.error, {
       code: 'iteration_limit',
-      message: "3 of the job's review rounds made no progress (SF_MAX_ITERATIONS is 3): each left no fewer open blocker and major findings than the fewest before, or reopened a fixed or left one. Open blocker or major findings: 1 (1 raised by the last review, 0 of them reopened; 0 carried from earlier rounds). The user decides how to go on: sf accept takes iteration 4 as it is (the open findings go unapplied and are listed in the MR text), sf say goes on: the count starts again, and the held-back findings go with the message.",
+      message: "3 of the job's review rounds made no progress (SF_MAX_ITERATIONS is 3): each left no fewer open blocker and major findings than the fewest before, or reopened a fixed or left one. Open blocker or major findings: 1 (1 raised by the last review, 0 of them reopened; 0 carried from earlier rounds). The user decides how to go on: sf accept takes iteration 4 as it is (the open findings go unapplied and are listed on the Merge request screen), sf say goes on: the count starts again, and the held-back findings go with the message.",
     });
     assert.deepEqual((await readFile(join(repo, '.software-factory', 'LIM-1.md'), 'utf8')).match(/^## Fix \d+$/gm), ['## Fix 1', '## Fix 2', '## Fix 3']);
     const jobs = new JobStore(env.state);
@@ -314,8 +315,11 @@ test('the Fix round limit by default (SF-131): the fourth Fix is refused; its it
     await waitFor(served, 'LIM-1', 'ready_for_human_review', 4);
     const override = await jobs.readGateOverride('app', 'LIM-1', 4);
     assert.deepEqual(override?.unapplied, [{ id: 'R4', path: 'a.txt', problem: 'Problem 4.', expected: 'Solved 4.', severity: 'major' }]);
-    assert.doesNotMatch((await jobs.readMrText('app', 'LIM-1'))!, /### Accepted over a stop\n(- .*\n)*- R[56] /);
-    assert.match((await jobs.readMrText('app', 'LIM-1'))!, /### Accepted over a stop\n- The user accepted iteration 4 over iteration_limit\.\n- R4 \[major\] `a\.txt`: Problem 4\. Expected: Solved 4\./);
+    const mr = (await jobs.readMrText('app', 'LIM-1'))!;
+    assert.ok(!mr.includes('### Accepted over a stop') && !mr.includes('The user accepted'), mr);
+    const notes = await mrNotes(jobs, (await jobs.read('app', 'LIM-1'))!);
+    assert.doesNotMatch(notes, /### Accepted over a stop\n(- .*\n)*- R[56] /);
+    assert.match(notes, /### Accepted over a stop\n- The user accepted iteration 4 over iteration_limit\.\n- R4 \[major\] `a\.txt`: Problem 4\. Expected: Solved 4\./);
   } finally {
     await stop(served);
   }

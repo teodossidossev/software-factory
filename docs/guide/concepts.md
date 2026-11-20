@@ -79,7 +79,7 @@ plan ─► Task file ─► Task check ─► Start / queue ─► iteration �
 | **Joint round** | | The review of an iteration by the Claude review and the Codex gate at the same time; their findings make one Fix section, and the iteration is clean only when both verdicts are. |
 | **Fix section** | Fix N | `## Fix N`, appended by the factory from a verdict with a blocker or major item; it starts the next iteration. |
 | **Round without progress** | | A review round that asks for a Fix while no fewer blocker and major findings are open than after any earlier round that asked for one, or that brings a fixed or left one back. The first round with a Fix sets the low and does not count. The round limits count only these; your message at the stop starts the count again. |
-| **Severity** | blocker, major, nit | The weight of a finding. Only blockers and majors make a fix; nits never block and go into the MR text. |
+| **Severity** | blocker, major, nit | The weight of a finding. Only blockers and majors make a fix; nits never block and are shown on the Merge request screen. |
 | **Ledger** | findings, R7 | `ledger.json`: every finding that went into a Fix section, with an id and its status (open, fixed, contested, escalated, left, accepted risk, must fix). |
 | **Clean** | "Reviews are clean" | The round's verdict that no further fix is needed (in a joint round, both reviews'). It starts MR preparation. |
 | **Simplification pass** | Simplification offered, Simplify or skip | After a job with fix rounds: one read-only session that names what the fixes added that the Task does not need. You choose Simplify or Skip. |

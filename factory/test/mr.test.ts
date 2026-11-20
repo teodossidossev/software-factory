@@ -11,10 +11,9 @@ import { delimiter, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { sandboxSettings } from '../src/config.js';
-import { commitAndRebase, commitPaths, continueRebase, filesWithMarkers, gitFailure, MAX_MR_TEXT_BYTES, mergeRequestLink, mrMessage, mrTextProblem, pushBranch, pushProtection, rebaseInProgress, refuseGuardedLfs, submodulePaths, withChecks, withNits } from '../src/mr.js';
+import { commitAndRebase, commitPaths, continueRebase, filesWithMarkers, gitFailure, mergeRequestLink, mrMessage, mrTextProblem, pushBranch, pushProtection, rebaseInProgress, refuseGuardedLfs, submodulePaths, withChecks } from '../src/mr.js';
 import { conflictPrompt, FACTORY_PROMPT_RULES, handbookSection, mrPrompt } from '../src/prompts.js';
 import { COMMIT_TYPES, commitHeader, DENIED_TOOLS, headerProblem, testingProblem } from '../src/rules.js';
-import type { ReviewItem } from '../src/review.js';
 
 const HANDBOOK = fileURLToPath(new URL('../../HANDBOOK.md', import.meta.url));
 
@@ -99,44 +98,17 @@ test('mergeRequestLink derives GitHub and GitLab pages from https and ssh origin
 
 test('withChecks puts the factory\'s ### Checks line at the end of ## Testing, replacing any ### Checks there; a lone "- None." stays (SF-128)', () => {
   const text = (testing: string[]): string => ['feat(T-1): Change', '', '## Special things to note', '- None.', '## Testing', ...testing, '## Screenshots', 'N/A', ''].join('\n');
-  const line = '- `npm test`: passed in 4 min 12 s on iteration 2.';
+  const line = '- `npm test`: passed in 4 min 12 s.';
   assert.equal(withChecks(text(['npm run lint: passed', '']), line, 2), text(['npm run lint: passed', '', '### Checks', line, '']));
   assert.equal(withChecks(text(['- None.']), line, 2), text(['- None.', '', '### Checks', line, '']));
   // An earlier preparation's (or the user's own) ### Checks is replaced, the rest of ## Testing stays.
-  const earlier = text(['- Unit tests.', '', '### Checks', '- `npm test`: passed in 1 s on iteration 1.', '- an extra claim', '']);
+  const earlier = text(['- Unit tests.', '', '### Checks', '- `npm test`: passed in 1 s.', '- an extra claim', '']);
   assert.equal(withChecks(earlier, line, 2), text(['- Unit tests.', '', '### Checks', line, '']));
   // The last section of the text.
   assert.equal(withChecks('t\n\n## Testing\n- Unit tests.\n', line, 2), ['t', '', '## Testing', '- Unit tests.', '', '### Checks', line].join('\n'));
   // Without ## Testing the text stays as it is.
   assert.equal(withChecks('t\n\n## What\nx\n', line, 2), 't\n\n## What\nx\n');
   assert.equal(mrTextProblem('T-1', withChecks(VALID_MR_TEXT, line, 2)), undefined);
-});
-
-test('withNits puts the factory\'s ### Nits not applied list at the end of ## Special things to note, replacing any there (SF-051)', () => {
-  const text = (special: string[]): string => ['feat(T-1): Change', '', '## Why', 'w', '## Special things to note', ...special, '## Testing', 't', ''].join('\n');
-  const nitItems: ReviewItem[] = [{ path: 'a.txt', problem: 'Wording.', expected: 'Nicer.', severity: 'nit' }, { path: 'b.txt', problem: 'Naming.', expected: 'Nicer.', severity: 'nit' }];
-  const nits = ['- [nit] `a.txt`: Wording. Expected: Nicer.', '- [nit] `b.txt`: Naming. Expected: Nicer.'];
-  // A heading inside a code fence is not the section.
-  const fencedText = ['feat(T-1): Change', '', '## What', '```', '## Special things to note', '```', '## Special things to note', '- None.', '## Testing', 't'].join('\n');
-  assert.equal(withNits(fencedText, nitItems, 2), fencedText.replace('- None.\n## Testing', `### Nits not applied\n${nits.join('\n')}\n\n## Testing`));
-  // A lone "- None." goes.
-  assert.equal(withNits(text(['- None.', '']), nitItems, 2), text(['### Nits not applied', ...nits, '']));
-  // Other notes stay; a list already there (the model's, or an earlier preparation's) is replaced.
-  const written = text(['- A migration.', '', '### Nits not applied', '- [nit] `old.txt`: Old.', '```', '## not a heading', '```', '']);
-  assert.equal(withNits(written, nitItems, 2), text(['- A migration.', '', '### Nits not applied', ...nits, '']));
-  // Without nits only the old list goes.
-  assert.equal(withNits(written, [], 2), text(['- A migration.', '']));
-  assert.equal(withNits(text(['- None.']), [], 2), text(['- None.']));
-  // The last section of the text.
-  assert.equal(withNits('feat(T-1): Change\n\n## Special things to note\n- None.\n', nitItems, 2), ['feat(T-1): Change', '', '## Special things to note', '### Nits not applied', ...nits].join('\n'));
-  assert.equal(mrTextProblem('T-1', withNits(VALID_MR_TEXT, nitItems, 2)), undefined);
-  // Cut to stay within the MR text limit, with a line that counts the rest.
-  const big: ReviewItem[] = Array.from({ length: 2000 }, (_, index) => ({ path: `f${index}.txt`, problem: 'x'.repeat(40), expected: 'y', severity: 'nit' }));
-  const cut = withNits(text(['- None.']), big, 3);
-  assert.ok(Buffer.byteLength(cut) <= MAX_MR_TEXT_BYTES);
-  const rest = /^- … and (\d+) more: see review\.json and gate\.json of iteration 3\.$/m.exec(cut);
-  assert.ok(rest !== null, cut.slice(-300));
-  assert.equal(cut.split('\n').filter((line) => line.startsWith('- [nit]')).length + Number(rest[1]), 2000);
 });
 
 test('mrMessage splits the MR text into a title and the whole body, normalised', () => {

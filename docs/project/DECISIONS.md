@@ -97,3 +97,11 @@ changed; a ticket marked `important: true` is never stopped by these three limit
 everything else that stops a job (churn, disputes, escalations, the turn limit, failed tests,
 failures, usage limits, the user) still stops it. This replaces the per-ticket ceilings of the
 2026-11-04 entry.
+
+## 2026-11-20: the MR text speaks to its reviewers only (SF-310)
+
+The factory's notes (the nits not applied, the simplifications skipped, the review findings not
+fixed, an Accept over a stop) never go into the MR text that is committed and pushed, in any
+workspace; they stay on the job's Merge request screen, beside the text, with the same content.
+The MR text describes what changed, why, how, the testing and what a reviewer should watch, and
+not how the change was made, who decided what or how it compares with the factory's budgets.

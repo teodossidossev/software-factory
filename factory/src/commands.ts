@@ -135,7 +135,7 @@ export const COMMANDS = {
   },
   accept: {
     name: 'accept', args: ['<workspace>', '<ticket>'],
-    description: 'Accept a clean Claude review over a stopped gate (needs_human with gate_rounds, gate_budget or gate_failed) or a ledger stop (review_churn, review_disputed) or the Fix round limit (iteration_limit) or the workspace\'s tests (tests_failed, tests_unavailable: without passing tests) and prepare the MR; on simplify_offered: skip the suggestions (listed in the MR text)',
+    description: 'Accept a clean Claude review over a stopped gate (needs_human with gate_rounds, gate_budget or gate_failed) or a ledger stop (review_churn, review_disputed) or the Fix round limit (iteration_limit) or the workspace\'s tests (tests_failed, tests_unavailable: without passing tests) and prepare the MR; on simplify_offered: skip the suggestions (listed on the Merge request screen)',
     run: (s, [w = '', t = '']) => s.execution.acceptGate(w, t),
   },
   simplify: {

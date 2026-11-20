@@ -620,7 +620,7 @@ export function settledLines(ledger: LedgerEntry[]): string[] {
   });
 }
 
-// The entries the MR text lists as not fixed: accepted risks, contests and nits left.
+// The entries the Merge request screen's notes list as not fixed: accepted risks, contests and nits left.
 // The user's simplifications are not findings and stay out.
 export function notFixed(ledger: LedgerEntry[]): LedgerEntry[] {
   return ledger.filter((entry) => !isSimplification(entry) && (entry.status === 'accepted_risk' || entry.status === 'contested' || entry.status === 'left'));
@@ -628,7 +628,7 @@ export function notFixed(ledger: LedgerEntry[]): LedgerEntry[] {
 
 const STATUS_WORDS: Partial<Record<LedgerStatus, string>> = { accepted_risk: 'accepted risk', contested: 'contested', left: 'left' };
 
-// One line of the MR text's `### Review findings not fixed`.
+// One line of the Merge request screen's notes' `### Review findings not fixed`.
 export function notFixedLine(entry: LedgerEntry): string {
   const why = entry.status === 'accepted_risk' ? oneLine(entry.settled?.note ?? '') : oneLine(entry.response);
   const evidence = entry.status === 'contested' && entry.evidence !== '' ? ` Evidence: ${entry.evidence}.` : '';

@@ -127,7 +127,7 @@ const STOPS = {
   },
   iteration_limit: {
     reason: 'Fix round limit reached', button: () => 'Give a direction',
-    sentence: () => 'The last Fix rounds did not bring the open findings down. Tell it to go on (it gets the held-back findings and a new count), accept the change with its open findings listed in the MR text, or give a direction.',
+    sentence: () => 'The last Fix rounds did not bring the open findings down. Tell it to go on (it gets the held-back findings and a new count), accept the change with its open findings listed on the Merge request screen, or give a direction.',
   },
   tests_failed: {
     reason: 'Tests keep failing', button: () => 'Decide',

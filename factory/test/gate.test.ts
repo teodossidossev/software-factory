@@ -17,6 +17,7 @@ import type { FactoryError } from '../src/errors.js';
 import { GATE_OUTPUT_FILE, GATE_SCHEMA, gateArgs } from '../src/gate.js';
 import { WITHHELD } from '../src/redact.js';
 import { JobStore } from '../src/jobs.js';
+import { mrNotes } from '../src/mr-notes.js';
 import { writeTask } from '../src/task-file.js';
 import { fetchRaw } from './support/dashboard-client.js';
 import { bwrapLog, call, codexLog, codexScript, fakeCodex, fakeLog, git, newEnv, newRepo, ownReviewMethod, putRules, putTask, reviewLog, reviewScript, runCli, script, serve, stop, task, waitFor } from './support/harness.js';
@@ -458,16 +459,15 @@ test('severity: one major among nits is the round\'s Fix section with the nits a
       [1, 'claude', 'clean', undefined], [1, 'codex', 'fix', undefined], [2, 'claude', 'fix', 'clean'], [2, 'codex', 'fix', 'clean'],
     ]);
     assert.match((await runCli(env, ['watch', 'app', 'G-10', '--once'])).stdout, /^\d\d:\d\d:\d\d \[2\] review by codex: fix \(2 items\), acted on as clean$/m);
-    // The nits of iteration 2 from both reviewers, deduplicated by path and problem.
+    // The nits of iteration 2 from both reviewers, deduplicated by path and problem, in the Merge
+    // request screen's notes, never in the MR text.
     const mr = (await jobs.readMrText('app', 'G-10'))!;
-    assert.ok(mr.includes([
-      '## Special things to note',
+    assert.ok(!mr.includes('### Nits not applied') && !mr.includes('[nit]'), mr);
+    assert.equal(await mrNotes(jobs, (await jobs.read('app', 'G-10'))!), [
       '### Nits not applied',
       '- [nit] `README.md`: No capital. Expected: Nicer.',
       '- [nit] `a.txt`: A narrower variant. Expected: Nicer.',
-      '',
-      '## Change outline',
-    ].join('\n')), mr);
+    ].join('\n'));
   } finally {
     await stop(served);
   }

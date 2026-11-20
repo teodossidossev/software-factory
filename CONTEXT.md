@@ -186,8 +186,8 @@ acceptance), `major` (a real defect or a Task requirement not met, but contained
 
 **Nit**:
 A Review item of Severity `nit`: style, naming, wording, a narrower variant of a risk already
-accepted, a nice-to-have. A Nit never blocks; the Nits of the Iteration that reaches Clean go into
-the MR text as `### Nits not applied`.
+accepted, a nice-to-have. A Nit never blocks; the Nits of the Iteration that reaches Clean are shown on
+the job's Merge request screen, never in the MR text, as `### Nits not applied`.
 _Avoid_: minor, suggestion (for a Nit)
 
 **Ledger**:
@@ -280,7 +280,8 @@ One read-only Claude session per Job, after the Clean Round of a Job that had a 
 section: it names what the review fixes added that the Task does not need, never what a fixed
 blocker finding needed. Its suggestions go to the User: Simplify (one Fix section "Simplify",
 reviewed as usual, the suggestions recorded in the Ledger as the User's choice) or Skip (MR
-preparation, the suggestions listed in the MR text). It runs at most once per Job.
+preparation, the suggestions shown on the job's Merge request screen, never in the MR text). It runs
+at most once per Job.
 _Avoid_: cleanup review, zoom-out, third reviewer
 
 **Human review**:

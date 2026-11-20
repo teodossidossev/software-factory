@@ -1192,6 +1192,14 @@ function renderMr(): void {
   card.append(desc);
   const left = el('div', 'stack');
   left.append(card);
+  // The factory's notes (the nits not applied, the skipped simplifications, the review findings not
+  // fixed, an Accept over a stop): under the text, never in it.
+  if (v.notes !== '') {
+    const notes = el('div', 'card2');
+    notes.id = 'mrNotes';
+    notes.append(el('h3', '', 'Not in the MR text'), el('span', 'hint', 'The factory\'s notes for you: they stay on this page and are never committed or pushed.'), md(v.notes));
+    left.append(notes);
+  }
   const side = el('div', 'stack');
   side.id = 'mrSide';
   const grid = el('div', 'grid');

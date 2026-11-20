@@ -591,7 +591,7 @@ test('ticket client (SF-140): a tickets event naming another ticket fetches noth
   assert.deepEqual(reads().slice(before).sort(), ['api/tickets/app/T-1/check', 'api/tickets/app/T-1/check', 'api/tickets/app/T-1/page', 'api/tickets/app/T-1/page']);
 });
 
-test('ticket client (SF-208): the Planning conversation card links a stored planning chat and has its field: Save, Remove and a refusal next to it; a stored link that is not a https://chatgpt.com/ one is never linked', async () => {
+test('ticket client (SF-208): the Planning conversation card links a stored planning chat and has its field: Save, Remove and a refusal next to it; a stored value the page does not trust is never linked', async () => {
   const chatLinks = (page: Page): string[] => cardOf(page, /^Planning conversation$/).querySelectorAll('a').filter((link) => link.textContent === 'Open the planning chat ↗').map((link) => `${link.href} ${link.target} ${link.rel}`);
   const row = ticket('T-1', { planning_chat: 'https://chatgpt.com/c/one' });
   const page = await openTicketPage([row], payload(row));
@@ -605,9 +605,10 @@ test('ticket client (SF-208): the Planning conversation card links a stored plan
   await page.flush();
   assert.deepEqual(posts(page).map((request) => [request.path, JSON.parse(request.body!)]), [['api/tickets/app/T-1/chat', { url: 'https://chatgpt.com.evil.com/' }]]);
   assert.equal(action(page, 'chat-save').disabled, true);
-  posts(page)[0]!.respond(400, { ok: false, error: { code: 'invalid_chat_link', message: 'Only a https://chatgpt.com/ conversation link can be saved.' } });
+  const refusal = 'Only a https://chatgpt.com/ conversation link or a https://claude.ai/code/<session> link can be saved.';
+  posts(page)[0]!.respond(400, { ok: false, error: { code: 'invalid_chat_link', message: refusal } });
   await page.flush();
-  assert.equal(cardOf(page, /^Planning conversation$/).querySelector('.chat-field .err-text')!.textContent, 'Only a https://chatgpt.com/ conversation link can be saved.');
+  assert.equal(cardOf(page, /^Planning conversation$/).querySelector('.chat-field .err-text')!.textContent, refusal);
   assert.deepEqual([page.$('tk-chat-input').value, chatLinks(page)], ['https://chatgpt.com.evil.com/', ['https://chatgpt.com/c/one _blank noopener noreferrer']]);
 
   action(page, 'chat-remove').click();
@@ -629,4 +630,20 @@ test('ticket client (SF-208): the Planning conversation card links a stored plan
   const odd = ticket('T-2', { planning_chat: 'javascript:alert(1)' });
   const other = await openTicketPage([odd], payload(odd));
   assert.deepEqual([chatLinks(other), other.$('tk-chat-input').value], [[], 'javascript:alert(1)']);
+});
+
+test('ticket client: a stored Claude planner session link https://claude.ai/code/<session> is linked as the planning chat; one with anything after the id is shown in the box, never linked; the box names both forms', async () => {
+  const chatLinks = (page: Page): string[] => cardOf(page, /^Planning conversation$/).querySelectorAll('a').filter((link) => link.textContent === 'Open the planning chat ↗').map((link) => `${link.href} ${link.target} ${link.rel}`);
+  const placeholder = (page: Page): unknown => (page.$('tk-chat-input') as unknown as { placeholder?: string }).placeholder;
+  const row = ticket('T-1', { planning_chat: 'https://claude.ai/code/session_01Ab' });
+  const page = await openTicketPage([row], payload(row));
+  assert.deepEqual(chatLinks(page), ['https://claude.ai/code/session_01Ab _blank noopener noreferrer']);
+  assert.equal(page.$('tk-chat-input').value, 'https://claude.ai/code/session_01Ab');
+  assert.equal(placeholder(page), 'https://chatgpt.com/c/… or https://claude.ai/code/…');
+
+  for (const stored of ['https://claude.ai/code/x?y=1', 'https://claude.ai/chat/x', 'https://claude.ai/code/a/b', `https://claude.ai/code/${'a'.repeat(129)}`]) {
+    const odd = ticket('T-2', { planning_chat: stored });
+    const other = await openTicketPage([odd], payload(odd));
+    assert.deepEqual([chatLinks(other), other.$('tk-chat-input').value], [[], stored], stored);
+  }
 });

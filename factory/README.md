@@ -4935,11 +4935,14 @@ sentence of section Ticket images before the last one. A message too long for a 
 The card ends with the ticket's **planning chat link** (SF-208): the conversation the ticket was
 planned in, pasted by the user into the field *Planning chat link* and saved with Save (`POST
 api/tickets/<ws>/<ticket>/chat`; Remove posts `null`), kept in `<state dir>/requests/<ws>/<ticket>.chat`
-and removed with the ticket. Only a `https://chatgpt.com/` link is kept (no other scheme, host,
-subdomain, port or credentials, at most 2048 characters; else `invalid_chat_link`, shown next to
-the field); it can be set while a job of the ticket is live. A stored link shows as *Open the
-planning chat ↗* (`target=_blank`, `rel=noopener`) here, on the job's card and on its page, and
-only when it starts with `https://chatgpt.com/`.
+and removed with the ticket. Two kinds of link are kept: a `https://chatgpt.com/` link (no other
+scheme, host, subdomain, port or credentials, at most 2048 characters), and a Claude planner
+session link exactly as the factory makes it, the trimmed text matching
+`^https://claude\.ai/code/[A-Za-z0-9_-]{1,128}$` as a whole (no port, credentials, other case,
+path, query or fragment); else `invalid_chat_link`, shown next to the field. It can be set while
+a job of the ticket is live. A stored link shows as *Open the planning chat ↗* (`target=_blank`,
+`rel=noopener`) here, on the job's card and on its page, and only when it starts with
+`https://chatgpt.com/` or matches that Claude pattern.
 Whether ChatGPT sends a prefilled message by itself is up to ChatGPT, so the page says to press
 Enter if it is not. Only the server's ChatGPT URL becomes a link. A change made with `sf workspace
 add|remove` or `write_task` shows at the next refresh of the stream (a state change, an action
@@ -5250,7 +5253,7 @@ shares; the setup, Task check, task and attachment posts have their own handlers
 | `POST api/workspaces/<name>/remove` | `{}` | `Setup.removeWorkspace`; `409 workspace_busy` while the workspace has a live job; result `{removed}` |
 | `POST api/tickets` | `{"workspace", "ticket", "title", "request", "owner"?: "chatgpt" \| "claude_code"}` | `Setup.createTicket`: the ticket skeleton through the Task file writer, the request and the Context owner (`chatgpt` when left out) kept for the conversation; result `{workspace, ticket, path, base}`, with `auto_planner: true` when the workspace has it (section Workspace registry) |
 | `POST api/tickets/<ws>/<ticket>/owner` | `{"owner": "chatgpt" \| "claude_code"}` | `Setup.setTicketOwner` (the ticket page's *Plan with*): rewrites `<state dir>/requests/<ws>/<ticket>.owner`; the names checked, `409 job_active` while a job of the ticket is live, `404 task_not_found` without a Task file listed as a ticket; result the ticket's row as the tickets payload has it (with `owner` and its `conversation`, without the queue fields); every page gets the tickets again; POST only |
-| `POST api/tickets/<ws>/<ticket>/chat` | `{"url": string \| null}` | `Setup.setPlanningChat` (SF-208, the planning chat link's Save and Remove): writes `<state dir>/requests/<ws>/<ticket>.chat` (null removes it); the names checked, allowed while a job of the ticket is live, `404 task_not_found` without the ticket's active Task file, `400 invalid_chat_link` for anything but a `https://chatgpt.com/` link; result `{workspace, ticket, planning_chat}`; every page gets the tickets and the jobs again; POST only |
+| `POST api/tickets/<ws>/<ticket>/chat` | `{"url": string \| null}` | `Setup.setPlanningChat` (SF-208, the planning chat link's Save and Remove): writes `<state dir>/requests/<ws>/<ticket>.chat` (null removes it); the names checked, allowed while a job of the ticket is live, `404 task_not_found` without the ticket's active Task file, `400 invalid_chat_link` for anything but a `https://chatgpt.com/` link or a `https://claude.ai/code/<session>` link; result `{workspace, ticket, planning_chat}`; every page gets the tickets and the jobs again; POST only |
 | `POST api/tickets/<ws>/<ticket>/planner` | `{}` | `startPlanner` (`sf planner start`, section MCP endpoint, The planner session) through the dashboard's planner: only for a ticket of the tickets list (an empty 404 otherwise, before the body is read); it answers once start has watched the new session (about 3 s): `{started, session}`, `started` false with the session that runs already; `409` for `planner_starting`, `planning_copy_missing`, `planning_copy_unsafe` and `planning_copy_untrusted`, `404 workspace_not_found`, `500` with its code for `planner_start_failed` and `invalid_config`; every page gets the tickets again |
 | `POST api/tickets/<ws>/<ticket>/planner/stop` | `{}` | `stopPlanner` (`sf planner stop`): result `{stopped}`, the session it ended or `null` when none ran; for any ticket names (a job of the ticket may have started); `409 planner_starting` while a start of the ticket is under way; every page gets the tickets again; POST only |
 | `POST api/tickets/<ws>/<ticket>/start` | `{}` | `Execution.start(ws, ticket)` (`sf start`, SF-040, SF-046): the job's record, branch and worktree, then iteration 1; result `{branch, state, check_after_minutes, worktree}`; refusals as they come (`409 task_draft` for a skeleton, `409 job_exists`, `409 branch_exists`, `404 task_not_found`, ...; a start by hand is never held by the run limit); every page gets the jobs, the workspaces and the tickets again |

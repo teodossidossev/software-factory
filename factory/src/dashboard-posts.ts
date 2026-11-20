@@ -83,7 +83,8 @@ const BODIES = {
   },
   // The ticket page's switch of who plans the ticket.
   'ticket-owner': { shape: '{"owner": "chatgpt" | "claude_code"}', schema: z.strictObject({ owner: z.enum(TICKET_OWNERS) }) },
-  // The ticket's planning chat link: a https://chatgpt.com/ URL, or null to remove it.
+  // The ticket's planning chat link: a https://chatgpt.com/ URL or a https://claude.ai/code/<session>
+  // link, or null to remove it.
   'ticket-chat': { shape: '{"url": string | null}', schema: z.strictObject({ url: z.string().nullable() }) },
   // The ticket's planner session: its start and its end take {}.
   'ticket-planner': { shape: '{}', schema: z.strictObject({}) },
@@ -376,8 +377,9 @@ export function postHandlers(ctx: DashboardContext, feed: Pick<DashboardFeed, 'c
     }
     if (target.kind === 'ticket-chat') {
       // Setup.setPlanningChat: the names and a missing Task file refused, a live job allowed, a link
-      // that is not a https://chatgpt.com/ one refused (invalid_chat_link); the ticket and the jobs
-      // reach every page again (the job's card and page show the link).
+      // that is neither a https://chatgpt.com/ one nor a https://claude.ai/code/<session> one refused
+      // (invalid_chat_link); the ticket and the jobs reach every page again (the job's card and page
+      // show the link).
       const key = jobKey(target.workspace, target.ticket);
       if (key === undefined) {
         return undefined;

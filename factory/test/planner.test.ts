@@ -50,14 +50,20 @@ test('resultConversation names the workspace, the ticket and the tools, as the u
   assert.ok(conversationUrl(long).length < MAX_CONVERSATION_URL, String(conversationUrl(long).length));
 });
 
-test('planningChatUrl takes only a https://chatgpt.com/ link: no other scheme, host, subdomain, port or credentials, at most 2048 characters', () => {
+test('planningChatUrl takes a https://chatgpt.com/ link (no other scheme, host, subdomain, port or credentials, at most 2048 characters) or exactly a https://claude.ai/code/<session> link', () => {
   assert.equal(planningChatUrl('https://chatgpt.com/c/6735-abcd'), 'https://chatgpt.com/c/6735-abcd');
   assert.equal(planningChatUrl('  https://chatgpt.com/g/g-p-x/c/6735-abcd \n'), 'https://chatgpt.com/g/g-p-x/c/6735-abcd');
+  assert.equal(planningChatUrl('https://claude.ai/code/session_01Ab'), 'https://claude.ai/code/session_01Ab');
+  assert.equal(planningChatUrl(' https://claude.ai/code/x-Y_9 '), 'https://claude.ai/code/x-Y_9');
+  assert.equal(planningChatUrl(`https://claude.ai/code/${'a'.repeat(128)}`), `https://claude.ai/code/${'a'.repeat(128)}`);
   const refused = ['http://chatgpt.com/', 'https://chat.openai.com/', 'https://evil.chatgpt.com/', 'https://chatgpt.com.evil.com/', 'https://u:p@chatgpt.com/', 'https://chatgpt.com:444/',
-    'javascript:alert(1)', `https://chatgpt.com/c/${'a'.repeat(2049 - 'https://chatgpt.com/c/'.length)}`, 'not a link', ''];
+    'javascript:alert(1)', `https://chatgpt.com/c/${'a'.repeat(2049 - 'https://chatgpt.com/c/'.length)}`, 'not a link', '',
+    'http://claude.ai/code/x', 'https://claude.ai/chat/x', 'https://claude.ai/code/', 'https://claude.ai/code/a/b', 'https://claude.ai/code/x?y=1', 'https://claude.ai/code/x#y',
+    'https://claude.ai/code/x?', 'https://claude.ai/code/x#', 'https://CLAUDE.ai/code/x', 'https://evil.claude.ai/code/x', 'https://claude.ai.evil.com/code/x',
+    'https://u:p@claude.ai/code/x', 'https://claude.ai:444/code/x', `https://claude.ai/code/${'a'.repeat(129)}`, 'https://claude.ai/'];
   for (const text of refused) {
     assert.throws(() => planningChatUrl(text), (error: unknown) => error instanceof FactoryError && error.code === 'invalid_chat_link'
-      && error.message === 'Only a https://chatgpt.com/ conversation link can be saved.', text);
+      && error.message === 'Only a https://chatgpt.com/ conversation link or a https://claude.ai/code/<session> link can be saved.', text);
   }
 });
 
@@ -370,6 +376,13 @@ test('Setup: the planning chat link saved, replaced and removed in <ticket>.chat
   assert.equal((await setup.setPlanningChat('app', 'C-1', null)).planning_chat, null);
 
   await rm(jobs.dir('app', 'C-1'), { recursive: true });
+  // A Claude planner session link: saved trimmed, read back by tickets() and planningOf.
+  assert.equal((await setup.setPlanningChat('app', 'C-1', ' https://claude.ai/code/session_01Ab ')).planning_chat, 'https://claude.ai/code/session_01Ab');
+  assert.equal(await readFile(file, 'utf8'), 'https://claude.ai/code/session_01Ab');
+  assert.equal((await setup.tickets())[0]!.planning_chat, 'https://claude.ai/code/session_01Ab');
+  assert.deepEqual(await setup.planningOf('app', 'C-1'), { owner: 'chatgpt', planning_chat: 'https://claude.ai/code/session_01Ab' });
+  await refusedWith(setup.setPlanningChat('app', 'C-1', 'https://claude.ai/code/x?y=1'), 'invalid_chat_link');
+  assert.equal(await readFile(file, 'utf8'), 'https://claude.ai/code/session_01Ab');
   await setup.setPlanningChat('app', 'C-1', 'https://chatgpt.com/c/three');
   await setup.deleteTicket('app', 'C-1');
   await assert.rejects(readFile(file), { code: 'ENOENT' });

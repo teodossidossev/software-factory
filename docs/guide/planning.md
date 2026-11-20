@@ -53,7 +53,9 @@ result over with the planner and send the Implementer the change you agree on.
   long), the page offers the message to copy instead.
 - **The planning chat link**: paste the link of the conversation the ticket was planned in into the
   field *Planning chat link* (the ticket's page, Planning conversation; or the job's page) and
-  Save. Only a `https://chatgpt.com/` link is kept. Then *Open the planning chat ↗* on the ticket's
+  Save. Two kinds of link are kept: a `https://chatgpt.com/` conversation, and a Claude planner
+  session `https://claude.ai/code/<session>` (the link *Open the planner session ↗* opens, and
+  the one its notification carries). Then *Open the planning chat ↗* on the ticket's
   page, the job's card and its page takes you back to it.
 - **Planner suggests changes**: the note `suggest_changes` stored shows on the job's page with
   **Send** and **Dismiss**, and on its card clamped, with *Review the suggestion*. Send gives the

@@ -700,7 +700,8 @@ function tkConversation(row: TicketEntry): HTMLElement {
   const fallback = Object.assign(el('textarea', 'copy-fallback'), { id: 'tk-copy-text', readOnly: true, hidden: true });
   fallback.setAttribute('aria-label', 'The first message');
   content.push(head, el('pre', 'cm', message), fallback);
-  // The ticket's planning chat: the stored link, only a https://chatgpt.com/ one, and its field.
+  // The ticket's planning chat: the stored link, only a https://chatgpt.com/ one or a Claude planner
+  // session link https://claude.ai/code/<session> (planningChatHref), and its field.
   const chat = planningChatHref(row.planning_chat);
   if (chat !== null) {
     content.push(tabLink('fs13', 'Open the planning chat ↗', chat));

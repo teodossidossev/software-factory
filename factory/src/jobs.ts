@@ -1,10 +1,11 @@
 // Job state on disk: <state dir>/jobs/<workspace>/<ticket>/ with job.json, events.jsonl and
-// iterations/NNN/{report.md,patch.diff,meta.json,review.json,gate.json,gate-level.json,gate-override.json,simplify.json} (plus the
+// iterations/NNN/{report.md,patch.diff,meta.json,review.json,gate.json,gate-level.json,gate-override.json,simplify.json,last-review.json} (plus the
 // gate's schema and output files, and tree), ledger.json (the findings ledger) from the first Fix section on, task.md
 // (the Task file as the Implementer was last given it), from MR preparation on mr.md (and mr-factory.md once the user
 // edited it), tests-<N>.json (a run of the workspace's test command on iteration N), planner-suggestion.json (the
 // planner's pending note while the job waits for the user, src/planner.ts), planner-send.json (while
-// a Send of that note runs), and objects/. Strictly parsed;
+// a Send of that note runs), last-review-skill/ and last-review-skill.json (the last review's copy of its skill,
+// src/last-review.ts), and objects/. Strictly parsed;
 // every file but the event log is replaced atomically. Knows nothing about the Implementer session, nor about Git:
 // tree and objects/ are only named here, src/changes.ts writes them.
 import { appendFile, type FileHandle, mkdir, readdir, readFile, rename, rm } from 'node:fs/promises';
@@ -13,6 +14,7 @@ import * as z from 'zod/v4';
 import { writeFileAtomic, writeFileAtomicWith } from './atomic.js';
 import { FactoryError } from './errors.js';
 import { GATE_LEVELS, type GateLevel } from './gate-level.js';
+import type { LastReviewRecord, SkillCopy } from './last-review.js';
 import { type LedgerEntry, ledgerSchema } from './ledger.js';
 import type { ReviewItem, ReviewMethod } from './review.js';
 import type { Suggestion } from './simplify.js';
@@ -493,6 +495,9 @@ export type EventRecord = { ts: string; iteration: number } & (
   // dropped, or its error), and the user's choice on the offer (simplify or skip).
   | { type: 'simplify'; reviewer: string; suggestions: number; dropped: number; error?: string; ignored?: true }
   | { type: 'simplify_chosen'; choice: 'simplify' | 'skip'; suggestions: number }
+  // The last review of the iteration: its comments, or its error (timed_out: it reached its time
+  // limit); ignored when the job had moved on before it ended.
+  | { type: 'last_review'; comments: number; error?: string; timed_out?: true; ignored?: true }
   // A step the user's Pause interrupted: the turn, or a round of a reviewer, thrown away
   // and run again on Resume; never a verdict.
   // A usage limit interrupts the same way: the job parks in waiting_limit.
@@ -612,6 +617,9 @@ function majorUnlessSet(items: ReviewItem[]): ReviewItem[] {
 function withSeverity<T extends ReviewRecord | GateRecord>(record: T): T {
   return 'items' in record && Array.isArray(record.items) ? { ...record, items: majorUnlessSet(record.items) } : record;
 }
+
+// last-review-skill.json as readLastReviewSkill accepts it.
+const skillCopySchema = z.strictObject({ path: z.string(), sha256: z.string().regex(/^[0-9a-f]{64}$/u), files: z.number().int().min(0) });
 
 async function readOrMissing(path: string): Promise<string | undefined> {
   try {
@@ -891,6 +899,41 @@ export class JobStore {
   async readSimplify(workspace: string, ticket: string, number: number): Promise<SimplifyRecord | undefined> {
     const text = await readOrMissing(join(this.iterationDir(workspace, ticket, number), 'simplify.json'));
     return text === undefined ? undefined : (JSON.parse(text) as SimplifyRecord);
+  }
+
+  // The outcome of the last review on an iteration, replaced atomically.
+  async writeLastReview(workspace: string, ticket: string, number: number, record: LastReviewRecord): Promise<void> {
+    await writeFileAtomic(join(this.iterationDir(workspace, ticket, number), 'last-review.json'), Buffer.from(`${JSON.stringify(record, null, 2)}\n`));
+  }
+
+  // The last review of an iteration; undefined when none ended there.
+  async readLastReview(workspace: string, ticket: string, number: number): Promise<LastReviewRecord | undefined> {
+    const text = await readOrMissing(join(this.iterationDir(workspace, ticket, number), 'last-review.json'));
+    return text === undefined ? undefined : (JSON.parse(text) as LastReviewRecord);
+  }
+
+  // The job's copy of the last review's skill folder (copySkill, src/last-review.ts).
+  lastReviewSkillDir(workspace: string, ticket: string): string {
+    return join(this.dir(workspace, ticket), 'last-review-skill');
+  }
+
+  // What the job's copy of the last review's skill is; undefined when there is none, or the file
+  // is not JSON of that shape.
+  async readLastReviewSkill(workspace: string, ticket: string): Promise<SkillCopy | undefined> {
+    const text = await readOrMissing(join(this.dir(workspace, ticket), 'last-review-skill.json'));
+    let value: unknown;
+    try {
+      value = text === undefined ? undefined : JSON.parse(text);
+    } catch { // a file that is not JSON reads as no copy: the caller copies the skill again
+      return undefined;
+    }
+    const parsed = skillCopySchema.safeParse(value);
+    return parsed.success ? parsed.data : undefined;
+  }
+
+  // Replaced atomically.
+  async writeLastReviewSkill(workspace: string, ticket: string, copy: SkillCopy): Promise<void> {
+    await writeFileAtomic(join(this.dir(workspace, ticket), 'last-review-skill.json'), Buffer.from(`${JSON.stringify(copy, null, 2)}\n`));
   }
 
   async writeGateOverride(workspace: string, ticket: string, number: number, override: GateOverride): Promise<void> {

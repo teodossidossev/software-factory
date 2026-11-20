@@ -128,10 +128,13 @@ export interface RedactorOptions {
 // short value ("1", true, main) is quoting code, not a secret.
 const OUTPUT_MIN_VALUE = 8;
 // The free-text fields of a reviewer's output: the verdict's summary, its items' problem
-// and expected (review.ts), the suggestions' what and why (simplify.ts), and a Task check output's
-// paraphrase and its findings' where, problem and expected (task-check.ts). Every other field stays
-// as it is: the ledger and the scope checks compare them.
-const OUTPUT_LISTS: ReadonlyArray<[string, readonly string[]]> = [['items', ['problem', 'expected']], ['suggestions', ['what', 'why']], ['findings', ['where', 'problem', 'expected']]];
+// and expected (review.ts), the suggestions' what and why (simplify.ts), a Task check output's
+// paraphrase and its findings' where, problem and expected (task-check.ts), and the last review's
+// comments' text (last-review.ts). Every other field stays as it is: the ledger and the scope
+// checks compare them.
+const OUTPUT_LISTS: ReadonlyArray<[string, readonly string[]]> = [
+  ['items', ['problem', 'expected']], ['suggestions', ['what', 'why']], ['findings', ['where', 'problem', 'expected']], ['comments', ['text']],
+];
 
 export class Redactor {
   readonly #cwd: string;

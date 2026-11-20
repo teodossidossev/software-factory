@@ -98,7 +98,7 @@ const USAGE = `Usage:
   sf up [--no-open] [--no-tunnel]                       sf serve (with its tunnel; --no-tunnel: SF_TUNNEL=off) in one terminal, and open the dashboard; Ctrl+C stops both
   sf dashboard [--open] [--rotate]                      Print the dashboard URL; --open also opens it (xdg-open); --rotate removes the token so the next sf serve makes a new one
   sf workspace add <name> --read <path> [--handoff checkout|off] [--color <name>] [--label <text>]  Register a workspace: the local checkout (every job works in a worktree of it); --handoff: its own hand-over setting, over SF_HANDOFF; --color: its colour on the board (blue, teal, green, olive, orange, red, purple or grey; default: by its name); --label: what its cards on the dashboard show instead of its name (one line, at most 24 characters; "" removes it). Again with the same path: changes the --handoff, --color and --label given
-  sf workspace list                                     List registered workspaces, their hand-over setting and colour, their label when they have one, their notify setting when it is not full, and auto-planner: on when it is on
+  sf workspace list                                     List registered workspaces, their hand-over setting and colour, their label when they have one, their notify setting when it is not full, and auto-planner: on when it is on, and the last review's skill when it has one
   sf workspace notify <name> full|brief|off             How much the notifications of the workspace's jobs and Task checks tell: full (the default); brief, ntfy gets the title and one line (the workspace and an error's code; a plan not ready keeps its counts; the desktop stays full); off, none. Applies to the next notification
   sf workspace auto-planner <name> on|off               Whether New ticket on the dashboard, for Claude Code, starts the ticket's planner session once its images are stored (as Create & plan); off (the default) leaves the start to you
   sf workspace remove <name>                            Unregister a workspace
@@ -515,12 +515,13 @@ async function workspace(args: string[]): Promise<void> {
       console.log('No workspaces registered.');
     }
     for (const [name, entry] of entries) {
-      // The label only when it has one, the notify setting only when it is not the default, and
-      // auto-planner only when it is on.
+      // The label only when it has one, the notify setting only when it is not the default,
+      // auto-planner only when it is on, and the last review's skill only when it has one.
       const notify = workspaceNotify(entry);
       const label = entry.label !== undefined ? `\n  label: ${entry.label}` : '';
       const autoPlanner = entry.auto_planner === true ? '\n  auto-planner: on' : '';
-      console.log(`${name}\n  checkout: ${entry.read_checkout}\n  hand-over: ${handoffLabel(entry)}\n  colour: ${colorLabel(name, entry)}${label}${notify !== 'full' ? `\n  notify: ${notify}` : ''}${autoPlanner}`);
+      const lastReview = entry.last_review_skill !== undefined ? `\n  last review: ${entry.last_review_skill}` : '';
+      console.log(`${name}\n  checkout: ${entry.read_checkout}\n  hand-over: ${handoffLabel(entry)}\n  colour: ${colorLabel(name, entry)}${label}${notify !== 'full' ? `\n  notify: ${notify}` : ''}${autoPlanner}${lastReview}`);
     }
     return;
   }

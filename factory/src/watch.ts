@@ -148,6 +148,19 @@ function recordLines(record: Record<string, unknown>): string[] {
     const count = typeof record.suggestions === 'number' ? record.suggestions : 0;
     return [`${prefix} simplification ${record.choice === 'skip' ? 'skipped' : 'chosen'} by the user: ${count} ${count === 1 ? 'suggestion' : 'suggestions'}`];
   }
+  // The last review: its comments, its error or its time limit (LAST_REVIEW_TIMEOUT_MS of
+  // src/last-review.ts, written out so the display does not load the session's module).
+  if (record.type === 'last_review') {
+    const ignored = record.ignored === true ? ' (ignored: the job had moved on)' : '';
+    if (record.timed_out === true) {
+      return [`${prefix} last review timed out after 10 minutes${ignored}`];
+    }
+    if (typeof record.error === 'string') {
+      return [`${prefix} last review failed: ${oneLine(record.error)}${ignored}`];
+    }
+    const count = typeof record.comments === 'number' ? record.comments : 0;
+    return [`${prefix} last review: ${count} ${count === 1 ? 'comment' : 'comments'}${ignored}`];
+  }
   // A step the user's Pause interrupted, and a Task file changed while paused.
   if (record.type === 'interrupted') {
     const who = typeof record.reviewer === 'string' ? ` by ${record.reviewer}` : '';

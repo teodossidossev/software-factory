@@ -15,7 +15,9 @@
 // (full, brief or off: how much its notifications tell; absent: full) and an optional `auto_queue`
 // (src/queue.ts addByItself: a Task whose plan is ready joins the run queue by itself; absent: false)
 // and an optional `auto_planner` (New ticket on the dashboard with the owner Claude Code starts the
-// ticket's planner session once its images are stored; absent: false).
+// ticket's planner session once its images are stored; absent: false) and an optional
+// `last_review_skill` (src/last-review.ts: the absolute path of the folder of the last review's
+// skill; absent: no last review).
 import { mkdir, readFile, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
@@ -145,6 +147,7 @@ const registrySchema = z.strictObject({
       test_command: testCommand.optional(),
       auto_queue: z.boolean().optional(),
       auto_planner: z.boolean().optional(),
+      last_review_skill: absolutePath.optional(),
     }),
   ),
   digest: digestSettingsSchema.optional(),
@@ -240,8 +243,8 @@ export async function setWorkspaceAutoPlanner(name: string, on: boolean, dir = c
 
 // What the Setup's Edit replaces; "" removes description, app and label, 'default' the handoff
 // key, 'auto' the color key, and digest with both false the digest key; an absent label keeps the
-// label. work_checkout, rules_skip, guard, test_command, notify, auto_queue and auto_planner stay
-// as they are.
+// label. work_checkout, rules_skip, guard, test_command, notify, auto_queue, auto_planner and
+// last_review_skill stay as they are.
 export interface WorkspaceEdit {
   read_checkout: string;
   description: string;
@@ -313,6 +316,8 @@ export interface Workspace {
   autoQueue?: boolean;
   // "auto_planner": true in workspaces.json; absent otherwise.
   autoPlanner?: boolean;
+  // The workspace's last_review_skill: the folder of the last review's skill; absent: no last review.
+  lastReviewSkill?: string;
 }
 
 // The entries whose ignored work_checkout differs from the checkout, for one warning at start.
@@ -391,6 +396,7 @@ export async function resolveWorkspace(name: string, dir = configDir()): Promise
       ...(entry.test_command !== undefined ? { testCommand: entry.test_command } : {}),
       ...(entry.auto_queue === true ? { autoQueue: true } : {}),
       ...(entry.auto_planner === true ? { autoPlanner: true } : {}),
+      ...(entry.last_review_skill !== undefined ? { lastReviewSkill: entry.last_review_skill } : {}),
     };
   } catch (error) {
     if (error instanceof FactoryError) {

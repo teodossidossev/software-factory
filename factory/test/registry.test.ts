@@ -86,6 +86,20 @@ test('resolveWorkspace and editedEntry (SF-122): guard: true only when the entry
   assert.deepEqual(editedEntry({ read_checkout: '/srv/a', guard: true }, edit), { read_checkout: '/srv/b', guard: true });
 });
 
+test('parseRegistry, resolveWorkspace and editedEntry (LR1-10): last_review_skill is an absolute path, a relative one or a non-string refused; lastReviewSkill when set; the Edit keeps it', async () => {
+  assert.deepEqual(parseRegistry(JSON.stringify({ workspaces: { app: { read_checkout: '/srv/app', last_review_skill: '/srv/skills/review' } } })).workspaces.app, { read_checkout: '/srv/app', last_review_skill: '/srv/skills/review' });
+  for (const skill of ['skills/review', './review', '', true, 1, null]) {
+    invalid(JSON.stringify({ workspaces: { app: { read_checkout: '/srv/app', last_review_skill: skill } } }));
+  }
+  assert.throws(() => parseRegistry(JSON.stringify({ workspaces: { app: { read_checkout: '/srv/app', last_review_skill: 'review' } } })), /workspaces\.app\.last_review_skill/);
+  const dir = join(temp, 'resolve-last-review');
+  await saveRegistry({ workspaces: { on: { read_checkout: repo, last_review_skill: '/srv/skills/review' }, unset: { read_checkout: repo } } }, dir);
+  assert.deepEqual(await resolveWorkspace('on', dir), { name: 'on', readCheckout: repo, workCheckout: repo, lastReviewSkill: '/srv/skills/review' });
+  assert.deepEqual(await resolveWorkspace('unset', dir), { name: 'unset', readCheckout: repo, workCheckout: repo });
+  const edit = { read_checkout: '/srv/b', description: '', app: '', handoff: 'default', color: 'auto', digest: { track: false, my_work: false } } as const;
+  assert.deepEqual(editedEntry({ read_checkout: '/srv/a', last_review_skill: '/srv/skills/review' }, edit), { read_checkout: '/srv/b', last_review_skill: '/srv/skills/review' });
+});
+
 test('parseRegistry, resolveWorkspace and editedEntry (SF-234): auto_queue is true or false, any other value refused; autoQueue only when true; the Edit keeps it', async () => {
   for (const autoQueue of [true, false]) {
     assert.deepEqual(parseRegistry(JSON.stringify({ workspaces: { app: { read_checkout: '/srv/app', auto_queue: autoQueue } } })).workspaces.app, { read_checkout: '/srv/app', auto_queue: autoQueue });

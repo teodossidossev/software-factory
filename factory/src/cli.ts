@@ -341,7 +341,7 @@ async function serve(options: { tunnel?: 'off' } = {}): Promise<{ dashboard: URL
       // acceptGate and archiveFinished) run on the same Execution as the socket commands.
       dashboard = await startDashboard(dashboardPort, config.stateDir, jobs, execution, setup, {
         gate: config.gate.on, checks, queue: runQueue, onWorkspacesChanged: () => void autoChecks?.rereadWorkspaces(), digests, remoteOrigins, remoteLogins, remotePort,
-        planner: { start: (w, t) => startPlanner(w, t, sessionDeps), session: (w, t) => plannerSession(w, t, sessionDeps), stop: (w, t) => stopPlanner(w, t, sessionDeps) },
+        planner: { start: (w, t, result) => startPlanner(w, t, sessionDeps, result), session: (w, t) => plannerSession(w, t, sessionDeps), stop: (w, t) => stopPlanner(w, t, sessionDeps) },
         ...(healthMonitor !== undefined ? { health: healthMonitor } : {}),
         ...(prototypes !== undefined ? { prototypes } : {}),
       });

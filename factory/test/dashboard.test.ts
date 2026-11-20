@@ -559,7 +559,7 @@ test('dashboard: jobs, job detail, report, patch and mr endpoints; bad names are
     assert.equal(all[0].progress, null);
 
     // SF-208: the planner block; awaiting_review does not wait for the user.
-    assert.deepEqual(all[1].planner, { chat: null, discuss: null, suggestion: null });
+    assert.deepEqual(all[1].planner, { owner: 'chatgpt', chat: null, discuss: null, suggestion: null });
     const detail = JSON.parse((await fetchRaw(new URL('api/jobs/app/T-1', base))).body);
     assert.equal(detail.job.branch, 'T-1-demo');
     assert.deepEqual(detail.job.planner, all[1].planner);

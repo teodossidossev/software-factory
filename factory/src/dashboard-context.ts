@@ -99,10 +99,11 @@ export function jobKey(workspace: string | undefined, ticket: string | undefined
 }
 
 // A ticket's planner session as the planned ticket page shows it: its name in Claude Code, when
-// it started and its claude.ai link once the session's hook recorded it (else null); null for
-// none. No pid and no id: the page needs neither, and the hook's write is checked against the id.
-export function plannerSessionView(session: PlannerSession | undefined): { name: string; started_at: string; link: string | null } | null {
-  return session === undefined ? null : { name: session.name, started_at: session.started_at, link: session.link ?? null };
+// it started, its claude.ai link once the session's hook recorded it (else null) and the job's
+// iteration it was started on (result_of, else null); null for none. No pid and no id: the page
+// needs neither, and the hook's write is checked against the id.
+export function plannerSessionView(session: PlannerSession | undefined): { name: string; started_at: string; link: string | null; result_of: number | null } | null {
+  return session === undefined ? null : { name: session.name, started_at: session.started_at, link: session.link ?? null, result_of: session.result_of ?? null };
 }
 
 // What a path is for the method rule: a job action (POST only), a setup action (POST only), a
@@ -141,9 +142,10 @@ export type Target =
   // One of the dashboard's pins: POST api/pins/<id> changes it and POST api/pins/<id>/remove
   // removes it (id as the path has it, checked by the post), POST only.
   | { kind: 'pin'; id: string; remove: boolean }
-  // The ticket's planner session: GET api/tickets/<ws>/<ticket>/planner reads it, POST starts it;
-  // POST .../planner/stop (stop) ends it, POST only.
-  | { kind: 'ticket-planner'; workspace: string | undefined; ticket: string | undefined; stop: boolean }
+  // The ticket's planner session: GET api/tickets/<ws>/<ticket>/planner reads it, POST starts it
+  // (start); POST .../planner/stop (stop) ends it and POST .../planner/discuss (discuss) starts it
+  // on the result of the ticket's job, both POST only.
+  | { kind: 'ticket-planner'; workspace: string | undefined; ticket: string | undefined; action: 'start' | 'stop' | 'discuss' }
   // A request for the coordinator's status (a click on Zen's screen): POST
   // api/coordinator/request, POST only.
   | { kind: 'coordinator-request' }
@@ -194,8 +196,11 @@ export function targetOf(path: string[]): Target {
   if (kind === 'tickets' && path.length === 5 && c === 'task') {
     return { kind: 'ticket-task', workspace: a, ticket: b };
   }
-  if (kind === 'tickets' && c === 'planner' && (path.length === 5 || (path.length === 6 && path[5] === 'stop'))) {
-    return { kind: 'ticket-planner', workspace: a, ticket: b, stop: path.length === 6 };
+  if (kind === 'tickets' && c === 'planner' && path.length === 5) {
+    return { kind: 'ticket-planner', workspace: a, ticket: b, action: 'start' };
+  }
+  if (kind === 'tickets' && c === 'planner' && path.length === 6 && (path[5] === 'stop' || path[5] === 'discuss')) {
+    return { kind: 'ticket-planner', workspace: a, ticket: b, action: path[5] };
   }
   if (kind === 'tickets' && path.length === 5 && c === 'attachments') {
     return { kind: 'ticket-attachment-add', workspace: a, ticket: b };

@@ -255,4 +255,11 @@ of the commit they review, and the factory's notes are its process, not the chan
 merge request received a contested nit with its ledger id and the argument between reviewer and
 Implementer.
 
+The MR text turn is also told who reads the text: the colleagues who review the merge request,
+with no ids of decisions or findings and no word of who decided what or how the change was made
+(the user's decision D-2 of SF-310-2). A text that holds one of the notes' headings, or an id of a
+decision or a finding outside code, is refused (`mr_text_invalid`), and the refusal names the
+lines of the description to delete, so the text of a job prepared before this amendment can be
+cleaned on the Merge request screen and pushed.
+
 The rest of this ADR stands.

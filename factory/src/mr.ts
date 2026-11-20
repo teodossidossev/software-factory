@@ -8,7 +8,7 @@ import { join, resolve } from 'node:path';
 import { FactoryError } from './errors.js';
 import { runGit } from './git.js';
 import { changedPaths, writeResolutionPatch } from './patch.js';
-import { COMMIT_TYPES, headerProblem, manualClaim, MAX_HEADER_CHARS, MR_REQUIRED_HEADINGS, testingProblem } from './rules.js';
+import { COMMIT_TYPES, headerProblem, manualClaim, MAX_HEADER_CHARS, MR_REQUIRED_HEADINGS, processProblem, testingProblem } from './rules.js';
 import { TASK_DIR } from './task-file.js';
 
 const FETCH_TIMEOUT_MS = 60_000;
@@ -136,7 +136,7 @@ export function mrTextProblem(ticket: string, text: string): string | undefined 
   if (missing.length > 0) {
     return `it lacks the heading(s) ${missing.join(', ')}`;
   }
-  return testingProblem(lines);
+  return testingProblem(lines) ?? processProblem(ticket, mrMessage(text).body.split('\n'));
 }
 
 // The MR text the Implementer wrote into the worktree, validated: missing or empty is
@@ -324,7 +324,9 @@ export async function validBranchName(cwd: string, name: string): Promise<boolea
 // Every problem of an MR text and its branch and base for the Merge request screen, each
 // with its field, in the screen's words: the title against the commit header rule (headerProblem),
 // the body once per missing required heading and once for a manual check claimed as run
-// (testingProblem), an empty branch or base. The same rules as mrTextProblem, every problem listed.
+// (testingProblem), once for the factory's notes or an id of a decision or a finding
+// (processProblem: the reader rule), an empty branch or base. The same rules as mrTextProblem,
+// every problem listed.
 export function mrProblems(ticket: string, message: { title: string; body: string }, branch: string, base: string): Array<{ field: 'title' | 'body' | 'branch' | 'base'; message: string }> {
   const problems: Array<{ field: 'title' | 'body' | 'branch' | 'base'; message: string }> = [];
   const title = message.title;
@@ -351,6 +353,10 @@ export function mrProblems(ticket: string, message: { title: string; body: strin
   const claim = manualClaim(lines);
   if (claim !== undefined) {
     problems.push({ field: 'body', message: `Testing claim: the ## Testing line "${claim.trim().slice(0, 90)}" reads as a check that was run. Anything not run goes on a line starting with "Not checked:".` });
+  }
+  const notForReviewers = processProblem(ticket, message.body.split('\n'));
+  if (notForReviewers !== undefined) {
+    problems.push({ field: 'body', message: `Not for the reviewers: ${notForReviewers}.` });
   }
   return problems;
 }

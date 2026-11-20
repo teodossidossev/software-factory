@@ -3308,7 +3308,10 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    rebases and pushes, and that the commit message is the whole MR text: the title as the header,
    then the body. It states `MR_TESTING_RULE` (`src/rules.ts`): `## Testing` lists only what was
    run in this job, with its result, and anything not run goes on a line starting with
-   `Not checked:`, saying who can run it. It asks for a short report (`# Report: <ticket>, MR
+   `Not checked:`, saying who can run it. Before it, on its own line, it states `MR_READER_RULE`
+   (`src/rules.ts`): the text speaks to the colleagues who review the merge request, with no ids
+   of decisions or findings, no word of who decided what or how the change was made, and none of
+   the factory's notes. It asks for a short report (`# Report: <ticket>, MR
    preparation <attempt>`, `## Done`, `## Open questions`) and ends with the Handbook's `## Git rules` and `## MR template` verbatim.
 
    **The test step** (SF-128, `src/test-command.ts`). The factory runs the workspace's
@@ -3522,7 +3525,7 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
    |---|---|
    | `implementer_question` | the reviewed change has nothing to commit against `base_commit` and the Report of the iteration has open questions (not empty, not "None."): checked before the MR text is read (`src/question-stop.ts`); the message is `The Implementer changed nothing and asks: <the questions>`, whitespace collapsed and cut at 400 characters with "…". A decision: `sf say` answers it |
    | `mr_text_missing` | `.software-factory/<ticket>.mr.md` absent or empty |
-   | `mr_text_invalid` | over 64 KiB, a first line that breaks `commitHeader(ticket)` in `src/rules.ts` (`<type>(<ticket>): <summary>`, type one of `feat fix chore refactor docs test perf build ci style revert`, at most 72 characters, no trailing period), or a missing `## What`, `## Why`, `## How`, `## Why the change`, `## Special things to note`, `## Change outline`, `## Testing` or `## Checklist` heading, or a `## Testing` line that starts with `By hand` or `Manual` (after any list marker, checkbox or emphasis) and does not contain `not` (`testingProblem` in `src/rules.ts`) |
+   | `mr_text_invalid` | over 64 KiB, a first line that breaks `commitHeader(ticket)` in `src/rules.ts` (`<type>(<ticket>): <summary>`, type one of `feat fix chore refactor docs test perf build ci style revert`, at most 72 characters, no trailing period), or a missing `## What`, `## Why`, `## How`, `## Why the change`, `## Special things to note`, `## Change outline`, `## Testing` or `## Checklist` heading, or a `## Testing` line that starts with `By hand` or `Manual` (after any list marker, checkbox or emphasis) and does not contain `not` (`testingProblem` in `src/rules.ts`), or one of the factory's note headings, or an id of a decision or a finding (`processProblem` in `src/rules.ts`: the lines to delete, numbered as the description holds them) |
    | `mr_empty` | the reviewed change has nothing to commit against `base_commit` |
    | `unreviewed_change` | the worktree changed again after the review of an iteration that itself brought an unreviewed change back to review (nothing is committed or published) |
    | `mr_commit_failed` | `git commit` failed, for example without a Git identity (stderr in the message) |
@@ -5466,8 +5469,9 @@ runs), the state checked before and after. Every check comes first; a refusal ch
 
 - The text is composed as the commit message is written (the title, a blank line, the body and a
   final newline) and must pass the factory's own rules (`mrTextProblem`: the title rule, the
-  required headings, SF-058, at most 64 KiB), else `400 mr_text_invalid`. The first save keeps the
-  factory's text as `mr-factory.md` next to `mr.md`; `edited` means the two differ.
+  required headings, SF-058, at most 64 KiB, no factory notes and no decision or finding ids),
+  else `400 mr_text_invalid`. The first save keeps the factory's text as `mr-factory.md` next to
+  `mr.md`; `edited` means the two differ.
 - **Commit message.** When the saved text differs from the prepared commit's message, the factory
   rewrites it before any push, in the job's worktree under the workspace's Git lock: `git commit
   --amend --only --cleanup=verbatim -F <file in the Git dir>`, hooks off. The tree, the author and
@@ -5495,7 +5499,9 @@ runs), the state checked before and after. Every check comes first; a refusal ch
   the Stream as the user's note; `factory_new` (section MR preparation) as the factory's.
 - **Before a push**, approve and `sf mr create` refuse with `mr_text_invalid` while `mr.md` fails
   the rules or is not the message of the commit the push would carry (`prepared_commit`; in
-  `handed_over` the saved one); a handed-over push of the user's own commits is not checked.
+  `handed_over` the saved one); a handed-over push of the user's own commits is not checked. A
+  text written before SF-310, which still holds the factory's notes, is refused with the lines of
+  its notes named, numbered as the Description field holds them: delete them, save, and push.
 
 ### Merge requests
 

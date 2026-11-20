@@ -511,6 +511,14 @@ title: the commit header. Then a blank line and this body, every heading kept in
 "Screenshots" and "Browser support verified" apply to user interface changes; write `N/A`
 otherwise. A checklist box is ticked only for what was done.
 
+The MR text speaks to the colleagues who review the merge request and to no one else: what
+changed, why, how, how it was tested and what a reviewer should watch. It never says how the change
+was made or who decided what: no ids of decisions or findings (`D-1`, `T-13`, `R7`), no "the user
+accepted" or "the user asked", no "the Task", "the coordinator", "iteration" or "hand-over", no
+count of files or lines against a budget. The factory's own notes are never part of it. A text
+holding one of their headings, or such an id outside code, is refused (`mr_text_invalid`), naming
+the lines.
+
 ```markdown
 <type>(<ticket>): <summary, the commit header>
 

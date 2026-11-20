@@ -59,6 +59,9 @@ export interface Config {
   taskCheckAuto: boolean;
   // The automatic checks that run at once over every workspace, 1-4 (SF_TASK_CHECK_PARALLEL).
   taskCheckParallel: number;
+  // The Codex check of a Task not written by ChatGPT's write_task (SF_TASK_CHECK_CODEX): auto runs
+  // it, off never; a Config without it (the tests' literals) counts as off.
+  taskCheckCodex?: 'auto' | 'off';
   // The bytes of rule file content given to the agents at most (SF_RULES_MAX_BYTES).
   rulesMaxBytes: number;
   // The Codex gate, beside the Claude review in the same round: the executable, or why the gate is off.
@@ -420,6 +423,15 @@ export function taskCheckAutoSetting(env: NodeJS.ProcessEnv = process.env): bool
   return mode === 'on';
 }
 
+// SF_TASK_CHECK_CODEX: auto or off (the default).
+export function taskCheckCodexSetting(env: NodeJS.ProcessEnv = process.env): 'auto' | 'off' {
+  const mode = env.SF_TASK_CHECK_CODEX || 'off';
+  if (mode !== 'auto' && mode !== 'off') {
+    throw new FactoryError('invalid_config', `SF_TASK_CHECK_CODEX must be auto or off, got "${mode}".`);
+  }
+  return mode;
+}
+
 // SF_TEST_TIMEOUT_MS: 30 minutes by default, at most 4 hours.
 export const DEFAULT_TEST_TIMEOUT_MS = 30 * 60_000;
 export const MAX_TEST_TIMEOUT_MS = 4 * 60 * 60_000;
@@ -477,6 +489,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     taskCheckMaxTurns: positiveInteger(env, 'SF_TASK_CHECK_MAX_TURNS', 30),
     taskCheckAuto: taskCheckAutoSetting(env),
     taskCheckParallel: positiveInteger(env, 'SF_TASK_CHECK_PARALLEL', 1, MAX_TASK_CHECK_PARALLEL),
+    taskCheckCodex: taskCheckCodexSetting(env),
     rulesMaxBytes: rulesMaxBytes(env),
     gate: gateConfig(env),
     codexModel: env.SF_CODEX_MODEL || undefined,

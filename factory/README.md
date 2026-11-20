@@ -712,6 +712,7 @@ relative one is one warning at start, and the dashboard then shows none.
 | `SF_TASK_CHECK_MAX_TURNS` | `30` | `maxTurns` of the Task check (SF-054); its model is `SF_REVIEW_MODEL`. |
 | `SF_TASK_CHECK_AUTO` | `on` | The automatic Task check of `sf serve` (SF-086, section Task check): `on` checks a written Task file 60 s after its last change; `off` keeps the check manual (Check on the board, `sf check-task`). Empty is the default; anything else refuses to start (`invalid_config`). |
 | `SF_TASK_CHECK_PARALLEL` | `1` | The automatic Task checks that run at once over every workspace, 1 to 4 (SF-086); a manual Check counts toward it but never waits. Anything else refuses to start (`invalid_config`). |
+| `SF_TASK_CHECK_CODEX` | `off` | The Codex check of a Task not written by ChatGPT's `write_task` (section Task check): `auto` runs it beside the Claude check, `off` never. Empty is the default; anything else refuses to start (`invalid_config`). |
 | `SF_HEALTH` | `on` | `sf serve`'s health checks (SF-153, section Health checks): `on` runs them every 30 s for the dashboard's light and the notifications; `off` runs none (the tests' own `sf serve`s), the light stays grey. `sf health` runs its checks whatever it says. Empty is the default; anything else refuses to start (`invalid_config`). |
 | `SF_KEEP_AWAKE` | `on` | Keeps the laptop from sleeping while a job runs (SF-158, section sf up): `on` holds a `systemd-inhibit --what=sleep:idle` child of `sf serve` while any job runs; `off` holds none (the tests' own `sf serve`s). Closing the lid still suspends. Empty is the default; anything else refuses to start (`invalid_config`). |
 | `SF_TUNNEL` | `auto` | The ChatGPT tunnel in `sf serve` (SF-154, section sf up): `auto` starts `scripts/sf-tunnel.sh run` as its child when a tunnel profile exists and no tunnel answers on `SF_TUNNEL_HEALTH`; `off` starts none (run `npm run tunnel` in a terminal of its own). `sf up --no-tunnel` is `off`. Empty is the default; anything else refuses to start (`invalid_config`). |
@@ -1348,8 +1349,39 @@ runs it by itself after each change of a Task file (below); the user can always 
   the Task has a `## Why whole` heading with text under it (`src/slices.ts`); the checker's
   prompt does not change; the verdict is `ready` with no blocker or major and `not_ready` otherwise, whatever the
   checker wrote.
+- **The Codex check** (`src/task-check-codex.ts`, `SF_TASK_CHECK_CODEX`, off by default): a Task
+  file whose text ChatGPT did not write through `write_task` is read by Codex too, so that a second
+  model family checks it, as the Claude check does for a ChatGPT plan. Who wrote the text the check
+  reads, in this order: the ticket's owner (`<state>/requests/<ws>/<ticket>.owner`) is
+  `claude_code` → Codex checks it ("the ticket's planner is Claude Code"); else the last event of
+  the ticket's history of kind `created`, `written`, `edited` or `fix_added` whose `sha256` is the
+  text's: `written` → ChatGPT wrote it, no Codex check; `created` or `edited` → "you wrote it on
+  the ticket's page"; `fix_added` → "the factory added a Fix section to it"; no such event →
+  "it was written outside the factory's tools (an editor or a session's file tools)". A
+  `queued_by_itself` event writes nothing and does not count; a history that cannot be read counts
+  as none. Codex gets the Claude check's prompt, its tools sentence replaced (it has a shell and
+  works read-only), at the same time and in the same check worktree, through the gate's runner:
+  `codex exec --ephemeral --sandbox read-only --disable memories -c memories.use_memories=false
+  [--image <path>]… --cd <worktree> --output-schema <check folder>/codex/codex-check-schema.json
+  --output-last-message <check folder>/codex/codex-check-output.json --json [--model
+  <SF_CODEX_MODEL>] -`, the schema the check's in strict form without `minLength`, inside the
+  gate's wrapper (`gateWrapper`, section Jobs) over a job session's denials in that worktree with the work
+  checkout's `.software-factory/` hidden too; Codex is found as for the gate (`SF_GATE`,
+  `SF_CODEX`), its time limit is `SF_GATE_TIMEOUT_MS` and its token cap one `SF_GATE_MAX_TOKENS`
+  per run. Its output is redacted as a reviewer's and settled by the factory's rules above. The
+  plan is ready only when both checks are: the record's verdict is `failed` when the Claude check
+  failed, `not_ready` when the Claude check or a Codex check that gave an output is not ready, else
+  `ready`; its counts add the Codex findings, one with the kind, where and problem of a Claude
+  finding counted once. A Codex failure holds nothing: the gate off or Codex missing ("Codex is not
+  available (SF_GATE=off); the Claude check decides alone."), a timeout, an error, an invalid answer
+  or one over the token cap is a failed part with its error, and the Claude check decides alone;
+  it is not retried by itself (Check runs both again). `sf check-task` prints the Codex lines
+  (`Codex check (<reason>), model <model or default>, <tokens> tokens`, its findings by severity
+  and `Codex verdict:`) before the `Verdict:` line, and exits 1 only when the Claude check failed.
 - **Storage**: `<state>/checks/<ws>/<ticket>/<first 16 hex of the Task file's sha256>.json`: the
-  output, the model, the estimated cost and the times; never in the work checkout. A later check
+  output, the model, the estimated cost and the times, and the Codex check's part (`codex`: its
+  reason, status, output or error, model, tokens and times) when Codex checked that version; never
+  in the work checkout. A later check
   of the same Task file replaces it. A check of another version of the Task file than the current
   one, or made before a Task file it builds on changed, is **stale**. So is one whose reading of
   the ticket its Task builds on is no longer the one a check would make (`buildsOnHolds` in

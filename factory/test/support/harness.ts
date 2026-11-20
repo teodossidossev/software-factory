@@ -144,6 +144,8 @@ export function processEnv(env: Env): NodeJS.ProcessEnv {
     SF_HANDOFF: 'off',
     // No automatic Task check unless the test turns it on (test/task-check-auto.test.ts, SF-086).
     SF_TASK_CHECK_AUTO: 'off',
+    // No Codex check unless the test turns it on (test/task-check-codex.test.ts).
+    SF_TASK_CHECK_CODEX: 'off',
     // No health checks in the tests' sf serve (SF-153): they would run the fake CLIs' login status.
     SF_HEALTH: 'off',
     // No sleep inhibitor in the tests' sf serve (SF-158): it would run the machine's systemd-inhibit;

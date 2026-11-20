@@ -108,6 +108,11 @@ refused), and the factory's test command passed in a sandbox without network on 
 - **The Codex gate runs in a read-denying wrapper.** It sees no secrets and no other jobs. Secrets
   in its findings are masked. The wrapper refuses new Unix sockets, so the gate cannot reach your
   X server, session bus or other local services through one.
+- **The Codex check of a plan runs in the same wrapper.** With `SF_TASK_CHECK_CODEX=auto`, Codex
+  reads the Task file (in its prompt), its images and the check's own checkout of the
+  repository, read-only, in the gate's wrapper, which also hides the checkout's
+  `.software-factory/` folder (the other Task files and MR texts); the Task file and the
+  repository's code go to OpenAI, as the gate's material does.
 - **The reviewers read the factory's copy of the Task file.** The Claude review, the Codex gate and
   the simplification pass get the Task file, with the factory's Fix sections, from the factory's
   own copy in the job's directory, written each time the factory puts the Task file into the

@@ -26,7 +26,7 @@ const PUBLIC_NAMES = new Set([
   'SF_DASHBOARD', 'SF_DASHBOARD_PORT', 'SF_DESKTOP_NOTIFY', 'SF_ENV_FILE', 'SF_GATE', 'SF_GATE_FULL_PATHS', 'SF_GATE_LEVEL',
   'SF_GATE_MAX_ROUNDS', 'SF_GATE_MAX_TOKENS', 'SF_GATE_TIMEOUT_MS', 'SF_HANDBOOK', 'SF_MAX_ITERATIONS', 'SF_MAX_JOBS',
   'SF_MAX_TURNS', 'SF_MODEL', 'SF_NOTIFY_ITERATIONS', 'SF_PORT', 'SF_REVIEW', 'SF_REVIEW_MAX_TURNS', 'SF_REVIEW_MODEL',
-  'SF_RULES_MAX_BYTES', 'SF_SANDBOX', 'SF_SANDBOX_DOMAINS', 'SF_SENSITIVE_PATHS', 'SF_SMOKE_CODEX_MODEL', 'SF_SMOKE_MODEL', 'SF_STATE_DIR', 'SF_TASK_CHECK_AUTO', 'SF_TASK_CHECK_PARALLEL',
+  'SF_RULES_MAX_BYTES', 'SF_SANDBOX', 'SF_SANDBOX_DOMAINS', 'SF_SENSITIVE_PATHS', 'SF_SMOKE_CODEX_MODEL', 'SF_SMOKE_MODEL', 'SF_STATE_DIR', 'SF_TASK_CHECK_AUTO', 'SF_TASK_CHECK_CODEX', 'SF_TASK_CHECK_PARALLEL',
   'SF_TUNNEL_HEALTH', 'SF_TUNNEL_SCRIPT',
   'SF_TURN_LIMIT_CONTINUES', 'SF_WORKTREE_ROOT',
 ]);
@@ -128,9 +128,10 @@ export interface RedactorOptions {
 // short value ("1", true, main) is quoting code, not a secret.
 const OUTPUT_MIN_VALUE = 8;
 // The free-text fields of a reviewer's output: the verdict's summary, its items' problem
-// and expected (review.ts), the suggestions' what and why (simplify.ts). Every other field stays as
-// it is: the ledger and the scope checks compare them.
-const OUTPUT_LISTS: ReadonlyArray<[string, readonly string[]]> = [['items', ['problem', 'expected']], ['suggestions', ['what', 'why']]];
+// and expected (review.ts), the suggestions' what and why (simplify.ts), and a Task check output's
+// paraphrase and its findings' where, problem and expected (task-check.ts). Every other field stays
+// as it is: the ledger and the scope checks compare them.
+const OUTPUT_LISTS: ReadonlyArray<[string, readonly string[]]> = [['items', ['problem', 'expected']], ['suggestions', ['what', 'why']], ['findings', ['where', 'problem', 'expected']]];
 
 export class Redactor {
   readonly #cwd: string;
@@ -175,6 +176,9 @@ export class Redactor {
     }
     if (typeof copy.summary === 'string') {
       copy.summary = this.#outputText(copy.summary);
+    }
+    if (typeof copy.paraphrase === 'string') {
+      copy.paraphrase = this.#outputText(copy.paraphrase);
     }
     for (const [list, fields] of OUTPUT_LISTS) {
       const entries = copy[list];

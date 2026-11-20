@@ -353,10 +353,10 @@ async function stopOf(jobs: JobStore, job: Job): Promise<{ items: unknown[]; sav
   return { items: [], saves_lines: null };
 }
 
-// A job's planner block: the ticket's planning chat link; while the job waits for the User, the
-// message that opens the conversation about its result (a ChatGPT link when ChatGPT plans the
-// ticket and it fits, else the message to copy); and the planner's suggestion while it is shown
-// (src/planner.ts).
+// A job's planner block: who plans the ticket (owner), the ticket's planning chat link; while the
+// job waits for the User, the message that opens the conversation about its result (a ChatGPT
+// link when ChatGPT plans the ticket and it fits, else the message to copy); and the planner's
+// suggestion while it is shown (src/planner.ts).
 export async function plannerOf(jobs: JobStore, setup: DashboardSetup, job: Job) {
   const { owner, planning_chat } = await setup.planningOf(job.workspace, job.ticket);
   let discuss: { message: string; url: string | null } | null = null;
@@ -365,7 +365,7 @@ export async function plannerOf(jobs: JobStore, setup: DashboardSetup, job: Job)
     const url = owner === 'chatgpt' ? conversationUrl(message) : null;
     discuss = { message, url: url !== null && url.length <= MAX_CONVERSATION_URL ? url : null };
   }
-  return { chat: planning_chat, discuss, suggestion: await shownSuggestion(jobs, job) };
+  return { owner, chat: planning_chat, discuss, suggestion: await shownSuggestion(jobs, job) };
 }
 
 // now: nowOf; tool_calls: the Implementer's tool calls in the job (ToolCallCounter); stop: stopOf;

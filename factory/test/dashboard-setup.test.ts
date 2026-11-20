@@ -360,7 +360,7 @@ test('dashboard ticket page (SF-081): the page payload of a skeleton and of a wr
     const posted = await fetchRaw(new URL('api/tickets/app/T-2/page', base), { method: 'POST', headers: { origin, 'content-type': 'application/json' }, body: '{}' });
     assert.deepEqual([posted.status, posted.headers.allow], [405, 'GET']);
     // Without the dashboard's planner every planner path is an empty 404.
-    for (const reply of [await fetchRaw(new URL('api/tickets/app/T-1/planner', base)), await act(base, 'api/tickets/app/T-1/planner', {}), await act(base, 'api/tickets/app/T-1/planner/stop', {})]) {
+    for (const reply of [await fetchRaw(new URL('api/tickets/app/T-1/planner', base)), await act(base, 'api/tickets/app/T-1/planner', {}), await act(base, 'api/tickets/app/T-1/planner/stop', {}), await act(base, 'api/tickets/app/T-1/planner/discuss', {})]) {
       assert.deepEqual([reply.status, reply.body], [404, '']);
     }
     // A Task file the reader refuses answers the refusal.
@@ -414,7 +414,7 @@ test('dashboard ticket planner: GET reads the ticket\'s planner session, POST st
     const base = dashboard.url;
     const path = 'api/tickets/app/T-5/planner';
     const read = async (): Promise<Reply> => fetchRaw(new URL(path, base));
-    const view = { name: 'Planner app T-5', started_at: '2026-11-16T12:03:00.000Z', link: null };
+    const view = { name: 'Planner app T-5', started_at: '2026-11-16T12:03:00.000Z', link: null, result_of: null };
     // DP-1: none runs.
     const none = await read();
     assert.deepEqual([none.status, none.headers['content-type'], JSON.parse(none.body)], [200, 'application/json; charset=utf-8', { session: null, prototypes: [] }]);
@@ -487,6 +487,98 @@ test('dashboard ticket planner: GET reads the ticket\'s planner session, POST st
     assert.deepEqual(JSON.parse((await read()).body), { session: null, prototypes: [] });
     assert.equal(JSON.parse((await fetchRaw(new URL('api/tickets/app/T-5/page', base))).body).planner_session, null);
     stream.close();
+  } finally {
+    await dashboard.close();
+  }
+});
+
+test('dashboard ticket planner on a job\'s result: POST .../planner/discuss starts the session on the job\'s iteration only while the job waits for the user; a ticket without a job, names, bodies, methods and the refusals; the job payload\'s planner owner', async () => {
+  const store = await fixture('dash-planner-discuss');
+  const setup = fakeSetup([workspaceRow('app')], [ticketRow('app', 'T-5')]);
+  const calls: Array<[string, string, string, { iteration: number } | undefined]> = [];
+  const sessions = new Map<string, PlannerSession>();
+  let refusal: FactoryError | undefined;
+  const planner: DashboardPlanner = {
+    async start(workspace, ticket, result) {
+      calls.push(['start', workspace, ticket, result]);
+      if (refusal !== undefined) {
+        throw refusal;
+      }
+      const kept = sessions.get(`${workspace}/${ticket}`);
+      if (kept !== undefined) {
+        return { started: false, session: kept };
+      }
+      const session: PlannerSession = { workspace, ticket, name: `Planner ${workspace} ${ticket}`, id: 'id-1', pid: 4242, started_at: '2026-11-16T12:03:00.000Z', result_of: result?.iteration };
+      sessions.set(`${workspace}/${ticket}`, session);
+      return { started: true, session };
+    },
+    session: async (workspace, ticket) => sessions.get(`${workspace}/${ticket}`),
+    stop: async () => undefined,
+  };
+  const dashboard = await startDashboard(0, store.state, store.jobs, fakeActions(), setup, { planner });
+  try {
+    const base = dashboard.url;
+    const path = 'api/tickets/app/T-1/planner/discuss';
+    // RD-2: the methods, the names, a ticket without a job (before the body), the bodies.
+    for (const method of ['GET', 'PUT']) {
+      const reply = await fetchRaw(new URL(path, base), { method });
+      assert.deepEqual([reply.status, reply.headers.allow], [405, 'POST'], method);
+    }
+    assert.equal((await fetchRaw(new URL('api/tickets/app/T-1/planner', base), { method: 'PUT' })).headers.allow, 'GET, POST');
+    for (const name of ['api/tickets/App/T-1/planner/discuss', 'api/tickets/app/..%2FT-1/planner/discuss', 'api/tickets/app/T-9/planner/discuss']) {
+      for (const body of [{}, { now: true }]) {
+        const reply = await act(base, name, body);
+        assert.deepEqual([reply.status, reply.body], [404, ''], name);
+      }
+    }
+    for (const text of ['{"now":true}', '[]', 'null']) {
+      const reply = await act(base, path, undefined, { body: text });
+      assert.deepEqual([reply.status, JSON.parse(reply.body).error], [400, { code: 'invalid_body', message: 'ticket-planner-discuss expects {}; no other keys, no null.' }], text);
+    }
+    // A job that does not wait for the user: awaiting_review, and failed.
+    const notWaiting = await act(base, path, {});
+    assert.deepEqual([notWaiting.status, JSON.parse(notWaiting.body).error], [409, {
+      code: 'invalid_state', message: 'The job is awaiting_review; Discuss the result needs a job that waits for the user: needs_human, ready_for_human_review or handed_over.',
+    }]);
+    assert.deepEqual(error(await act(base, 'api/tickets/app/T-0/planner/discuss', {})), { status: 409, code: 'invalid_state' });
+    assert.deepEqual(calls, []);
+
+    // A waiting job: the start on its iteration, then the session that runs.
+    const job = (await store.jobs.read('app', 'T-1'))!;
+    await store.jobs.write({ ...job, state: 'needs_human', iteration: 1 });
+    const view = { name: 'Planner app T-1', started_at: '2026-11-16T12:03:00.000Z', link: null, result_of: 1 };
+    const stream = await openStream(new URL('api/stream', base));
+    await stream.next('tickets');
+    assert.deepEqual(result(await act(base, path, {})), { started: true, session: view });
+    await stream.next('tickets');
+    await store.jobs.write({ ...job, state: 'ready_for_human_review', iteration: 2 });
+    assert.deepEqual(result(await act(base, path, {})), { started: false, session: view });
+    await stream.next('tickets');
+    assert.deepEqual(calls, [['start', 'app', 'T-1', { iteration: 1 }], ['start', 'app', 'T-1', { iteration: 2 }]]);
+    assert.deepEqual(JSON.parse((await fetchRaw(new URL('api/tickets/app/T-1/planner', base))).body), { session: view, prototypes: [] });
+    stream.close();
+
+    // The planner's refusals map as start's.
+    for (const [code, status] of [['planner_starting', 409], ['planning_copy_missing', 409], ['planning_copy_unsafe', 409], ['planning_copy_untrusted', 409], ['workspace_not_found', 404], ['planner_start_failed', 500]] as const) {
+      refusal = new FactoryError(code, `The ${code} message.`);
+      const reply = await act(base, path, {});
+      assert.deepEqual([reply.status, JSON.parse(reply.body)], [status, { ok: false, error: { code, message: `The ${code} message.` } }], code);
+    }
+    refusal = undefined;
+
+    // The job gone between the check and the call: job_not_found.
+    const read = store.jobs.read.bind(store.jobs);
+    let reads = 0;
+    store.jobs.read = async (workspace, ticket) => ((reads += 1) === 1 ? read(workspace, ticket) : undefined);
+    const vanished = await act(base, path, {});
+    store.jobs.read = read;
+    assert.deepEqual([vanished.status, JSON.parse(vanished.body).error], [404, { code: 'job_not_found', message: 'There is no job for app/T-1.' }]);
+
+    // RD-3: the job payload's planner block says who plans the ticket.
+    const ownerOf = async (): Promise<unknown> => JSON.parse((await fetchRaw(new URL('api/jobs/app/T-1', base))).body).job.planner.owner;
+    assert.equal(await ownerOf(), 'chatgpt');
+    setup.rows.tickets.push({ ...ticketRow('app', 'T-1'), owner: 'claude_code' });
+    assert.equal(await ownerOf(), 'claude_code');
   } finally {
     await dashboard.close();
   }

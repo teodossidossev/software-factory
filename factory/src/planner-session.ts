@@ -10,7 +10,10 @@
 // refused with SF_PLANNER_TRUST=ask (the default: the user runs sf planner trust); with auto, start
 // first answers Claude Code's trust dialog for the copy itself (acceptTrustDialog), under the lock,
 // and refuses only when that fails. It never refreshes the copy. A session whose record cannot be
-// written is ended before the lock is released.
+// written is ended before the lock is released. A start may carry the job's result: a new session's
+// first message is then the message about that result (resultConversation, as the job page gives it
+// for Claude Code), and its record keeps the job's iteration as result_of; a running session is
+// answered as it is, never typed into.
 import { type ChildProcess, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { closeSync, openSync, readFileSync } from 'node:fs';
@@ -20,6 +23,7 @@ import { dirname, join } from 'node:path';
 import { writeFileAtomic } from './atomic.js';
 import { checkJob, checkName, UsageError } from './commands.js';
 import { planningDir, plannerTrustSetting } from './config.js';
+import { resultConversation } from './conversation.js';
 import { FactoryError } from './errors.js';
 import { localTime } from './local-time.js';
 import { type HeldLock, ownerAlive, startTime, tryLock } from './pid-lock.js';
@@ -48,6 +52,7 @@ export interface PlannerSession {
   pid: number;          // the pid of script, the session's terminal
   pid_start?: string;   // its start time (pid-lock.ts startTime), so a reused pid is not taken for it
   started_at: string;   // ISO 8601
+  result_of?: number;   // the job's iteration when a start on its result started this session
   link?: string;        // https://claude.ai/code/<id>, once the session's hook recorded it
 }
 
@@ -84,9 +89,16 @@ const word = (text: string): string => `'${text.replaceAll("'", "'\\''")}'`;
 // The session's name in Claude Code.
 const sessionName = (workspace: string, ticket: string): string => `Planner ${workspace} ${ticket}`;
 
-// The command line script runs: fixed text and validated names only.
-function commandLine(workspace: string, ticket: string): string {
-  return `exec claude --remote-control ${word(sessionName(workspace, ticket))} ${word(`/planning-tasks workspace ${workspace}, ticket ${ticket}`)}`;
+// A start on a job's result: the job's iteration at the start.
+export interface ResultStart {
+  iteration: number;
+}
+
+// The command line script runs: fixed text and validated names only. The first message plans the
+// ticket, or with result opens the conversation about the job's result.
+function commandLine(workspace: string, ticket: string, result?: ResultStart): string {
+  const first = result === undefined ? `/planning-tasks workspace ${workspace}, ticket ${ticket}` : resultConversation(workspace, ticket, 'claude_code');
+  return `exec claude --remote-control ${word(sessionName(workspace, ticket))} ${word(first)}`;
 }
 
 // The environment of any Claude Code the planner commands open in the copy: sessionEnvironment's
@@ -115,6 +127,7 @@ function plannerEnvironment(env: NodeJS.ProcessEnv, ticket: string, id: string):
 }
 
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+const wholeFromZero = (value: unknown): value is number => Number.isInteger(value) && (value as number) >= 0;
 
 // The record at file: 'missing' when there is no file, undefined when the file is no record.
 async function readRecord(file: string, workspace: string, ticket: string): Promise<PlannerSession | 'missing' | undefined> {
@@ -141,14 +154,15 @@ async function readRecord(file: string, workspace: string, ticket: string): Prom
     pid: data.pid as number,
     pid_start: typeof data.pid_start === 'string' ? data.pid_start : undefined,
     started_at: data.started_at,
+    result_of: wholeFromZero(data.result_of) ? data.result_of : undefined,
     link: typeof data.link === 'string' ? data.link : undefined,
   };
 }
 
 // The record, its keys in the order of PlannerSession (undefined ones left out).
 function writeRecord(file: string, session: PlannerSession): Promise<void> {
-  const { workspace, ticket, name, id, pid, pid_start, started_at, link } = session;
-  return writeFileAtomic(file, Buffer.from(`${JSON.stringify({ workspace, ticket, name, id, pid, pid_start, started_at, link }, null, 2)}\n`), 0o600);
+  const { workspace, ticket, name, id, pid, pid_start, started_at, result_of, link } = session;
+  return writeFileAtomic(file, Buffer.from(`${JSON.stringify({ workspace, ticket, name, id, pid, pid_start, started_at, result_of, link }, null, 2)}\n`), 0o600);
 }
 
 // A session's process, or the trust run's script.
@@ -220,9 +234,13 @@ const starting = (workspace: string, ticket: string): FactoryError =>
 const startFailed = (workspace: string, ticket: string, why: string): FactoryError =>
   new FactoryError('planner_start_failed', `The planner of ${workspace} ${ticket} did not start: ${why}`);
 
-// Starts the ticket's session, or answers with the one that runs (started false).
-export async function startPlanner(workspace: string, ticket: string, deps: SessionDeps): Promise<{ started: boolean; session: PlannerSession }> {
+// Starts the ticket's session, or answers with the one that runs (started false, its own
+// result_of). result: a start on the job's result, its iteration a whole number from 0.
+export async function startPlanner(workspace: string, ticket: string, deps: SessionDeps, result?: ResultStart): Promise<{ started: boolean; session: PlannerSession }> {
   const [w, t] = checkJob([workspace, ticket], 'planner start');
+  if (result !== undefined && !wholeFromZero(result.iteration)) {
+    throw new FactoryError('invalid_content', 'The iteration must be a whole number from 0.');
+  }
   const trust = plannerTrustSetting(deps.env);
   const file = sessionFile(deps.stateDir, w, t);
   const taken = await tryLock(lockFile(file));
@@ -244,7 +262,7 @@ export async function startPlanner(workspace: string, ticket: string, deps: Sess
         throw new FactoryError('planning_copy_untrusted', `Claude Code does not trust the planning copy of ${w} yet, and the factory could not accept its trust dialog: ${why}. Run sf planner trust ${w}, accept its trust dialog, then start the planner again.`);
       }
     }
-    return { started: true, session: await launch(w, t, copy, file, deps.env) };
+    return { started: true, session: await launch(w, t, copy, file, deps.env, result) };
   } finally {
     await taken.held.release();
   }
@@ -448,15 +466,16 @@ async function openInput(workspace: string, ticket: string, file: string, id: st
 }
 
 // script running Claude Code in the copy, detached and unreferenced; its record written before the
-// watch, which removes it when the session ends within START_CHECK_MS.
-async function launch(workspace: string, ticket: string, copy: string, file: string, env: NodeJS.ProcessEnv): Promise<PlannerSession> {
+// watch, which removes it when the session ends within START_CHECK_MS. result: the job's result
+// the session opens on, its iteration recorded as result_of.
+async function launch(workspace: string, ticket: string, copy: string, file: string, env: NodeJS.ProcessEnv, result?: ResultStart): Promise<PlannerSession> {
   const id = randomUUID();
   // The record's folder exists: the ticket's lock (tryLock) made it, mode 0700.
   const fd = await openInput(workspace, ticket, file, id);
   let exited: Promise<void>;
   let child: ChildProcess;
   try {
-    child = spawn('script', ['-qfec', commandLine(workspace, ticket), '/dev/null'], {
+    child = spawn('script', ['-qfec', commandLine(workspace, ticket, result), '/dev/null'], {
       cwd: copy, env: plannerEnvironment(env, ticket, id), detached: true, stdio: [fd, 'ignore', 'ignore'],
     });
     // Before any await, so an exit while the record is written is not missed.
@@ -470,7 +489,7 @@ async function launch(workspace: string, ticket: string, copy: string, file: str
   }
   child.unref();
   const pid = child.pid!;
-  const session: PlannerSession = { workspace, ticket, name: sessionName(workspace, ticket), id, pid, pid_start: startTime(pid), started_at: new Date().toISOString() };
+  const session: PlannerSession = { workspace, ticket, name: sessionName(workspace, ticket), id, pid, pid_start: startTime(pid), started_at: new Date().toISOString(), result_of: result?.iteration };
   try {
     await writeRecord(file, session);
   } catch (error) {

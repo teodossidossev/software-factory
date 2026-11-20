@@ -46,7 +46,7 @@ import type { HealthMonitor } from './health.js';
 import type { RunQueue } from './queue.js';
 import { listen, LOOPBACK_HOST, sameSecret, sendJson, statusOf } from './http.js';
 import type { Job, JobState, JobStore } from './jobs.js';
-import type { PlannerSession } from './planner-session.js';
+import type { PlannerSession, ResultStart } from './planner-session.js';
 import { DIGEST_DEFAULTS } from './registry.js';
 import { DASHBOARD_TOKEN_FILE as TOKEN_FILE, readTokenFile } from './secrets.js';
 import type { Setup } from './setup.js';
@@ -153,11 +153,11 @@ export type DashboardDigests = Pick<Digests, 'list' | 'read' | 'start'>;
 // The health checks' last result (sf serve's HealthMonitor).
 export type DashboardHealth = Pick<HealthMonitor, 'list'>;
 // The planned ticket page's planner session (src/planner-session.ts) for startDashboard: start
-// (startPlanner), the session as it runs now (plannerSession, which removes the record of one
-// that ended) and stop (stopPlanner), each by the ticket's workspace and key; the caller binds
-// the session's environment and folders.
+// (startPlanner; with result, on the job's result at that iteration), the session as it runs now
+// (plannerSession, which removes the record of one that ended) and stop (stopPlanner), each by
+// the ticket's workspace and key; the caller binds the session's environment and folders.
 export interface DashboardPlanner {
-  start(workspace: string, ticket: string): Promise<{ started: boolean; session: PlannerSession }>;
+  start(workspace: string, ticket: string, result?: ResultStart): Promise<{ started: boolean; session: PlannerSession }>;
   session(workspace: string, ticket: string): Promise<PlannerSession | undefined>;
   stop(workspace: string, ticket: string): Promise<PlannerSession | undefined>;
 }
@@ -540,8 +540,10 @@ export async function startDashboard(
       return;
     }
     if (what.kind === 'ticket-planner') {
-      if (req.method !== 'POST' && (what.stop || req.method !== 'GET')) {
-        empty(res, 405, { allow: what.stop ? 'POST' : 'GET, POST' });
+      // Only .../planner itself is read on GET.
+      const readable = what.action === 'start';
+      if (req.method !== 'POST' && (!readable || req.method !== 'GET')) {
+        empty(res, 405, { allow: readable ? 'GET, POST' : 'POST' });
         return;
       }
       if (req.method === 'GET') {
@@ -549,7 +551,7 @@ export async function startDashboard(
         return;
       }
       const key = jobKey(what.workspace, what.ticket);
-      const post = key === undefined ? undefined : posts.plannerPost(key, what.stop);
+      const post = key === undefined ? undefined : posts.plannerPost(key, what.action);
       if (post === undefined) {
         empty(res, 404);
         return;

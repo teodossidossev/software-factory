@@ -9,6 +9,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { chmod, mkdir, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { resultConversation } from '../src/conversation.js';
 import { FactoryError } from '../src/errors.js';
 import { acceptTrustDialog, copyTrusted, sessionFile, startPlanner, trustDialogShown } from '../src/planner-session.js';
 import { type Env, git, newEnv, newRepo, processEnv, runCli, temp } from './support/harness.js';
@@ -164,6 +165,42 @@ test('sf planner start runs one session per ticket in the planning copy; stop en
     assert.match(await readFile(join(bin, 'script.log'), 'utf8'), /^exit=143$/m);
     const none = await runCli(env, ['planner', 'stop', 'app', 'APP-12']);
     assert.deepEqual([none.code, none.stdout], [0, 'No planner of app APP-12 is running.\n']);
+  } finally {
+    await killLeft(file);
+  }
+});
+
+test('a start on a job\'s result opens the session with the message about it and records the iteration; a running session keeps its own', async () => {
+  const { env, bin, file } = await sessionEnv('planner-result');
+  const deps = { env: processEnv(env), stateDir: env.state, configDir: env.config };
+  try {
+    // A bad iteration is refused before anything starts.
+    for (const iteration of [-1, 1.5, Number.NaN]) {
+      await assert.rejects(startPlanner('app', 'APP-12', deps, { iteration }), (error: unknown) => {
+        assert.ok(error instanceof FactoryError, String(error));
+        assert.deepEqual([error.code, error.message], ['invalid_content', 'The iteration must be a whole number from 0.']);
+        return true;
+      });
+    }
+    assert.equal(existsSync(join(env.state, 'planner')), false);
+
+    const first = await startPlanner('app', 'APP-12', deps, { iteration: 2 });
+    assert.equal(first.started, true);
+    assert.equal(first.session.result_of, 2);
+    const claudeLog = await readFile(join(bin, 'claude.log'), 'utf8');
+    const message = resultConversation('app', 'APP-12', 'claude_code');
+    // The message holds an apostrophe: quoted for the shell, it reaches claude as one argument.
+    assert.ok(message.includes("'"));
+    assert.deepEqual(claudeLog.split('\n').filter((line) => line.startsWith('arg=')), ['arg=--remote-control', 'arg=Planner app APP-12', `arg=${message}`]);
+    const record = await recordOf(file);
+    assert.deepEqual(Object.keys(record), ['workspace', 'ticket', 'name', 'id', 'pid', 'pid_start', 'started_at', 'result_of']);
+    assert.equal(record.result_of, 2);
+
+    // A later iteration: the running session, its own result_of, nothing spawned.
+    const second = await startPlanner('app', 'APP-12', deps, { iteration: 3 });
+    assert.deepEqual([second.started, second.session.result_of, second.session.pid], [false, 2, record.pid]);
+    assert.equal(await runs(bin), 1);
+    assert.deepEqual(await recordOf(file), record);
   } finally {
     await killLeft(file);
   }
@@ -423,6 +460,13 @@ test('the hook records the link in its own session\'s record only', async () => 
   await waiting(markers);
   assert.deepEqual(await recordOf(file), { ...record, link: 'https://claude.ai/code/session_01Ab' });
   assert.deepEqual(await readdir(join(env.state, 'planner', 'app')), ['APP-12.json']);
+  // A session started on a job's result keeps its result_of through the link's write.
+  const onResult = { ...record, result_of: 2 };
+  await writeFile(file, `${JSON.stringify(onResult, null, 2)}\n`, { mode: 0o600 });
+  await waiting(markers);
+  const kept = await recordOf(file);
+  assert.deepEqual(kept, { ...onResult, link: 'https://claude.ai/code/session_01Ab' });
+  assert.deepEqual(Object.keys(kept), ['workspace', 'ticket', 'name', 'id', 'pid', 'started_at', 'result_of', 'link']);
   // Start on the running session prints it.
   env.extra = {};
   const running = await runCli(env, ['planner', 'start', 'app', 'APP-12']);

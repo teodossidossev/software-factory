@@ -19,6 +19,8 @@ import { type JobKey, type JobRoute, openWhileUpdating, type PostRoute, type Que
 import { FactoryError } from './errors.js';
 import { internalError, sendJson, statusOf } from './http.js';
 import { addPin, changePin, PIN_CHANGE, PIN_CHANGE_SHAPE, PIN_ID, PIN_INPUT, PIN_INPUT_SHAPE, PIN_REMOVE, pinIdOf, refusePinToken, removePin } from './pins.js';
+import type { ResultStart } from './planner-session.js';
+import { WAITING_STATES, waits } from './planner.js';
 import { HANDOFF_MODES, WORKSPACE_COLORS, WORKSPACE_NAME_PATTERN } from './registry.js';
 import { REVIEW_JOB_SHAPE, reviewJobCall } from './review-job.js';
 import { setRoleSkills, skillsForClients } from './skills.js';
@@ -85,9 +87,10 @@ const BODIES = {
   'ticket-owner': { shape: '{"owner": "chatgpt" | "claude_code"}', schema: z.strictObject({ owner: z.enum(TICKET_OWNERS) }) },
   // The ticket's planning chat link: a https://chatgpt.com/ URL, or null to remove it.
   'ticket-chat': { shape: '{"url": string | null}', schema: z.strictObject({ url: z.string().nullable() }) },
-  // The ticket's planner session: its start and its end take {}.
+  // The ticket's planner session: its start, its end and its start on the job's result take {}.
   'ticket-planner': { shape: '{}', schema: z.strictObject({}) },
   'ticket-planner-stop': { shape: '{}', schema: z.strictObject({}) },
+  'ticket-planner-discuss': { shape: '{}', schema: z.strictObject({}) },
   // The dashboard's pins (src/pins.ts, with their bounds): a new one, a change of one, a removal.
   'pin-add': { shape: PIN_INPUT_SHAPE, schema: PIN_INPUT },
   'pin-change': { shape: PIN_CHANGE_SHAPE, schema: PIN_CHANGE },
@@ -201,22 +204,44 @@ export function postHandlers(ctx: DashboardContext, feed: Pick<DashboardFeed, 'c
   // empty 404 before the body is read); the answer comes once start has watched the new session:
   // {started, session}, started false with the session that runs already. POST
   // .../planner/stop (stop) ends it (DashboardPlanner.stop) for any ticket names: {stopped}, the
-  // session it ended or null. Every page gets the tickets again, so an open ticket page reads its
-  // payload, with the session, again. Neither without the planner.
-  function plannerPost([workspace, ticket]: [string, string], stop: boolean): Post | undefined {
+  // session it ended or null. POST .../planner/discuss (discuss), only for a ticket with a job
+  // (else an empty 404 before the body is read): with the job read again, refused without one
+  // (job_not_found) and for a job that does not wait for the User (invalid_state), else start on
+  // the job's result at its iteration, answered as start. Every page gets the tickets again, so an
+  // open ticket page reads its payload, with the session, again. None without the planner.
+  function plannerPost([workspace, ticket]: [string, string], action: 'start' | 'stop' | 'discuss'): Post | undefined {
     if (planner === undefined) {
       return undefined;
     }
-    const route = stop ? 'ticket-planner-stop' : 'ticket-planner';
-    const run = stop
-      ? async () => ({ stopped: plannerSessionView(await planner.stop(workspace, ticket)) })
-      : async () => {
-        const { started, session } = await planner.start(workspace, ticket);
-        return { started, session: plannerSessionView(session) };
-      };
+    const route = action === 'start' ? 'ticket-planner' : `ticket-planner-${action}` as const;
+    const start = async (result?: ResultStart) => {
+      const { started, session } = await planner.start(workspace, ticket, result);
+      return { started, session: plannerSessionView(session) };
+    };
+    const runs = {
+      start: () => start(),
+      stop: async () => ({ stopped: plannerSessionView(await planner.stop(workspace, ticket)) }),
+      discuss: async () => {
+        const job = await jobs.read(workspace, ticket);
+        if (job === undefined) {
+          throw new FactoryError('job_not_found', `There is no job for ${workspace}/${ticket}.`);
+        }
+        if (!waits(job.state)) {
+          const states = `${WAITING_STATES.slice(0, -1).join(', ')} or ${WAITING_STATES.at(-1)}`;
+          throw new FactoryError('invalid_state', `The job is ${job.state}; Discuss the result needs a job that waits for the user: ${states}.`);
+        }
+        return start({ iteration: job.iteration });
+      },
+    };
+    const exists = {
+      start: async () => (await setup.tickets()).some((entry) => entry.workspace === workspace && entry.ticket === ticket),
+      stop: undefined,
+      discuss: async () => (await jobs.read(workspace, ticket)) !== undefined,
+    };
+    const run = runs[action];
     return {
       ...setupBody(route),
-      exists: stop ? undefined : async () => (await setup.tickets()).some((entry) => entry.workspace === workspace && entry.ticket === ticket),
+      exists: exists[action],
       call: (data) => (BODIES[route].schema.safeParse(data).success ? run : undefined),
       refreshSetup: true,
     };

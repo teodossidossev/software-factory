@@ -90,7 +90,7 @@ export const ERROR_STATUS: Readonly<Record<string, number>> = {
   // Resume whose Task file refers to images that cannot be used.
   attachment_type: 400, attachment_too_large: 413, attachment_limit: 409, attachment_missing: 400, attachment_invalid: 409,
   // Back to the planner: no suggestion shown, or not the one the page showed; a planning chat link
-  // that is not a https://chatgpt.com/ one.
+  // that is neither a https://chatgpt.com/ one nor a https://claude.ai/code/<session> one.
   no_suggestion: 409, suggestion_changed: 409, invalid_chat_link: 400,
   // The dashboard's pins (src/pins.ts): no such pin, too many open ones, a pins.json that only
   // sf pins clear may replace, a pin or a note that holds the dashboard's token.

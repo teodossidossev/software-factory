@@ -319,10 +319,14 @@ const state: PageState = {
 // The only URL the page links to: the ChatGPT composer prefilled by the server (the prefix of
 // src/conversation.ts).
 const CHATGPT_PREFILL_URL = 'https://chatgpt.com/?q=';
-// A ticket's planning chat link: the server keeps only https://chatgpt.com/ links
-// (src/conversation.ts planningChatUrl), and the page links a stored one only with this prefix.
+// A ticket's planning chat link: the server keeps a https://chatgpt.com/ link or a whole Claude
+// planner session link https://claude.ai/code/<session> (src/conversation.ts planningChatUrl), and
+// the page links a stored one only when it starts with PLANNING_CHAT_PREFIX or matches
+// PLANNING_CLAUDE_LINK (the pattern of web/planner.ts TK_PLANNER_LINK), else not at all.
 const PLANNING_CHAT_PREFIX = 'https://chatgpt.com/';
-const planningChatHref = (value: unknown): string | null => (typeof value === 'string' && value.startsWith(PLANNING_CHAT_PREFIX) ? value : null);
+const PLANNING_CLAUDE_LINK = /^https:\/\/claude\.ai\/code\/[A-Za-z0-9_-]{1,128}$/;
+const planningChatHref = (value: unknown): string | null =>
+  (typeof value === 'string' && (value.startsWith(PLANNING_CHAT_PREFIX) || PLANNING_CLAUDE_LINK.test(value)) ? value : null);
 
 // The "Planning chat link" fields of the job page ('job') and the planned ticket page ('tk'), by
 // "<page>:<ws>/<ticket>": the input, kept across redraws so its text and caret stay, the link it
@@ -338,7 +342,7 @@ function chatLinkField(page: 'job' | 'tk', key: string, stored: string | null, d
   if (field === undefined) {
     const input = el('input', 'chat-input');
     input.type = 'url';
-    input.placeholder = 'https://chatgpt.com/c/…';
+    input.placeholder = 'https://chatgpt.com/c/… or https://claude.ai/code/…';
     input.value = stored ?? '';
     input.autocomplete = 'off';
     field = { input, stored, error: null };

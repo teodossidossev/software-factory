@@ -108,8 +108,8 @@ export interface TicketRow {
   // owner: who plans it, from its .owner file next to them (chatgpt without one).
   request: string | null;
   owner: TicketOwner;
-  // The ticket's planning chat link, from its .chat file next to them (a https://chatgpt.com/ URL),
-  // or null.
+  // The ticket's planning chat link, from its .chat file next to them (a https://chatgpt.com/ URL
+  // or a Claude planner session link https://claude.ai/code/<session>), or null.
   planning_chat: string | null;
   // The state of the ticket's last job when it ended, or null without a job.
   job: JobState | null;

@@ -127,8 +127,11 @@ refused), and the factory's test command passed in a sandbox without network on 
   only your Send on the dashboard sends it, and only the note the page showed (its SHA-256 is
   checked, so a note the planner replaced meanwhile is never sent unread). A note is refused unless
   the job waits for you, and is bounded at 4000 characters. The planning chat link is only ever a
-  `https://chatgpt.com/` link, checked when it is saved and again before the page links it, and is
-  opened only by your click.
+  `https://chatgpt.com/` link or a Claude planner session link in exactly the form the factory
+  makes, `https://claude.ai/code/` and one id of 1 to 128 letters, digits, `_` or `-`, nothing
+  before or after (no other scheme, case, host, subdomain, port, credentials, path, query or
+  fragment; no other claude.ai page, so the field is no open redirect). It is checked when it is
+  saved and again before the page links it, and is opened only by your click.
 - **The Claude Code planner can only read, and write its prototypes.** `sf planner setup` gives
   the planning copy's sessions the factory's planning tools, reading tools, and Write and Edit in one
   folder outside the copy, the workspace's prototypes folder (`<planning folder>/prototypes/<workspace>/`);

@@ -80,20 +80,31 @@ export function resultConversation(workspace: string, ticket: string, owner: Tic
 // The longest planning chat link a ticket keeps.
 export const MAX_CHAT_LINK = 2048;
 
-// A ticket's planning chat link as the User gave it: a https://chatgpt.com/ URL (no subdomain, no
-// port, no credentials) of at most MAX_CHAT_LINK characters as given and as its href, returned as
-// the href; anything else is invalid_chat_link. The page links a stored one only with the prefix
-// https://chatgpt.com/ (web/core.ts PLANNING_CHAT_PREFIX).
+// A Claude planner session link exactly as the factory makes it (planner-session.ts, notify.ts):
+// https://claude.ai/code/ and one session id, nothing before or after. web/core.ts
+// PLANNING_CLAUDE_LINK is the same pattern.
+const CLAUDE_SESSION_LINK = /^https:\/\/claude\.ai\/code\/[A-Za-z0-9_-]{1,128}$/;
+
+// A ticket's planning chat link as the User gave it, of at most MAX_CHAT_LINK characters as given:
+// a https://chatgpt.com/ URL (no subdomain, no port, no credentials, its href at most
+// MAX_CHAT_LINK characters too), returned as the href; or the trimmed text itself when it is a
+// whole Claude planner session link (CLAUDE_SESSION_LINK, tested on the text, not a parsed URL);
+// anything else is invalid_chat_link. The page checks a stored one again before it links it
+// (web/core.ts planningChatHref).
 export function planningChatUrl(text: string): string {
-  const invalid = new FactoryError('invalid_chat_link', 'Only a https://chatgpt.com/ conversation link can be saved.');
+  const invalid = new FactoryError('invalid_chat_link', 'Only a https://chatgpt.com/ conversation link or a https://claude.ai/code/<session> link can be saved.');
   if (text.length > MAX_CHAT_LINK) {
     throw invalid;
   }
-  const url = URL.parse(text.trim());
-  if (url === null || url.protocol !== 'https:' || url.hostname !== 'chatgpt.com' || url.port !== '' || url.username !== '' || url.password !== '' || url.href.length > MAX_CHAT_LINK) {
-    throw invalid;
+  const trimmed = text.trim();
+  const url = URL.parse(trimmed);
+  if (url !== null && url.protocol === 'https:' && url.hostname === 'chatgpt.com' && url.port === '' && url.username === '' && url.password === '' && url.href.length <= MAX_CHAT_LINK) {
+    return url.href;
   }
-  return url.href;
+  if (CLAUDE_SESSION_LINK.test(trimmed)) {
+    return trimmed;
+  }
+  throw invalid;
 }
 
 // A stored planning chat link, or null when there is none or it no longer passes planningChatUrl.

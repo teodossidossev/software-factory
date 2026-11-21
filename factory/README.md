@@ -1215,8 +1215,8 @@ runs it by itself after each change of a Task file (below); the user can always 
   - Every automatic check runs through the same `TaskChecks` as Check, so the board shows
     `checking…` and Check answers `check_running` while it runs. One that ends `not_ready` or
     `failed` is notified on the job notifications' channels and settings (section Notifications):
-    "SF-0xx: plan not ready", "N blocker, M major · <workspace>", or "SF-0xx: plan check failed"
-    with the first line of the error; default priority, tag `warning`. A failed channel is logged
+    "SF-0xx: plan not ready", "N blocker, M major · <workspace>" (the counts are both checks'),
+    or "SF-0xx: plan check failed" with the first line of the error; default priority, tag `warning`. A failed channel is logged
     on `sf serve`'s stderr ("<ws>/<ticket>: plan-check notification via <channel> failed: …"),
     nothing is stored. A ready one, a cancelled one and a manual one are not notified; nor a failed
     one a retry follows (its ticket queued, not forced, fewer than 3 retries of its Task text), nor a
@@ -1417,7 +1417,8 @@ runs it by itself after each change of a Task file (below); the user can always 
   check: not checked", "stale", "check failed" or "not ready: N blocker, M major" when that is the
   case, and starts anyway once confirmed. The Context owner reads it with the read-only MCP tool
   `task_check` (`{workspace, ticket}`): the check of the current Task file (`verdict` `ready`,
-  `not_ready` or `failed`, the paraphrase, findings and files), or `verdict: "none"` when the
+  `not_ready` or `failed`, the paraphrase, findings and files, and `codex`, the Codex part
+  (`verdict`, `reason`, `findings`, `error`, `model`) or null), or `verdict: "none"` when the
   current version has none, so ChatGPT can rewrite the Task from the findings; `running` (a check
   of the ticket runs now) and `pending` (an automatic one is scheduled and has not started) say
   whether to wait. It cannot run one: the factory runs it after `write_task`, whose answer says
@@ -4277,7 +4278,7 @@ and prints what each did.
 
 An automatic Task check (SF-086, section Task check) that ends `not_ready` or `failed` is notified on
 the same channels with the same settings: "<ticket>: plan not ready" with "N blocker, M major ·
-<workspace>", or "<ticket>: plan check failed" with the first line of its error; `Priority:
+<workspace>" (the Claude check's and the Codex check's findings together), or "<ticket>: plan check failed" with the first line of its error; `Priority:
 default`, `Tags: warning`. A failed channel is logged on `sf serve`'s stderr; nothing is stored. A
 ready, cancelled or manual check is not notified, nor a failed one that a retry of the queue's
 re-checks follows, nor a re-check after a moved base that ends `not_ready` again.

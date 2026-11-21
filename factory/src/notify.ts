@@ -14,7 +14,7 @@ import type { Job, JobState, JobStore } from './jobs.js';
 import { now, statesWith } from './jobs.js';
 import { localTime } from './local-time.js';
 import { HANDOFF_OFF_CODE, type NotifyMode } from './registry.js';
-import { type CheckRecord, recordVerdict, severityCounts } from './task-check.js';
+import { type CheckRecord, recordCounts, recordVerdict } from './task-check.js';
 import { turnLimitLine } from './turn-limit.js';
 
 const DESKTOP_TIMEOUT_MS = 5_000;
@@ -181,8 +181,8 @@ export function limitResetNotification(resumed: number, waiting: number): Notifi
 }
 
 // The notification for an automatic Task check that ended not ready ("N blocker, M major ·
-// <workspace>", the counts as the board writes them) or failed (the first line of its error);
-// undefined for a ready one.
+// <workspace>", the counts of both checks as the board writes them) or failed (the first line of
+// its error); undefined for a ready one.
 export function taskCheckNotification(record: CheckRecord): Notification | undefined {
   const verdict = recordVerdict(record);
   if (verdict === 'ready') {
@@ -191,7 +191,7 @@ export function taskCheckNotification(record: CheckRecord): Notification | undef
   if (verdict === 'failed') {
     return { title: `${record.ticket}: plan check failed`, body: (record.error ?? 'unknown error').split(/\r?\n/)[0]!, priority: 'default', tags: 'warning' };
   }
-  const counts = severityCounts(record.output);
+  const counts = recordCounts(record);
   return { title: `${record.ticket}: plan not ready`, body: `${counts.blocker} blocker, ${counts.major} major · ${record.workspace}`, priority: 'default', tags: 'warning' };
 }
 

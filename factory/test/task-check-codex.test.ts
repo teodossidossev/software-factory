@@ -2,7 +2,9 @@
 // then the history's writes), its prompt (the Claude check's with the tools sentence adapted), its
 // strict schema, the record's combined verdict and counts, the setting, the redaction of its free
 // text, the runner shared with the gate; then end to end with the fake Claude and the fake Codex:
-// sf check-task with Codex beside the Claude check, in the same worktree and in the gate's wrapper.
+// sf check-task with Codex beside the Claude check, in the same worktree and in the gate's wrapper;
+// last the readers outside the dashboard: task_check, the notification, the queue's plan check and
+// the ticket's history.
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
@@ -13,18 +15,21 @@ import { taskCheckCodexSetting } from '../src/config.js';
 import { FactoryError } from '../src/errors.js';
 import { type CodexTask, GATE_TASK, gateArgs, type GateOptions, runCodex, runGate } from '../src/gate.js';
 import { JobStore } from '../src/jobs.js';
+import { taskCheckNotification } from '../src/notify.js';
 import { checkPrompt } from '../src/prompts.js';
 import { Redactor } from '../src/redact.js';
 import type { PathDenials } from '../src/sandbox-denials.js';
 import {
   CHECK_SCHEMA, type CheckFinding, type CheckOutput, type CheckRecord, checkSummary, recordCounts, recordVerdict, taskSha256,
 } from '../src/task-check.js';
+import { planCheck } from '../src/task-check-auto.js';
 import {
   CHECK_TOOLS_SENTENCE, type CodexCheck, CODEX_CHECK_OUTPUT_FILE, CODEX_CHECK_SCHEMA_FILE, CODEX_TOOLS_SENTENCE, codexCheckDue, codexCheckPrompt, codexCheckSchema, withTaskFolderHidden,
 } from '../src/task-check-codex.js';
 import { writeTask } from '../src/task-file.js';
 import { within } from '../src/test-command.js';
-import { bwrapLog, codexLog, codexScript, type Env, fakeCodex, newEnv, newRepo, reviewLog, reviewScript, runCli, temp } from './support/harness.js';
+import { TicketHistory } from '../src/ticket-history.js';
+import { bwrapLog, call, codexLog, codexScript, type Env, fakeCodex, newEnv, newRepo, reviewLog, reviewScript, runCli, serve, stop, temp } from './support/harness.js';
 
 const OUTSIDE = 'it was written outside the factory\'s tools (an editor or a session\'s file tools)';
 
@@ -371,4 +376,101 @@ test('CC-11: a secret of the check\'s environment in a Codex finding is stored a
   const record = JSON.parse(text) as CheckRecord;
   assert.equal(record.codex?.output?.findings[0]?.problem, 'The key [redacted] is in the Task.');
   assert.ok(run.stdout.includes('[missing] ## Files: The key [redacted] is in the Task.'), run.stdout);
+});
+
+// task_check of the ticket through sf serve.
+async function taskCheckOf(env: Env, ticket: string): Promise<Record<string, any>> {
+  const served = await serve(env);
+  try {
+    return await call(served, 'task_check', { workspace: 'app', ticket });
+  } finally {
+    await stop(served);
+  }
+}
+
+test('TC-1: task_check answers the combined verdict, the Claude check\'s fields and the Codex part beside them, its findings settled', async () => {
+  const { env, content } = await codexEnv('codex-tool', 'X-8');
+  await reviewScript(env, [{ output: CLAUDE }]);
+  await codexScript(env, [{ output: CODEX }]);
+  const run = await runCli(env, ['check-task', 'app', 'X-8']);
+  assert.equal(run.code, 0, run.stderr);
+  const answer = await taskCheckOf(env, 'X-8');
+  const record = await stored(env, 'X-8', content);
+  assert.deepEqual(answer, {
+    verdict: 'not_ready', sha256: taskSha256(content), paraphrase: CLAUDE.paraphrase, findings: CLAUDE.findings, files: CLAUDE.files, error: null, model: 'fake-model',
+    checked_at: record.ended_at, running: false, pending: false,
+    codex: { verdict: 'not_ready', reason: OUTSIDE, findings: [{ ...CODEX.findings[0]!, severity: 'blocker' }], error: null, model: null },
+  });
+});
+
+test('TC-2: task_check of a failed Codex part: its verdict failed, its error, no findings; the top-level verdict the Claude check\'s', async () => {
+  const { env } = await codexEnv('codex-tool-failed', 'X-9');
+  await reviewScript(env, [{ output: CLAUDE }]);
+  await codexScript(env, [{ invalid: true }]);
+  assert.equal((await runCli(env, ['check-task', 'app', 'X-9'])).code, 0);
+  const answer = await taskCheckOf(env, 'X-9');
+  assert.equal(answer.verdict, 'ready');
+  assert.deepEqual(answer.findings, CLAUDE.findings);
+  assert.deepEqual([answer.codex.verdict, answer.codex.findings, answer.codex.reason, answer.codex.model], ['failed', [], OUTSIDE, null]);
+  assert.match(answer.codex.error, /^Codex returned output that is not JSON: /);
+});
+
+test('TC-3: task_check of a Task ChatGPT wrote through write_task: codex null', async () => {
+  const { env, content } = await codexEnv('codex-tool-chatgpt', 'X-10');
+  await mkdir(join(env.state, 'requests', 'app'), { recursive: true });
+  await writeFile(join(env.state, 'requests', 'app', 'X-10.owner'), 'chatgpt\n');
+  await mkdir(join(env.state, 'tickets', 'app', 'X-10'), { recursive: true });
+  await writeFile(join(env.state, 'tickets', 'app', 'X-10', 'history.jsonl'), `${JSON.stringify({ ts: '2026-11-20T10:00:00.000Z', kind: 'written', by: 'context_owner', sha256: taskSha256(content) })}\n`);
+  await reviewScript(env, [{ output: CLAUDE }]);
+  assert.equal((await runCli(env, ['check-task', 'app', 'X-10'])).code, 0);
+  const answer = await taskCheckOf(env, 'X-10');
+  assert.deepEqual([answer.verdict, answer.codex, answer.findings], ['ready', null, CLAUDE.findings]);
+});
+
+// A Claude check ready without findings and a Codex part with one blocker and two majors.
+const codexHeld = (): CheckRecord =>
+  record(output([], 'ready'), codexPart(output([finding('blocker'), finding('major', 'missing', '## A'), finding('major', 'missing', '## B')], 'not_ready')));
+
+test('TC-4: the "plan not ready" notification counts the Codex part\'s findings; a record without one keeps today\'s text', () => {
+  assert.deepEqual(taskCheckNotification(codexHeld()), { title: 'C-1: plan not ready', body: '1 blocker, 2 major · app', priority: 'default', tags: 'warning' });
+  assert.equal(taskCheckNotification(record(output([finding('major')], 'not_ready')))?.body, '0 blocker, 1 major · app');
+  assert.equal(taskCheckNotification(record(output([], 'ready'), codexPart(null))), undefined);
+});
+
+test('TC-5: planCheck counts the Codex part\'s findings: the queue\'s reason counts both checks', async () => {
+  const of = (held: CheckRecord): Promise<unknown> => planCheck({
+    view: async () => ({ check: held, stale: false, running: false, current_sha256: held.sha256, check_reason: null }),
+    store: { read: async () => held } as unknown as Parameters<typeof planCheck>[0]['store'],
+  }, undefined, 'app', 'C-1');
+  assert.deepEqual(await of(codexHeld()), { state: 'not_ready', blockers: 1, majors: 2 });
+  assert.deepEqual(await of(record(output([finding('major')], 'not_ready'))), { state: 'not_ready', blockers: 0, majors: 1 });
+});
+
+test('TC-6: the ticket\'s history says the combined verdict and counts and names the Codex part; a shared finding counts once', async () => {
+  const state = join(temp, 'codex-history');
+  const dir = join(state, 'checks', 'app', 'T-1');
+  await mkdir(dir, { recursive: true });
+  const scope: CheckFinding = { kind: 'missing', severity: 'major', where: 'scope:', problem: 'src/a.ts (modify) is not in scope:.', expected: 'Add it.' };
+  const records: Array<[string, CheckRecord]> = [
+    ['2026-11-20T10:01:00.000Z', { ...record(output([], 'ready'), codexPart(output([finding('major')], 'not_ready'))), cost_usd: 0.48 }],
+    ['2026-11-20T10:02:00.000Z', { ...record(output([], 'ready'), codexPart(null)), cost_usd: 0.31 }],
+    ['2026-11-20T10:03:00.000Z', { ...record(output([], 'ready')), cost_usd: 0.48 }],
+    ['2026-11-20T10:04:00.000Z', { ...record(output([scope], 'not_ready'), codexPart(output([scope], 'not_ready'))), cost_usd: 0.2 }],
+    ['2026-11-20T10:05:00.000Z', { ...record(null, codexPart(output([], 'ready'))), cost_usd: 0.1 }],
+  ];
+  for (const [index, [endedAt, held]] of records.entries()) {
+    await writeFile(join(dir, `${String(index).repeat(16)}.json`), JSON.stringify({ ...held, ticket: 'T-1', ended_at: endedAt }));
+  }
+  const timeline = await new TicketHistory(state).timeline('app', 'T-1');
+  assert.deepEqual(timeline.filter((entry) => entry.kind === 'checked').map((entry) => entry.text), [
+    'Check failed · Codex ready · $0.10',
+    'Checked: not ready (0 blockers, 1 major) · Codex not ready · $0.20',
+    'Checked: ready · $0.48',
+    'Checked: ready · Codex failed · $0.31',
+    'Checked: not ready (0 blockers, 1 major) · Codex not ready · $0.48',
+  ]);
+  // The shared scope: major counts once, as planCheck and the notification count it.
+  const shared = { ...records[3]![1], ticket: 'T-1' };
+  assert.deepEqual(recordCounts(shared), { blocker: 0, major: 1, nit: 0 });
+  assert.equal(taskCheckNotification(shared)?.body, '0 blocker, 1 major · app');
 });

@@ -127,7 +127,7 @@ When the base moved since the trace, fetch it and re-read every `path:line` the 
 check reads the base as it is now. Then `write_task`.
 
 **Green.** `write_task` schedules the check; wait for it with `task_check`. For each blocker and
-major:
+major, of `findings` and of `codex.findings` (Codex's check of the same version, when it ran):
 
 - Name the legwork that would have caught it (a consumer not traced, a claim not walked, a
   decision not closed, a convention not read). Redo that legwork for this slice **and** for every

@@ -59,6 +59,15 @@ const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' 
 // " · $0.48" of a cost, or nothing when it is not known.
 const money = (cost: unknown): string => (typeof cost === 'number' && Number.isFinite(cost) ? ` · $${cost.toFixed(2)}` : '');
 
+// A check output as a stored record holds it, unvalidated.
+interface RawFinding { severity?: unknown; kind?: unknown; where?: unknown; problem?: unknown }
+interface RawOutput { verdict?: unknown; findings?: Array<RawFinding | null> }
+// The findings of a raw output, none when it has no list.
+const findingsOf = (output: RawOutput | undefined): Array<RawFinding | null> => (Array.isArray(output?.findings) ? output.findings : []);
+// The state the History names of a record's Codex part: failed when it did not check or holds no output.
+const codexState = (status: unknown, output: RawOutput | undefined): string =>
+  (status !== 'checked' || output === undefined ? 'failed' : output.verdict === 'ready' ? 'ready' : 'not ready');
+
 // The History's label of a recorded write.
 function recordedText(event: HistoryEvent): string {
   switch (event.kind) {
@@ -159,7 +168,12 @@ export class TicketHistory {
     return events;
   }
 
-  // Every stored Task check of the ticket (one per checked version), as "checked" entries.
+  // Every stored Task check of the ticket (one per checked version), as "checked" entries: the
+  // combined verdict of the Claude check and its Codex part (not ready when either is), the counts
+  // of both (a Codex finding with the kind, where and problem of a Claude finding counted once, as
+  // recordCounts counts them), and, when the record has a Codex part, " · Codex <state>" (ready,
+  // not ready, or failed when it holds no output) before the money. Read from the raw JSON, so any
+  // record shape reads.
   async #checks(workspace: string, ticket: string): Promise<TimelineEntry[]> {
     const dir = join(this.#stateDir, 'checks', workspace, ticket);
     const entries: TimelineEntry[] = [];
@@ -168,16 +182,20 @@ export class TicketHistory {
       if (record === undefined || record.workspace !== workspace || record.ticket !== ticket || typeof record.ended_at !== 'string') {
         continue;
       }
-      const output = record.output as { verdict?: unknown; findings?: Array<{ severity?: unknown }> } | null | undefined;
+      const output = record.output as RawOutput | null | undefined;
+      const codex = record.codex as { output?: RawOutput | null; status?: unknown } | null | undefined;
+      const codexOutput = codex !== null && typeof codex === 'object' && codex.output !== null && typeof codex.output === 'object' ? codex.output : undefined;
+      const codexText = codex === null || typeof codex !== 'object' ? '' : ` · Codex ${codexState(codex.status, codexOutput)}`;
       let text: string;
       if (record.status !== 'checked' || output === null || typeof output !== 'object') {
-        text = `Check failed${money(record.cost_usd)}`;
-      } else if (output.verdict === 'ready') {
-        text = `Checked: ready${money(record.cost_usd)}`;
+        text = `Check failed${codexText}${money(record.cost_usd)}`;
+      } else if (output.verdict === 'ready' && codexOutput?.verdict !== 'not_ready') {
+        text = `Checked: ready${codexText}${money(record.cost_usd)}`;
       } else {
-        const findings = Array.isArray(output.findings) ? output.findings : [];
+        const claudeFindings = findingsOf(output);
+        const findings = [...claudeFindings, ...findingsOf(codexOutput).filter((item) => !claudeFindings.some((other) => other?.kind === item?.kind && other?.where === item?.where && other?.problem === item?.problem))];
         const count = (severity: string): number => findings.filter((item) => item?.severity === severity).length;
-        text = `Checked: not ready (${plural(count('blocker'), 'blocker')}, ${plural(count('major'), 'major')})${money(record.cost_usd)}`;
+        text = `Checked: not ready (${plural(count('blocker'), 'blocker')}, ${plural(count('major'), 'major')})${codexText}${money(record.cost_usd)}`;
       }
       entries.push({ ts: record.ended_at, kind: 'checked', by: 'factory', text });
     }

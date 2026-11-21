@@ -597,8 +597,8 @@ function createMcpServer(
         `Returns the last Task check of the current Task file .software-factory/<ticket>.md: a read-only Claude session that read only the Task file, the Task files it builds on and the repository (the factory runs it ` +
         `automatically after write_task, or the user presses Check). running: a check of the ticket runs now; pending: an automatic check of it is scheduled and has not started; call again until ` +
         `both are false. paraphrase is the checker's reading of the Task; findings are decision, contradiction, missing, overreach or unclear, each blocker, major or nit; files are the files it ` +
-        `expects to change; verdict is ready (no blocker or major), not_ready, failed (error says why; never ready), or none when the current Task file has no check (a check of an earlier version ` +
-        `does not count). Rewrite the Task from the findings with write_task. Starts nothing.`,
+        `expects to change; verdict is ready (no blocker or major in either check), not_ready, failed (error says why; never ready), or none when the current Task file has no check (a check of an ` +
+        `earlier version does not count); codex is Codex's check of the same version (verdict, reason, findings, error, model), run for a Task not written by ChatGPT's write_task, or null: its findings count as the others; a failed one holds nothing. Rewrite the Task from the findings with write_task. Starts nothing.`,
       inputSchema: z.strictObject({ workspace: workspaceName, ticket: ticketKey }),
       outputSchema: z.object({
         verdict: z.enum(['none', 'ready', 'not_ready', 'failed']),
@@ -606,7 +606,7 @@ function createMcpServer(
         paraphrase: z.string().nullable(),
         findings: z.array(checkFinding),
         files: z.array(checkFile),
-        error: z.string().nullable(),
+        error: z.string().nullable(), codex: z.object({ verdict: z.enum(['ready', 'not_ready', 'failed']), reason: z.string(), findings: z.array(checkFinding), error: z.string().nullable(), model: z.string().nullable() }).nullable(),
         model: z.string().nullable(),
         checked_at: z.string().nullable(),
         running: z.boolean(),
@@ -623,12 +623,12 @@ function createMcpServer(
         const running = checks.isRunning(workspace, ticket);
         const pending = auto?.isPending(workspace, ticket) ?? false;
         if (record === undefined) {
-          return toolResult({ verdict: 'none' as const, sha256, paraphrase: null, findings: [], files: [], error: null, model: null, checked_at: null, running, pending });
+          return toolResult({ verdict: 'none' as const, sha256, paraphrase: null, findings: [], files: [], error: null, model: null, checked_at: null, running, pending, codex: null });
         }
         return toolResult({
           verdict: recordVerdict(record),
           sha256, paraphrase: record.output?.paraphrase ?? null, findings: record.output?.findings ?? [], files: record.output?.files ?? [],
-          error: record.error, model: record.model, checked_at: record.ended_at, running, pending,
+          error: record.error, model: record.model, checked_at: record.ended_at, running, pending, codex: record.codex === undefined ? null : { verdict: record.codex.output?.verdict ?? 'failed', reason: record.codex.reason, findings: record.codex.output?.findings ?? [], error: record.codex.error, model: record.codex.model },
         });
       } catch (error) {
         return toolError(error);

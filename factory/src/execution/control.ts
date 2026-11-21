@@ -57,6 +57,7 @@ export interface ControlReviews {
   retryReviewInRunner(workspaceName: string, ticket: string): Promise<{ state: JobState; iteration: number }>;
   settleInRunner(workspaceName: string, ticket: string, id: string, decision: Decision, note: string): Promise<{ state: JobState; id: string; status: string; waiting: string[] }>;
   startReview(job: Job): Promise<void>;
+  stopLastReviews(): void;
 }
 
 export interface ControlStart {
@@ -676,14 +677,15 @@ export class ControlPart {
     }
   }
 
-  // Runner mode, on SIGTERM (abort, reset): the turn, the review, the gate and a run of the test
-  // command end and their outcome is never applied; resolves once the state change in
-  // progress, if any, is written.
+  // Runner mode, on SIGTERM (abort, reset): the turn, the review, the gate, a run of the test
+  // command and the last review end and their outcome is never applied; resolves once the state
+  // change in progress, if any, is written.
   async stop(): Promise<void> {
     this.#stop.setStopping();
     for (const key of [...this.#sessions.reviews.keys()]) {
       this.#cancelReview(key);
     }
+    this.#peers.reviews.stopLastReviews();
     const sessions = [...this.#sessions.live.values()].map((live) => live.session);
     this.#sessions.live.clear();
     await Promise.all(sessions.map((session) => session.close()));

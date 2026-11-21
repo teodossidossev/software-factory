@@ -2379,6 +2379,47 @@ ended. A restart of `sf serve` therefore leaves a working job working.
     that run ended, failed, was cancelled, or the job moved on (`sf say`) while it ran. A runner that
     ended before the outcome applied is resumed: the stored `simplify.json` applies; one that ended
     while the pass ran records it as failed ("interrupted") and goes on to MR preparation.
+- **The last review** (SF-309, `src/last-review.ts`, `src/execution/last-review-step.ts`): in a
+  workspace whose entry names a `last_review_skill` (section Workspace registry), every clean round
+  gets one last, advisory review as MR preparation starts. A clean round is the deciding clean
+  verdict (both of a joint round, the gate alone without the Claude review, the Claude review alone
+  with `SF_GATE=off` or a gate level that skipped the gate); an Accept over a stop (the gate's, the
+  ledger's, the Fix round limit's, the tests') is not one, and with `SF_REVIEW=off` no round runs.
+  It starts once MR preparation answers `preparing_mr` after that round (after the simplification
+  pass, or its Skip, when the pass runs), so never on an iteration the pass may still change, and
+  not on a Guard fix. One run per clean iteration: none when the iteration has a `last-review.json`
+  or a run of it is under way; a Retry of MR preparation, the move of a part and a Tests Fix start
+  none, and a run of an earlier iteration is cancelled when the new iteration's clean round starts
+  its own. The workspace's entry is read at each start.
+  - The session: a fresh read-only Agent SDK `query()` in the job's worktree, as the Claude
+    review's (its tools, path denials and sandbox, no user settings, memory or MCP server), on
+    `SF_REVIEW_MODEL` with `SF_REVIEW_MAX_TURNS`, aborted after 10 minutes. Its prompt holds the
+    skill's method (`SKILL.md` without its front matter, then each other text file of the folder
+    in a `<skill_file>` block, up to 64 KiB; a file left out is named), the factory's copy of the
+    Task file and the clean iteration's Patch (the job's whole change, cut at 256 KiB). It answers
+    with a summary and comments (`path`, `line` on the change's side, `text`, `kind`: `change`,
+    `question` or `follow_up`); the factory keeps the first 30, numbers them `C1`, `C2`, …, cuts a
+    text at 1,000 characters and the summary at 2,000, and redacts them (`Redactor.output`). Its
+    messages are not written to `events.jsonl`.
+  - The skill folder is copied once per job, at its first run, to the job directory's
+    `last-review-skill/`, with `last-review-skill.json` (`path`, `sha256` of the copy, `files`);
+    every later run reads that copy. A folder without a regular `SKILL.md` at its top, with more
+    than 50 files or 512 KiB, or that cannot be read is a failed run with its message.
+  - MR preparation runs beside it: the test step, then the MR text turn. When that turn ends while
+    the run is under way, the commit, rebase and hand-over wait for its end (section MR
+    preparation, step 3); when it ends first, nothing waits. The runner stays while a run is under
+    way.
+  - `iterations/NNN/last-review.json`: `{reviewer: "last_review", summary, comments, dropped,
+    skill, cost_usd, model, started_at, ended_at}`, or for a failed run `{reviewer, error,
+    timed_out, skill, started_at, ended_at}` (`skill` `null` when no copy was made; a timeout's
+    error is "The last review timed out after 10 minutes."). One `last_review` event at its end
+    (`comments`, and `error`, `timed_out` or `ignored` when the job had moved past its iteration).
+  - It never stops, parks or fixes the job: a failure (the skill folder, the session, a usage
+    limit, user settings that weaken the sandbox) or a timeout is recorded and MR preparation goes
+    on. A cancelled run (abort, reset, the runner's stop, a newer iteration's run) leaves no record.
+    A runner that ends while it runs leaves the job to recovery (`mr_serve_restarted`) and the run
+    to nothing: its comments are lost, and a Retry starts none.
+  - Its comments are stored with the iteration only; no MR text reads them.
 - `sf say` queues a message as the next turn (in `working`, `awaiting_review`, `needs_human` or
   `ready_for_human_review`, where it reopens the worktree like the fix path); outside `working`
   the job goes back to `working` and publishes a new iteration at the end. At a limit stop it also
@@ -3397,8 +3438,10 @@ sandbox (ADR-0005): inside it, `git rebase` could not unlink the sandbox's place
      review), and the iteration's record becomes `accepted_failing` with a `tests` event, so the
      step is skipped.
      `sf retry` runs the command again after `tests_unavailable`. `sf say` gives a direction.
-3. When that turn ends, the factory checks the MR text, then works in the worktree under the
-   workspace's Git lock. Every Git call runs with a 60 s timeout and, like every Git call of the
+3. When that turn ends while the iteration's last review (section Jobs) still runs, the job stays
+   `preparing_mr` and everything below waits for it to end (at most its 10 minutes), then goes on
+   with that turn's outcome. When that turn ends, the factory checks the MR text, then works in the
+   worktree under the workspace's Git lock. Every Git call runs with a 60 s timeout and, like every Git call of the
    factory (SF-124: `runGit` and its siblings in `src/git.ts`, the only module that starts `git`),
    with `-c core.hooksPath=/dev/null -c core.fsmonitor=false`, so no repository hook and no
    fsmonitor runs outside the sandbox. No argument or environment variable switches that off.
@@ -4327,8 +4370,9 @@ sf.sock                                  # 0600, while sf serve runs; one JSON r
 dashboard-token                          # 0600, the dashboard token of the last sf serve start
 jobs/<workspace>/<ticket>/job.json       # workspace, ticket, branch, base, base_commit, target_commit, worktree, prepared_commit, mr_attempts, mr_conflict_turn (SF-087: the MR preparation in progress ran a conflict turn; no Retry then), state, iteration, fixes, gate_fixes, gate_tokens, stalled_fixes, least_open, gate_stalled and gate_budget_from (the limits' counts; absent means none), important (absent: not important), simplify_iteration (SF-055, absent until the simplification pass starts), session_id, created_at, updated_at, error, mr ({host, number, url, state, merge_commit?} or null)
 jobs/<workspace>/<ticket>/events.jsonl   # {ts, iteration, message | prompt | state | type: "notify_failed" | "review" | "review_failed" | "review_message" | "gate_event" | "gate_overridden" | "gate_level" | "simplify" | "simplify_chosen" | "merge_request" | "mr_edited" | ...}; what sf watch reads
-jobs/<workspace>/<ticket>/iterations/NNN/{report.md,patch.diff,meta.json,review.json,gate.json,gate-level.json,gate-override.json,simplify.json,gate-schema.json,gate-output.json,conflict-resolution.diff}
+jobs/<workspace>/<ticket>/iterations/NNN/{report.md,patch.diff,meta.json,review.json,gate.json,gate-level.json,gate-override.json,simplify.json,last-review.json,gate-schema.json,gate-output.json,conflict-resolution.diff}
 jobs/<workspace>/<ticket>/ledger.json    # the findings ledger (SF-052): one entry per review item of a Fix section, from the first one on
+jobs/<workspace>/<ticket>/last-review-skill/, last-review-skill.json   # the job's copy of the last review's skill folder and what it is ({path, sha256, files}), from its first last review (SF-309)
 worktrees/<workspace>/<ticket>/          # the job's worktree (SF_WORKTREE_ROOT), from start to Clean, abort or reset
 jobs/<workspace>/<ticket>/mr.md              # the MR text, once the branch is ready or after a conflict iteration
 jobs/<workspace>/<ticket>/mr-factory.md      # the factory's MR text, once the user saved their own (SF-080)
@@ -6672,13 +6716,19 @@ Edit the file to set it (`sf workspace add` and the dashboard's form do not show
 it); it is read at each preparation. The optional `auto_queue` (SF-234: `true` or `false`, absent is
 `false`, any other value makes the file invalid) puts a ticket whose plan is ready into the run
 queue by itself (section Run queue, Queued by itself); edit the file to set it (the Edit keeps it);
-it is read each time a check ends. The optional `rules_skip` (SF-059: a list of globs) names the
+it is read each time a check ends. The optional `last_review_skill` (SF-309: an absolute path; a
+value that is not one makes the file invalid, and the registry checks only that) names the folder
+of the review skill the last review follows after every clean round (section Jobs, The last
+review); without it no last review runs. A folder without a regular `SKILL.md`, or one too large
+or unreadable, gives a failed last review at the job's first run, never an invalid file. Edit the
+file to set it (`sf workspace add` and the dashboard's form do not show it; the Edit keeps it);
+`sf workspace list` shows it; it is read at each run. The optional `rules_skip` (SF-059: a list of globs) names the
 repository rule files not given to the agents (section Coding rules); edit the file to set it.
 The optional `description`, `app` and `digest: {track, my_work}`, and the top-level `digest`
 settings, are the morning digest's (SF-103, section Morning digest); the optional top-level
 `explain: {on, language, model}` is the stop explanations' (SF-106, section Stop explanations). The Workspaces drawer's Edit
 changes an existing workspace's path, description, app, hand-over, colour, label and digest switches (the
-name stays; `work_checkout`, `rules_skip`, `guard`, `test_command`, `notify`, `auto_queue` and `auto_planner` are kept): its body has every field, `""` removes the
+name stays; `work_checkout`, `rules_skip`, `guard`, `test_command`, `last_review_skill`, `notify`, `auto_queue` and `auto_planner` are kept): its body has every field, `""` removes the
 description, the app and the label, `"default"` the handoff, `"auto"` the color, and a body without
 `label` keeps the label; the path is checked as Add checks it, and a path change while the workspace has a live job is `workspace_busy`.
 

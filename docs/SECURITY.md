@@ -113,11 +113,14 @@ refused), and the factory's test command passed in a sandbox without network on 
   repository, read-only, in the gate's wrapper, which also hides the checkout's
   `.software-factory/` folder (the other Task files and MR texts); the Task file and the
   repository's code go to OpenAI, as the gate's material does.
-- **The reviewers read the factory's copy of the Task file.** The Claude review, the Codex gate and
-  the simplification pass get the Task file, with the factory's Fix sections, from the factory's
-  own copy in the job's directory, written each time the factory puts the Task file into the
-  worktree; a contest's `§section` is checked against the same copy. The worktree's
+- **The reviewers read the factory's copy of the Task file.** The Claude review, the Codex gate,
+  the simplification pass and the last review get the Task file, with the factory's Fix sections,
+  from the factory's own copy in the job's directory, written each time the factory puts the Task
+  file into the worktree; a contest's `§section` is checked against the same copy. The worktree's
   `.software-factory/<ticket>.md`, which the Implementer can write, is not what they read.
+- **The last review is read-only and advisory.** It runs as the Claude review does (read tools
+  only, the path denials, no user settings, memory or MCP server), its comments are redacted, it
+  changes nothing and stops nothing, and nothing it writes reaches the MR text.
 - **The factory writes into the worktree through no link.** The Task file it copies into the
   worktree's `.software-factory/`, and the ticket's images there, are written by a rename into a
   folder of its own: a link the Implementer put at `.software-factory/`, at the Task file or at

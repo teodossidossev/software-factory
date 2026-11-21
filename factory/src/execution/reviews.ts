@@ -1,6 +1,7 @@
 // The review and gate pipeline: the Claude review of an iteration, the Codex gate at the
 // iteration's gate level, the ledger of findings (settle), the user's retry of a failed review and
-// override of a stopped gate, and the simplification pass after a clean verdict.
+// override of a stopped gate, the simplification pass after a clean verdict, and the last review
+// that starts with the MR preparation after it (execution/last-review-step.ts).
 // The gate runs inside the wrapper of the sessions' read denials, and every reviewer's
 // output is redacted (Redactor.output) right after its session ends, before it is stored or used.
 import { homedir, tmpdir } from 'node:os';
@@ -29,6 +30,7 @@ import type { RunnerRequest } from '../runner.js';
 import type { JobStorePort, LivePort, LockPort, RunnerPort, SettingsPort, StopPort } from './ports.js';
 import { LEDGER_ACCEPT_CODES } from './errors.js';
 import { testsEvent } from './events.js';
+import { LastReviewStep } from './last-review-step.js';
 import { markedGroups } from './prompts.js';
 import { exists, type FixOptions, type RunningReview } from './shared.js';
 
@@ -85,6 +87,8 @@ export class ReviewsPart {
   readonly #stop: StopPort;
   // The parts it calls (src/execution.ts wires them).
   readonly #peers: ReviewsPeers;
+  // The last review after a clean round, beside MR preparation.
+  readonly #lastReview: LastReviewStep;
 
   constructor(store: JobStorePort, locks: LockPort, sessions: LivePort, runner: RunnerPort, settings: SettingsPort, stop: StopPort, peers: ReviewsPeers) {
     this.#store = store;
@@ -94,6 +98,7 @@ export class ReviewsPart {
     this.#settings = settings;
     this.#stop = stop;
     this.#peers = peers;
+    this.#lastReview = new LastReviewStep({ store, locks, sessions, runner, settings, stop });
   }
 
   // The job's images as prompt images: the job's own copy, with the alt texts of the Task
@@ -311,7 +316,7 @@ export class ReviewsPart {
         // No gate override: the gate was clean.
         const record = await this.#store.jobs.readSimplify(workspaceName, ticket, job.iteration);
         const sensitive = [...new Set([...accepted, ...gateAccepted])];
-        return this.#peers.mr.prepareMr(job, sensitive, { onAccepted: async () => {
+        return this.#prepare(job, sensitive, { onAccepted: async () => {
           const at = now();
           if (record !== undefined && 'suggestions' in record) {
             await this.#store.jobs.writeSimplify(workspaceName, ticket, job.iteration, { ...record, skipped_at: at });
@@ -699,10 +704,10 @@ export class ReviewsPart {
   }
 
   // After the deciding clean verdict: the simplification pass when it is due, else MR
-  // preparation with the accepted paths (sensitive). A pass that already ended on this iteration
-  // (its runner stopped before the outcome applied) applies its record; one that started on it and
-  // never ended (its runner stopped while it ran) is recorded as failed and goes on, as a failed
-  // run does. Only under the lock.
+  // preparation with the accepted paths (sensitive), and with it the iteration's last review
+  // (#prepare). A pass that already ended on this iteration (its runner stopped before the outcome
+  // applied) applies its record; one that started on it and never ended (its runner stopped while
+  // it ran) is recorded as failed and goes on, as a failed run does. Only under the lock.
   async afterClean(job: Job, sensitive: string[]): Promise<void> {
     const { workspace, ticket, iteration } = job;
     const record = await this.#store.jobs.readSimplify(workspace, ticket, iteration);
@@ -713,12 +718,38 @@ export class ReviewsPart {
       const error = 'The simplification pass was interrupted (its runner ended while it ran); it runs once per job.';
       await this.#store.jobs.writeSimplify(workspace, ticket, iteration, { reviewer: SIMPLIFIER, error, started_at: at, ended_at: at });
       await this.#store.jobs.appendEvent(workspace, ticket, { ts: at, iteration, type: 'simplify', reviewer: SIMPLIFIER, suggestions: 0, dropped: 0, error });
-      await this.#peers.mr.prepareMr(job, sensitive);
+      await this.#prepare(job, sensitive);
     } else if (this.#simplifyDue(job)) {
       await this.#startSimplify(job, sensitive);
     } else {
-      await this.#peers.mr.prepareMr(job, sensitive);
+      await this.#prepare(job, sensitive);
     }
+  }
+
+  // MR preparation after a clean round (afterClean, the pass's outcome and its Skip): once it is
+  // under way, the iteration's last review starts beside it (LastReviewStep). Only under the lock.
+  async #prepare(job: Job, sensitive: string[], options?: { onAccepted?: () => Promise<void> }): Promise<{ state: JobState; iteration: number; branch: string }> {
+    const answer = await this.#peers.mr.prepareMr(job, sensitive, options);
+    if (answer.state === 'preparing_mr') {
+      await this.#lastReview.start(await this.#store.job(job.workspace, job.ticket));
+    }
+    return answer;
+  }
+
+  // Whether the MR preparation of the job waits for its iteration's last review, which then calls
+  // resume at its end (LastReviewStep.holds).
+  holdsMr(job: Job, resume: (job: Job) => Promise<void>): boolean {
+    return this.#lastReview.holds(job, resume);
+  }
+
+  // Whether a last review is under way.
+  lastReviewRuns(): boolean {
+    return this.#lastReview.running();
+  }
+
+  // Cancels every last review under way (stop()).
+  stopLastReviews(): void {
+    this.#lastReview.stopAll();
   }
 
   // Whether the simplification pass runs on the job: SF_SIMPLIFY on, at least one Fix
@@ -854,7 +885,7 @@ export class ReviewsPart {
   // none, or a failed run, goes on to MR preparation. Only under the lock.
   async #offerSimplify(job: Job, record: SimplifyRecord, sensitive: string[]): Promise<void> {
     if (!('suggestions' in record) || record.suggestions.length === 0) {
-      await this.#peers.mr.prepareMr(job, sensitive);
+      await this.#prepare(job, sensitive);
       return;
     }
     // from: awaiting_review (afterClean from afterClaude, #gated and #pickUp; #simplifyEnded current)

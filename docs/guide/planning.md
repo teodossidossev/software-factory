@@ -49,8 +49,13 @@ result over with the planner and send the Implementer the change you agree on.
 - **Discuss the result ↗** on the job's page (in the composer) and on its card opens a new ChatGPT
   conversation prefilled with a message that has the planner read the Task file and the job's
   latest Report and reviews (`read_job`), sum them up, discuss what should change with you and
-  propose it with `suggest_changes`. When Claude Code plans the ticket (or the link would be too
-  long), the page offers the message to copy instead.
+  propose it with `suggest_changes`. When the link would be too long, the page offers the message
+  to copy instead. When the Claude planner plans the ticket, the planner reads the job with
+  `read_job` and proposes with `suggest_changes` too: while the ticket's planner session runs,
+  *Discuss the result ↗* on the job's page opens it, the message copied for you to paste unless
+  the session was started on this result; else *Discuss the result* starts one in the planning
+  copy with the message as its first message, and its link shows once it first waits for you.
+  The card's *Discuss the result* opens the job's page at the composer.
 - **The planning chat link**: paste the link of the conversation the ticket was planned in into the
   field *Planning chat link* (the ticket's page, Planning conversation; or the job's page) and
   Save. Two kinds of link are kept: a `https://chatgpt.com/` conversation, and a Claude planner

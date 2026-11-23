@@ -681,7 +681,8 @@ const WAITING_STATES: readonly JobState[] = ['needs_human', 'ready_for_human_rev
 
 // The card's planner lines: in a waiting state, the planner's suggestion clamped to three
 // lines (the whole note in its title) with Review the suggestion, which opens the job page at the
-// composer, where Send is (never on the card); then Discuss the result ↗ (or its message to copy) in
+// composer, where Send is (never on the card); then Discuss the result ↗ (or its message to copy;
+// for a ticket Claude Code plans, Discuss the result, which opens the job page at the composer) in
 // a waiting state, and Open the planning chat ↗ on any card with a stored link. A click on a link
 // or on Copy does not open the job.
 function plannerLines(job: JobRow): HTMLElement[] {
@@ -705,6 +706,8 @@ function plannerLines(job: JobRow): HTMLElement[] {
   if (discuss !== null && typeof discuss.message === 'string') {
     if (typeof discuss.url === 'string' && discuss.url.startsWith(CHATGPT_PREFILL_URL)) {
       links.append(tabLink('fs12', 'Discuss the result ↗', discuss.url));
+    } else if (planner.owner === 'claude_code') {
+      links.append(button('btn small', 'Discuss the result', { open: key, focus: 'composer' }));
     } else {
       const copy = button('btn small', 'Copy the message for the planner');
       const message = discuss.message;

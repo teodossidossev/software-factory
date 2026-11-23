@@ -4,7 +4,8 @@
 // ticket page's Planning conversation card and its link in the page's header, Start the planner,
 // End (asked first in setup.js's ticket confirmation), the ticket's prototypes in that card and the
 // newest in the header, and its read again every
-// TK_PLANNER_POLL_MS while it runs. A classic script, loaded in order with defer, sharing the
+// TK_PLANNER_POLL_MS while it runs; on the job page of a waiting job Claude Code plans, the
+// session read every TK_PLANNER_POLL_MS and the controls of Discuss the result. A classic script, loaded in order with defer, sharing the
 // page's globals with the others. This file has no import or export on purpose: the compiler
 // keeps it a script, so its top-level names stay the page's globals.
 'use strict';
@@ -94,8 +95,10 @@ function tkPlannerSession(value: unknown): PlannerSessionView | null {
   if (!isRecord(value)) {
     return null;
   }
-  const { name, started_at: startedAt, link } = value;
-  return typeof name === 'string' && typeof startedAt === 'string' && (link === null || typeof link === 'string') ? { name, started_at: startedAt, link } : null;
+  const { name, started_at: startedAt, link, result_of: resultOf } = value;
+  return typeof name === 'string' && typeof startedAt === 'string' && (link === null || typeof link === 'string')
+    ? { name, started_at: startedAt, link, result_of: Number.isInteger(resultOf) && typeof resultOf === 'number' && resultOf >= 0 ? resultOf : null }
+    : null;
 }
 
 // The session's link, only a TK_PLANNER_LINK one.
@@ -223,4 +226,171 @@ function tkPlannerStop(key: string): Promise<void> {
     tkPlannerAnswered(key, null);
     return tkPlannerSession(fieldOf(result, 'stopped')) === null ? `No planner of ${key} was running.` : `Ended the planner of ${key}.`;
   }, 'Ending the planner failed');
+}
+
+// ---------- Discuss the result on the job page of a waiting job Claude Code plans ----------
+
+// The planner session of the waiting job the job page shows, apart from tkPlanner (the ticket
+// page's): its job ("<ws>/<ticket>") and iteration, the session as last read or answered (null:
+// none runs), whether a read is out, the timer of the next read, per job key the count of the
+// answers of Discuss the result (a read sent before the last one is not applied), and the count of
+// the times the page left the job (visits: a read sent before the last one is dropped whole).
+const jobPlanner: { key: string | null; iteration: number | null; session: PlannerSessionView | null; reading: boolean; timer: ReturnType<typeof setTimeout> | null; answers: Map<string, number>; visits: number } = {
+  key: null, iteration: null, session: null, reading: false, timer: null, answers: new Map(), visits: 0,
+};
+
+// Whether the job page shows job key (its Stream, Changes or Merge request screen) and it is a job
+// Claude Code plans that waits for the user: only then is its session read.
+function jobPlannerShows(key: string): boolean {
+  if (ui.job !== key || !['stream', 'changes', 'mr'].includes(ui.screen)) {
+    return false;
+  }
+  const planner = shownJob()?.planner;
+  return planner?.owner === 'claude_code' && planner.discuss !== null;
+}
+
+// The job page draws the planner block of a waiting job Claude Code plans (renderPlanner, its one
+// caller): another job's state is dropped and a read starts; the same job at another iteration
+// reads at once, its session kept; else a read only when none is out and no timer is armed, so a
+// redraw sends nothing (leaving the job and coming back finds the timer gone and reads at once).
+function jobPlannerWatch(job: JobRow): void {
+  const key = keyOf(job);
+  if (jobPlanner.key !== key) {
+    clearTimeout(jobPlanner.timer ?? undefined);
+    Object.assign(jobPlanner, { key, iteration: job.iteration, session: null, reading: false, timer: null });
+  } else if (jobPlanner.iteration !== job.iteration) {
+    clearTimeout(jobPlanner.timer ?? undefined);
+    Object.assign(jobPlanner, { iteration: job.iteration, timer: null });
+  } else if (jobPlanner.timer !== null || jobPlanner.reading) {
+    return;
+  }
+  void jobPlannerRead(key);
+}
+
+// The job page draws its planner block without a waiting job Claude Code plans: no job's detail
+// (select clears it each time the page opens a job, so leaving a job and coming back passes here),
+// or a job that does not wait or that ChatGPT plans. The page has left the job of jobPlanner: the
+// timer is cleared, no read counts as out, and a read sent before is dropped whole when it answers;
+// the session shown stays until the next read.
+function jobPlannerLeave(): void {
+  clearTimeout(jobPlanner.timer ?? undefined);
+  Object.assign(jobPlanner, { timer: null, reading: false, visits: jobPlanner.visits + 1 });
+}
+
+// The next read of job key's session, after TK_PLANNER_POLL_MS, on one timer.
+function jobPlannerArm(key: string): void {
+  clearTimeout(jobPlanner.timer ?? undefined);
+  jobPlanner.timer = setTimeout(() => void jobPlannerRead(key), TK_PLANNER_POLL_MS);
+}
+
+// GET api/tickets/<ws>/<ticket>/planner while the job page shows job key waiting: none once it
+// shows another job or page, or the job no longer waits (no timer either); while the page is
+// hidden no read, the timer goes on. An answer that comes once the page left the job (another job,
+// another page, the job left and opened again, or the job no longer waiting) is dropped whole: no
+// change of the session, the read out, the timer or the page; else its session replaces the one
+// shown unless an answer of Discuss the result came after it was sent (a failed read keeps what is
+// shown), and the next read is armed.
+async function jobPlannerRead(key: string): Promise<void> {
+  jobPlanner.timer = null;
+  if (jobPlanner.key !== key || !jobPlannerShows(key)) {
+    return;
+  }
+  if (document.visibilityState === 'hidden') {
+    jobPlannerArm(key);
+    return;
+  }
+  jobPlanner.reading = true;
+  const answers = jobPlanner.answers.get(key) ?? 0;
+  const visits = jobPlanner.visits;
+  // The answer's session, once read.
+  let read: { session: PlannerSessionView | null } | null = null;
+  try {
+    read = { session: tkPlannerSession(fieldOf(await getJson(`api/tickets/${jobPath(key)}/planner`), 'session')) };
+  } catch { // no answer, an HTTP error or a body that is not JSON: the session shown stays until the next read
+  }
+  if (jobPlanner.key !== key || jobPlanner.visits !== visits || !jobPlannerShows(key)) {
+    return;
+  }
+  jobPlanner.reading = false;
+  if (read !== null && answers === (jobPlanner.answers.get(key) ?? 0)) {
+    jobPlanner.session = read.session;
+  }
+  jobPlannerArm(key);
+  renderComposer();
+}
+
+// Discuss the result without a session: POST api/tickets/<ws>/<ticket>/planner/discuss with {},
+// once at a time (state.setupPending "discuss:<key>"), the composer drawn before and after. Its
+// answer counts for the job (a read sent before is not applied) and, while the page shows the
+// job, its session is shown and the next read comes TK_PLANNER_POLL_MS later; the outcome goes
+// to the toast.
+async function jobPlannerDiscuss(key: string): Promise<void> {
+  const id = `discuss:${key}`;
+  if (state.setupPending.has(id)) {
+    return;
+  }
+  state.setupPending.add(id);
+  renderComposer();
+  let outcome: Outcome;
+  try {
+    const result = await post(`api/tickets/${jobPath(key)}/planner/discuss`, {});
+    const session = tkPlannerSession(fieldOf(result, 'session'));
+    jobPlanner.answers.set(key, (jobPlanner.answers.get(key) ?? 0) + 1);
+    if (jobPlanner.key === key && jobPlannerShows(key)) {
+      jobPlanner.session = session;
+      jobPlannerArm(key);
+    }
+    const text = fieldOf(result, 'started') !== false
+      ? `The planner of ${key} started with the message about the result: it reads the job and sums it up. Its link shows here once it first waits for you.`
+      : tkPlannerHref(session) !== null ? `The planner of ${key} runs already: Discuss the result opens it.` : `The planner of ${key} runs already; its link shows here once it first waits for you.`;
+    outcome = { level: 'ok', text };
+  } catch (error) {
+    outcome = { level: 'error', text: error instanceof ActionError ? `${error.code}: ${error.message}` : `Starting the planner failed (${errorMessage(error)}); it may have started.` };
+  }
+  state.setupPending.delete(id);
+  toast(outcome);
+  renderComposer();
+}
+
+// Discuss the result of a waiting job Claude Code plans, in the planner block (inMenu false) or as
+// a ready job's More ▾ items (inMenu true). No session known: the button that starts one (its
+// label while the start is out). A session with a TK_PLANNER_LINK link: that link in a new tab; the
+// click copies the message to paste, unless the session was started on this iteration's result.
+// Any other session: the line that it runs (in More ▾ the note of a disabled item), then Copy the
+// message for the planner unless it was started on this result.
+function jobPlannerControls(job: JobRow, inMenu: boolean): HTMLElement[] {
+  const key = keyOf(job);
+  const session = jobPlanner.key === key ? jobPlanner.session : null;
+  if (session === null) {
+    const posting = state.setupPending.has(`discuss:${key}`);
+    const start = button(inMenu ? 'ho-item' : 'btn small', posting ? 'Starting the planner…' : 'Discuss the result', { act: 'planner-discuss' });
+    start.id = 'planner-discuss-button';
+    start.disabled = posting;
+    start.setAttribute('title', `Starts the planner in the planning copy of ${job.workspace} with the message about the result`);
+    return [start];
+  }
+  const fresh = session.result_of === job.iteration;
+  const href = tkPlannerHref(session);
+  if (href !== null) {
+    const link = tabLink(inMenu ? 'ho-item' : 'fs13', 'Discuss the result ↗', href);
+    link.id = 'planner-discuss-link';
+    const message = job.planner.discuss?.message;
+    if (!fresh && typeof message === 'string') {
+      // The copy happens in the click, which the browser allows; the link opens the tab as well.
+      link.addEventListener('click', () => copyValue(message, byIdAs('planner-copy-text', 'textarea'), (text) => toast({ level: 'info', text: `${text} The message for the planner: paste it into the session.` })));
+    }
+    link.setAttribute('title', fresh ? 'Opens the planner session, which got the message about this result' : 'Opens the planner session; the message about the result is copied, to paste there');
+    return [link];
+  }
+  const text = `Planner session "${session.name}" runs; its link shows here once it first waits for you, or find it under that name in the Claude app or on claude.ai/code.`;
+  const copy = fresh ? [] : [button(inMenu ? 'ho-item' : 'btn small', 'Copy the message for the planner', { act: 'planner-copy' })];
+  if (inMenu) {
+    const item = button('ho-item', 'Discuss the result');
+    item.disabled = true;
+    item.append(el('span', 'muted', text));
+    return [item, ...copy];
+  }
+  const line = el('p', 'fs13', text);
+  line.setAttribute('role', 'status');
+  return [line, ...copy];
 }

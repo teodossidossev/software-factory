@@ -73,10 +73,12 @@ interface JobSummary {
   planner: JobPlanner;
 }
 
-// A job's planner block: src/dashboard-payloads.ts plannerOf. chat: the ticket's planning chat
-// link; discuss: the message about the result and its ChatGPT link (null: copy it), only while the
-// job waits for the user; suggestion: the planner's note while it is shown (src/planner.ts).
+// A job's planner block: src/dashboard-payloads.ts plannerOf. owner: who plans the ticket; chat:
+// the ticket's planning chat link; discuss: the message about the result and its ChatGPT link
+// (null: copy it), only while the job waits for the user; suggestion: the planner's note while it
+// is shown (src/planner.ts).
 interface JobPlanner {
+  owner: TicketOwner;
   chat: string | null;
   discuss: { message: string; url: string | null } | null;
   suggestion: { note: string; sha256: string; at: string } | null;
@@ -558,11 +560,12 @@ interface PlanDependency {
   merged: boolean;
 }
 // A ticket's planner session as the planned ticket page shows it: src/dashboard-context.ts
-// plannerSessionView.
+// plannerSessionView. result_of: the job's iteration whose result it was started on, else null.
 interface PlannerSessionView {
   name: string;
   started_at: string;
   link: string | null;
+  result_of: number | null;
 }
 // One of a ticket's prototypes as the planned ticket page lists it: src/prototypes.ts PrototypeEntry.
 interface PrototypeEntry {

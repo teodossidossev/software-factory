@@ -5097,8 +5097,12 @@ a header, then the Stream with the composer pinned at the bottom.
   message box with Send under the row and closes it again; *More ▾*; and *Abort…*, quiet, at the
   far right. More ▾ holds the other of the two, *Approve without review…*, Create merge request
   (when it can be created), Refresh MR status (SF-200), *Discuss the result ↗* (or *Copy the
-  message for the planner*) and, for a ticket ChatGPT plans without a stored link, *Planning chat
-  link…*, which opens the field under the row; an item that is off says why under its label. It
+  message for the planner*; for a ticket Claude Code plans, SF-308-3, the items of the planner
+  block's Discuss below: *Discuss the result ↗* to its session, *Discuss the result* that starts
+  one, or a disabled *Discuss the result* whose note says the session runs, then *Copy the message
+  for the planner* unless it was started on this result) and, for a ticket without a stored link
+  that Claude Code plans or ChatGPT plans with a link of the result, *Planning chat link…*, which
+  opens the field under the row; an item that is off says why under its label. It
   opens upward, below 768 px as a sheet across the bottom of the screen; the arrows move through
   it and Esc closes it, the focus back on More ▾; `handed_over` (SF-073): Approve… (primary), *Ask for changes*
   (the message, with the edits in the user's checkout), *I opened the MR myself*, *Merged — archive* (confirmed in place by a second click), *Take it back*,
@@ -5121,14 +5125,24 @@ a header, then the Stream with the composer pinned at the bottom.
   Dismiss removes it. Their outcomes show in the status line as the other actions'. Then, while
   the job waits for the user, *Discuss the result ↗*: a new ChatGPT conversation prefilled with
   the message of `resultConversation` (read the Task file and the Report with `read_job`, sum up,
-  discuss, propose with `suggest_changes`), or *Copy the message for the planner* when Claude Code
-  plans the ticket or the link would be too long; *Open the planning chat ↗* with a stored link,
-  and the field *Planning chat link*. On a ready job, Discuss and the field are in the ready panel's
-  More ▾; the block keeps the suggestion and *Open the planning chat ↗*. The job's board card
-  shows, in a waiting state, *Planner
-  suggests changes* with the note clamped to three lines (the whole note in its title) and *Review
-  the suggestion*, which opens this page with the composer focused (no Send on the card), and the
-  same two links.
+  discuss, propose with `suggest_changes`), or *Copy the message for the planner* when the link
+  would be too long. When Claude Code plans the ticket (SF-308-3), the page reads the ticket's
+  planner session (`GET api/tickets/<ws>/<ticket>/planner`) at once and every 10 s while it shows
+  the waiting job (none while the tab is hidden), and Discuss is: with a session whose link is a
+  `https://claude.ai/code/` one, *Discuss the result ↗*, which opens it in a new tab and copies the
+  message to paste there unless the session was started on this result; with no session,
+  *Discuss the result*, which posts `api/tickets/<ws>/<ticket>/planner/discuss` and starts the
+  planner in the planning copy with the message as its first message (the planner reads the job
+  with `read_job` and proposes with `suggest_changes`), its outcome in the toast; with a session
+  whose link is not recorded yet, the line "Planner session "…" runs; its link shows here once it
+  first waits for you, …" and *Copy the message for the planner* unless it was started on this
+  result. Then *Open the planning chat ↗* with a stored link, and the field *Planning chat link*.
+  On a ready job, Discuss and the field are in the ready panel's More ▾; the block keeps the
+  suggestion and *Open the planning chat ↗*. The job's board card shows, in a waiting state,
+  *Planner suggests changes* with the note clamped to three lines (the whole note in its title)
+  and *Review the suggestion*, which opens this page with the composer focused (no Send on the
+  card), and the same two links; for a ticket Claude Code plans, *Discuss the result* instead of
+  the Copy, which opens this page at the composer.
 - **Changes** (SF-079): the file tree on the left and the diff of the selected file on the right,
   as IntelliJ shows them; see Changes below.
 - **Merge request** (SF-080): the branch, the base, the MR title and text, editable before the

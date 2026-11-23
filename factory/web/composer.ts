@@ -120,13 +120,15 @@ function plannerAvailability(action: 'suggestion-send' | 'suggestion-dismiss', j
 
 // The planner block, right after the composer's sentence: the planner's suggestion while it
 // is shown, as plain text, with Send (the note as the user's message) and Dismiss; Discuss the result
-// (the ChatGPT link, or the message to copy) while the job waits for the user; Open the planning chat
+// (the ChatGPT link, or the message to copy; for a ticket Claude Code plans, jobPlannerControls'
+// session link or start) while the job waits for the user; Open the planning chat
 // and its field. A ready job's Discuss and field are in its ready panel instead. Every href is
 // checked against its fixed prefix.
 function renderPlanner(job: JobRow | null): void {
   const block = byId('planner');
   const planner = job?.planner;
   if (job === null || planner === undefined || planner === null) {
+    jobPlannerLeave();
     withChatFocus(() => block.replaceChildren());
     block.hidden = true;
     return;
@@ -161,7 +163,17 @@ function renderPlanner(job: JobRow | null): void {
   const discuss = planner.discuss;
   // A ready job's Discuss and field are in its panel's More ▾.
   const ready = job.state === 'ready_for_human_review';
-  if (!ready && discuss !== null && typeof discuss.message === 'string') {
+  // Claude Code plans the ticket: its session's link, or Discuss the result that starts one; any
+  // other job (or none, above) leaves the session's reads.
+  const claude = planner.owner === 'claude_code' && discuss !== null;
+  if (claude) {
+    jobPlannerWatch(job);
+  } else {
+    jobPlannerLeave();
+  }
+  if (claude && !ready) {
+    links.append(...jobPlannerControls(job, false));
+  } else if (!ready && discuss !== null && typeof discuss.message === 'string') {
     if (typeof discuss.url === 'string' && discuss.url.startsWith(CHATGPT_PREFILL_URL)) {
       links.append(tabLink('fs13', 'Discuss the result ↗', discuss.url));
     } else {
@@ -425,9 +437,10 @@ function chatGptLink(job: JobRow): string | null {
   return typeof url === 'string' && url.startsWith(CHATGPT_PREFILL_URL) ? url : null;
 }
 
-// Whether the job's ticket takes a planning chat link from the ready panel: ChatGPT plans it and it
-// has none stored.
-const takesChatLink = (job: JobRow): boolean => chatGptLink(job) !== null && job.planner?.chat === null;
+// Whether the job's ticket takes a planning chat link from the ready panel: it has none stored, and
+// Claude Code plans it (the field takes its session link) or ChatGPT does with a link of the result
+// (one whose message is too long for the link gets no field).
+const takesChatLink = (job: JobRow): boolean => (chatGptLink(job) !== null || job.planner?.owner === 'claude_code') && job.planner?.chat === null;
 
 // The ready panel of a job ready for review, right after #confirm, drawn again on each call (the
 // focus kept): one row with the listed primary action, Ask for a change (which shows .crow), More ▾
@@ -491,8 +504,8 @@ function renderReadyPanel(job: JobRow | null): void {
 // The ready panel's More ▾ items: each listed action but the primary, Send and the dangerous one,
 // in the server's order, with its second line (why it is off, else READY_NOTES'), a separator
 // before Refresh MR status; then Discuss the result ↗ (the ChatGPT link, else Copy the message for
-// the planner) while the job has a message for the planner, and Planning chat link… for a ticket
-// ChatGPT plans without a stored link.
+// the planner; for a ticket Claude Code plans, jobPlannerControls' items) while the job has a
+// message for the planner, and Planning chat link… while takesChatLink.
 function readyMenuItems(job: JobRow): HTMLElement[] {
   const items: HTMLElement[] = [];
   for (const shown of listedActions(job)) {
@@ -511,7 +524,9 @@ function readyMenuItems(job: JobRow): HTMLElement[] {
     }
     items.push(item);
   }
-  if (typeof job.planner?.discuss?.message === 'string') {
+  if (job.planner?.owner === 'claude_code' && job.planner.discuss !== null) {
+    items.push(...jobPlannerControls(job, true));
+  } else if (typeof job.planner?.discuss?.message === 'string') {
     const url = chatGptLink(job);
     items.push(url !== null ? tabLink('ho-item', 'Discuss the result ↗', url) : button('ho-item', 'Copy the message for the planner', { act: 'planner-copy' }));
   }
@@ -525,11 +540,12 @@ function readyMenuItems(job: JobRow): HTMLElement[] {
 
 // The composer's own buttons, which composerAct handles: the planner block's, the planning chat
 // link's and the ready panel's toggles.
-const COMPOSER_ACTS: readonly string[] = ['suggestion-send', 'suggestion-dismiss', 'planner-copy', 'chat-save', 'chat-remove', 'ask', 'chat-open'];
+const COMPOSER_ACTS: readonly string[] = ['suggestion-send', 'suggestion-dismiss', 'planner-copy', 'planner-discuss', 'chat-save', 'chat-remove', 'ask', 'chat-open'];
 
 // The planner block's buttons: Send posts the sha256 of the suggestion the page shows (the server
 // sends its stored note only while it is that one), Dismiss removes it; Copy puts the message for
-// the planner on the clipboard; Save and Remove of the planning chat link. The ready panel's Ask
+// the planner on the clipboard; Discuss the result starts the planner on the result
+// (jobPlannerDiscuss); Save and Remove of the planning chat link. The ready panel's Ask
 // for a change and Planning chat link… open and close the box and the field, the focus in what
 // opened or back on what opened it.
 function composerAct(action: string, job: JobRow): void {
@@ -556,6 +572,8 @@ function composerAct(action: string, job: JobRow): void {
     if (typeof message === 'string') {
       copyValue(message, byIdAs('planner-copy-text', 'textarea'), (text) => toast({ level: 'info', text: `${text} The message for the planner.` }));
     }
+  } else if (action === 'planner-discuss') {
+    void jobPlannerDiscuss(key);
   } else {
     void saveChatLink('job', key, action === 'chat-remove');
   }

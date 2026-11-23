@@ -2300,6 +2300,24 @@ test('board client (SF-208): a waiting card shows the planner\'s note clamped wi
   assert.equal(page.$('suggestion-send-button').textContent, 'Send');
 });
 
+test('board client (SF-308-3): a waiting card Claude Code plans shows Discuss the result, which opens the job page at the composer, and no Copy; a ChatGPT card keeps its link or Copy', async () => {
+  const planner = (owner: string, discuss: Record<string, unknown>) => ({ planner: { owner, chat: null, discuss, suggestion: null } });
+  const claude = job('C', 'needs_human', { error: { code: 'max_turns', message: 'x' }, ...planner('claude_code', { message: 'Use the software-factory MCP server.', url: null }) });
+  const linked = job('L', 'ready_for_human_review', planner('chatgpt', { message: 'm', url: 'https://chatgpt.com/?q=m' }));
+  const long = job('G', 'handed_over', planner('chatgpt', { message: 'm', url: null }));
+  const page = await loadBoard([claude, linked, long], { writeText: async () => undefined });
+  const c = card(page, 'app/C');
+  const discuss = button(c, 'Discuss the result')!;
+  assert.deepEqual([discuss.dataset.open, discuss.dataset.focus, labels(c).includes('Copy the message for the planner'), c.querySelectorAll('a').length], ['app/C', 'composer', false, 0]);
+  assert.deepEqual([card(page, 'app/L').querySelector('a')!.textContent, button(card(page, 'app/L'), 'Discuss the result')], ['Discuss the result ↗', undefined]);
+  assert.deepEqual([labels(card(page, 'app/G')).includes('Copy the message for the planner'), button(card(page, 'app/G'), 'Discuss the result')], [true, undefined]);
+  discuss.click();
+  await page.flush();
+  page.streams.at(-1)!.emit('job', detail(claude));
+  await page.flush();
+  assert.deepEqual([onJobPage(page), page.location.hash, page.document.activeElement], [true, '#app/C', page.$('msg')]);
+});
+
 async function loadBoard(jobs: Job[], clipboard: { writeText(text: string): Promise<void> }): Promise<Page> {
   const page = await loadPage(STATIC_DIR, (path) => {
     if (path === 'api/jobs') {

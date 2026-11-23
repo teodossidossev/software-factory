@@ -6,8 +6,8 @@
 // file list of the published iteration are built from it), SF_CONFIG_DIR set to a temporary
 // directory whose registry holds the fixture's workspace (the user's registry is never read), and
 // one Chromium. Per test (browserTest): a new state directory with the six jobs, the planned tickets
-// and their history, new fake actions, setup and queue that record each call and answer as the
-// real ones do for the cases tested, a new startDashboard and a new page, all closed after the test.
+// and their history, new fake actions, setup, queue and planner that record each call and answer
+// as the real ones do for the cases tested, a new startDashboard and a new page, all closed after the test.
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -17,12 +17,14 @@ import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { type Browser, chromium, type Page, type Request } from 'playwright';
-import { type DashboardActions, type DashboardDigests, type DashboardQueue, type DashboardSetup, type RunningDashboard, startDashboard } from '../../src/dashboard.js';
+import type { TicketOwner } from '../../src/conversation.js';
+import { type DashboardActions, type DashboardDigests, type DashboardPlanner, type DashboardQueue, type DashboardSetup, type RunningDashboard, startDashboard } from '../../src/dashboard.js';
 import { digestCounts, type DigestRecord } from '../../src/digest-run.js';
 import { FactoryError } from '../../src/errors.js';
 import { type EventRecord, type Job, type JobState, JobStore, runningJobs, TERMINAL_STATES } from '../../src/jobs.js';
 import { messageText, mrMessage, mrProblems, mrTextProblem } from '../../src/mr.js';
 import { buildPatch, fileChanges } from '../../src/patch.js';
+import type { PlannerSession, ResultStart } from '../../src/planner-session.js';
 import { MAX_RUNNING, MIN_RUNNING } from '../../src/queue.js';
 import { saveRegistry, type WorkspaceColor, workspaceColor } from '../../src/registry.js';
 import type { WorkspaceRow, WorkspaceSettings } from '../../src/setup.js';
@@ -352,8 +354,44 @@ export class FakeSetup implements DashboardSetup {
     return refuse('setup_unavailable', 'Not in the browser fixture.');
   }
 
-  async planningOf() {
-    return { owner: 'chatgpt' as const, planning_chat: null };
+  // Who plans each ticket (SF-308-3), by ticket: ChatGPT for one not named here.
+  readonly owners = new Map<string, TicketOwner>();
+
+  async planningOf(_workspace: string, ticket: string) {
+    return { owner: this.owners.get(ticket) ?? 'chatgpt', planning_chat: null };
+  }
+}
+
+// The tickets' planner sessions (SF-308-3), by "<ws>/<ticket>", as DashboardPlanner answers them:
+// session reads the map, stop removes from it, start records its arguments and adds a session
+// (result_of from its result) unless one is there, which it answers with started false.
+export class FakePlanner implements DashboardPlanner {
+  readonly sessions = new Map<string, PlannerSession>();
+  readonly starts: Array<[string, string, ResultStart | undefined]> = [];
+
+  async start(workspace: string, ticket: string, result?: ResultStart): Promise<{ started: boolean; session: PlannerSession }> {
+    this.starts.push([workspace, ticket, result]);
+    const key = `${workspace}/${ticket}`;
+    const running = this.sessions.get(key);
+    if (running !== undefined) {
+      return { started: false, session: running };
+    }
+    const session: PlannerSession = {
+      workspace, ticket, name: `sf-plan-${workspace}-${ticket}`, id: `planner-${this.starts.length}`, pid: process.pid, started_at: at(40),
+      ...(result === undefined ? {} : { result_of: result.iteration }),
+    };
+    this.sessions.set(key, session);
+    return { started: true, session };
+  }
+
+  async session(workspace: string, ticket: string): Promise<PlannerSession | undefined> {
+    return this.sessions.get(`${workspace}/${ticket}`);
+  }
+
+  async stop(workspace: string, ticket: string): Promise<PlannerSession | undefined> {
+    const session = this.sessions.get(`${workspace}/${ticket}`);
+    this.sessions.delete(`${workspace}/${ticket}`);
+    return session;
   }
 }
 
@@ -714,6 +752,7 @@ export interface Fixture {
   setup: FakeSetup;
   queue: FakeQueue;
   digests: FakeDigests;
+  planner: FakePlanner;
   // Console errors, page errors, failed requests and responses of 400 and more, since the page opened.
   problems: string[];
   // Opens the page at the hash (the board without one) and waits until the stream has delivered
@@ -739,7 +778,8 @@ export function browserTest(name: string, fn: (fx: Fixture) => Promise<void>, op
     const queue = new FakeQueue(jobs, setup);
     const actions = new FakeActions(jobs);
     const digests = new FakeDigests();
-    const dashboard = await startDashboard(0, state, jobs, actions.bind(), setup, { queue, digests });
+    const planner = new FakePlanner();
+    const dashboard = await startDashboard(0, state, jobs, actions.bind(), setup, { queue, digests, planner });
     const context = await once.browser.newContext({ viewport: { width: 1400, height: 900 } });
     const page = await context.newPage();
     const url = dashboard.url.href;
@@ -757,7 +797,7 @@ export function browserTest(name: string, fn: (fx: Fixture) => Promise<void>, op
       }
     });
     const fx: Fixture = {
-      page, dashboard, url, state, jobs, actions, setup, queue, digests, problems,
+      page, dashboard, url, state, jobs, actions, setup, queue, digests, planner, problems,
       async open(hash = '') {
         await page.goto(`${url}${hash === '' ? '' : `#${hash}`}`);
         await page.waitForFunction(() => document.getElementById('health-light')?.dataset.stream === 'live');

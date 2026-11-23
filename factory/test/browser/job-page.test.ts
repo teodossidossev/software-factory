@@ -1,6 +1,7 @@
 // The job page in a real browser (SF-091): the Stream, the Changes screen with its tree's keys, the
 // Merge request screen, and the page's own keys.
 import assert from 'node:assert/strict';
+import { resultConversation } from '../../src/conversation.js';
 import { browserTest, eventually, type Fixture, FILES, JOBS, MR_BODY, MR_TITLE, WS } from './support.js';
 
 // The Stream as the user reads it: each line's kind and its text, without the time.
@@ -200,4 +201,41 @@ browserTest('job page (SF-107): the hand-over panel shows its two paths side by 
     return top !== null && bottom !== null && bottom.y >= top.y + top.height && Math.abs(top.x - bottom.x) < 1 && bottom.x + bottom.width <= 600;
   }, true);
   assert.equal(await noScroll(), true);
+});
+
+// SF-308-3: Discuss the result of a waiting job whose ticket Claude Code plans. claude.ai is a
+// route stub: no network.
+browserTest('job page (SF-308-3): Claude Code plans the ticket: Discuss the result ↗ opens its session in a new page, the message on the clipboard; with no session, Discuss the result posts discuss and the session it started shows', async (fx) => {
+  const link = 'https://claude.ai/code/session_01Ab';
+  const { iteration } = (await fx.jobs.read(WS, JOBS.gate))!;
+  fx.setup.owners.set(JOBS.gate, 'claude_code');
+  fx.planner.sessions.set(`${WS}/${JOBS.gate}`, { workspace: WS, ticket: JOBS.gate, name: `sf-plan-${WS}-${JOBS.gate}`, id: 'planner-0', pid: process.pid, started_at: '2026-11-01T10:40:00.000Z', link });
+  const context = fx.page.context();
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: new URL(fx.url).origin });
+  await context.route('https://claude.ai/**', (route) => route.fulfill({ status: 200, contentType: 'text/html', body: '<title>The planner session</title>' }));
+  await fx.open(`${WS}/${JOBS.gate}`);
+  const discuss = fx.page.locator('#planner-discuss-link');
+  await discuss.waitFor();
+  assert.deepEqual([await discuss.innerText(), await discuss.getAttribute('target'), await discuss.getAttribute('rel')], ['Discuss the result ↗', '_blank', 'noopener noreferrer']);
+  const opened = context.waitForEvent('page');
+  await discuss.click();
+  const tab = await opened;
+  await tab.waitForLoadState();
+  assert.equal(tab.url(), link);
+  await tab.close();
+  await eventually(() => fx.page.evaluate(() => navigator.clipboard.readText()), resultConversation(WS, JOBS.gate, 'claude_code'));
+
+  // No session: the button posts discuss, and the session started on this result shows its line.
+  fx.planner.sessions.clear();
+  await fx.page.reload();
+  await fx.page.waitForFunction(() => document.getElementById('health-light')?.dataset.stream === 'live');
+  const start = fx.page.locator('#planner-discuss-button');
+  await start.waitFor();
+  const request = fx.posted(`api/tickets/${WS}/${JOBS.gate}/planner/discuss`);
+  await start.click();
+  assert.deepEqual((await request).postDataJSON(), {});
+  await eventually(() => fx.page.locator('#planner [role="status"]').innerText().catch(() => ''), `Planner session "sf-plan-${WS}-${JOBS.gate}" runs; its link shows here once it first waits for you, or find it under that name in the Claude app or on claude.ai/code.`);
+  assert.deepEqual(fx.planner.starts, [[WS, JOBS.gate, { iteration }]]);
+  assert.equal(await fx.page.locator('#planner [data-act="planner-copy"]').count(), 0);
+  assert.deepEqual(fx.problems, []);
 });

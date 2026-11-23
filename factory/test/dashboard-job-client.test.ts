@@ -920,7 +920,7 @@ test('job client (SF-119): on a phone or without hover the Merge request tab wit
 const SUGGESTION = { note: '<b>Keep</b> the button,\nrename it', sha256: 'a'.repeat(64), at: '2026-11-01T10:06:00.000Z' };
 const DISCUSS = { message: 'Use the Software Factory connector. Call guide.', url: 'https://chatgpt.com/?q=Use%20the' };
 const planned = (state: string, planner: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
-  job(state, { planner: { chat: null, discuss: null, suggestion: null, ...planner }, ...extra });
+  job(state, { planner: { owner: 'chatgpt', chat: null, discuss: null, suggestion: null, ...planner }, ...extra });
 const posted = (page: Page): Array<[string, unknown]> => page.requests.filter((request) => request.method === 'POST').map((request) => [request.path, JSON.parse(request.body!)]);
 const links = (node: FakeElement): Array<[string, string, string, string]> => node.querySelectorAll('a').map((link) => [link.textContent, link.href, link.target, link.rel]);
 
@@ -1089,4 +1089,224 @@ test('job client (SF-286): a card\'s Review the suggestion of a ready job opens 
   page.streams.at(-1)!.emit('job', detail(ready));
   await page.flush();
   assert.deepEqual([crowOf(page).hidden, page.$('ask-button').getAttribute('aria-expanded'), page.document.activeElement], [false, 'true', page.$('msg')]);
+});
+
+// Discuss the result for a ticket Claude Code plans (SF-308-3): the job page reads the ticket's
+// planner session (web/planner.ts jobPlanner) and opens it, or starts one on the result.
+const CLAUDE_DISCUSS = { message: 'Use the software-factory MCP server. Call read_job.', url: null };
+const SESSION_LINK = 'https://claude.ai/code/session_01Ab';
+const POLL_MS = 10000;
+const claudeJob = (state: string, planner: Record<string, unknown> = {}, extra: Record<string, unknown> = {}) =>
+  planned(state, { owner: 'claude_code', discuss: CLAUDE_DISCUSS, ...planner }, state === 'needs_human' ? { error: { code: 'iteration_limit', message: 'm' }, ...extra } : extra);
+const plannerSession = (extra: Record<string, unknown> = {}) => ({ name: 'sf-plan-app-T-1', started_at: '2026-11-01T10:07:00.000Z', link: null, result_of: null, ...extra });
+const sessionLine = (name: string) => `Planner session "${name}" runs; its link shows here once it first waits for you, or find it under that name in the Claude app or on claude.ai/code.`;
+const STARTED = 'The planner of app/T-1 started with the message about the result: it reads the job and sums it up. Its link shows here once it first waits for you.';
+const plannerReads = (page: Page, ticket = 'T-1'): FetchRequest[] => gets(page, `api/tickets/app/${ticket}/planner`);
+const discussPost = (page: Page): FetchRequest => page.requests.filter((request) => request.method === 'POST' && request.path === 'api/tickets/app/T-1/planner/discuss').at(-1)!;
+// The timers of the next read armed and not fired yet.
+const armed = (page: Page) => page.timers.filter((timer) => timer.ms === POLL_MS && !timer.cleared && !timer.fired);
+
+// Answers the last read of the ticket's session with session.
+async function answerRead(page: Page, session: unknown, ticket = 'T-1'): Promise<void> {
+  plannerReads(page, ticket).at(-1)!.respond(200, { session, prototypes: [] });
+  await page.flush();
+}
+
+// The page goes to the hash, the job's stream sending it.
+async function goTo(page: Page, hash: string, shown?: Detail): Promise<void> {
+  page.location.hash = hash;
+  page.window.dispatch('hashchange');
+  await page.flush();
+  if (shown !== undefined) {
+    page.streams.at(-1)!.emit('open');
+    page.streams.at(-1)!.emit('job', shown);
+    await page.flush();
+  }
+}
+
+test('job client (SF-308-3): a waiting job Claude Code plans without a session: one read, Discuss the result posts discuss once at a time, the session it started on this result shows its line without Copy, and the next read comes 10 s after the answer', async () => {
+  const page = await openJob(detail(claudeJob('needs_human')));
+  assert.equal(plannerReads(page).length, 1);
+  await answerRead(page, null);
+  const start = page.$('planner-discuss-button');
+  assert.deepEqual([start.textContent, start.disabled, start.dataset.act, start.getAttribute('title')], ['Discuss the result', false, 'planner-discuss', 'Starts the planner in the planning copy of app with the message about the result']);
+  // No ChatGPT link and no Copy of the message.
+  assert.deepEqual([links(page.$('planner')), page.$('planner').querySelector('[data-act="planner-copy"]')], [[], null]);
+  start.click();
+  await page.flush();
+  assert.deepEqual(posted(page), [['api/tickets/app/T-1/planner/discuss', {}]]);
+  assert.deepEqual([page.$('planner-discuss-button').textContent, page.$('planner-discuss-button').disabled], ['Starting the planner…', true]);
+  // A second click while it is out posts nothing, even on a button not disabled.
+  page.$('planner-discuss-button').click();
+  page.$('planner-discuss-button').disabled = false;
+  page.$('planner-discuss-button').click();
+  await page.flush();
+  assert.equal(posted(page).length, 1);
+  const before = page.timers.length;
+  discussPost(page).respond(200, { ok: true, result: { started: true, session: plannerSession({ result_of: 1 }) } });
+  await page.flush();
+  assert.equal(page.$('toast-text').textContent, STARTED);
+  assert.deepEqual([page.$('planner').querySelector('[role="status"]')!.textContent, page.document.getElementById('planner-discuss-button'), page.$('planner').querySelector('[data-act="planner-copy"]')], [sessionLine('sf-plan-app-T-1'), null, null]);
+  // One read armed, by the answer: 10 s after it the page reads the session again.
+  assert.deepEqual([armed(page).length, page.timers.indexOf(armed(page)[0]!) >= before], [1, true]);
+  page.tick(POLL_MS);
+  await page.flush();
+  assert.equal(plannerReads(page).length, 2);
+});
+
+test('job client (SF-308-3): Discuss the result\'s outcomes in the toast: started, running with and without a link, a refusal, no answer', async () => {
+  const outcome = async (answer: (request: FetchRequest) => void): Promise<string> => {
+    const page = await openJob(detail(claudeJob('needs_human')));
+    await answerRead(page, null);
+    page.$('planner-discuss-button').click();
+    await page.flush();
+    answer(discussPost(page));
+    await page.flush();
+    return page.$('toast-text').textContent;
+  };
+  assert.equal(await outcome((request) => request.respond(200, { ok: true, result: { started: true, session: plannerSession() } })), STARTED);
+  assert.equal(await outcome((request) => request.respond(200, { ok: true, result: { started: false, session: plannerSession({ link: SESSION_LINK }) } })), 'The planner of app/T-1 runs already: Discuss the result opens it.');
+  assert.equal(await outcome((request) => request.respond(200, { ok: true, result: { started: false, session: plannerSession({ link: 'https://evil.example/code/x' }) } })), 'The planner of app/T-1 runs already; its link shows here once it first waits for you.');
+  const refused = 'The job is working; Discuss the result needs a job that waits for the user: needs_human, ready_for_human_review or handed_over.';
+  assert.equal(await outcome((request) => request.respond(409, { ok: false, error: { code: 'invalid_state', message: refused } })), `invalid_state: ${refused}`);
+  assert.match(await outcome((request) => request.fail('connection reset')), /^Starting the planner failed \(.+\); it may have started\.$/);
+});
+
+test('job client (SF-308-3): a session with a link: Discuss the result ↗ opens it in a new tab and its click copies the message to paste; one started on this result copies nothing; a link that is not claude.ai/code is not linked', async () => {
+  const written: string[] = [];
+  const page = await openJob(detail(claudeJob('needs_human')), () => undefined, { writeText: async (text) => void written.push(text) });
+  await answerRead(page, plannerSession({ link: SESSION_LINK }));
+  assert.deepEqual(links(page.$('planner')), [['Discuss the result ↗', SESSION_LINK, '_blank', 'noopener noreferrer']]);
+  assert.equal(page.$('planner-discuss-link').getAttribute('title'), 'Opens the planner session; the message about the result is copied, to paste there');
+  page.$('planner-discuss-link').click();
+  await page.flush();
+  assert.deepEqual([written, page.$('toast-text').textContent], [[CLAUDE_DISCUSS.message], 'Copied. The message for the planner: paste it into the session.']);
+  // Started on this iteration's result: nothing to paste.
+  page.tick(POLL_MS);
+  await answerRead(page, plannerSession({ link: SESSION_LINK, result_of: 1 }));
+  page.$('planner-discuss-link').click();
+  await page.flush();
+  assert.deepEqual([written.length, page.$('planner-discuss-link').getAttribute('title')], [1, 'Opens the planner session, which got the message about this result']);
+  // A link that fails TK_PLANNER_LINK: the line and Copy instead.
+  page.tick(POLL_MS);
+  await answerRead(page, plannerSession({ link: 'https://evil.example/code/x' }));
+  assert.deepEqual([links(page.$('planner')), page.$('planner').querySelector('[role="status"]')!.textContent], [[], sessionLine('sf-plan-app-T-1')]);
+  page.$('planner').querySelector('[data-act="planner-copy"]')!.click();
+  await page.flush();
+  assert.deepEqual(written, [CLAUDE_DISCUSS.message, CLAUDE_DISCUSS.message]);
+});
+
+test('job client (SF-308-3): the job page reads the session every 10 s while it shows the waiting job, none while hidden (the timer goes on), on the board or on another job; back on it, one read at once; a redraw sends nothing; a late read of A leaves B alone; a session gone shows the button; iteration 2 reads at once', async () => {
+  const a = claudeJob('needs_human');
+  const b = claudeJob('needs_human', {}, { ticket: 'T-2', branch: 'T-2-demo', title: 'Other' });
+  const page = await openJob(detail(a), (path) => (path === 'api/jobs/app/T-2' ? detail(b) : undefined), undefined, [b]);
+  await answerRead(page, null);
+  // Without a session too.
+  page.tick(POLL_MS);
+  await page.flush();
+  assert.equal(plannerReads(page).length, 2);
+  await answerRead(page, plannerSession({ link: SESSION_LINK }));
+  assert.equal(page.$('planner-discuss-link').href, SESSION_LINK);
+  // A redraw sends nothing.
+  await show(page, detail(a));
+  assert.equal(plannerReads(page).length, 2);
+  // Hidden: no read, the timer goes on.
+  page.document.visibilityState = 'hidden';
+  page.tick(POLL_MS);
+  await page.flush();
+  assert.deepEqual([plannerReads(page).length, armed(page).length], [2, 1]);
+  page.document.visibilityState = 'visible';
+  page.tick(POLL_MS);
+  await page.flush();
+  assert.equal(plannerReads(page).length, 3);
+  // The session ended: the button again.
+  await answerRead(page, null);
+  assert.deepEqual([page.$('planner-discuss-button').textContent, page.document.getElementById('planner-discuss-link')], ['Discuss the result', null]);
+  // On the board: no read, no timer after.
+  await goTo(page, '#board');
+  page.tick(POLL_MS);
+  await page.flush();
+  assert.deepEqual([plannerReads(page).length, armed(page).length], [3, 0]);
+  // Back on the job: one read at once.
+  await goTo(page, '#app/T-1', detail(a));
+  assert.equal(plannerReads(page).length, 4);
+  // On B while A's read is out: B's own read; A's late answer leaves B's link, reads and timer alone.
+  await goTo(page, '#app/T-2', detail(b));
+  assert.equal(plannerReads(page, 'T-2').length, 1);
+  await answerRead(page, plannerSession({ name: 'sf-plan-app-T-2', link: 'https://claude.ai/code/session_02Cd' }), 'T-2');
+  assert.equal(armed(page).length, 1);
+  await answerRead(page, plannerSession({ link: SESSION_LINK }));
+  assert.deepEqual([page.$('planner-discuss-link').href, armed(page).length], ['https://claude.ai/code/session_02Cd', 1]);
+  page.tick(POLL_MS);
+  await page.flush();
+  assert.deepEqual([plannerReads(page).length, plannerReads(page, 'T-2').length], [4, 2]);
+  // Back on A, waiting again at iteration 2 while a read is armed: one read at once.
+  await goTo(page, '#app/T-1', detail(a));
+  assert.equal(plannerReads(page).length, 5);
+  await answerRead(page, null);
+  await show(page, detail(claudeJob('needs_human', {}, { iteration: 2 })));
+  assert.equal(plannerReads(page).length, 6);
+});
+
+test('job client (SF-308-3): left before its timer fires, the job reads at once when shown again; a read answered while the page shows the board or a ChatGPT job is dropped whole', async () => {
+  const a = claudeJob('needs_human');
+  const c = planned('needs_human', { discuss: DISCUSS }, { ticket: 'T-3', branch: 'T-3-demo', title: 'ChatGPT', error: { code: 'iteration_limit', message: 'm' } });
+  const page = await openJob(detail(a), (path) => (path === 'api/jobs/app/T-3' ? detail(c) : undefined), undefined, [c]);
+  await answerRead(page, null);
+  assert.equal(armed(page).length, 1);
+  // To the board and back before the timer fires: the timer is gone, one read at once.
+  await goTo(page, '#board');
+  await goTo(page, '#app/T-1', detail(a));
+  assert.deepEqual([plannerReads(page).length, armed(page).length], [2, 0]);
+  // The board while that read is out: its answer changes nothing, arms nothing.
+  await goTo(page, '#board');
+  await answerRead(page, plannerSession({ link: SESSION_LINK }));
+  assert.equal(armed(page).length, 0);
+  await goTo(page, '#app/T-1', detail(a));
+  // Back on the job: the dropped answer's link is not shown, and a read goes out at once.
+  assert.deepEqual([page.document.getElementById('planner-discuss-link'), page.$('planner-discuss-button').textContent, plannerReads(page).length], [null, 'Discuss the result', 3]);
+  // A ChatGPT job while that read is out: the same.
+  await goTo(page, '#app/T-3', detail(c));
+  await answerRead(page, plannerSession({ link: SESSION_LINK }));
+  assert.deepEqual([armed(page).length, links(page.$('planner')).map(([text, href]) => [text, href])], [0, [['Discuss the result ↗', DISCUSS.url]]]);
+  await goTo(page, '#app/T-1', detail(a));
+  assert.deepEqual([page.document.getElementById('planner-discuss-link'), plannerReads(page).length], [null, 4]);
+  await answerRead(page, plannerSession({ link: SESSION_LINK }));
+  assert.deepEqual([page.$('planner-discuss-link').href, armed(page).length], [SESSION_LINK, 1]);
+});
+
+test('job client (SF-308-3): a ready job Claude Code plans: More ▾ holds Discuss the result by case, then Planning chat link… (none once a link is stored); a ready ChatGPT job whose message is too long has none', async () => {
+  const written: string[] = [];
+  const page = await openJob(detail(claudeJob('ready_for_human_review')), () => undefined, { writeText: async (text) => void written.push(text) });
+  // The items from Discuss the result (or its pending label) on: [tag, text, disabled].
+  const tail = (): Array<[string, string, boolean]> => {
+    const items = (readyMenu(page).children as FakeElement[]).map((node): [string, string, boolean] => [node.tagName, node.textContent, node.disabled === true]);
+    return items.slice(items.findIndex(([, text]) => text.startsWith('Discuss the result') || text === 'Starting the planner…'));
+  };
+  await answerRead(page, null);
+  // The planner block holds no Discuss: it is in the panel.
+  assert.equal(page.$('planner').querySelector('[data-act="planner-discuss"]'), null);
+  assert.deepEqual(tail(), [['BUTTON', 'Discuss the result', false], ['BUTTON', 'Planning chat link…', false]]);
+  page.$('planner-discuss-button').click();
+  await page.flush();
+  assert.deepEqual([posted(page), tail()[0]], [[['api/tickets/app/T-1/planner/discuss', {}]], ['BUTTON', 'Starting the planner…', true]]);
+  discussPost(page).respond(200, { ok: true, result: { started: false, session: plannerSession() } });
+  await page.flush();
+  // A session without a link: the disabled item with the line as its note, then Copy.
+  assert.deepEqual(tail(), [['BUTTON', `Discuss the result${sessionLine('sf-plan-app-T-1')}`, true], ['BUTTON', 'Copy the message for the planner', false], ['BUTTON', 'Planning chat link…', false]]);
+  assert.equal(readyMenu(page).querySelector('[data-act="planner-copy"]')!.className, 'ho-item');
+  // With a link: the link, whose click copies the message.
+  page.tick(POLL_MS);
+  await answerRead(page, plannerSession({ link: SESSION_LINK }));
+  assert.deepEqual(tail(), [['A', 'Discuss the result ↗', false], ['BUTTON', 'Planning chat link…', false]]);
+  assert.deepEqual(links(readyMenu(page)), [['Discuss the result ↗', SESSION_LINK, '_blank', 'noopener noreferrer']]);
+  page.$('planner-discuss-link').click();
+  await page.flush();
+  assert.deepEqual([written, page.$('toast-text').textContent], [[CLAUDE_DISCUSS.message], 'Copied. The message for the planner: paste it into the session.']);
+  // A stored link: no Planning chat link….
+  await show(page, detail(claudeJob('ready_for_human_review', { chat: 'https://claude.ai/code/session_09' })));
+  assert.deepEqual([tail(), page.document.getElementById('chat-open-button')], [[['A', 'Discuss the result ↗', false]], null]);
+  // ChatGPT plans a ready job whose message is too long for its link: no Planning chat link….
+  const chatgpt = await openJob(detail(planned('ready_for_human_review', { discuss: { message: 'm', url: null } })));
+  assert.deepEqual([chatgpt.document.getElementById('chat-open-button'), plannerReads(chatgpt).length], [null, 0]);
 });

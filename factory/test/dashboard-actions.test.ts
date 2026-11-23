@@ -52,6 +52,9 @@ const ROUTES: Record<RouteName, { body: unknown; call: unknown[]; refresh?: Post
   // SF-208: the planner's suggestion, on the dashboard only.
   'suggestion-send': { body: { sha256: 'a'.repeat(64) }, call: ['sendSuggestion', 'app', 'T-1', 'a'.repeat(64)], refresh: 'job' },
   'suggestion-dismiss': { body: {}, call: ['dismissSuggestion', 'app', 'T-1'], refresh: 'job' },
+  // SF-309-3: the last review's comments, on the dashboard only.
+  'last-review-send': { body: { iteration: 3, ids: ['C1', 'C3'] }, call: ['sendLastReview', 'app', 'T-1', 3, ['C1', 'C3']], refresh: 'job' },
+  'last-review-dismiss': { body: { iteration: 2, ids: ['C2'] }, call: ['dismissLastReview', 'app', 'T-1', 2, ['C2']], refresh: 'job' },
   review: { body: {}, call: ['retryReview', 'app', 'T-1'], command: 'review' },
   retry: { body: {}, call: ['retryMr', 'app', 'T-1'], command: 'retry', confirm: true },
   accept: { body: {}, call: ['acceptGate', 'app', 'T-1'], command: 'accept' },
@@ -87,7 +90,7 @@ const routePath = (name: RouteName): string => (POST_ROUTES[name].kind === 'job'
 test('POST_ROUTES (SF-139): every route as before: its kind, what the pages get again, its body bound, its socket command (an entry of commands.ts), the update gate (pause and mr-status open) and the confirm routes', () => {
   assert.deepEqual(ROUTE_NAMES, Object.keys(ROUTES));
   assert.deepEqual(JOB_ROUTES, [
-    'approve', 'abort', 'say', 'suggestion-send', 'suggestion-dismiss', 'review', 'retry', 'accept', 'settle', 'simplify', 'archive', 'mr-create', 'mr-merge', 'mr-status', 'pause', 'resume', 'restart', 'handover', 'takeback', 'handed-done',
+    'approve', 'abort', 'say', 'suggestion-send', 'suggestion-dismiss', 'last-review-send', 'last-review-dismiss', 'review', 'retry', 'accept', 'settle', 'simplify', 'archive', 'mr-create', 'mr-merge', 'mr-status', 'pause', 'resume', 'restart', 'handover', 'takeback', 'handed-done',
     'merged-archive', 'mr-save', 'mr-reset',
   ]);
   for (const name of ROUTE_NAMES) {
@@ -129,6 +132,29 @@ test('dashboard actions (SF-139): every route of POST_ROUTES answers as before: 
       queue.calls.length = 0;
     }
   }, undefined, { queue });
+});
+
+test('dashboard actions (SF-309-3): last-review-send and last-review-dismiss refuse a body of another shape (iteration a whole number from 1, ids at most 30 strings) without a call; no ids reaches the action, which refuses it', async () => {
+  const fake = fakeActions();
+  await withDashboard('dash-act-last-review', fake, async (dashboard) => {
+    const base = dashboard.url;
+    const bad = [
+      {}, { iteration: 1 }, { ids: ['C1'] }, { iteration: 0, ids: ['C1'] }, { iteration: 1.5, ids: ['C1'] }, { iteration: '1', ids: ['C1'] },
+      { iteration: 1, ids: 'C1' }, { iteration: 1, ids: [1] }, { iteration: 1, ids: [null] }, { iteration: null, ids: [] },
+      { iteration: 1, ids: Array.from({ length: 31 }, (_, index) => `C${index + 1}`) },
+    ];
+    for (const name of ['last-review-send', 'last-review-dismiss'] as const) {
+      for (const body of bad) {
+        const reply = await act(base, `api/jobs/app/T-1/${name}`, body);
+        assert.deepEqual(error(reply), { status: 400, code: 'invalid_body' }, `${name} ${JSON.stringify(body)}`);
+        assert.equal(JSON.parse(reply.body).error.message, `${name} expects {"iteration": number, "ids": string[]}; no other keys, no null.`);
+      }
+      // No ids is a body of the shape: the Execution refuses it (invalid_content).
+      fake.answer = new FactoryError('invalid_content', 'Choose at least one comment.');
+      assert.deepEqual(error(await act(base, `api/jobs/app/T-1/${name}`, { iteration: 1, ids: [] })), { status: 400, code: 'invalid_content' }, name);
+    }
+    assert.deepEqual(fake.calls, [['sendLastReview', 'app', 'T-1', 1, []], ['dismissLastReview', 'app', 'T-1', 1, []]]);
+  });
 });
 
 test('dashboard actions (SF-139): a name not in POST_ROUTES is no action: a GET is an empty 404, a POST 405 (Allow: GET) as before, nothing is dispatched', async () => {

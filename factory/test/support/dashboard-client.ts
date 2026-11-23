@@ -180,7 +180,9 @@ export type Call = ['start', string, string] | ['approve', string, string] | ['a
   | ['mergeRequestView', string, string] | ['saveMr', string, string, MrInput] | ['resetMr', string, string]
   | ['openMergeRequests', string] | ['mergeRequestThreads', string, number] | ['mergeRequestOverview', string, number]
   // The planner's suggestion (SF-208).
-  | ['sendSuggestion', string, string, string] | ['dismissSuggestion', string, string];
+  | ['sendSuggestion', string, string, string] | ['dismissSuggestion', string, string]
+  // The last review's comments (SF-309-3).
+  | ['sendLastReview', string, string, number, string[]] | ['dismissLastReview', string, string, number, string[]];
 
 export interface FakeActions extends DashboardActions {
   calls: Call[];
@@ -241,6 +243,8 @@ export function fakeActions(answer: unknown = { state: 'pushed', branch: 'T-1-de
     mergeRequestOverview: (workspace, number) => reply(['mergeRequestOverview', workspace, number]),
     sendSuggestion: (workspace, ticket, sha256) => reply(['sendSuggestion', workspace, ticket, sha256]),
     dismissSuggestion: (workspace, ticket) => reply(['dismissSuggestion', workspace, ticket]),
+    sendLastReview: (workspace, ticket, iteration, ids) => reply(['sendLastReview', workspace, ticket, iteration, ids]),
+    dismissLastReview: (workspace, ticket, iteration, ids) => reply(['dismissLastReview', workspace, ticket, iteration, ids]),
   };
   async function reply(call: Call): Promise<any> {
     fake.calls.push(call);

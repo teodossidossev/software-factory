@@ -213,6 +213,16 @@ export class Execution implements RunnerWork {
     return this.#parts.turns.dismissSuggestion(workspaceName, ticket);
   }
 
+  // The dashboard's Send and Dismiss of the last review's comments (src/last-review-choices.ts):
+  // Send gives the stored texts of the shown comments the page chose, by id, to say.
+  sendLastReview(workspaceName: string, ticket: string, iteration: number, ids: string[]): Promise<{ state: JobState; queued: boolean }> {
+    return this.#parts.turns.sendLastReview(workspaceName, ticket, iteration, ids);
+  }
+
+  dismissLastReview(workspaceName: string, ticket: string, iteration: number, ids: string[]): Promise<{ dismissed: number }> {
+    return this.#parts.turns.dismissLastReview(workspaceName, ticket, iteration, ids);
+  }
+
   // execution/reviews.ts
   retryReview(workspaceName: string, ticket: string): Promise<{ state: JobState; iteration: number }> {
     return this.#parts.reviews.retryReview(workspaceName, ticket);

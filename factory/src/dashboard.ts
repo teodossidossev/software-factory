@@ -131,11 +131,13 @@ const STATIC_FILES: Record<string, { file: string; type: string }> = {
 // The hand-over to the user's checkout: handover, takeback, handedDone and markMerged (Merged —
 // archive) as sf handover, takeback, handed-done and handed-done --merged, and checkHandedOver, the check for the
 // user's own push that the job's detail starts. The Merge request screen: mergeRequestView (GET
-// mr-view), saveMr and resetMr (POST mr-save and mr-reset).
+// mr-view), saveMr and resetMr (POST mr-save and mr-reset). On the dashboard only: sendSuggestion
+// and dismissSuggestion, the planner's suggestion (src/planner.ts), and sendLastReview and
+// dismissLastReview, the last review's comments (src/last-review-choices.ts).
 export type DashboardActions = Pick<Execution, 'start' | 'approve' | 'abort' | 'say' | 'retryReview' | 'retryMr' | 'acceptGate' | 'settle' | 'simplify' | 'archiveFinished'
   | 'createMergeRequest' | 'mergeMergeRequest' | 'mergeRequestStatus' | 'mergeRequestHost' | 'pause' | 'resumePaused' | 'restart'
   | 'handover' | 'takeback' | 'handedDone' | 'markMerged' | 'checkHandedOver' | 'mergeRequestView' | 'saveMr' | 'resetMr' | 'openMergeRequests' | 'mergeRequestThreads' | 'mergeRequestOverview'
-  | 'sendSuggestion' | 'dismissSuggestion'>;
+  | 'sendSuggestion' | 'dismissSuggestion' | 'sendLastReview' | 'dismissLastReview'>;
 
 // The start screen's data and changes: the workspace registry and the Task files (src/setup.ts).
 // jobDependencies: the tickets a live job's Task file lands after. chains: the chains of parts

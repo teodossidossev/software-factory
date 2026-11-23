@@ -90,6 +90,7 @@ effect and says only whether each token is set.
 | `SF_TASK_CHECK_AUTO` | `on` | `on`, `off`, empty | `on`: `sf serve` checks a written Task file 60 s after its last change. `off`: only Check on the board and `sf check-task`. |
 | `SF_TASK_CHECK_PARALLEL` | `1` | `1` to `4` | Automatic Task checks that run at once over all workspaces. |
 | `SF_TASK_CHECK_CODEX` | `off` | `auto`, `off`, empty | `auto`: a Task not written by ChatGPT's `write_task` (the Claude Code planner's, one you wrote, a file written by hand) is checked by Codex too, at the same time; the plan is ready only when both checks are; a Codex failure holds nothing. `off`: the Claude check alone. |
+| `SF_TASK_CHECK_FOLLOW_UP` | `on` | `on`, `off`, empty | `on`: an automatic re-check of a Task file revised after a not-ready Claude check, at the same commit (or after base commits outside its scope), with an unchanged builds_on chain and at most 40% of its lines changed, starts from that check's findings and the Task file's diff; it verifies each earlier finding and the changes, and an earlier finding it does not resolve stays. After two such re-checks in a row the next is full. Check on the board and `sf check-task` are always full. `off`: every check is full. |
 | `SF_TASK_CHECK_MAX_TURNS` | `30` | positive integer | Steps of a Task check. |
 
 ### The Codex gate

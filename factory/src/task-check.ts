@@ -10,12 +10,14 @@
 // findings, the files it expects to change and a verdict. A check is stored by the sha256 that folds the Task file's images and
 // chain in (taskCheckSha256), and counts while what it read of the ticket it builds on holds (CheckStore.read), under the state directory, never in the work checkout. It only advises: nothing here starts, refuses or changes
 // a job. A Task not written by ChatGPT's write_task is read by Codex too, at the same time in the
-// same checkout (src/task-check-codex.ts), and the record holds both checks.
+// same checkout (src/task-check-codex.ts), and the record holds both checks. The checked Task text
+// is kept beside its record, and an automatic re-check of a revised not_ready Task may start from the
+// previous check's findings and the Task file's diff (a follow-up: followUpPlan, runTaskCheck).
 import { createHash, randomUUID } from 'node:crypto';
 import { renameSync, rmSync } from 'node:fs';
-import { mkdir, mkdtemp, open, readdir, readFile, realpath, rm, unlink, writeFile } from 'node:fs/promises';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import type { HookCallback, SandboxSettings, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import { mkdir, mkdtemp, open, readdir, readFile, realpath, rm } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import type { SandboxSettings, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import * as z from 'zod/v4';
 import { writeFileAtomic } from './atomic.js';
 import { type BuildsOnRecord, buildsOnChain, buildsOnHolds, buildsOnTarget, chainLines, checkChain, type PreparedPoint, preparedPoint } from './builds-on.js';
@@ -24,7 +26,7 @@ import type { Config } from './config.js';
 import { taskStartBranch } from './continues.js';
 import { workspaceDecisionDocs } from './decisions.js';
 import { FactoryError } from './errors.js';
-import { inTmpRoot, TMP_REFUSAL, tmpRoots } from './host-tmp.js';
+import { tmpRoots } from './host-tmp.js';
 import { Redactor } from './redact.js';
 import { runGit } from './git.js';
 import { resolveTarget } from './mr.js';
@@ -34,11 +36,13 @@ import type { Workspace } from './registry.js';
 import { runStructuredSession, SEVERITIES, SEVERITY_DEFINITIONS, type Severity } from './review.js';
 import { collectRules } from './rules-docs.js';
 import { matchesGlob, scopeOf } from './rules.js';
-import { absoluteRule, pathDenials, prepareTaskChecksDir, TASK_CHECK_DIR_UNSAFE } from './sandbox-denials.js';
+import { pathDenials, prepareTaskChecksDir, TASK_CHECK_DIR_UNSAFE } from './sandbox-denials.js';
 import { roleSkillBlocks, type SkillNames } from './skills.js';
 import { sliceFindings } from './slices.js';
+import { checkDeniedRules, cutOutsideLinks, guardHooks } from './task-check-guard.js';
 import { type CodexCheck, codexCheckDue, codexCheckLines, type CodexCheckSettings, runCodexCheck } from './task-check-codex.js';
-import { ARCHIVE_DIR, checkNeed, isDraft, mayTouch, parseFrontMatter, readTask, TASK_DIR, taskScope, TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
+import { movedIntoScope, scopeGlobs } from './task-check-recheck.js';
+import { ARCHIVE_DIR, checkNeed, isDraft, mayTouch, parseFrontMatter, readTask, TASK_DIR, taskDiff, taskScope, TICKET_DESCRIPTION, TICKET_PATTERN } from './task-file.js';
 import { addDetachedWorktree, removeWorktree } from './worktree.js';
 
 export const FINDING_KINDS = ['decision', 'contradiction', 'missing', 'overreach', 'unclear'] as const;
@@ -77,9 +81,51 @@ export type CheckVerdict = CheckOutput['verdict'];
 const { $schema: _draft, ...checkSchema } = z.toJSONSchema(checkOutput, { target: 'draft-7' });
 export const CHECK_SCHEMA: Record<string, unknown> = checkSchema;
 
+// A follow-up check's output (see runTaskCheck): checkOutput plus, after the paraphrase, its answer
+// on each previous finding (previous), and on each finding the previous finding it restates.
+export const PREVIOUS_STATUSES = ['resolved', 'open'] as const;
+export const previousAnswer = z.strictObject({
+  id: z.string().describe('The previous finding\'s id: F1, F2, ...'),
+  status: z.enum(PREVIOUS_STATUSES).describe('resolved: the current Task file resolves it, verified against the repository; open: it does not, or you cannot verify that it does.'),
+  note: z.string().describe('Why: what in the current Task file resolves it, or what is still wrong.'),
+});
+export const followUpFinding = z.strictObject({
+  ...checkFinding.shape,
+  previous_id: z.string().nullable().describe('The F<n> of the previous finding this one restates, or null for a new finding.'),
+});
+export const followUpOutput = z.strictObject({
+  paraphrase: checkOutput.shape.paraphrase,
+  previous: z.array(previousAnswer).describe('One answer for each previous finding (F1, F2, ...).'),
+  findings: z.array(followUpFinding),
+  files: checkOutput.shape.files,
+  verdict: checkOutput.shape.verdict,
+});
+export type PreviousAnswer = z.output<typeof previousAnswer>;
+export type FollowUpOutput = z.output<typeof followUpOutput>;
+const { $schema: _followUpDraft, ...followUpSchema } = z.toJSONSchema(followUpOutput, { target: 'draft-7' });
+export const FOLLOW_UP_SCHEMA: Record<string, unknown> = followUpSchema;
+
 // The verdict rule: ready when no finding is a blocker or major, whatever the checker wrote.
 export function checkVerdict(findings: readonly CheckFinding[]): CheckVerdict {
   return findings.some((item) => item.severity !== 'nit') ? 'not_ready' : 'ready';
+}
+
+// A previous finding's id in a follow-up check: F1 for the first.
+const previousId = (index: number): string => `F${index + 1}`;
+const sameId = (given: string | null | undefined, id: string): boolean => given?.trim().toUpperCase() === id;
+
+// The previous findings a follow-up check keeps as they were: each one it did not answer resolved
+// (an answer open, or none) and restated under no finding's previous_id. An id answered both
+// resolved and open counts as open.
+export function openPrevious(output: CheckOutput | FollowUpOutput, previous: readonly CheckFinding[]): CheckFinding[] {
+  const answers = 'previous' in output ? output.previous : [];
+  return previous.filter((_item, index) => {
+    const id = previousId(index);
+    const mine = answers.filter((answer) => sameId(answer.id, id));
+    const resolved = mine.length > 0 && mine.every((answer) => answer.status === 'resolved');
+    const restated = output.findings.some((item: CheckFinding & { previous_id?: string | null }) => sameId(item.previous_id, id));
+    return !resolved && !restated;
+  });
 }
 
 // The findings of the files the checker expects against the Task's scope, when it has one:
@@ -118,13 +164,15 @@ export function scopeFindings(task: string, files: CheckOutput['files'], given: 
 
 // The output as the factory keeps it: a contradiction is always a blocker, the scope differences
 // and the slice findings (src/slices.ts; maxFiles: the norm's slice.change_max_files) are added,
-// and the verdict is the rule's.
-export function settleCheck(task: string, output: CheckOutput, maxFiles?: number): CheckOutput {
-  const findings = [
-    ...output.findings.map((item) => (item.kind === 'contradiction' ? { ...item, severity: 'blocker' as const } : item)),
-    ...scopeFindings(task, output.files, output.findings),
-    ...sliceFindings(task, output.files, maxFiles),
-  ];
+// and the verdict is the rule's. For a follow-up check (previous: the previous check's findings, in
+// their order), every previous finding it keeps open (openPrevious) is added back unchanged after
+// its own, unless the factory's scope or slice findings give the same one; previous_id is not kept.
+export function settleCheck(task: string, output: CheckOutput | FollowUpOutput, maxFiles?: number, previous: readonly CheckFinding[] = []): CheckOutput {
+  const own = output.findings.map(({ kind, severity, where, problem, expected }): CheckFinding => ({ kind, severity: kind === 'contradiction' ? 'blocker' : severity, where, problem, expected }));
+  const kept = openPrevious(output, previous);
+  const factory = [...scopeFindings(task, output.files, [...own, ...kept]), ...sliceFindings(task, output.files, maxFiles)];
+  const same = (a: CheckFinding, b: CheckFinding): boolean => a.kind === b.kind && a.where === b.where && a.problem === b.problem;
+  const findings = [...own, ...kept.filter((item) => !factory.some((other) => same(item, other))), ...factory];
   return { paraphrase: output.paraphrase, findings, files: output.files, verdict: checkVerdict(findings) };
 }
 
@@ -181,9 +229,24 @@ export interface CheckRecord extends SkillNames {
   // The Codex check of the same run, when it was due (src/task-check-codex.ts): absent when Codex did
   // not check this version.
   codex?: CodexCheck;
+  // How the Claude check ran: full, or follow_up of the previous check (see runTaskCheck), with that
+  // record's sha256 and, once its session answered, its answer on each previous finding. A record
+  // without mode counts as full.
+  mode?: CheckMode;
+  follow_up_of?: string;
+  previous?: PreviousAnswer[];
 }
 
-// <state>/checks/<ws>/<ticket>/<sha256, first 16 hex>.json.
+export type CheckMode = 'full' | 'follow_up';
+
+// One check's record and the Task text it checked (runTaskCheck), stored together (CheckStore.write).
+export interface CheckRun {
+  record: CheckRecord;
+  task: string;
+}
+
+// <state>/checks/<ws>/<ticket>/<sha256, first 16 hex>.json, and the checked Task text beside it in
+// <sha256, first 16 hex>.task.md (0600), read by the next check of the ticket (a follow-up's diff).
 export class CheckStore {
   readonly root: string;
   readonly #stateDir: string;
@@ -204,40 +267,70 @@ export class CheckStore {
     return join(this.#dir(workspace, ticket), `${checkId(sha256)}.json`);
   }
 
-  async write(record: CheckRecord): Promise<string> {
+  // The path of the Task text a check read, beside its record.
+  taskPath(workspace: string, ticket: string, sha256: string): string {
+    return join(this.#dir(workspace, ticket), `${checkId(sha256)}.task.md`);
+  }
+
+  // The record and, when given, the Task text it checked (task, written first).
+  async write(record: CheckRecord, task?: string): Promise<string> {
     const path = this.path(record.workspace, record.ticket, record.sha256);
     await mkdir(this.#dir(record.workspace, record.ticket), { recursive: true, mode: 0o700 });
+    if (task !== undefined) {
+      await writeFileAtomic(this.taskPath(record.workspace, record.ticket, record.sha256), Buffer.from(task, 'utf8'));
+    }
     await writeFileAtomic(path, Buffer.from(`${JSON.stringify(record, null, 2)}\n`));
     return path;
   }
 
-  // The record of an automatic check, unless signal aborts first: a complete temp file is
-  // written, then signal is looked at and the file renamed into place in one synchronous step, so a
-  // cancel either comes before the commit (nothing stored, the temp file goes) or after it (the run
-  // had ended). Returns the path, or undefined when cancelled.
-  async writeUnless(record: CheckRecord, signal: AbortSignal): Promise<string | undefined> {
+  // The record of an automatic check and the Task text it checked (task, when given), unless signal
+  // aborts first: complete temp files are written, then signal is looked at and the files renamed
+  // into place in one synchronous step, so a cancel either comes before the commit (nothing stored,
+  // the temp files go) or after it (the run had ended). Returns the path, or undefined when cancelled.
+  async writeUnless(record: CheckRecord, signal: AbortSignal, task?: string): Promise<string | undefined> {
     const path = this.path(record.workspace, record.ticket, record.sha256);
     if (signal.aborted) {
       return undefined;
     }
     await mkdir(this.#dir(record.workspace, record.ticket), { recursive: true, mode: 0o700 });
-    const temp = `${path}.${randomUUID()}.tmp`;
+    const files: Array<{ temp: string; target: string; text: string }> = [
+      ...(task === undefined ? [] : [{ target: this.taskPath(record.workspace, record.ticket, record.sha256), text: task }]),
+      { target: path, text: `${JSON.stringify(record, null, 2)}\n` },
+    ].map((file) => ({ ...file, temp: `${file.target}.${randomUUID()}.tmp` }));
     try {
-      const handle = await open(temp, 'wx', 0o600);
-      try {
-        await handle.writeFile(`${JSON.stringify(record, null, 2)}\n`);
-        await handle.sync();
-      } finally {
-        await handle.close();
+      for (const file of files) {
+        const handle = await open(file.temp, 'wx', 0o600);
+        try {
+          await handle.writeFile(file.text);
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
       }
-      // No await between the look at signal and the rename: no cancel can come in between.
+      // No await between the look at signal and the renames: no cancel can come in between.
       if (signal.aborted) {
         return undefined;
       }
-      renameSync(temp, path);
+      for (const file of files) {
+        renameSync(file.temp, file.target);
+      }
       return path;
     } finally {
-      rmSync(temp, { force: true });
+      for (const file of files) {
+        rmSync(file.temp, { force: true });
+      }
+    }
+  }
+
+  // The Task text the record's check read, or undefined when it was not kept.
+  async checkedTask(record: Pick<CheckRecord, 'workspace' | 'ticket' | 'sha256'>): Promise<string | undefined> {
+    try {
+      return await readFile(this.taskPath(record.workspace, record.ticket, record.sha256), 'utf8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return undefined;
+      }
+      throw error;
     }
   }
 
@@ -393,210 +486,16 @@ export interface CheckOptions {
   worktreeRoot: string;
   // The Codex check's settings; absent: no Codex check (SF_TASK_CHECK_CODEX=off).
   codex?: CodexCheckSettings;
+  // Whether this check may be a follow-up (followUpPlan): SF_TASK_CHECK_FOLLOW_UP=on, and an
+  // automatic check (TaskChecks.startAuto); a manual check is always full.
+  followUp?: boolean;
   signal?: AbortSignal;
   // Every SDK message of the session, in order; a failing call changes nothing of the outcome.
   onMessage?: (message: SDKMessage) => Promise<void>;
 }
 
-// Read rules on top of the guard (defence in depth): the work checkout's .software-factory folder
-// (the other Task files, the MR texts, the archive), the factory's state (jobs, ledgers, requests,
-// checks) and its config.
-export function checkDeniedRules(checkout: string, stateDir: string, configDir: string): string[] {
-  return [join(checkout, TASK_DIR), stateDir, configDir].map((dir) => `Read(${absoluteRule(dir)}/**)`);
-}
-
-// Glob characters: a pattern segment with one of them is not a fixed directory.
-const GLOB_CHARS = /[*?[\]{}]/;
-
-// The path with its deepest existing ancestor's symlinks resolved, so a link inside the root that
-// points outside it is seen where it leads.
-async function realTarget(path: string): Promise<string> {
-  const rest: string[] = [];
-  let existing = path;
-  for (;;) {
-    try {
-      return join(await realpath(existing), ...rest);
-    } catch { // this ancestor does not resolve: its parent is tried
-      const parent = dirname(existing);
-      if (parent === existing) {
-        return path;
-      }
-      rest.unshift(relative(parent, existing));
-      existing = parent;
-    }
-  }
-}
-
-// The keys of a tool input that name a path; Claude Code reads any of them (Grep takes file_path
-// for path, for one), so each one present is a target.
-const PATH_KEYS = ['file_path', 'path', 'notebook_path'];
-
-// A path value the guard cannot resolve as Claude Code will: one it trims or expands (~, ~/...,
-// ~user); such a call is refused rather than guessed.
-const unresolvable = (value: string): boolean => value !== value.trim() || value.startsWith('~');
-
-// The most alternatives a pattern's braces may expand to, the most brace groups it may have and
-// the longest path or pattern value; more refuse the call (before any expansion).
-const MAX_ALTERNATIVES = 64;
-const MAX_BRACE_GROUPS = 16;
-const MAX_VALUE_CHARS = 4096;
-
-// A glob pattern's brace alternatives, nested ones included ("src/{a,{b,c}}" -> src/a, src/b,
-// src/c), each to be checked on its own. undefined: braces that do not pair, a backslash (an
-// escape the guard does not interpret), an extglob or "|" (alternatives it does not expand) or
-// more than MAX_ALTERNATIVES.
-export function braceAlternatives(pattern: string): string[] | undefined {
-  if (pattern.length > MAX_VALUE_CHARS || pattern.split('{').length - 1 > MAX_BRACE_GROUPS || pattern.includes('\\') || pattern.includes('|') || /[@!+*?]\(/.test(pattern)) {
-    return undefined;
-  }
-  const open = pattern.indexOf('{');
-  if (open < 0) {
-    return pattern.includes('}') ? undefined : [pattern];
-  }
-  if (pattern.slice(0, open).includes('}')) {
-    return undefined;
-  }
-  let depth = 0;
-  let start = open + 1;
-  const parts: string[] = [];
-  for (let index = open; index < pattern.length; index += 1) {
-    const char = pattern[index];
-    if (char === '{') {
-      depth += 1;
-    } else if (char === '}' && (depth -= 1) === 0) {
-      parts.push(pattern.slice(start, index));
-      const result: string[] = [];
-      for (const part of parts) {
-        const expanded = braceAlternatives(`${pattern.slice(0, open)}${part}${pattern.slice(index + 1)}`);
-        if (expanded === undefined || result.push(...expanded) > MAX_ALTERNATIVES) {
-          return undefined;
-        }
-      }
-      return result;
-    } else if (char === ',' && depth === 1) {
-      parts.push(pattern.slice(start, index));
-      start = index + 1;
-    }
-  }
-  return undefined;
-}
-
-// The paths a tool call reads, relative to the root or absolute: every path key present (the root
-// when Grep or Glob has none) and, for each brace alternative of Glob's pattern, its part up to
-// the first glob segment. undefined: a tool the check may not use, a Read without a path, a value
-// it trims or expands, a pattern it cannot expand, an alternative that climbs with "..", or an
-// absolute alternative of Grep's glob filter.
-function toolTargets(tool: string, input: Record<string, unknown>): string[] | undefined {
-  if (tool !== 'Read' && tool !== 'Grep' && tool !== 'Glob') {
-    return undefined;
-  }
-  const values = (keys: string[]): Array<string | undefined> => keys.filter((key) => input[key] !== undefined).map((key) => (typeof input[key] === 'string' ? input[key] as string : undefined));
-  const paths = values(PATH_KEYS);
-  const patterns = values(tool === 'Glob' ? ['pattern'] : tool === 'Grep' ? ['glob'] : []);
-  if ([...paths, ...patterns].some((value) => value === undefined || value.length > MAX_VALUE_CHARS || unresolvable(value))) {
-    return undefined;
-  }
-  const given = (paths as string[]).filter((path) => path !== '');
-  if (tool === 'Read' && given.length === 0) {
-    return undefined;
-  }
-  const bases = given.length > 0 ? given : ['.'];
-  const targets = [...bases];
-  for (const pattern of patterns as string[]) {
-    const alternatives = braceAlternatives(pattern);
-    if (alternatives === undefined) {
-      return undefined;
-    }
-    for (const alternative of alternatives) {
-      const segments = alternative.split('/');
-      if (unresolvable(alternative) || segments.includes('..') || (tool === 'Grep' && isAbsolute(alternative))) {
-        return undefined;
-      }
-      if (tool === 'Glob') {
-        const first = segments.findIndex((segment) => GLOB_CHARS.test(segment));
-        const fixed = (first < 0 ? segments : segments.slice(0, first)).join('/');
-        targets.push(...(isAbsolute(alternative) ? [fixed || '/'] : bases.map((base) => join(base, fixed))));
-      }
-    }
-  }
-  return targets;
-}
-
-// The SDK's tool through which the session gives its structured output (outputFormat): it carries
-// the answer, not a file access, so the guard lets it through unchecked, by this exact name only.
-const STRUCTURED_OUTPUT_TOOL = 'StructuredOutput';
-
-// Why a tool call of the check is refused, or undefined when it is the session's answer
-// (STRUCTURED_OUTPUT_TOOL) or every path it reads is inside root (symlinks resolved) and outside a
-// .software-factory folder there. root is the check's worktree, a real path; temporary: the host's
-// temporary roots (tmpRoots), whose refusal says so (TMP_REFUSAL). Never throws: a call the guard
-// fails to check is refused (Claude Code would take a hook that throws as no decision and let the
-// call through).
-export async function guardReason(root: string, tool: string, input: unknown, temporary: readonly string[] = []): Promise<string | undefined> {
-  if (tool === STRUCTURED_OUTPUT_TOOL) {
-    return undefined;
-  }
-  try {
-    return await checkedReason(root, tool, input, temporary);
-  } catch { // never throws: a call it fails to check is refused
-    return `The Task check could not check this ${tool} call; it is refused.`;
-  }
-}
-
-async function checkedReason(root: string, tool: string, input: unknown, temporary: readonly string[]): Promise<string | undefined> {
-  const targets = typeof input === 'object' && input !== null ? toolTargets(tool, input as Record<string, unknown>) : undefined;
-  if (targets === undefined) {
-    return `The Task check reads the repository with Read, Grep and Glob only, inside ${root}, by plain paths (no ~, no surrounding spaces); this ${tool} call is refused.`;
-  }
-  for (const target of targets) {
-    const real = await realTarget(resolve(root, target));
-    const inside = relative(root, real);
-    if (inside === '..' || inside.startsWith(`..${sep}`) || isAbsolute(inside) || inside.split(sep)[0] === TASK_DIR) {
-      return `The Task check may read only the repository checkout ${root}; ${target} ${inTmpRoot(real, temporary) ? `is in a temporary root: ${TMP_REFUSAL}` : 'is outside it'}.`;
-    }
-  }
-  return undefined;
-}
-
-// The check's PreToolUse hook: guardReason (with the temporary roots) first; a refusal is a deny.
-export function guardHooks(root: string, temporary: readonly string[] = []): { PreToolUse: Array<{ hooks: HookCallback[] }> } {
-  const guard: HookCallback = async (input) => {
-    if (input.hook_event_name !== 'PreToolUse') {
-      return {};
-    }
-    const reason = await guardReason(root, input.tool_name, input.tool_input, temporary).catch(() => 'The Task check could not check this call; it is refused.');
-    return reason === undefined ? {} : { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } };
-  };
-  return { PreToolUse: [{ hooks: [guard] }] };
-}
-
-// What a symbolic link out of the check's worktree becomes there.
-export const OUTSIDE_LINK_NOTE = 'A symbolic link out of the repository checkout; the Task check does not follow it.\n';
-
-// Replaces every symbolic link under root (.git left alone) whose target is outside root, or does
-// not resolve, with a regular file holding OUTSIDE_LINK_NOTE: a search from the root that follows
-// links then stays inside the worktree. Links that stay inside are kept. Returns the paths replaced.
-export async function cutOutsideLinks(root: string): Promise<string[]> {
-  const cut: string[] = [];
-  const walk = async (dir: string): Promise<void> => {
-    for (const entry of await readdir(dir, { withFileTypes: true })) {
-      const path = join(dir, entry.name);
-      if (entry.isDirectory() && entry.name !== '.git') {
-        await walk(path);
-      } else if (entry.isSymbolicLink()) {
-        const target = await realpath(path).catch(() => undefined);
-        const inside = target === undefined ? '..' : relative(root, target);
-        if (inside === '..' || inside.startsWith(`..${sep}`) || isAbsolute(inside) || inside.split(sep)[0] === TASK_DIR) {
-          await unlink(path);
-          await writeFile(path, OUTSIDE_LINK_NOTE, { flag: 'wx' });
-          cut.push(relative(root, path));
-        }
-      }
-    }
-  };
-  await walk(root);
-  return cut;
-}
+// The path guard of the check's session and its worktree's link cut (src/task-check-guard.ts).
+export { braceAlternatives, checkDeniedRules, cutOutsideLinks, guardHooks, guardReason, OUTSIDE_LINK_NOTE } from './task-check-guard.js';
 
 // The check's checkout: a detached worktree of the work checkout at the Task's base, or its
 // continues (fetched from origin when there is one, as Start does), or at the prepared commit,
@@ -631,10 +530,97 @@ async function checkCheckout(checkout: string, task: string, prepared?: Prepared
   return { root, commit, remove };
 }
 
+// The most a follow-up check's diff may change: added plus removed lines, as a share of the lines of
+// the text the previous check read.
+export const FOLLOW_UP_MAX_CHANGED = 0.4;
+
+// The lines added plus removed in a unified diff (its --- and +++ header lines left out).
+export function changedLineCount(diff: string): number {
+  let count = 0;
+  let inHunk = false;
+  for (const line of diff.split('\n')) {
+    if (line.startsWith('@@')) {
+      inHunk = true;
+    } else if (inHunk && (line.startsWith('+') || line.startsWith('-'))) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+// The lines of a text, a final newline ending the last one.
+const lineCount = (text: string): number => (text === '' ? 0 : text.split('\n').length - (text.endsWith('\n') ? 1 : 0));
+
+// What a follow-up check starts from: the previous record, its findings and the diff of the Task
+// text it read to the current one.
+export interface FollowUpPlan {
+  of: CheckRecord;
+  findings: CheckFinding[];
+  diff: string;
+}
+
+// Whether the check of task (its check sha256 folding in chain, the current chainLines; reading the
+// checkout at commit) is a follow-up of the ticket's previous check, and what it starts from; undefined
+// for a full check. A follow-up only when all of these hold:
+// - the newest stored record of the ticket is a completed Claude check (not failed) whose verdict is
+//   not_ready, and the Task text it read was kept (CheckStore.checkedTask);
+// - that text, with its images as they are now and the current chain lines, gives that record's
+//   sha256: the builds_on chain (and the images it refers to) did not change;
+// - its commit is commit, or the commits in between touch none of the Task's scope or may_touch
+//   paths (movedIntoScope, src/task-check-recheck.ts);
+// - the added plus removed lines of the unified diff (taskDiff) are at most FOLLOW_UP_MAX_CHANGED of
+//   the old text's lines, and the texts differ;
+// - the newest two records are not both follow-ups: after two in a row the next check is full.
+// Never throws: anything it cannot read or decide makes the check full.
+export async function followUpPlan(store: CheckStore, workspace: Workspace, ticket: string, task: string, chain: readonly string[], commit: string): Promise<FollowUpPlan | undefined> {
+  try {
+    const records = await store.records(workspace.name, ticket);
+    const of = records.at(-1);
+    if (of === undefined || of.status !== 'checked' || of.output === null || of.output.verdict !== 'not_ready') {
+      return undefined;
+    }
+    if (records.length >= 2 && records.slice(-2).every((record) => record.mode === 'follow_up')) {
+      return undefined;
+    }
+    const old = await store.checkedTask(of);
+    if (old === undefined) {
+      return undefined;
+    }
+    const references = attachmentReferences(ticket, old);
+    const images = references.length === 0 ? [] : await imageHashes(imagesDir(workspace, ticket), references);
+    if (taskCheckSha256(old, images, chain) !== of.sha256) {
+      return undefined;
+    }
+    const fields = parseFrontMatter(task) ?? new Map<string, string>();
+    if (await movedIntoScope(workspace.workCheckout, of.commit, commit, scopeGlobs(fields))) {
+      return undefined;
+    }
+    const diff = await taskDiff(ticket, old, task);
+    if (diff === undefined || changedLineCount(diff) > FOLLOW_UP_MAX_CHANGED * lineCount(old)) {
+      return undefined;
+    }
+    return { of, findings: of.output.findings, diff };
+  } catch (error) {
+    console.error(`warning: the Task check of ${workspace.name}/${ticket} is full: its follow-up could not be prepared: ${error instanceof Error ? error.message : String(error)}`);
+    return undefined;
+  }
+}
+
 // Runs one check of the given Task text in its own worktree of the work checkout at the Task's
-// base. Never throws: a checkout that cannot be made or a failed session is a failed record, its
-// error redacted like a failed review's. The worktree is removed afterwards.
-export async function runTaskCheck(workspace: Workspace, ticket: string, task: string, options: CheckOptions): Promise<CheckRecord> {
+// base, and returns its record with the text it checked. Never throws: a checkout that cannot be
+// made or a failed session is a failed record, its error redacted like a failed review's. The
+// worktree is removed afterwards.
+//
+// With options.followUp, the check is a follow-up when followUpPlan says so: its prompt is the full
+// prompt with the previous findings and the Task file's diff (checkPrompt), its schema
+// FOLLOW_UP_SCHEMA, and every previous finding it keeps open stays in its findings (settleCheck). Its
+// tools, model, turns and hooks are a full check's. The Codex check always gets the full prompt and
+// CHECK_SCHEMA.
+export async function runTaskCheck(workspace: Workspace, ticket: string, task: string, options: CheckOptions): Promise<CheckRun> {
+  return { record: await checkRecordOf(workspace, ticket, task, options), task };
+}
+
+async function checkRecordOf(workspace: Workspace, ticket: string, task: string, options: CheckOptions): Promise<CheckRecord> {
   const startedAt = new Date().toISOString();
   // The chain of Tasks it builds on, read once from the Task files (never throws).
   const chain = await buildsOnChain(workspace, ticket, task);
@@ -652,10 +638,12 @@ export async function runTaskCheck(workspace: Workspace, ticket: string, task: s
     const message = error instanceof FactoryError ? error.message : 'The Task file\'s images could not be read.';
     return {
       workspace: workspace.name, ticket, sha256: taskCheckSha256(task, await imageHashes(imagesDir(workspace, ticket), references), chainLines(chain)), ...reading, commit: null, status: 'failed', output: null,
-      error: message, model: options.model ?? null, cost_usd: null, started_at: startedAt, ended_at: new Date().toISOString(),
+      error: message, model: options.model ?? null, cost_usd: null, started_at: startedAt, ended_at: new Date().toISOString(), mode: 'full',
     };
   }
-  const record = { workspace: workspace.name, ticket, sha256: taskCheckSha256(task, images, chainLines(chain)), ...reading };
+  const lines = chainLines(chain);
+  // A check that fails before its follow-up was decided is full.
+  const fullRecord = { workspace: workspace.name, ticket, sha256: taskCheckSha256(task, images, lines), ...reading, mode: 'full' as CheckMode };
   let checkout: Awaited<ReturnType<typeof checkCheckout>>;
   try {
     checkout = await checkCheckout(workspace.workCheckout, task, prepared);
@@ -663,12 +651,15 @@ export async function runTaskCheck(workspace: Workspace, ticket: string, task: s
     const unsafe = error instanceof FactoryError && error.code === TASK_CHECK_DIR_UNSAFE ? `${TASK_CHECK_DIR_UNSAFE}: ` : '';
     const message = `${unsafe}The check could not prepare its checkout: ${error instanceof Error ? error.message : String(error)}`;
     return {
-      ...record, commit: null, status: 'failed', output: null, error: new Redactor({ cwd: workspace.workCheckout }).failure(message.slice(0, 1000)),
+      ...fullRecord, commit: null, status: 'failed', output: null, error: new Redactor({ cwd: workspace.workCheckout }).failure(message.slice(0, 1000)),
       model: options.model ?? null, cost_usd: null, started_at: startedAt, ended_at: new Date().toISOString(),
     };
   }
   try {
     const cwd = checkout.root;
+    // A follow-up of the previous check (followUpPlan), when allowed and due; else full.
+    const plan = options.followUp === true ? await followUpPlan(new CheckStore(options.stateDir), workspace, ticket, task, lines, checkout.commit) : undefined;
+    const record = plan === undefined ? fullRecord : { ...fullRecord, mode: 'follow_up' as CheckMode, follow_up_of: plan.of.sha256 };
     // The images as they were read and hashed, next to the check's checkout (removed with it), so
     // the session sees exactly the bytes its sha256 names.
     const imageDir = join(dirname(checkout.root), 'images');
@@ -699,7 +690,7 @@ export async function runTaskCheck(workspace: Workspace, ticket: string, task: s
     // The paths off limits to every session, but the Task checks' parent directory the check runs in: on top of checkDeniedRules for the tools, and for the sandbox, with the session's
     // temporary folder and the check's own folder (not its siblings) kept. The check's own guard (guardHooks) holds the tools, not the job's. Its skills: the choice and the link now;
     // the workspace's decision documents: listed in the check's checkout, at the Task's base.
-    let outcome: Awaited<ReturnType<typeof runStructuredSession<CheckOutput>>>;
+    let outcome: Awaited<ReturnType<typeof runStructuredSession<CheckOutput | FollowUpOutput>>>;
     const skills = await roleSkillBlocks(options.stateDir, 'task_check');
     const signal = options.signal ?? new AbortController().signal;
     // norms never throws: a bad or missing norms.json is the defaults.
@@ -708,10 +699,13 @@ export async function runTaskCheck(workspace: Workspace, ticket: string, task: s
     // block below waits for it, so the checkout outlives it.
     let codex: Promise<CodexCheck> | undefined;
     try {
-      const prompt = checkPrompt(ticket, task, rules, skills.text, await workspaceDecisionDocs(workspace.name, cwd, options.configDir), sent.chain, prepared);
+      const decisions = await workspaceDecisionDocs(workspace.name, cwd, options.configDir);
+      // The full prompt, Codex's always; the follow-up's adds the previous findings and the diff.
+      const fullPrompt = checkPrompt(ticket, task, rules, skills.text, decisions, sent.chain, prepared);
+      const prompt = plan === undefined ? fullPrompt : checkPrompt(ticket, task, rules, skills.text, decisions, sent.chain, prepared, { findings: plan.findings, diff: plan.diff });
       const due = options.codex === undefined ? { due: false as const } : await codexCheckDue(options.stateDir, workspace.name, ticket, task);
       if (due.due) {
-        codex = runCodexCheck(prompt, options.codex!, {
+        codex = runCodexCheck(fullPrompt, options.codex!, {
           workspace, root: cwd, images: refs.map((ref) => ref.path), stateDir: options.stateDir, worktreeRoot: options.worktreeRoot, configDir: options.configDir,
           sandbox: options.sandbox !== undefined, signal, reason: due.reason, schema: CHECK_SCHEMA, output: checkOutput,
         });
@@ -727,7 +721,7 @@ export async function runTaskCheck(workspace: Workspace, ticket: string, task: s
           await options.onMessage?.(message);
         },
       }, {
-        schema: CHECK_SCHEMA, output: checkOutput, noun: 'check', outputNoun: 'output',
+        ...(plan === undefined ? { schema: CHECK_SCHEMA, output: checkOutput } : { schema: FOLLOW_UP_SCHEMA, output: followUpOutput }), noun: 'check', outputNoun: 'output',
         deny: checkDeniedRules(workspace.workCheckout, options.stateDir, options.configDir), hooks: guardHooks(cwd, await tmpRoots()),
       });
     } catch (error) {
@@ -742,7 +736,8 @@ export async function runTaskCheck(workspace: Workspace, ticket: string, task: s
     if (!outcome.ok) {
       return { ...base, status: 'failed', output: null, error: redactor.failure(outcome.message), cost_usd: null };
     }
-    return { ...base, status: 'checked', output: settleCheck(task, outcome.output, maxFiles), error: null, cost_usd: outcome.costUsd };
+    const previous = plan !== undefined && 'previous' in outcome.output ? { previous: outcome.output.previous } : {};
+    return { ...base, ...previous, status: 'checked', output: settleCheck(task, outcome.output, maxFiles, plan?.findings), error: null, cost_usd: outcome.costUsd };
   } finally {
     await checkout.remove();
   }
@@ -777,11 +772,11 @@ export interface CheckView {
 
 // The check settings of a loaded Config: the review's executable, sandbox and model, the check's
 // turn limit and the directories off limits; with SF_TASK_CHECK_CODEX=auto, the Codex check's from
-// the gate's.
+// the gate's; followUp: SF_TASK_CHECK_FOLLOW_UP (TaskChecks uses it for its automatic checks only).
 export function checkSettings(config: Config, configDir: string): Omit<CheckOptions, 'signal' | 'onMessage'> {
   return {
     claudePath: config.claudePath, sandbox: config.sandbox, model: config.reviewModel, maxTurns: config.taskCheckMaxTurns, rulesMaxBytes: config.rulesMaxBytes,
-    stateDir: config.stateDir, configDir, worktreeRoot: config.worktreeRoot,
+    stateDir: config.stateDir, configDir, worktreeRoot: config.worktreeRoot, followUp: config.taskCheckFollowUp === true,
     ...(config.taskCheckCodex === 'auto' ? { codex: { gate: config.gate, model: config.codexModel, timeoutMs: config.gateTimeoutMs, maxTokens: config.gateMaxTokens } } : {}),
   };
 }
@@ -888,14 +883,15 @@ export class TaskChecks {
       this.#end(key, name, ticket, undefined);
       throw error;
     }
-    const ended = runTaskCheck(workspace, ticket, task, { ...this.#options, ...(signal !== undefined ? { signal } : {}) })
-      .then(async (record) => {
+    // A manual check is always full; an automatic one may be a follow-up when the setting allows it.
+    const ended = runTaskCheck(workspace, ticket, task, { ...this.#options, followUp: this.#options.followUp === true && signal !== undefined, ...(signal !== undefined ? { signal } : {}) })
+      .then(async (run) => {
         if (signal === undefined) {
-          await this.store.write(record);
-          return record;
+          await this.store.write(run.record, run.task);
+          return run.record;
         }
         // An automatic check: stored only when no cancel came before the commit.
-        return (await this.store.writeUnless(record, signal)) === undefined ? undefined : record;
+        return (await this.store.writeUnless(run.record, signal, run.task)) === undefined ? undefined : run.record;
       })
       .catch((error: unknown) => {
         console.error(error);

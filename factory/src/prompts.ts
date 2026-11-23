@@ -8,6 +8,7 @@ import type { UserMessage } from './job-stream.js';
 import { SEVERITIES, SEVERITY_DEFINITIONS, type Severity } from './review.js';
 import { MR_READER_RULE, MR_TESTING_RULE } from './rules.js';
 import { SKILL_BLOCKS_LINE } from './skills.js';
+import type { CheckFinding } from './task-check.js';
 import { TASK_DIR } from './task-file.js';
 
 export const FACTORY_PROMPT_RULES = `Rules from the Software Factory:
@@ -157,7 +158,14 @@ export function conflictPrompt(input: ConflictPromptInput): string {
 // commit of the ticket the Task builds on) the chain is not read: the second line says the checkout
 // holds that ticket's change, and a "- Builds on:" line after the Codebase line says to check the
 // claims about that code against the checkout, a path:line that only moved being a nit.
-export function checkPrompt(ticket: string, task: string, rules = '', skills = '', decisions?: DecisionDocs, chain?: CheckChain, prepared?: Pick<PreparedPoint, 'ticket' | 'commit'>): string {
+//
+// With followUp (a follow-up check, src/task-check.ts) it is the same prompt plus the follow-up
+// lines after the verdict line and, before <task_file>, the <previous_findings> block (each finding
+// of the previous check as F<n>, in its order) and the <task_file_diff> block (the unified diff from
+// the text that check read to the current one).
+export function checkPrompt(
+  ticket: string, task: string, rules = '', skills = '', decisions?: DecisionDocs, chain?: CheckChain, prepared?: Pick<PreparedPoint, 'ticket' | 'commit'>, followUp?: FollowUpContext,
+): string {
   const built = prepared === undefined ? chain ?? [] : [];
   const leftOut = built.filter((item) => item.text === null).map((item) => item.ticket);
   return [
@@ -182,15 +190,51 @@ export function checkPrompt(ticket: string, task: string, rules = '', skills = '
     ...SEVERITIES.map((severity: Severity) => `  - \`${severity}\`: ${SEVERITY_DEFINITIONS[severity]}.`),
     '- files: every file you expect the change to create, modify or delete, tests and docs included. When the front matter has `scope:`, a file you expect outside it is `missing`, and a scope entry no expected file needs is `overreach`.',
     '- verdict: `ready` when no finding is a blocker or major; `not_ready` otherwise. The factory applies this rule to your findings, whatever you write.',
+    ...(followUp === undefined ? [] : FOLLOW_UP_LINES),
     ...checkDecisionLines(decisions),
     '',
     ...(skills !== '' ? [SKILL_BLOCKS_LINE, skills, ''] : []),
     ...(rules !== '' ? [rules.trimEnd(), ''] : []),
     ...built.flatMap((item) => (item.text === null ? [] : [`<builds_on_task ticket="${item.ticket}" path="${item.path}">`, item.text.trimEnd(), '</builds_on_task>', ''])),
+    ...(followUp === undefined ? [] : followUpBlocks(followUp)),
     `<task_file path="${TASK_DIR}/${ticket}.md">`,
     task.trimEnd(),
     '</task_file>',
   ].join('\n');
+}
+
+// What a follow-up check is given of the previous check: its findings, in order (F1, F2, ...), and
+// the unified diff from the Task text it read to the current one.
+export interface FollowUpContext {
+  findings: readonly CheckFinding[];
+  diff: string;
+}
+
+// The follow-up check's own instructions (checkPrompt with followUp).
+export const FOLLOW_UP_LINES: readonly string[] = [
+  '- Follow-up: an earlier check of this Task file found the problems in <previous_findings>, numbered F1, F2, …; the Task file was revised since, and <task_file_diff> is the unified diff from the text that check read to the current Task file below.',
+  '- previous: for each previous finding, decide whether the current Task file resolves it, verifying against the repository as for any claim, and answer it with its id, `resolved` or `open`, and a note saying why. A finding you cannot verify as resolved is `open`.',
+  '- Review every changed part and what it affects as rigorously as a full check: the changed lines, the parts of the Task they bear on, and the code they name.',
+  '- Raise any other problem you notice anywhere in the Task file, changed or not. Unchanged parts the previous check passed need no fresh audit.',
+  '- previous_id: on each finding, the F<n> of the previous finding it restates (when that finding is still open, possibly reworded or with another severity), or null for a new one. A previous finding you answer `open` and restate under no previous_id is kept as it was.',
+];
+
+// The <previous_findings> and <task_file_diff> blocks of a follow-up check's prompt.
+function followUpBlocks(followUp: FollowUpContext): string[] {
+  return [
+    '<previous_findings>',
+    ...followUp.findings.flatMap((item, index) => [
+      `F${index + 1} (kind: ${item.kind}, severity: ${item.severity}, where: ${item.where})`,
+      `  problem: ${item.problem}`,
+      `  expected: ${item.expected}`,
+    ]),
+    '</previous_findings>',
+    '',
+    '<task_file_diff>',
+    followUp.diff.trimEnd(),
+    '</task_file_diff>',
+    '',
+  ];
 }
 
 // The caps of <user_decisions>, in characters: one message's text, and all the texts sent.

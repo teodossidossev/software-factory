@@ -12,7 +12,7 @@ import type { Job } from '../src/jobs.js';
 import type { Workspace } from '../src/registry.js';
 import { type CheckRecord, taskSha256 } from '../src/task-check.js';
 import { AutoChecks } from '../src/task-check-auto.js';
-import { MAX_RETRIES, type QueuedTicket, RETRY_AFTER_MS, SWEEP_MS, touchesScope } from '../src/task-check-recheck.js';
+import { MAX_RETRIES, movedIntoScope, type QueuedTicket, RETRY_AFTER_MS, scopeGlobs, SWEEP_MS, touchesScope } from '../src/task-check-recheck.js';
 import { FakeClock, FakeRunner } from './support/auto-checks.js';
 import { git, temp } from './support/harness.js';
 
@@ -245,6 +245,23 @@ test('without scope or may_touch any changed path counts, and a commit Git does 
   await sweepAndDelay(r);
   assert.deepEqual(r.runner.starts, ['auto app/U-2', 'auto app/U-1']);
   assert.deepEqual([touchesScope([], []), touchesScope([], ['x']), touchesScope(['src/**'], ['README.md']), touchesScope(['src/**'], undefined)], [false, true, false, true]);
+});
+
+test('movedIntoScope (SF-317), the test the sweep and the follow-up check share: the same commit has not moved; another moved into scope only when a path between them matches', async (t) => {
+  const r = await rig('recheck-moved-into-scope');
+  t.after(() => r.auto.close());
+  const first = head(r);
+  const readme = await r.commit('README.md');
+  const source = await r.commit('src/a.ts');
+  assert.equal(await movedIntoScope(r.dir, first, first, ['src/**']), false);
+  assert.equal(await movedIntoScope(r.dir, first, readme, ['src/**']), false);
+  assert.equal(await movedIntoScope(r.dir, first, source, ['src/**']), true);
+  assert.equal(await movedIntoScope(r.dir, readme, source, ['README.md']), false);
+  // Without globs any changed path counts; a commit Git does not know, or none, counts as moved.
+  assert.equal(await movedIntoScope(r.dir, first, readme, []), true);
+  assert.equal(await movedIntoScope(r.dir, 'f'.repeat(40), first, ['src/**']), true);
+  assert.equal(await movedIntoScope(r.dir, null, first, ['src/**']), true);
+  assert.deepEqual(scopeGlobs(new Map([['scope', '[src/**]'], ['may_touch', '[docs/x.md]']])), ['src/**', 'docs/x.md']);
 });
 
 test('a fetch error skips the workspace for the sweep, logged once; the next sweep tries again', async (t) => {

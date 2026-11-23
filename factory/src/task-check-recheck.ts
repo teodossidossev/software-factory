@@ -97,6 +97,17 @@ export function touchesScope(globs: readonly string[], changed: readonly string[
   return changed.some((path) => globs.some((glob) => glob === path || matchesGlob(path, glob)));
 }
 
+// A Task's scope and may_touch globs, for movedIntoScope.
+export const scopeGlobs = (fields: Map<string, string>): string[] => [...(taskScope(fields) ?? []), ...mayTouch(fields)];
+
+// Whether the commit a check would read now (to) moved from the one a record read (from) in a way
+// that touches the Task: another commit, and the paths changed in between match its scope or may_touch
+// globs (touchesScope; a commit Git no longer knows counts as every path changed). Throws on a Git
+// error. The sweep's not_ready re-check and the follow-up check (src/task-check.ts) both use it.
+export async function movedIntoScope(checkout: string, from: string | null, to: string, globs: readonly string[]): Promise<boolean> {
+  return to !== from && touchesScope(globs, await changedPaths(checkout, from, to));
+}
+
 // The retry counts and the sweep (see the top of this file).
 export class Rechecks {
   readonly #options: RecheckOptions;
@@ -144,7 +155,7 @@ export class Rechecks {
             tips.set(key, resolveTarget(look.workspace.workCheckout, look.base).then((target) => target.commit));
           }
           const tip = await tips.get(key)!;
-          if (tip !== look.record.commit && touchesScope(look.globs, await changedPaths(look.workspace.workCheckout, look.record.commit, tip))) {
+          if (await movedIntoScope(look.workspace.workCheckout, look.record.commit, tip, look.globs)) {
             this.#options.trigger(entry.workspace, entry.ticket, 'moved');
           }
         } catch (error) {
@@ -166,7 +177,7 @@ export class Rechecks {
       }
       const record = await this.#options.store.read(name, ticket, await currentCheckSha256(workspace, ticket, task));
       const fields = parseFrontMatter(task) ?? new Map<string, string>();
-      return record === undefined ? undefined : { workspace, ticket, base: taskStartBranch(fields), globs: [...(taskScope(fields) ?? []), ...mayTouch(fields)], record };
+      return record === undefined ? undefined : { workspace, ticket, base: taskStartBranch(fields), globs: scopeGlobs(fields), record };
     } catch (error) {
       if (!(error instanceof FactoryError)) {
         console.error(error);

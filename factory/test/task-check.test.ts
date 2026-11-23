@@ -12,17 +12,22 @@ import { chmod, mkdir, readdir, readFile, realpath, rename, rm, stat, symlink, w
 import { addAttachment } from '../src/attachments.js';
 import { basename, dirname, join } from 'node:path';
 import { test } from 'node:test';
+import { buildsOnChain, chainLines } from '../src/builds-on.js';
+import { loadConfig, taskCheckFollowUpSetting } from '../src/config.js';
 import { type Job, JobStore } from '../src/jobs.js';
 import { DECISION_CHECK_LINES } from '../src/decisions.js';
-import { checkPrompt } from '../src/prompts.js';
+import { checkPrompt, FOLLOW_UP_LINES } from '../src/prompts.js';
 import { readOnlySessionOptions, REVIEW_DENIED_TOOLS } from '../src/review.js';
 import {
-  CHECK_SCHEMA, type CheckFinding, type CheckOutput, type CheckRecord, CheckStore, TaskChecks, checkDeniedRules, checkLines, checkOutput, checkSummary,
-  checkVerdict, cutOutsideLinks, guardReason, OUTSIDE_LINK_NOTE, scopeFindings, settleCheck, startNote, taskCheckSha256, taskSha256,
+  CHECK_SCHEMA, type CheckFinding, type CheckOutput, type CheckRecord, CheckStore, TaskChecks, changedLineCount, checkDeniedRules, checkLines, checkOutput, checkSettings, checkSummary,
+  checkVerdict, cutOutsideLinks, FOLLOW_UP_SCHEMA, type FollowUpOutput, followUpPlan, guardReason, openPrevious, OUTSIDE_LINK_NOTE, scopeFindings, settleCheck, startNote, taskCheckSha256, taskSha256,
 } from '../src/task-check.js';
+import { codexCheckPrompt } from '../src/task-check-codex.js';
 import { writeTask } from '../src/task-file.js';
 import { act, fetchRaw } from './support/dashboard-client.js';
-import { assertPathDenials, type Env, git, holdOpen, newEnv, newRepo, probeLog, putRules, reviewLog, reviewScript, runCli, serve, stop, temp } from './support/harness.js';
+import {
+  assertPathDenials, codexLog, codexScript, type Env, fakeCodex, git, holdOpen, newEnv, newRepo, probeLog, processEnv, putRules, reviewLog, reviewScript, runCli, serve, stop, temp,
+} from './support/harness.js';
 
 const finding = (severity: CheckFinding['severity'], kind: CheckFinding['kind'] = 'decision', where = '## Behaviour'): CheckFinding =>
   ({ kind, severity, where, problem: `A ${severity} problem.`, expected: 'Say which.' });
@@ -733,4 +738,335 @@ test('the Task check with images (SF-065): the factory gives the referenced imag
   // A referenced image missing from the archive enters as missing; the view never throws.
   await rm(join(repo, '.software-factory', 'archive', 'C-10', '1.png'));
   assert.equal((await checks.view('app', 'C-10')).current_sha256, missingSha);
+});
+
+// SF-317: the follow-up checks.
+
+const PREVIOUS: CheckFinding[] = [
+  finding('major', 'decision', '## Behaviour'),
+  finding('blocker', 'missing', '## Tests'),
+  finding('major', 'unclear', '## Goal'),
+  finding('nit', 'overreach', '## Docs'),
+];
+
+test('SF_TASK_CHECK_FOLLOW_UP (SF-317): on by default (also empty) or off, anything else invalid; checkSettings carries it', () => {
+  assert.equal(taskCheckFollowUpSetting({}), true);
+  assert.equal(taskCheckFollowUpSetting({ SF_TASK_CHECK_FOLLOW_UP: '' }), true);
+  assert.equal(taskCheckFollowUpSetting({ SF_TASK_CHECK_FOLLOW_UP: 'on' }), true);
+  assert.equal(taskCheckFollowUpSetting({ SF_TASK_CHECK_FOLLOW_UP: 'off' }), false);
+  assert.throws(() => taskCheckFollowUpSetting({ SF_TASK_CHECK_FOLLOW_UP: 'OFF' }), /SF_TASK_CHECK_FOLLOW_UP must be on or off/);
+  const base = { HOME: temp, SF_GATE: 'off' };
+  assert.equal(checkSettings(loadConfig(base), '/cfg').followUp, true);
+  assert.equal(checkSettings(loadConfig({ ...base, SF_TASK_CHECK_FOLLOW_UP: 'off' }), '/cfg').followUp, false);
+});
+
+test('settleCheck of a follow-up (SF-317): an open F2 without a matching previous_id is added back, an F3 missing from previous counts as open, a resolved F1 and a restated F4 are not repeated; not_ready', () => {
+  const output: FollowUpOutput = {
+    paraphrase: 'p',
+    previous: [
+      { id: 'F1', status: 'resolved', note: 'The Behaviour section now says which.' },
+      { id: 'F2', status: 'open', note: 'Still no test plan.' },
+      { id: 'F4', status: 'open', note: 'Docs still named.' },
+    ],
+    findings: [
+      { ...finding('nit', 'overreach', '## Docs'), problem: 'The Docs step is still not needed.', previous_id: 'F4' },
+      { ...finding('nit', 'unclear', '## Title'), previous_id: null },
+    ],
+    files: [],
+    verdict: 'ready',
+  };
+  const settled = settleCheck('', output, undefined, PREVIOUS);
+  assert.deepEqual(settled.findings, [
+    { ...finding('nit', 'overreach', '## Docs'), problem: 'The Docs step is still not needed.' },
+    finding('nit', 'unclear', '## Title'),
+    PREVIOUS[1],
+    PREVIOUS[2],
+  ]);
+  assert.equal(settled.verdict, 'not_ready');
+  // F2 answered open, F3 missing: each alone keeps the verdict not_ready.
+  assert.equal(settleCheck('', { ...output, previous: [{ id: 'F1', status: 'resolved', note: '' }, { id: 'F2', status: 'resolved', note: '' }, { id: 'F4', status: 'resolved', note: '' }] }, undefined, PREVIOUS).findings.at(-1), PREVIOUS[2]);
+  const onlyF2 = settleCheck('', { ...output, previous: [{ id: 'F1', status: 'resolved', note: '' }, { id: 'F2', status: 'open', note: '' }, { id: 'F3', status: 'resolved', note: '' }, { id: 'F4', status: 'resolved', note: '' }] }, undefined, PREVIOUS);
+  assert.deepEqual([onlyF2.findings.includes(PREVIOUS[1]!), onlyF2.findings.includes(PREVIOUS[2]!), onlyF2.verdict], [true, false, 'not_ready']);
+  // An id answered both ways counts as open; every one resolved and none restated: none kept.
+  assert.deepEqual(openPrevious({ ...output, previous: [{ id: 'F1', status: 'resolved', note: '' }, { id: 'f1', status: 'open', note: '' }] }, [PREVIOUS[0]!]), [PREVIOUS[0]]);
+  assert.deepEqual(openPrevious({ ...output, findings: [], previous: PREVIOUS.map((_item, index) => ({ id: `F${index + 1}`, status: 'resolved' as const, note: '' })) }, PREVIOUS), []);
+  // A full check's output is unchanged by the follow-up part.
+  assert.deepEqual(settleCheck('', OUTPUT), settleCheck('', OUTPUT, undefined, []));
+  // The follow-up schema: the check's, previous after the paraphrase and a required previous_id.
+  const schema = FOLLOW_UP_SCHEMA as { properties: Record<string, { items?: { required?: string[] } }>; required: string[] };
+  assert.deepEqual(Object.keys(schema.properties), ['paraphrase', 'previous', 'findings', 'files', 'verdict']);
+  assert.deepEqual(schema.required, ['paraphrase', 'previous', 'findings', 'files', 'verdict']);
+  assert.deepEqual(schema.properties.findings!.items!.required, ['kind', 'severity', 'where', 'problem', 'expected', 'previous_id']);
+  assert.deepEqual(schema.properties.previous!.items!.required, ['id', 'status', 'note']);
+});
+
+test('the follow-up prompt (SF-317): the full prompt plus its lines, the numbered previous findings and the diff before the full Task file', () => {
+  const task = taskText('C-30');
+  const full = checkPrompt('C-30', task);
+  const diff = '--- a/.software-factory/C-30.md\n+++ b/.software-factory/C-30.md\n@@ -1 +1 @@\n-old\n+new';
+  const prompt = checkPrompt('C-30', task, '', '', undefined, undefined, undefined, { findings: PREVIOUS.slice(0, 2), diff });
+  assert.ok(prompt.endsWith(`<task_file path=".software-factory/C-30.md">\n${task.trimEnd()}\n</task_file>`));
+  assert.ok(prompt.includes([
+    '<previous_findings>',
+    'F1 (kind: decision, severity: major, where: ## Behaviour)', '  problem: A major problem.', '  expected: Say which.',
+    'F2 (kind: missing, severity: blocker, where: ## Tests)', '  problem: A blocker problem.', '  expected: Say which.',
+    '</previous_findings>', '', '<task_file_diff>', diff, '</task_file_diff>', '', '<task_file path=".software-factory/C-30.md">',
+  ].join('\n')), prompt);
+  for (const line of FOLLOW_UP_LINES) {
+    assert.ok(prompt.includes(`${line}\n`) && !full.includes(line));
+  }
+  // Without the follow-up part, nothing changes: the full prompt is the prompt minus those lines and blocks.
+  const without = prompt.replace(`${FOLLOW_UP_LINES.join('\n')}\n`, '').replace(/<previous_findings>[\s\S]*<\/task_file_diff>\n\n/, '');
+  assert.equal(without, full);
+  assert.equal(changedLineCount(diff), 2);
+  assert.equal(changedLineCount(`--- a/x\n+++ b/x\n@@ -1,3 +1,3 @@\n a\n--- b\n+++ c\n d`), 2);
+});
+
+// A work checkout with Task file ticket at text (scope: README.md, other files outside it), and the
+// check store of its state.
+async function planEnv(name: string): Promise<{ workspace: { name: string; readCheckout: string; workCheckout: string }; store: CheckStore; head: () => string; commit: (path: string) => Promise<string> }> {
+  const env = await newEnv(name);
+  const repo = await newRepo(env, `${name}-repo`, false);
+  await mkdir(join(repo, '.software-factory'), { recursive: true });
+  const head = (): string => git(repo, 'rev-parse', 'HEAD').trim();
+  const commit = async (path: string): Promise<string> => {
+    await writeFile(join(repo, path), 'change\n', { flag: 'a' });
+    git(repo, 'add', path);
+    git(repo, 'commit', '-q', '-m', `change ${path}`);
+    return head();
+  };
+  return { workspace: { name: 'app', readCheckout: repo, workCheckout: repo }, store: new CheckStore(env.state), head, commit };
+}
+
+// A Task text of exactly 100 lines (the final newline ending the last), scope README.md; body lines
+// "line <n>" from 1 on, each replaced by "changed <n>" when n is in changed, and the extra lines after.
+function hundredLines(ticket: string, changed: readonly number[] = [], extra: readonly string[] = [], frontExtra = ''): string {
+  const head = `---\nticket: ${ticket}\ntitle: A long Task\nbase: main\nscope: [README.md]\n${frontExtra}---\n\n# ${ticket}: A long Task\n\n`;
+  const headLines = head.split('\n').length - 1;
+  const body = Array.from({ length: 100 - headLines }, (_item, index) => (changed.includes(index + 1) ? `changed ${index + 1}` : `line ${index + 1}`));
+  return `${head}${[...body, ...extra].join('\n')}\n`;
+}
+
+// A stored check of text: not_ready with PREVIOUS (or verdict), at commit, ending at endedAt.
+function planRecord(ticket: string, sha256: string, commit: string, endedAt: string, verdict: 'ready' | 'not_ready' | 'failed' = 'not_ready', mode?: 'full' | 'follow_up'): CheckRecord {
+  const output = verdict === 'failed' ? null : { paraphrase: 'p', findings: verdict === 'ready' ? [] : PREVIOUS, files: [], verdict };
+  return {
+    workspace: 'app', ticket, sha256, commit, status: output === null ? 'failed' : 'checked', output, error: output === null ? 'The check timed out.' : null,
+    model: null, cost_usd: null, started_at: endedAt, ended_at: endedAt, ...(mode === undefined ? {} : { mode }),
+  };
+}
+
+test('followUpPlan (SF-317): all of D-2 met gives a follow-up; each condition on its own gives a full check', async () => {
+  const { workspace, store, head, commit } = await planEnv('follow-up-plan');
+  const old = hundredLines('C-31');
+  const revised = hundredLines('C-31', [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]);
+  await writeFile(join(workspace.workCheckout, '.software-factory', 'C-31.md'), revised);
+  const at = head();
+  const put = async (record: CheckRecord, text?: string): Promise<void> => {
+    await store.write(record, text);
+  };
+  const plan = (commitNow = at, task = revised): ReturnType<typeof followUpPlan> => followUpPlan(store, workspace, 'C-31', task, [], commitNow);
+
+  // No previous check: full.
+  assert.equal(await plan(), undefined);
+  // A not_ready Claude check with its text kept, at the same commit, 40% changed: a follow-up.
+  await put(planRecord('C-31', taskSha256(old), at, '2026-11-23T08:00:00.000Z'), old);
+  const ok = await plan();
+  assert.equal(ok?.of.sha256, taskSha256(old));
+  assert.deepEqual(ok?.findings, PREVIOUS);
+  assert.equal(changedLineCount(ok!.diff), 40);
+  assert.match(ok!.diff, /^--- a\/\.software-factory\/C-31\.md\n\+\+\+ b\/\.software-factory\/C-31\.md\n@@/);
+  // 41%: full.
+  assert.equal(await plan(at, hundredLines('C-31', Array.from({ length: 20 }, (_item, index) => index + 1), ['one more'])), undefined);
+  // The same text: no diff, full.
+  assert.equal(await plan(at, old), undefined);
+  // The base moved outside the scope: still a follow-up; into the scope: full.
+  const outside = await commit('other.txt');
+  assert.equal((await plan(outside))?.of.sha256, taskSha256(old));
+  assert.equal(await plan(await commit('README.md')), undefined);
+  // A commit Git does not know: full.
+  await put(planRecord('C-31', taskSha256(old), 'f'.repeat(40), '2026-11-23T08:00:00.000Z'), old);
+  assert.equal(await plan(), undefined);
+  // A ready, then a failed previous check: full.
+  await put(planRecord('C-31', taskSha256(old), at, '2026-11-23T08:00:00.000Z', 'ready'), old);
+  assert.equal(await plan(), undefined);
+  await put(planRecord('C-31', taskSha256(old), at, '2026-11-23T08:00:00.000Z', 'failed'), old);
+  assert.equal(await plan(), undefined);
+  // Not ready through its Codex part only: the Claude check was ready, full.
+  await put({ ...planRecord('C-31', taskSha256(old), at, '2026-11-23T08:00:00.000Z', 'ready'), codex: { reason: 'r', status: 'checked', output: { paraphrase: 'p', findings: PREVIOUS, files: [], verdict: 'not_ready' }, error: null, model: null, tokens: null, started_at: '', ended_at: '' } as unknown as CheckRecord['codex'] }, old);
+  assert.equal(await plan(), undefined);
+  // Back to not_ready, its text not kept: full.
+  await put(planRecord('C-31', taskSha256(old), at, '2026-11-23T08:00:00.000Z'), old);
+  assert.notEqual(await plan(), undefined);
+  await rm(store.taskPath('app', 'C-31', taskSha256(old)));
+  assert.equal(await plan(), undefined);
+
+  // The previous two records both follow-ups: full; a full one before the last follow-up: a follow-up.
+  const older = hundredLines('C-31', [50]);
+  await put(planRecord('C-31', taskSha256(older), at, '2026-11-23T07:00:00.000Z', 'not_ready', 'follow_up'), older);
+  await put(planRecord('C-31', taskSha256(old), at, '2026-11-23T08:00:00.000Z', 'not_ready', 'follow_up'), old);
+  assert.equal(await plan(), undefined);
+  await put(planRecord('C-31', taskSha256(older), at, '2026-11-23T07:00:00.000Z', 'not_ready', 'full'), older);
+  assert.equal((await plan())?.of.sha256, taskSha256(old));
+  // The newest record is another version's: that one is the previous check.
+  const newest = hundredLines('C-31', [60]);
+  await put(planRecord('C-31', taskSha256(newest), at, '2026-11-23T09:00:00.000Z', 'ready'), newest);
+  assert.equal(await plan(), undefined);
+});
+
+test('followUpPlan (SF-317): a changed builds_on chain gives a full check', async () => {
+  const { workspace, store, head } = await planEnv('follow-up-chain');
+  const dir = join(workspace.workCheckout, '.software-factory');
+  await writeFile(join(dir, 'C-40.md'), taskText('C-40'));
+  const old = hundredLines('C-41', [], [], 'builds_on: C-40\n');
+  const revised = hundredLines('C-41', [1], [], 'builds_on: C-40\n');
+  const chain = async (): Promise<string[]> => chainLines(await buildsOnChain(workspace, 'C-41', revised));
+  const oldSha = taskCheckSha256(old, [], chainLines(await buildsOnChain(workspace, 'C-41', old)));
+  assert.notEqual(oldSha, taskSha256(old));
+  await store.write(planRecord('C-41', oldSha, head(), '2026-11-23T08:00:00.000Z'), old);
+  assert.equal((await followUpPlan(store, workspace, 'C-41', revised, await chain(), head()))?.of.sha256, oldSha);
+  await writeFile(join(dir, 'C-40.md'), taskText('C-40', '', 'Greet the reader twice.'));
+  assert.equal(await followUpPlan(store, workspace, 'C-41', revised, await chain(), head()), undefined);
+});
+
+test('CheckStore keeps the checked Task text (SF-317): .task.md beside the record, 0600, by write and writeUnless; none when cancelled; records() ignores it', async () => {
+  const store = new CheckStore(join(temp, 'task-text-store'));
+  const text = taskText('C-1');
+  const one = record(taskSha256(text), '2026-11-23T08:00:00.000Z');
+  await store.write(one, text);
+  const path = store.taskPath('app', 'C-1', one.sha256);
+  assert.equal(path, store.path('app', 'C-1', one.sha256).replace(/\.json$/, '.task.md'));
+  assert.equal(await readFile(path, 'utf8'), text);
+  assert.equal((await stat(path)).mode & 0o777, 0o600);
+  assert.equal(await store.checkedTask(one), text);
+  assert.deepEqual((await store.records('app', 'C-1')).length, 1);
+  const two = record('b'.repeat(64), '2026-11-23T09:00:00.000Z');
+  const cancelled = new AbortController();
+  cancelled.abort();
+  assert.equal(await store.writeUnless(two, cancelled.signal, 'cancelled text'), undefined);
+  assert.equal(await store.checkedTask(two), undefined);
+  assert.equal(await store.writeUnless(two, new AbortController().signal, 'second text'), store.path('app', 'C-1', two.sha256));
+  assert.equal(await store.checkedTask(two), 'second text');
+  assert.equal((await stat(store.taskPath('app', 'C-1', two.sha256))).mode & 0o777, 0o600);
+  assert.deepEqual((await readdir(dirname(path))).sort(), [`${'b'.repeat(16)}.json`, `${'b'.repeat(16)}.task.md`, basename(store.path('app', 'C-1', one.sha256)), basename(path)].sort());
+});
+
+// Runs fn with HOME, PATH and TMPDIR of env, as an sf process of env gets them: a session in this
+// process runs the fake Claude and Codex of env, and the check's worktree goes under the test run's
+// own temporary folder, never the machine's (a sandbox that runs the tests may mask that one).
+const AS_ENV = ['HOME', 'PATH', 'TMPDIR'] as const;
+async function asEnv<T>(env: Env, fn: () => Promise<T>): Promise<T> {
+  const saved = AS_ENV.map((name) => [name, process.env[name]] as const);
+  const given = processEnv(env);
+  for (const name of AS_ENV) {
+    process.env[name] = given[name];
+  }
+  try {
+    return await fn();
+  } finally {
+    for (const [name, value] of saved) {
+      if (value === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = value;
+      }
+    }
+  }
+}
+
+test('the follow-up end to end (SF-317): a first and a manual check are full, a revised not_ready Task\'s automatic re-check is a follow-up with Codex on the full prompt; an open finding stays; the setting off is full', async () => {
+  const extra = { SF_REVIEW_MODEL: 'fake-checker', SF_TASK_CHECK_MAX_TURNS: '9', SF_TASK_CHECK_CODEX: 'auto', SF_GATE: 'codex', SF_CODEX: fakeCodex };
+  const env = await newEnv('follow-up-e2e', extra);
+  const repo = await newRepo(env, 'follow-up-e2e-repo', false);
+  const workspace = { name: 'app', readCheckout: repo, workCheckout: repo };
+  const jobs = new JobStore(env.state);
+  const v1 = hundredLines('C-50');
+  await writeTask(workspace, 'C-50', v1, jobs);
+  const settings = checkSettings(loadConfig(processEnv(env)), env.config);
+  assert.equal(settings.followUp, true);
+  const checks = new TaskChecks({ ...settings, resolve: async () => workspace });
+  const auto = async (): Promise<CheckRecord | undefined> => asEnv(env, async () => (await checks.startAuto('app', 'C-50', new AbortController().signal)).ended);
+  const notReady: CheckOutput = { paraphrase: 'p', findings: PREVIOUS.slice(0, 3), files: [{ path: 'README.md', action: 'modify' }], verdict: 'not_ready' };
+  const codexReady: CheckOutput = { paraphrase: 'p', findings: [], files: [{ path: 'README.md', action: 'modify' }], verdict: 'ready' };
+
+  // The first check: full, its text kept.
+  await reviewScript(env, [{ output: notReady }]);
+  await codexScript(env, [{ output: codexReady }, { output: codexReady }, { output: codexReady }, { output: codexReady }]);
+  // The newest session of the fake Claude.
+  const latest = async (): Promise<Awaited<ReturnType<typeof reviewLog>>[number]> => (await reviewLog(env)).at(-1)!;
+  const first = await auto();
+  assert.deepEqual([first?.status, first?.mode, first?.follow_up_of, first?.output?.verdict], ['checked', 'full', undefined, 'not_ready'], first?.error ?? undefined);
+  assert.equal(await checks.store.checkedTask(first!), v1);
+  let entry = await latest();
+  assert.equal(entry.prompt, checkPrompt('C-50', v1));
+
+  // Revised: the automatic re-check is a follow-up. F1 resolved, F2 open and restated, F3 left out.
+  const v2 = hundredLines('C-50', [1, 2]);
+  await writeTask(workspace, 'C-50', v2, jobs);
+  const previous = [{ id: 'F1', status: 'resolved', note: 'Says which now.' }, { id: 'F2', status: 'open', note: 'Still no tests.' }];
+  await reviewScript(env, [{ output: { paraphrase: 'p2', previous, findings: [{ ...PREVIOUS[1]!, problem: 'Still no test plan.', previous_id: 'F2' }], files: [{ path: 'README.md', action: 'modify' }], verdict: 'ready' } }]);
+  const second = await auto();
+  entry = await latest();
+  assert.ok(entry.prompt.includes('<previous_findings>\nF1 (kind: decision, severity: major, where: ## Behaviour)'), entry.prompt);
+  assert.ok(entry.prompt.includes('F3 (kind: unclear, severity: major, where: ## Goal)'));
+  assert.ok(entry.prompt.includes('<task_file_diff>\n--- a/.software-factory/C-50.md\n+++ b/.software-factory/C-50.md\n@@'));
+  assert.ok(entry.prompt.includes('-line 1\n-line 2\n+changed 1\n+changed 2'));
+  assert.ok(entry.prompt.endsWith(`<task_file path=".software-factory/C-50.md">\n${v2.trimEnd()}\n</task_file>`));
+  assert.deepEqual(JSON.parse(option(entry.argv, 'json-schema')!), FOLLOW_UP_SCHEMA);
+  assert.deepEqual([option(entry.argv, 'max-turns'), option(entry.argv, 'model'), option(entry.argv, 'tools')], ['9', 'fake-checker', 'Read,Grep,Glob']);
+  // Codex: the full prompt and the check's schema, as ever.
+  const codexRuns = await codexLog(env);
+  assert.equal(codexRuns.length, 2);
+  assert.equal(codexRuns.at(-1)!.prompt, codexCheckPrompt(checkPrompt('C-50', v2)));
+  assert.equal(second?.codex?.status, 'checked');
+  // The record: follow_up of the first, the answers, the restated F2 and the open F3 added back.
+  assert.deepEqual([second?.status, second?.mode, second?.follow_up_of, second?.previous], ['checked', 'follow_up', first!.sha256, previous]);
+  assert.deepEqual(second?.output?.findings, [{ ...PREVIOUS[1]!, problem: 'Still no test plan.' }, PREVIOUS[2]]);
+  assert.equal(second?.output?.verdict, 'not_ready');
+  assert.equal(await checks.store.checkedTask(second!), v2);
+
+  // A manual Check of a revised version: full, though it meets the rest.
+  const v3 = hundredLines('C-50', [1, 2, 3]);
+  await writeTask(workspace, 'C-50', v3, jobs);
+  await reviewScript(env, [{ output: notReady }]);
+  await asEnv(env, async () => {
+    await checks.start('app', 'C-50');
+    const deadline = Date.now() + 60_000;
+    while (checks.isRunning('app', 'C-50')) {
+      assert.ok(Date.now() < deadline, 'the manual check did not end');
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  });
+  entry = await latest();
+  assert.equal(entry.prompt, checkPrompt('C-50', v3));
+  const manual = await checks.store.last('app', 'C-50');
+  assert.deepEqual([manual?.sha256, manual?.mode, manual?.output?.verdict], [taskSha256(v3), 'full', 'not_ready']);
+  assert.equal(await checks.store.checkedTask(manual!), v3);
+
+  // The setting off: an automatic re-check that meets the rest is full.
+  const v4 = hundredLines('C-50', [1, 2, 3, 4]);
+  await writeTask(workspace, 'C-50', v4, jobs);
+  await reviewScript(env, [{ output: notReady }]);
+  const off = new TaskChecks({ ...checkSettings(loadConfig({ ...processEnv(env), SF_TASK_CHECK_FOLLOW_UP: 'off' }), env.config), resolve: async () => workspace });
+  const fourth = await asEnv(env, async () => (await off.startAuto('app', 'C-50', new AbortController().signal)).ended);
+  entry = await latest();
+  assert.equal(entry.prompt, checkPrompt('C-50', v4));
+  assert.deepEqual([fourth?.mode, fourth?.follow_up_of], ['full', undefined]);
+});
+
+test('sf check-task (SF-317): keeps the checked text beside the record, 0600; a re-check of a revised not_ready Task is full', async () => {
+  const v1 = hundredLines('C-51');
+  const { env, repo } = await checkEnv('check-cli-follow-up', 'C-51', v1);
+  await reviewScript(env, [{ output: OUTPUT }, { output: OUTPUT }]);
+  assert.equal((await runCli(env, ['check-task', 'app', 'C-51'])).code, 0);
+  const store = new CheckStore(env.state);
+  const text = store.taskPath('app', 'C-51', taskSha256(v1));
+  assert.equal(await readFile(text, 'utf8'), v1);
+  assert.equal((await stat(text)).mode & 0o777, 0o600);
+  const v2 = hundredLines('C-51', [1]);
+  await writeTask({ name: 'app', readCheckout: repo, workCheckout: repo }, 'C-51', v2, new JobStore(env.state));
+  assert.equal((await runCli(env, ['check-task', 'app', 'C-51'])).code, 0);
+  const entry = (await reviewLog(env)).at(-1);
+  assert.equal(entry!.prompt, checkPrompt('C-51', v2));
+  assert.equal((await store.last('app', 'C-51'))?.mode, 'full');
 });

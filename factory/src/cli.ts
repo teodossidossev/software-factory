@@ -724,8 +724,9 @@ async function checkTask(args: string[]): Promise<void> {
   const abort = new AbortController();
   process.once('SIGINT', () => abort.abort());
   console.error(`Checking ${TASK_DIR}/${ticket}.md of ${name}: a read-only Claude session reads it and the repository; this takes a few minutes.`);
-  const record = await runTaskCheck(workspace, ticket, task, { ...checkSettings(config, configDir()), signal: abort.signal });
-  const path = await new CheckStore(config.stateDir).write(record);
+  // A manual check: always full, never a follow-up.
+  const { record, task: checked } = await runTaskCheck(workspace, ticket, task, { ...checkSettings(config, configDir()), followUp: false, signal: abort.signal });
+  const path = await new CheckStore(config.stateDir).write(record, checked);
   console.log([...checkLines(record), '', `stored: ${path}`].join('\n'));
   // The check's worktree shared the checkout's Git directory: the config lock its sandbox left
   // goes as after a check of sf serve's, unless a job of the workspace runs.

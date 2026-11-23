@@ -552,7 +552,9 @@ test('dashboard: jobs, job detail, report, patch and mr endpoints; bad names are
     assert.equal(list.headers['content-type'], 'application/json; charset=utf-8');
     const { jobs: all } = JSON.parse(list.body);
     assert.deepEqual(all.map((job: Job) => [job.ticket, job.state]), [['T-0', 'failed'], ['T-1', 'awaiting_review']]);
-    assert.deepEqual(Object.keys(all[1]).sort(), ['actions', 'availability', 'base', 'branch', 'claude_review', 'cost_usd', 'created_at', 'deleted', 'error', 'files', 'fixes', 'gate', 'gate_fixes', 'gate_tokens', 'handoff_skipped', 'handover', 'iteration', 'limit', 'mr', 'mr_attempts', 'mr_conflict_turn', 'mr_host', 'now', 'paused', 'planner', 'prepared_commit', 'progress', 'review', 'review_ended_at', 'state', 'stop', 'stop_code', 'stop_group', 'stop_kind', 'task_changed', 'ticket', 'title', 'tool_calls', 'turn_limit', 'undeclared', 'updated_at', 'workspace', 'worktree']);
+    assert.deepEqual(Object.keys(all[1]).sort(), ['actions', 'availability', 'base', 'branch', 'claude_review', 'cost_usd', 'created_at', 'deleted', 'error', 'files', 'fixes', 'gate', 'gate_fixes', 'gate_tokens', 'handoff_skipped', 'handover', 'iteration', 'last_review', 'limit', 'mr', 'mr_attempts', 'mr_conflict_turn', 'mr_host', 'now', 'paused', 'planner', 'prepared_commit', 'progress', 'review', 'review_ended_at', 'state', 'stop', 'stop_code', 'stop_group', 'stop_kind', 'task_changed', 'ticket', 'title', 'tool_calls', 'turn_limit', 'undeclared', 'updated_at', 'workspace', 'worktree']);
+    // No last review: none in either row (SF-309-3).
+    assert.deepEqual(all.map((job: Record<string, unknown>) => job.last_review), [null, null]);
     assert.deepEqual(all[0].error, { code: 'start_failed', message: 'Git failed.' });
     // The running job's progress (no worktree: no steps; the Claude review ahead), none for the failed one.
     assert.deepEqual({ ...all[1].progress, ready_from: typeof all[1].progress.ready_from, ready_to: typeof all[1].progress.ready_to }, { steps: [], phase: 'claude', fix_round: 0, ready_from: 'string', ready_to: 'string' });
@@ -1356,7 +1358,8 @@ test('dashboard (SF-040): no reviewer or subscription in the data; the subscript
   await withDashboard('dash-no-reviewer', fakeActions(), async (dashboard) => {
     const base = dashboard.url;
     const detail = JSON.parse((await fetchRaw(new URL('api/jobs/app/T-1', base))).body);
-    assert.deepEqual(Object.keys(detail).sort(), ['confirm_actions', 'explanation', 'gate', 'history', 'iterations', 'job', 'lead', 'ledger', 'mr', 'mr_title', 'settle_ids']);
+    assert.deepEqual(Object.keys(detail).sort(), ['confirm_actions', 'explanation', 'gate', 'history', 'iterations', 'job', 'last_review', 'lead', 'ledger', 'mr', 'mr_title', 'settle_ids']);
+    assert.equal(detail.last_review, null);
     const { jobs: all } = JSON.parse((await fetchRaw(new URL('api/jobs', base))).body);
     assert.ok(all.every((job: Record<string, unknown>) => !('reviewer' in job)));
     assert.deepEqual([(await fetchRaw(new URL('api/subscriptions', base))).status], [404]);

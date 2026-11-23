@@ -12,6 +12,7 @@ import { worktreeTree } from '../guard.js';
 import { attachWorktree, checkBranchFree, isAncestor } from '../handoff.js';
 import { jobUserMessages } from '../job-stream.js';
 import { claudeReviews, type FileChange, type Handover, type Job, type JobState, now, type PauseStep, statesWith } from '../jobs.js';
+import { checkLastReviewSend, dismissShownComments, sendShownComments } from '../last-review-choices.js';
 import { answerFix, escalationMessage, headings, heldBackNote, type LedgerEntry, roundProgress, type RoundProgress, userFixItems } from '../ledger.js';
 import { rebaseInProgress } from '../mr.js';
 import { checkSuggestionSend, removeSuggestion, sendShownSuggestion } from '../planner.js';
@@ -564,6 +565,22 @@ export class TurnsPart {
     return { dismissed: await removeSuggestion(this.#store.jobs, workspaceName, ticket) };
   }
 
+  // Send of the last review's comments on the dashboard: the stored texts of the comments the page
+  // chose (ids, at the iteration it showed), as one message through say, the User's own (on a
+  // handed_over job, Ask for changes). The check, the say and the record of the ids sent are one step
+  // under the job's lock (sendShownComments). Refused without sending when the job shows no comments
+  // at that iteration (invalid_state) and for no ids, an id not shown or given twice, or a message
+  // too long (invalid_content).
+  sendLastReview(workspaceName: string, ticket: string, iteration: number, ids: string[]): Promise<{ state: JobState; queued: boolean }> {
+    return sendShownComments(this.#store.jobs, workspaceName, ticket, iteration, ids, () => this.#store.job(workspaceName, ticket), (message) => this.say(workspaceName, ticket, message));
+  }
+
+  // Dismiss of the last review's comments: the chosen ids recorded dismissed, refused as a Send is
+  // except for the message's length; how many were recorded.
+  dismissLastReview(workspaceName: string, ticket: string, iteration: number, ids: string[]): Promise<{ dismissed: number }> {
+    return dismissShownComments(this.#store.jobs, workspaceName, ticket, iteration, ids, () => this.#store.job(workspaceName, ticket));
+  }
+
   // sf say needs a job with a session to go on with and a non-empty text message.
   checkSay(job: Job, message: string): void {
     // A step of the hand-over that was cut off is repaired by recover() first.
@@ -593,9 +610,11 @@ export class TurnsPart {
     return this.#locks.locked(async () => {
       let job = await this.#store.job(workspaceName, ticket);
       this.checkSay(job, message);
-      // The planner's note a Send is sending goes only while the job still waits for the User at
-      // the iteration the Send checked: a message that came first may have moved it on.
+      // The planner's note or the last review's comments a Send is sending go only while the job
+      // still waits for the User at the iteration the Send checked: a message that came first may
+      // have moved it on.
       await checkSuggestionSend(this.#store.jobs, job, message);
+      await checkLastReviewSend(this.#store.jobs, job, message);
       // Read on the job as it stopped, before anything below changes it; an unreadable ledger
       // refuses the message with nothing written.
       const atLimit = job.state === 'needs_human' && LIMIT_STOPS.includes(job.error?.code ?? '');

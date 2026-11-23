@@ -10,6 +10,7 @@
 import * as z from 'zod/v4';
 import { socketCommand } from './commands.js';
 import type { DashboardActions, DashboardQueue } from './dashboard.js';
+import { MAX_COMMENTS } from './last-review.js';
 import { DECISIONS } from './ledger.js';
 import { MAX_MR_TEXT_BYTES } from './mr.js';
 import { WORKSPACE_NAME_PATTERN } from './registry.js';
@@ -56,6 +57,10 @@ export type PostRoute = JobRoute | QueueRoute;
 const job = <S extends z.ZodType>(route: Omit<JobRoute<S>, 'kind'>): JobRoute<S> => ({ kind: 'job', ...route });
 const queue = <S extends z.ZodType>(route: Omit<QueueRoute<S>, 'kind'>): QueueRoute<S> => ({ kind: 'queue', ...route, refresh: 'setup' });
 const EMPTY = { shape: '{}', body: z.strictObject({}) };
+// The last review's Send and Dismiss: the iteration the page showed and the ids it chose (at most a
+// record's MAX_COMMENTS).
+const LAST_REVIEW_SHAPE = '{"iteration": number, "ids": string[]}';
+const LAST_REVIEW_BODY = z.strictObject({ iteration: z.number().int().min(1), ids: z.array(z.string()).max(MAX_COMMENTS) });
 // The routes that can push or merge, Merged — archive and Archive take the ticket beside their
 // other keys; the local port ignores it.
 const CONFIRM = { confirm: z.string().optional() };
@@ -81,6 +86,17 @@ export const POST_ROUTES = {
     call: (actions, _queue, [w, t], body) => actions.sendSuggestion(w, t, body.sha256),
   }),
   'suggestion-dismiss': job({ ...EMPTY, refresh: 'job', call: (actions, _queue, [w, t]) => actions.dismissSuggestion(w, t) }),
+  // The last review's comments (src/last-review-choices.ts), on the dashboard only: Send gives the
+  // chosen comments (their ids, at the iteration the page showed) to say, as the User's own
+  // message; Dismiss records them dismissed.
+  'last-review-send': job({
+    shape: LAST_REVIEW_SHAPE, body: LAST_REVIEW_BODY, refresh: 'job',
+    call: (actions, _queue, [w, t], body) => actions.sendLastReview(w, t, body.iteration, body.ids),
+  }),
+  'last-review-dismiss': job({
+    shape: LAST_REVIEW_SHAPE, body: LAST_REVIEW_BODY, refresh: 'job',
+    call: (actions, _queue, [w, t], body) => actions.dismissLastReview(w, t, body.iteration, body.ids),
+  }),
   // sf review: the Execution refuses any state but needs_human with review_failed.
   review: job({ ...EMPTY, command: 'review', call: (actions, _queue, [w, t]) => actions.retryReview(w, t) }),
   // sf retry: the Execution refuses any job but one a transient MR preparation failure

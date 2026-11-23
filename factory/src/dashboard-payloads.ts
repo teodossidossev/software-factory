@@ -9,6 +9,7 @@ import type { DashboardActions, DashboardChecks, DashboardQueue, DashboardSetup 
 import { CONFIRM_ACTIONS } from './dashboard-routes.js';
 import { currentExplanation, ledgerStopEntries } from './explain.js';
 import { claudeReviews, type Job, type JobStore } from './jobs.js';
+import { lastReviewCount, shownLastReview } from './last-review-choices.js';
 import { jobLead } from './lead-time.js';
 import { shownSuggestion, waits } from './planner.js';
 import { historyOf, phaseOf, type Progress, progressOf, readSteps } from './progress.js';
@@ -369,7 +370,8 @@ export async function plannerOf(jobs: JobStore, setup: DashboardSetup, job: Job)
 }
 
 // now: nowOf; tool_calls: the Implementer's tool calls in the job (ToolCallCounter); stop: stopOf;
-// planner: plannerOf.
+// planner: plannerOf; last_review: the count of the last review's comments shown while the job waits
+// at its iteration (src/last-review-choices.ts), null otherwise.
 export async function jobsPayload(jobs: JobStore, setup: DashboardSetup, actions: DashboardActions, toolCalls: ToolCallCounter) {
   const list = [];
   const hosts = new Map<string, MrHost>();
@@ -387,6 +389,7 @@ export async function jobsPayload(jobs: JobStore, setup: DashboardSetup, actions
       title: await setup.taskTitle(job.workspace, job.ticket), ...facts,
       now: await nowOf(jobs, job, facts), tool_calls: await toolCalls.count(jobs.eventsPath(job.workspace, job.ticket)), stop: await stopOf(jobs, job),
       planner: await plannerOf(jobs, setup, job),
+      last_review: lastReviewCount(await shownLastReview(jobs, job)),
     });
   }
   return { jobs: list };
@@ -564,5 +567,8 @@ export async function jobDetail(jobs: JobStore, job: Job, gate: boolean, actions
     // The plain explanation of the current stop: explanation.json while it is the job's
     // current stop's (pending, written or failed); null otherwise.
     explanation: await currentExplanation(jobs, job),
+    // The last review's comments while the job waits at its iteration (src/last-review-choices.ts);
+    // null otherwise.
+    last_review: await shownLastReview(jobs, job),
   };
 }

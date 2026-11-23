@@ -22,7 +22,7 @@ import { FactoryError } from './errors.js';
 import { type Job, type JobStore, TERMINAL_STATES } from './jobs.js';
 import type { PlanCheck } from './queue.js';
 import type { Workspace } from './registry.js';
-import { type CheckRecord, currentCheckSha256, recordVerdict, severityCounts, type TaskChecks } from './task-check.js';
+import { type CheckRecord, currentCheckSha256, recordCounts, recordVerdict, type TaskChecks } from './task-check.js';
 import { type QueuedTicket, type Recheck, recheckApplies, Rechecks, SWEEP_MS } from './task-check-recheck.js';
 import { checkNeed, isDraft, readTask, TASK_DIR, TICKET_PATTERN } from './task-file.js';
 
@@ -507,7 +507,8 @@ export class AutoChecks {
 // The plan check of a queued ticket (the run queue's planCheck): checking while a check of it runs;
 // not_needed when its current Task file has no check record and needs none (a pending
 // trigger of it never runs); checking while a check of it is pending; else the verdict of the check
-// of its current Task file (none without one) with its blocker and major counts.
+// of its current Task file (none without one) with its blocker and major counts (the Claude
+// check's and its Codex part's, recordCounts).
 export async function planCheck(checks: Pick<TaskChecks, 'view' | 'store'>, auto: Pick<AutoChecks, 'isPending'> | undefined, workspace: string, ticket: string): Promise<PlanCheck> {
   const view = await checks.view(workspace, ticket);
   if (view.running) {
@@ -525,6 +526,6 @@ export async function planCheck(checks: Pick<TaskChecks, 'view' | 'store'>, auto
   if (record === undefined) {
     return { state: 'none', blockers: 0, majors: 0 };
   }
-  const counts = severityCounts(record.output);
+  const counts = recordCounts(record);
   return { state: recordVerdict(record), blockers: counts.blocker, majors: counts.major };
 }

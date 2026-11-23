@@ -579,7 +579,7 @@ test('the dashboard: Check runs one check at a time, the tickets carry its summa
     const taskCheck = async (): Promise<Record<string, any>> => (await served.client.callTool({ name: 'task_check', arguments: { workspace: 'app', ticket: 'C-4' } })).structuredContent as Record<string, any>;
     assert.deepEqual((await tickets())[0]!.check, { state: 'none', check_reason: null, stale: false, running: false, blockers: 0, majors: 0, nits: 0, ended_at: null, start_note: 'not checked' });
     assert.deepEqual(JSON.parse((await fetchRaw(new URL('api/tickets/app/C-4/check', base))).body), { check: null, stale: false, running: false, current_sha256: taskSha256(content), check_reason: null });
-    assert.deepEqual(await taskCheck(), { verdict: 'none', sha256: taskSha256(content), paraphrase: null, findings: [], files: [], error: null, model: null, checked_at: null, running: false, pending: false });
+    assert.deepEqual(await taskCheck(), { verdict: 'none', sha256: taskSha256(content), paraphrase: null, findings: [], files: [], error: null, model: null, checked_at: null, running: false, pending: false, codex: null });
 
     // Two Checks at the same moment: one starts, the other is check_running; one session runs.
     const replies = await Promise.all([act(base, 'api/tickets/app/C-4/check', {}), act(base, 'api/tickets/app/C-4/check', {})]);

@@ -18,7 +18,7 @@ the factory starts is denied what it does not need, in two places at once:
   `filesystem.denyRead` and `filesystem.denyWrite`, and network access only to `registry.npmjs.org`
   and the hosts in `SF_SANDBOX_DOMAINS`.
 
-A job's sessions (the Implementer, the Claude review, the simplification pass) also get a
+A job's sessions (the Implementer, the Claude review, the simplification pass, the last review) also get a
 **file-tool guard**: a `PreToolUse` hook that checks every file tool call by its real path, links
 resolved (below). The web tools `WebFetch` and `WebSearch`, which the sandbox does not hold, are
 denied to every job's turns.
@@ -37,7 +37,7 @@ registry and the session's own working directory.
 ## What no session can reach
 
 Denied for reading and writing, in every session (the Implementer and its MR turns, the Claude
-review, the simplification pass, the Task check):
+review, the simplification pass, the last review, the Task check):
 
 | What | Why it matters |
 | --- | --- |
@@ -56,7 +56,7 @@ review, the simplification pass, the Task check):
 Claude Code's sandbox shows its commands the machine's own `/tmp`, where other programs keep their
 Unix sockets (a browser extension's bridge, Chrome's, other Claude sessions') and other Claude
 sessions their tool output (`/tmp/claude-<uid>`). So every Claude session the factory starts (the
-Implementer and its MR turns, the Claude review, the simplification pass, the Task check) reads
+Implementer and its MR turns, the Claude review, the simplification pass, the last review, the Task check) reads
 nothing in `/tmp`, nor in the system temporary directory when it lies elsewhere, but its own paths
 there, when they lie there at all:
 
@@ -89,7 +89,7 @@ Every session also denies the tools of the MCP server named `software-factory`, 
 which you add the factory to Claude Code: a server added in the `user` scope loads into every
 session, and none may call the planning tools with the token Claude Code holds for it.
 
-The read-only sessions (the Claude review, the simplification pass, the Task check, a stop's
+The read-only sessions (the Claude review, the simplification pass, the last review, the Task check, a stop's
 explanation, the morning digest) load no MCP server at all: they start with `strictMcpConfig` and
 no `mcpServers`, so neither a server you added in the `user` scope nor the repository's `.mcp.json`
 loads, and their `disallowedTools` deny `mcp__*` as well. The SDK's `tools` option covers the
@@ -103,7 +103,7 @@ on in its own settings, which outrank yours. And the factory's own installation,
 change the factory that runs it (unless the session's own repository is the factory's clone: the factory developing
 itself).
 
-Before each Implementer, review and simplification session starts, the factory reads your user settings (`~/.claude/settings.json`, or `$CLAUDE_CONFIG_DIR/settings.json`): if it sets `sandbox.enabled` false, `sandbox.filesystem.disabled` true, or an `allowRead`/`allowWrite` entry covering a denied path, or cannot be read as JSON, the session does not start and the job stops with `user_settings_weaken_sandbox`, naming the key and the path (a missing file is fine).
+Before each Implementer, review and simplification session starts, the factory reads your user settings (`~/.claude/settings.json`, or `$CLAUDE_CONFIG_DIR/settings.json`): if it sets `sandbox.enabled` false, `sandbox.filesystem.disabled` true, or an `allowRead`/`allowWrite` entry covering a denied path, or cannot be read as JSON, the session does not start and the job stops with `user_settings_weaken_sandbox`, naming the key and the path (a missing file is fine). The last review's session does not start either, but it never stops the job: its failure is recorded with that message and MR preparation goes on.
 
 No session gets your SSH agent (`SSH_AUTH_SOCK` is not passed on), and neither does the Codex gate.
 
@@ -137,7 +137,7 @@ refused.
 
 Every reviewer's verdict (the Claude review's, the gate's, the simplification pass's) is redacted
 before the factory stores or sends it: its free text (the summary, each item's problem and
-expected, each suggestion's what and why) loses every key the redaction knows (`sk-…`, `ghp_…`,
+expected, each suggestion's what and why, each last review comment's text) loses every key the redaction knows (`sk-…`, `ghp_…`,
 `NAME_TOKEN=…` and the like), every environment value of 8 characters or more and the dashboard
 and MCP tokens, each as `[redacted]`. Shorter values stay, so a finding that quotes code with `1`
 or `main` is not mangled; the paths, severities and ledger ids stay as they are. That covers
@@ -208,14 +208,14 @@ runs on Bedrock or Vertex (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`):
 needs them. Sandboxed commands see none of the credentials passed: every `ANTHROPIC_*`, `AWS_*`,
 `GOOGLE_*`, `CLOUD_ML_*` and `CLAUDE_CODE_OAUTH_TOKEN` is unset for them
 (`sandbox.credentials.envVars`, mode `deny`), in the Implementer's turns and in the review, the
-simplification pass and the Task check alike.
+simplification pass, the last review and the Task check alike.
 
 ## What each session can reach
 
 | Session | Reads | Writes | Runs commands |
 | --- | --- | --- | --- |
 | Implementer (and its MR turns) | its worktree, its workspace's checkout (with its `.git`), the kept paths of the home directory, the rest of the machine outside the home directory but the paths above | its worktree (outside its `.git` and its agent configuration: the guard and `denyWrite`), the sandbox's temporary directory | Bash in the sandbox |
-| Claude review, simplification pass | as the Implementer, with the guard | nothing (read-only tools) | none |
+| Claude review, simplification pass, last review | as the Implementer, with the guard | nothing (read-only tools) | none |
 | Task check | its own checkout of the Task's base, or of the prepared commit of the ticket it builds on, only (a path guard on every tool call) | nothing | none |
 | Codex gate | as a job's sandboxed commands (the wrapper above): its worktree, the images, the Codex package and node, `CODEX_HOME`, the rest of the machine outside the home directory but the paths above | `CODEX_HOME`, the iteration's directory | read-only (Codex's own sandbox) |
 

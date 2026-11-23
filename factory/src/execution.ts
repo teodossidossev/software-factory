@@ -27,6 +27,8 @@
 // - execution/events.ts: the tests event of the job's stream.
 // - execution/test-step.ts: MR preparation's test step (MrPart's): the run of the workspace's
 //   test command and its end.
+// - execution/last-review-step.ts: the last review after a clean round (ReviewsPart's): its run and
+//   its end, and MR preparation's wait for it.
 // - execution/shared.ts: the helpers and runtime types more than one part uses.
 // The Implementer session of each job works in the job's own worktree and publishes an iteration
 // (Report, Patch and the file list) when the session goes idle; then the Claude review of that
@@ -163,9 +165,11 @@ export class Execution implements RunnerWork {
     this.jobs = core.jobs;
   }
 
-  // Runner mode: no turn runs or waits, no review or gate runs, no state change is in progress.
+  // Runner mode: no turn runs or waits, no review, gate or last review runs, no state change is in
+  // progress.
   get idle(): boolean {
-    return this.#core.pending === 0 && this.#core.reviews.size === 0 && ![...this.#core.live.values()].some((live) => live.session.busy);
+    return this.#core.pending === 0 && this.#core.reviews.size === 0 && !this.#parts.reviews.lastReviewRuns()
+      && ![...this.#core.live.values()].some((live) => live.session.busy);
   }
 
   // execution/start.ts

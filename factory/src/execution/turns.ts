@@ -71,6 +71,7 @@ export interface TurnsMr {
 
 export interface TurnsReviews {
   startReview(job: Job): Promise<void>;
+  holdsMr(job: Job, resume: (job: Job) => Promise<void>): boolean;
 }
 
 export interface TurnsStart {
@@ -288,6 +289,11 @@ export class TurnsPart {
       // The turn's sandbox has ended, before the hand-over at the end of MR preparation.
       await this.#sessions.afterSession(job, job.iteration + 1);
       if (job.state === 'preparing_mr') {
+        // MR preparation waits here, before its commit, while the iteration's last review runs:
+        // its end goes on with this turn's outcome.
+        if (this.#peers.reviews.holdsMr(job, (held) => this.#peers.mr.mrIdle(held, live, outcome))) {
+          return;
+        }
         await this.#peers.mr.mrIdle(job, live, outcome);
         return;
       }

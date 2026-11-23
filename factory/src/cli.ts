@@ -30,6 +30,7 @@ import {
 import { FactoryError } from './errors.js';
 import { currentExplanation, Explainer, explanationLines } from './explain.js';
 import { Execution, type ExecutionOptions, MERGED_EVERY_MS, MERGED_FIRST_MS, type Retired, type StateListener } from './execution.js';
+import { startFindingsRefresh } from './findings-checklist.js';
 import { checkForgeToken, chooseForge, forgeSettings } from './forge.js';
 import { codexVersion } from './gate.js';
 import { checkTerms, commitsToCheck, type CommitSpec, type GuardHit, hitReport, installHook, scanBranch, scanChange, scanCommits, scanMrText, worktreeTree } from './guard.js';
@@ -407,6 +408,7 @@ async function serve(options: { tunnel?: 'off' } = {}): Promise<{ dashboard: URL
   // The pass of merged jobs: a minute after the start, then every 10 minutes; the archived jobs leave every page.
   const archiveMerged = (): void => void execution.archiveMergedJobs().then((done) => done.forEach((job) => dashboard?.onStateChange(job, job.state)), (error: unknown) => console.error(error));
   const mergedTimers = [setTimeout(archiveMerged, MERGED_FIRST_MS).unref(), setInterval(archiveMerged, MERGED_EVERY_MS).unref()];
+  const findingsRefresh = startFindingsRefresh(config); // each workspace's findings checklist, once a day (SF_FINDINGS_CHECKLIST)
   // The laptop stays awake while a job runs (src/keep-awake.ts), unless SF_KEEP_AWAKE=off.
   const keepAwake = keepAwakeOn ? new KeepAwake({ intervalMs: KEEP_AWAKE_EVERY_MS, jobs: () => jobs.list(), command: KEEP_AWAKE_COMMAND }) : undefined;
   keepAwake?.start();
@@ -436,6 +438,7 @@ async function serve(options: { tunnel?: 'off' } = {}): Promise<{ dashboard: URL
     upkept.close();
     keepAwake?.stop();
     mergedTimers.forEach((timer) => clearTimeout(timer));
+    findingsRefresh?.close();
     // The waits of sf coordinator wait-request end first: their open connections would hold the socket's close.
     endRequestWaits();
     Promise.all([server.close(), socket.close(), dashboard?.close(), tunnel?.stop()]).then(

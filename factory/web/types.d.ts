@@ -779,7 +779,7 @@ interface StatsSecondOpinion {
   fixed: number;
   cases: Array<{ workspace: string; ticket: string; archived: boolean; iteration: number; findings: number; fixed: number }>;
 }
-// src/stats.ts ArmRow.
+// src/stats-arms.ts ArmRow.
 interface StatsArmRow {
   arm: 'on' | 'off';
   jobs: number;
@@ -792,12 +792,22 @@ interface StatsArmRow {
   codex_findings: number;
   codex_findings_per_job: number | null;
 }
-// src/stats.ts FixSessionArmRow.
+// src/stats-arms.ts FixSessionArmRow.
 interface StatsFixSessionArmRow extends Omit<StatsArmRow, 'arm'> {
   arm: 'fresh' | 'resume';
   mean_iterations: number | null;
   fix_round_usd: number | null;
   fix_round_complete: boolean;
+}
+// src/stats-arms.ts FindingsChecklistArmRow.
+interface StatsFindingsChecklistArmRow extends Omit<StatsArmRow, 'arm'> {
+  arm: 'with' | 'without';
+  codex_fix_verdicts: number;
+  codex_fix_verdicts_per_job: number | null;
+  mean_iterations: number | null;
+  implementer_usd: number;
+  implementer_complete: boolean;
+  implementer_usd_per_delivered: number | null;
 }
 // src/stats.ts JobRow.
 interface StatsJobRow {
@@ -846,6 +856,7 @@ interface StatsPayload {
   second_opinion: { codex_after_claude: StatsSecondOpinion; claude_after_codex: StatsSecondOpinion };
   arms: StatsArmRow[];
   arms_fix_session: StatsFixSessionArmRow[];
+  arms_findings_checklist: StatsFindingsChecklistArmRow[];
   // src/stats.ts SimplifyCounts.
   simplify: { offered: number; taken: number; skipped: number };
   jobs: StatsJobRow[];

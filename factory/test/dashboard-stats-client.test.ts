@@ -1,7 +1,8 @@
 // The Stats page in static/reports.js (SF-117), run under node:vm against the fake page of
 // test/support/fake-dom.ts: #stats and the Stats button, the period and workspace reads (an older
 // answer ignored), the warnings first with their links, the second opinion, the Claude review
-// on/off table (SF-132), the fix session fresh/resume table (SF-316-2), the stage and role
+// on/off table (SF-132), the fix session fresh/resume table (SF-316-2), the recurring findings
+// checklist with/without table (SF-318-3), the stage and role
 // tables, the Table toggle, the SVG charts (createElementNS, class attributes, no style attribute), the all-zero chart's box, leaving a job
 // page or the drawer, the loading, error and empty states, Escape, and the other pages hiding #stats. Script checks, not browser acceptance: the layout is
 // test/browser/stats-page.test.ts.
@@ -59,6 +60,16 @@ function payload(extra: Record<string, unknown> = {}) {
     arms_fix_session: [
       { arm: 'fresh', jobs: 2, delivered: 1, aborted: 1, cost_usd: 3.75, cost_complete: true, usd_per_delivered: 3.75, median_iterations: 3, mean_iterations: 2, fix_round_usd: 0.375, fix_round_complete: false, codex_findings: 1, codex_findings_per_job: 0.5 },
       { arm: 'resume', jobs: 3, delivered: 1, aborted: 0, cost_usd: 3.5, cost_complete: false, usd_per_delivered: 3.5, median_iterations: 2, mean_iterations: 7 / 3, fix_round_usd: null, fix_round_complete: true, codex_findings: 0, codex_findings_per_job: 0 },
+    ],
+    arms_findings_checklist: [
+      {
+        arm: 'with', jobs: 2, delivered: 1, aborted: 1, cost_usd: 1.75, cost_complete: false, usd_per_delivered: 1.75, median_iterations: 2, codex_findings: 1, codex_findings_per_job: 0.5,
+        codex_fix_verdicts: 1, codex_fix_verdicts_per_job: 0.5, mean_iterations: 1.5, implementer_usd: 1.5, implementer_complete: false, implementer_usd_per_delivered: 1.5,
+      },
+      {
+        arm: 'without', jobs: 3, delivered: 0, aborted: 0, cost_usd: 5, cost_complete: true, usd_per_delivered: null, median_iterations: null, codex_findings: 2, codex_findings_per_job: 2 / 3,
+        codex_fix_verdicts: 2, codex_fix_verdicts_per_job: 2 / 3, mean_iterations: 7 / 3, implementer_usd: 5, implementer_complete: true, implementer_usd_per_delivered: null,
+      },
     ],
     simplify: { offered: 2, taken: 1, skipped: 1 },
     jobs: [{
@@ -181,7 +192,7 @@ test('stats client: the warnings come first with their links (job, ticket, diges
   assert.equal(first!.querySelectorAll('details li').length, 8);
   assert.equal(first!.querySelectorAll('button').some((node) => node.textContent.startsWith('Show all')), false);
   assert.deepEqual(sections(page).map((section) => section.querySelector('h3')!.textContent),
-    ['Warnings (5)', 'Now', 'Does a second model pay?', 'Claude review on/off', 'Fix session fresh/resume', 'Review stages', 'Spend', 'Load', 'Jobs (1)']);
+    ['Warnings (5)', 'Now', 'Does a second model pay?', 'Claude review on/off', 'Fix session fresh/resume', 'Recurring findings checklist with/without', 'Review stages', 'Spend', 'Load', 'Jobs (1)']);
   assert.deepEqual(sectionOf(page, /^Now$/).querySelectorAll('.st-tile').map((tile) => tile.textContent), ['Running2', 'Waiting for you1', 'Paused0', 'Queued—']);
 
   const none = await openStats(payload({ warnings: [] }));
@@ -262,6 +273,28 @@ test('stats client: the fix session fresh/resume table (SF-316-2) right under th
   const noArms = sectionOf(none, /^Fix session fresh\/resume$/);
   assert.equal(noArms.querySelector('table'), null);
   assert.deepEqual(noArms.querySelectorAll('p').map((p) => p.textContent), ['No jobs with a recorded fix session in this period.']);
+});
+
+test('stats client: the recurring findings checklist with/without table (SF-318-3) right under the fix session one, Codex fix verdicts, mean iterations and Implementer per delivered, its note; with no job in either arm one line', async () => {
+  const page = await openStats();
+  const titles = sections(page).map((section) => section.querySelector('h3')!.textContent);
+  assert.equal(titles.indexOf('Recurring findings checklist with/without'), titles.indexOf('Fix session fresh/resume') + 1);
+  const arms = sectionOf(page, /^Recurring findings checklist with\/without$/);
+  assert.deepEqual(rowTexts(tableAfter(arms)), [
+    ['Checklist', 'Jobs', 'Delivered', 'Aborted', 'Codex fix verdicts', 'Per job', 'Mean iterations', 'Implementer per delivered'],
+    ['With', '2', '1', '1', '1', '0.5', '1.5', 'at least $1.50'],
+    ['Without', '3', '0', '0', '2', '0.7', '2.3', '—'],
+  ]);
+  assert.match(arms.querySelector('p')!.textContent, /^Implementer per delivered: .* Jobs started without a recorded checklist are in neither arm\.$/);
+
+  const empty = (arm: string) => ({
+    arm, jobs: 0, delivered: 0, aborted: 0, cost_usd: 0, cost_complete: true, usd_per_delivered: null, median_iterations: null, codex_findings: 0, codex_findings_per_job: null,
+    codex_fix_verdicts: 0, codex_fix_verdicts_per_job: null, mean_iterations: null, implementer_usd: 0, implementer_complete: true, implementer_usd_per_delivered: null,
+  });
+  const none = await openStats(payload({ arms_findings_checklist: [empty('with'), empty('without')] }));
+  const noArms = sectionOf(none, /^Recurring findings checklist with\/without$/);
+  assert.equal(noArms.querySelector('table'), null);
+  assert.deepEqual(noArms.querySelectorAll('p').map((p) => p.textContent), ['No jobs with a recorded findings checklist in this period.']);
 });
 
 test('stats client: the stage table, the by-role table with "not recorded" and "at least"; the Table toggle swaps a chart for its numbers and back', async () => {

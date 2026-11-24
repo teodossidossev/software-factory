@@ -870,6 +870,22 @@ function stFixSessionArms(data: StatsPayload): HTMLElement {
   return section;
 }
 
+// The recurring findings checklist comparison: one line per arm, with and without, of the jobs
+// whose job.json has findings_checklist; the empty text when neither has a job.
+const ST_FINDINGS_CHECKLIST: Readonly<Record<string, string>> = { with: 'With', without: 'Without' };
+function stFindingsChecklistArms(data: StatsPayload): HTMLElement {
+  const section = stSection('Recurring findings checklist with/without');
+  if (data.arms_findings_checklist.every((row) => row.jobs === 0)) {
+    section.append(el('p', 'muted fs13', 'No jobs with a recorded findings checklist in this period.'));
+    return section;
+  }
+  section.append(stTable(['Checklist', 'Jobs', 'Delivered', 'Aborted', 'Codex fix verdicts', 'Per job', 'Mean iterations', 'Implementer per delivered'], data.arms_findings_checklist.map((row) => [
+    ST_FINDINGS_CHECKLIST[row.arm] ?? row.arm, String(row.jobs), String(row.delivered), String(row.aborted), String(row.codex_fix_verdicts), stCount(row.codex_fix_verdicts_per_job),
+    stCount(row.mean_iterations), stArmCost(row.implementer_usd_per_delivered, row.implementer_complete),
+  ])), el('p', 'muted fs13', 'Implementer per delivered: the Implementer\'s cost of all the arm\'s jobs over its delivered ones, "at least" when a cost is unknown. Jobs started without a recorded checklist are in neither arm.'));
+  return section;
+}
+
 function stStages(data: StatsPayload): HTMLElement {
   const section = stSection('Review stages');
   const items = data.stages.map((row) => ({ ...row, label: ST_STAGES[row.stage] ?? row.stage }));
@@ -1054,7 +1070,7 @@ function renderStats(): void {
       stTile('Running', String(data.now.running)), stTile('Waiting for you', String(data.now.waiting_for_you)),
       stTile('Paused', String(data.now.paused)), stTile('Queued', data.now.queued === null ? '—' : String(data.now.queued)),
     ));
-    body.append(stWarnings(data), now, stSecondOpinion(data), stArms(data), stFixSessionArms(data), stStages(data), stSpend(data), stLoad(data), stJobs(data), ...stNotes(data));
+    body.append(stWarnings(data), now, stSecondOpinion(data), stArms(data), stFixSessionArms(data), stFindingsChecklistArms(data), stStages(data), stSpend(data), stLoad(data), stJobs(data), ...stNotes(data));
   }
   // The focus stays on the control it was on; the scroll where it was.
   const active = document.activeElement;

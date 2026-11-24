@@ -5,7 +5,7 @@ import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { changeNote, firstPrompt, imagesChangedNote } from '../src/execution.js';
-import { freshFixPrompt, implementCommand } from '../src/execution/prompts.js';
+import { findingsBlock, freshFixPrompt, implementCommand, sessionBlocks } from '../src/execution/prompts.js';
 import { DETAIL_CHARS, jobUserMessages, lineEntries, type StreamContext, streamContext, type StreamEntry } from '../src/job-stream.js';
 import { type GateRecord, type IterationMeta, JobStore, type ReviewRecord, type SimplifyRecord } from '../src/jobs.js';
 import type { LedgerEntry } from '../src/ledger.js';
@@ -147,6 +147,37 @@ test('lineEntries (SF-316): a fresh fix round\'s prompt is a fix entry with its 
   assert.deepEqual([resumed.kind, resumed.fix_n, resumed.fix], ['fix', 1, '## Fix 1\n\n1. [R1, major] a.ts: one.']);
   assert.equal((await one({ prompt: factoryPrompt('Please look at Fix 1', 'T-1', 2) }, { task })).t, 'user');
   assert.equal((await one({ prompt: factoryPrompt('notes/T-1.md Fix 1', 'T-1', 2) }, { task })).t, 'user');
+});
+
+test('lineEntries (SF-318-2): the <recurring_findings> block is cut after the rules or in their place; every prompt keeps its kind and none shows the checklist', async () => {
+  const task = '# T-1\n\n## Fix 2\n\n1. [R2, major] b.ts: two.\n';
+  const findings = findingsBlock('<!-- generated 2026-11-24 from 12 findings in 4 jobs -->\n- Name each changed setting in the summary (5)\n- Keep error messages specific (3)\n');
+  const files = [{ path: 'a.ts', status: 'modified' as const }];
+  const entries = [];
+  for (const rules of ['<rules>\nR\n</rules>\n', '']) {
+    // The first prompt, and a Resume at iteration 0 without a message (the same prompt).
+    const first = await one({ prompt: factoryPrompt(firstPrompt('T-1', [], rules, ['implement'], findings), 'T-1', 1) });
+    assert.deepEqual([first.t, first.who, first.kind, first.text], ['prompt', 'factory', 'implement', '/implement .software-factory/T-1.md']);
+    const kept = await one({ prompt: factoryPrompt(firstPrompt('T-1', ['a.ts'], rules, ['implement'], findings), 'T-1', 1) });
+    assert.equal(kept.kind, 'implement');
+    assert.ok(kept.text.startsWith('/implement .software-factory/T-1.md\n\nThis job restarts an earlier job of T-1.'), kept.text);
+    // A Resume opening a new session (#resumePrompt): with a message, without one at a later iteration.
+    const leading = sessionBlocks(rules, findings);
+    const said = await one({ prompt: factoryPrompt([...leading, 'Please merge the rows.'].join('\n\n'), 'T-1', 2) });
+    assert.deepEqual([said.t, said.who, said.text], ['user', 'you', 'Please merge the rows.']);
+    const resumed = await one({ prompt: factoryPrompt([...leading, 'Continue where you stopped.'].join('\n\n'), 'T-1', 2) });
+    assert.deepEqual([resumed.t, resumed.kind, resumed.text], ['prompt', 'continue', 'Continue where you stopped.']);
+    // A fresh fix round.
+    const command = '/implement .software-factory/T-1.md Fix 2';
+    const fix = await one({ prompt: factoryPrompt(freshFixPrompt(command, rules, { iteration: 2, report: 'r', files }, 'abc', findings), 'T-1', 3, undefined, 'abc') }, { task });
+    assert.deepEqual([fix.t, fix.kind, fix.fix_n, fix.text], ['prompt', 'fix', 2, command]);
+    entries.push(first, kept, said, resumed, fix);
+  }
+  for (const entry of entries) {
+    for (const cut of ['recurring_findings', 'Before you write the Report', 'Name each changed setting', 'Keep error messages']) {
+      assert.ok(!JSON.stringify(entry).includes(cut), `${cut}: ${JSON.stringify(entry)}`);
+    }
+  }
 });
 
 test('lineEntries (SF-065): the images line and the changed-images note are cut from the text; the prompt still has its kind, the image names come from the record', async () => {

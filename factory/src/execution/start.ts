@@ -1,12 +1,14 @@
 // The start of a job and its recovery: start (the record, the fetch, the worktree and the first
 // turn), the Task file's copy in the worktree and its images, restart and the rule for a restart of
 // sf serve (recover).
+import { createHash } from 'node:crypto';
 import type { Stats } from 'node:fs';
 import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readlink, rm, symlink, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { writeFileAtomic } from '../atomic.js';
 import { type ImageRef, jobAttachment, type ResolvedImage, resolveTaskImages, writeImages } from '../attachments.js';
 import { FactoryError } from '../errors.js';
+import { checklistPath } from '../findings-checklist.js';
 import { runGit } from '../git.js';
 import { claudeReviewDecision, fixSessionDecision } from '../config.js';
 import { buildsOnPoint, buildsOnTarget, notReadyAtStart } from '../builds-on.js';
@@ -24,7 +26,7 @@ import { isDraft, parseFrontMatter, readTask, TASK_DIR, taskBuildsOn, type TaskF
 import { addWorktree, deleteBranch, removeWorktree } from '../worktree.js';
 import type { JobStorePort, LockPort, RunnerPort, SettingsPort } from './ports.js';
 import { checkNotInCheckout } from './errors.js';
-import { firstPrompt } from './prompts.js';
+import { findingsBlock, firstPrompt, writeJobFindings } from './prompts.js';
 import { branchName, exists } from './shared.js';
 
 // A job record claimed by start or restart, before its worktree exists.
@@ -362,7 +364,7 @@ export class StartPart {
     const job: Job = {
       workspace: workspace.name, ticket, branch, base, continues, builds_on: buildsOn.ticket, builds_on_commit: buildsOn.commit, base_commit: null, state: 'starting', worktree, prepared_commit: null,
       iteration: 0, fixes: 0, gate_fixes: 0, gate_tokens: 0, session_id: null, mr: null, target_commit: null, mr_attempts: 0, mr_conflict_turn: false, created_at: created, updated_at: created, claude_review: setup.claude_review,
-      fix_session: fixSession.fix_session,
+      fix_session: fixSession.fix_session, findings_checklist: null,
       ...(plan.important ? { important: true as const } : {}),
     };
     checkTransition(null, 'starting', 'create');
@@ -425,6 +427,8 @@ export class StartPart {
         await this.#store.transition(job, 'failed', 'launch', { code: failure.code, message });
         throw new FactoryError(failure.code, message);
       }
+      const findings = await this.#storeFindings(workspace.name, ticket);
+      job = { ...job, findings_checklist: findings === '' ? null : createHash('sha256').update(findings, 'utf8').digest('hex') };
       if (kept !== undefined) {
         await copyKept(kept, worktree);
       }
@@ -432,7 +436,7 @@ export class StartPart {
       // from: starting (checked when the job was read above)
       job = await this.#store.transition(await this.syncTask(workspace, job), 'working', 'launch');
       // The first turn runs in the job's runner, with the images' blocks.
-      const prompt = factoryPrompt(firstPrompt(ticket, kept?.paths ?? [], rules, (await jobSkills(this.#settings.config.stateDir, this.#store.jobs.eventsPath(workspace.name, ticket))).roles.implementer), ticket, job.iteration + 1, this.#peers.turns.imagesLine(job), job.base_commit);
+      const prompt = factoryPrompt(firstPrompt(ticket, kept?.paths ?? [], rules, (await jobSkills(this.#settings.config.stateDir, this.#store.jobs.eventsPath(workspace.name, ticket))).roles.implementer, findings), ticket, job.iteration + 1, this.#peers.turns.imagesLine(job), job.base_commit);
       const images = this.#peers.reviews.imageRefs(job, (await this.#store.jobs.readTaskCopy(workspace.name, ticket)) ?? '');
       await this.#runner.serveRunners().queue(workspace.name, ticket, { kind: 'turn', prompt, ...(images.length > 0 ? { images } : {}) });
       return { branch, state: job.state, check_after_minutes: this.#settings.config.checkAfterStartMin, worktree };
@@ -452,6 +456,35 @@ export class StartPart {
     });
     await writeJobRules(this.#store.jobs.dir(workspace.name, ticket), collected);
     return collected.block;
+  }
+
+  // The job's <recurring_findings> block, made once at Start from the workspace's findings checklist
+  // (src/findings-checklist.ts) and stored in its directory (findings.md) for every prompt that
+  // opens an Implementer session; '' with SF_FINDINGS_CHECKLIST off, without the file, or when it
+  // holds no check, and then nothing is stored. The checklist only helps, so it never stops a Start:
+  // a file that cannot be read, or a findings.md that cannot be written, gives '' and a
+  // findings_checklist_unavailable event with the error's message.
+  async #storeFindings(workspace: string, ticket: string): Promise<string> {
+    if (this.#settings.config.findingsChecklist === false) {
+      return '';
+    }
+    try {
+      const text = await readFile(checklistPath(this.#settings.config.stateDir, workspace), 'utf8').catch((error: unknown) => {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          return '';
+        }
+        throw error;
+      });
+      const block = findingsBlock(text);
+      if (block !== '') {
+        await writeJobFindings(this.#store.jobs.dir(workspace, ticket), block);
+      }
+      return block;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await this.#store.jobs.appendEvent(workspace, ticket, { ts: now(), iteration: 0, type: 'findings_checklist_unavailable', message });
+      return '';
+    }
   }
 
   // Checks the names, fetches the start branch (continues, else the base) when origin exists,

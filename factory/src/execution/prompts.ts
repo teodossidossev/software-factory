@@ -1,6 +1,9 @@
 // The text the job lifecycle gives the Implementer: the first prompt of a job, the prompt of a fix
 // round in a new session, the notes of a changed Task file or its images, and the groups of the
-// factory's marked paths.
+// factory's marked paths; and the job's copy of the workspace's findings checklist block.
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { writeFileAtomic } from '../atomic.js';
 import type { FileChange } from '../jobs.js';
 import { SCOPE_PROBLEM, SENSITIVE_PROBLEM } from '../ledger.js';
 import type { ReviewItem } from '../review.js';
@@ -41,6 +44,38 @@ export function implementCommand(ticket: string, skills: readonly string[], fix?
   return `${skills.includes('implement') ? '/implement ' : ''}${TASK_DIR}/${ticket}.md${fix === undefined ? '' : ` Fix ${fix}`}`;
 }
 
+// The first line of the <recurring_findings> block.
+export const FINDINGS_INSTRUCTION = 'Before you write the Report, go through these checks, fix what applies to this change, and say in `## Checks` which applied.';
+
+// The <recurring_findings> block of a workspace's findings checklist (src/findings-checklist.ts):
+// the instruction line, then the file's checks (its "- " lines; the generated comment left out);
+// '' when the file holds no check. The Implementer alone is given it, in every prompt that opens a
+// session, after the <rules> block (or in its place); src/job-stream.ts cuts it.
+export function findingsBlock(checklist: string): string {
+  const checks = checklist.split(/\r?\n/u).map((line) => line.trimEnd()).filter((line) => line.startsWith('- ') && line.length > 2);
+  return checks.length === 0 ? '' : ['<recurring_findings>', FINDINGS_INSTRUCTION, ...checks, '</recurring_findings>', ''].join('\n');
+}
+
+// The job's copy of its block, in its directory.
+const FINDINGS_COPY = 'findings.md';
+
+// Writes the job's findings.md, once at Start (src/execution/start.ts) when the block is not ''.
+export async function writeJobFindings(jobDir: string, block: string): Promise<void> {
+  await writeFileAtomic(join(jobDir, FINDINGS_COPY), Buffer.from(block, 'utf8'));
+}
+
+// The job's <recurring_findings> block; '' in a job directory without findings.md. The checklist
+// only helps, so a findings.md that cannot be read gives '' too and never stops a turn.
+export async function readJobFindings(jobDir: string): Promise<string> {
+  return readFile(join(jobDir, FINDINGS_COPY), 'utf8').catch(() => '');
+}
+
+// The job's blocks of a prompt that opens a session, each without its trailing newline: its <rules>
+// block, then its <recurring_findings> block; either one '' is left out.
+export function sessionBlocks(rules: string, findings: string): string[] {
+  return [rules, findings].filter((block) => block !== '').map((block) => block.trimEnd());
+}
+
 // The line of a changed file in a fresh fix round's <changed_files>: added A, modified M, deleted D,
 // renamed "R <from> -> <path>".
 export function changedFileLine(change: Pick<FileChange, 'path' | 'status' | 'from'>): string {
@@ -65,15 +100,16 @@ export interface FixPack {
 }
 
 // The prompt of a fix round that starts a new Implementer session (fix_session fresh), before
-// factoryPrompt: the fix command (implementCommand … Fix N) first, then the job's <rules> block when
-// it has one, as in a first prompt; then <previous_report> with the previous iteration's Report, then
-// <changed_files> with its files against the base commit, one "<status> <path>" line each and how to
-// read them. No diff text. base: the job's base commit, null when it has none.
-export function freshFixPrompt(command: string, rules: string, pack: FixPack, base: string | null): string {
+// factoryPrompt: the fix command (implementCommand … Fix N) first, then the job's <rules> and
+// <recurring_findings> blocks when it has them, as in a first prompt; then <previous_report> with the
+// previous iteration's Report, then <changed_files> with its files against the base commit, one
+// "<status> <path>" line each and how to read them. No diff text. base: the job's base commit, null
+// when it has none.
+export function freshFixPrompt(command: string, rules: string, pack: FixPack, base: string | null, findings = ''): string {
   const commit = base ?? 'the commit your branch started from';
   return [
     command,
-    ...(rules !== '' ? ['', rules.trimEnd()] : []),
+    ...sessionBlocks(rules, findings).flatMap((block) => ['', block]),
     '',
     `<previous_report iteration="${pack.iteration}">`,
     pack.report.trimEnd() || '(The previous iteration has no Report.)',
@@ -86,10 +122,11 @@ export function freshFixPrompt(command: string, rules: string, pack: FixPack, ba
   ].join('\n');
 }
 
-// The first prompt of a job: its command (implementCommand), then the job's <rules> block when it has
-// one; after sf restart --keep-files, with the files kept from the previous job.
-export function firstPrompt(ticket: string, kept: string[], rules = '', skills: readonly string[] = ['implement']): string {
-  const command = [implementCommand(ticket, skills), ...(rules !== '' ? ['', rules.trimEnd()] : [])].join('\n');
+// The first prompt of a job: its command (implementCommand), then the job's <rules> and
+// <recurring_findings> blocks when it has them; after sf restart --keep-files, with the files kept
+// from the previous job.
+export function firstPrompt(ticket: string, kept: string[], rules = '', skills: readonly string[] = ['implement'], findings = ''): string {
+  const command = [implementCommand(ticket, skills), ...sessionBlocks(rules, findings).flatMap((block) => ['', block])].join('\n');
   if (kept.length === 0) {
     return command;
   }

@@ -32,7 +32,7 @@ import type { RunnerRequest } from '../runner.js';
 import { implementerSkills, jobSkills } from '../skills.js';
 import type { JobStorePort, LivePort, LockPort, RunnerPort, SettingsPort, StopPort } from './ports.js';
 import { checkNotInCheckout, cutOffError } from './errors.js';
-import { changeNote, type FixPack, freshFixPrompt, implementCommand } from './prompts.js';
+import { changeNote, type FixPack, freshFixPrompt, implementCommand, readJobFindings } from './prompts.js';
 import { exists, type FixOptions, type Live } from './shared.js';
 
 type Success = Extract<IdleOutcome, { ok: true }>;
@@ -555,7 +555,8 @@ export class TurnsPart {
       // A new session reads the Task file as it is now: no change note; its images, as it refers to
       // them now, go as blocks.
       job = await this.#currentImages(await this.#endSessionForFix(job), images ?? []);
-      first = freshFixPrompt(command, await readJobRules(this.#store.jobs.dir(workspaceName, ticket)), await this.#fixPack(job), job.base_commit);
+      const dir = this.#store.jobs.dir(workspaceName, ticket);
+      first = freshFixPrompt(command, await readJobRules(dir), await this.#fixPack(job), job.base_commit, await readJobFindings(dir));
       blocks = this.#peers.reviews.imageRefs(job, (await this.#store.jobs.readTaskCopy(workspaceName, ticket)) ?? '');
     }
     this.session(job, workspace).send(factoryPrompt(first, ticket, job.iteration + 1, this.imagesLine(job), job.base_commit), DENIED_TOOLS, blocks);

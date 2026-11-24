@@ -20,10 +20,10 @@ const versionIn = async (dir: string): Promise<string> => (await readFile(join(d
 test('a missing state-version gets the current version', async () => {
   const dir = await stateDir();
   try {
-    assert.equal(STATE_VERSION, 8);
+    assert.equal(STATE_VERSION, 9);
     const result = await checkStateVersion(dir);
-    assert.deepEqual(result, { found: undefined, version: 8, migrated: [] });
-    assert.equal(await versionIn(dir), '8');
+    assert.deepEqual(result, { found: undefined, version: 9, migrated: [] });
+    assert.equal(await versionIn(dir), '9');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -80,20 +80,20 @@ test('a migration that fails leaves the number of the last step done', async () 
 test('a higher state-version is refused with state_too_new and left as it is', async () => {
   const dir = await stateDir();
   try {
-    await writeFile(join(dir, STATE_VERSION_FILE), '9\n');
+    await writeFile(join(dir, STATE_VERSION_FILE), '10\n');
     await assert.rejects(checkStateVersion(dir), (error: unknown) => {
       assert.ok(error instanceof FactoryError);
       assert.equal(error.code, 'state_too_new');
       assert.match(error.message, /the state was written by a newer factory; update the factory|written by a newer factory/);
       return true;
     });
-    assert.equal(await versionIn(dir), '9');
+    assert.equal(await versionIn(dir), '10');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
 });
 
-test('the real migrations 1 → 2 (SF-131: claude_review in job.json), 2 → 3 (SF-153: last_start in queue.json), 3 → 4 (SF-210: the digest record\'s texts and in_progress), 4 → 5 (SF-236: retry_at and retries of a queue entry), 5 → 6 (the limits\' counts and the important mark in job.json) , 6 → 7 (a pin of another page, with url, in pins.json) and 7 → 8 (SF-316: the fix session and the carried costs in job.json) change nothing in the state directory', async () => {
+test('the real migrations 1 → 2 (SF-131: claude_review in job.json), 2 → 3 (SF-153: last_start in queue.json), 3 → 4 (SF-210: the digest record\'s texts and in_progress), 4 → 5 (SF-236: retry_at and retries of a queue entry), 5 → 6 (the limits\' counts and the important mark in job.json) , 6 → 7 (a pin of another page, with url, in pins.json), 7 → 8 (SF-316: the fix session and the carried costs in job.json) and 8 → 9 (SF-318-2: findings_checklist in job.json) change nothing in the state directory', async () => {
   const dir = await stateDir();
   try {
     const jobDir = join(dir, 'jobs', 'app', 'V-1');
@@ -109,32 +109,36 @@ test('the real migrations 1 → 2 (SF-131: claude_review in job.json), 2 → 3 (
     const pins = '{"version":1,"next":2,"pins":[{"id":1,"route":"","selector":"#buy","text":"Place order","rect":{"x":1,"y":2,"w":3,"h":4,"vw":1280,"vh":800},"note":"","url":"http://localhost:3000/orders?id=42","at":"2026-11-16T10:00:00.000Z","resolved":false}]}\n';
     await writeFile(join(dir, 'pins.json'), pins);
     await writeFile(join(dir, STATE_VERSION_FILE), '1\n');
-    assert.deepEqual(MIGRATIONS.map((migration) => migration.from), [1, 2, 3, 4, 5, 6, 7]);
-    assert.deepEqual(await checkStateVersion(dir), { found: 1, version: 8, migrated: [1, 2, 3, 4, 5, 6, 7] });
-    assert.equal(await versionIn(dir), '8');
+    assert.deepEqual(MIGRATIONS.map((migration) => migration.from), [1, 2, 3, 4, 5, 6, 7, 8]);
+    assert.deepEqual(await checkStateVersion(dir), { found: 1, version: 9, migrated: [1, 2, 3, 4, 5, 6, 7, 8] });
+    assert.equal(await versionIn(dir), '9');
     assert.equal(await readFile(join(jobDir, 'job.json'), 'utf8'), job);
     assert.equal(await readFile(join(dir, 'queue.json'), 'utf8'), queue);
     assert.equal(await readFile(join(digestDir, '20261101T060000Z-scheduled.json'), 'utf8'), record);
     assert.equal(await readFile(join(dir, 'pins.json'), 'utf8'), pins);
-    // From 3: the steps 3 → 4 to 7 → 8.
+    // From 3: the steps 3 → 4 to 8 → 9.
     await writeFile(join(dir, STATE_VERSION_FILE), '3\n');
-    assert.deepEqual(await checkStateVersion(dir), { found: 3, version: 8, migrated: [3, 4, 5, 6, 7] });
+    assert.deepEqual(await checkStateVersion(dir), { found: 3, version: 9, migrated: [3, 4, 5, 6, 7, 8] });
     assert.equal(await readFile(join(digestDir, '20261101T060000Z-scheduled.json'), 'utf8'), record);
-    // From 4: the steps 4 → 5 to 7 → 8.
+    // From 4: the steps 4 → 5 to 8 → 9.
     await writeFile(join(dir, STATE_VERSION_FILE), '4\n');
-    assert.deepEqual(await checkStateVersion(dir), { found: 4, version: 8, migrated: [4, 5, 6, 7] });
+    assert.deepEqual(await checkStateVersion(dir), { found: 4, version: 9, migrated: [4, 5, 6, 7, 8] });
     assert.equal(await readFile(join(dir, 'queue.json'), 'utf8'), queue);
-    // From 5: the steps 5 → 6 to 7 → 8.
+    // From 5: the steps 5 → 6 to 8 → 9.
     await writeFile(join(dir, STATE_VERSION_FILE), '5\n');
-    assert.deepEqual(await checkStateVersion(dir), { found: 5, version: 8, migrated: [5, 6, 7] });
+    assert.deepEqual(await checkStateVersion(dir), { found: 5, version: 9, migrated: [5, 6, 7, 8] });
     assert.equal(await readFile(join(jobDir, 'job.json'), 'utf8'), job);
-    // From 6: the steps 6 → 7 and 7 → 8.
+    // From 6: the steps 6 → 7 to 8 → 9.
     await writeFile(join(dir, STATE_VERSION_FILE), '6\n');
-    assert.deepEqual(await checkStateVersion(dir), { found: 6, version: 8, migrated: [6, 7] });
+    assert.deepEqual(await checkStateVersion(dir), { found: 6, version: 9, migrated: [6, 7, 8] });
     assert.equal(await readFile(join(dir, 'pins.json'), 'utf8'), pins);
-    // From 7 alone: the one step 7 → 8.
+    // From 7: the steps 7 → 8 and 8 → 9.
     await writeFile(join(dir, STATE_VERSION_FILE), '7\n');
-    assert.deepEqual(await checkStateVersion(dir), { found: 7, version: 8, migrated: [7] });
+    assert.deepEqual(await checkStateVersion(dir), { found: 7, version: 9, migrated: [7, 8] });
+    assert.equal(await readFile(join(jobDir, 'job.json'), 'utf8'), job);
+    // From 8 alone: the one step 8 → 9.
+    await writeFile(join(dir, STATE_VERSION_FILE), '8\n');
+    assert.deepEqual(await checkStateVersion(dir), { found: 8, version: 9, migrated: [8] });
     assert.equal(await readFile(join(jobDir, 'job.json'), 'utf8'), job);
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -164,6 +168,32 @@ test('the job store keeps job.json\'s limit counts and important mark, and refus
     const path = join(jobs.dir('app', 'V-1'), 'job.json');
     for (const invalid of [{ stalled_fixes: -1 }, { least_open: 1.5 }, { important: false }]) {
       await writeFile(path, `${JSON.stringify({ ...job, ...invalid }, null, 2)}\n`);
+      await assert.rejects(jobs.read('app', 'V-1'), { code: 'job_invalid' });
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('the job store keeps job.json\'s findings_checklist (SF-318-2): a sha256 or null, absent in an older job.json; anything else refused', async () => {
+  const dir = await stateDir();
+  try {
+    const jobs = new JobStore(dir);
+    const at = '2026-11-24T10:00:00.000Z';
+    const job: Job = {
+      workspace: 'app', ticket: 'V-1', branch: 'V-1-findings', base: 'main', continues: null, builds_on: null, builds_on_commit: null,
+      base_commit: null, state: 'working', worktree: null, prepared_commit: null, iteration: 1, fixes: 0, gate_fixes: 0, gate_tokens: 0,
+      session_id: null, mr: null, target_commit: null, mr_attempts: 0, mr_conflict_turn: false, created_at: at, updated_at: at,
+    };
+    for (const value of ['a'.repeat(64), null]) {
+      await jobs.write({ ...job, findings_checklist: value });
+      assert.equal((await jobs.read('app', 'V-1'))!.findings_checklist, value);
+    }
+    await jobs.write(job);
+    assert.equal('findings_checklist' in (await jobs.read('app', 'V-1'))!, false);
+    const path = join(jobs.dir('app', 'V-1'), 'job.json');
+    for (const invalid of ['', 'A'.repeat(64), 'a'.repeat(63), true]) {
+      await writeFile(path, `${JSON.stringify({ ...job, findings_checklist: invalid }, null, 2)}\n`);
       await assert.rejects(jobs.read('app', 'V-1'), { code: 'job_invalid' });
     }
   } finally {

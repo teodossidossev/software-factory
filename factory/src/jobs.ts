@@ -76,8 +76,7 @@ export const PAUSE_STEPS = ['turn', 'review', 'gate', 'simplify'] as const;
 export type PauseStep = (typeof PAUSE_STEPS)[number];
 export const RESTARTABLE_STATES = statesWith('restartable');
 export const RESUMABLE_STATES = statesWith('resumable');
-// How long a job parked on a usage limit without a parsed reset time waits before the run queue
-// tries it again.
+// How long a job parked on a usage limit without a parsed reset time waits before the run queue tries it again.
 export const LIMIT_RETRY_MS = 30 * 60_000;
 
 // The steps of src/execution/ that change a job's state, each named after the step, not
@@ -251,8 +250,7 @@ const jobSchema = z.strictObject({
   // (SF_GATE_MAX_TOKENS for every started 2000 changed lines).
   gate_tokens: z.number().int().min(0).default(0),
   // The job's review rounds without progress: rounds that asked for a Fix while no fewer blocker
-  // and major ledger entries were open than after any earlier such round, or that reopened one.
-  // Absent: 0.
+  // and major ledger entries were open than after any earlier such round, or that reopened one. Absent: 0.
   stalled_fixes: z.number().int().min(0).optional(),
   // The fewest open blocker and major ledger entries after any review round of the job that asked
   // for a Fix; absent before the first.
@@ -272,6 +270,8 @@ const jobSchema = z.strictObject({
   claude_review: z.boolean().optional(),
   // The fix rounds' session, decided at Start (SF_FIX_SESSION, the Task's fix_session); absent: resume.
   fix_session: z.enum(['fresh', 'resume']).optional(),
+  // The sha256 of the Implementer's findings checklist block (findings.md, src/execution/start.ts); null: none.
+  findings_checklist: z.string().regex(/^[0-9a-f]{64}$/).nullable().optional(),
   session_id: z.string().min(1).nullable(),
   // fix_session fresh: the SDK's cost total of the session after its last turn (src/execution/turns.ts).
   session_cost_usd: z.strictObject({ session_id: z.string().min(1), usd: z.number().min(0) }).optional(),
@@ -475,8 +475,7 @@ export interface Iteration {
 // removed placeholders, or a review's outcome, Codex event or Claude message.
 export type EventRecord = { ts: string; iteration: number } & (
   | { message: unknown }
-  // A prompt sent to the Implementer, with the names, types and sizes of its image blocks,
-  // never their bytes.
+  // A prompt sent to the Implementer, with the names, types and sizes of its image blocks, never their bytes.
   | { prompt: string; images?: Array<{ name: string; type: string; bytes: number }> }
   | { state: { from: JobState | null; to: JobState; error?: { code: string; message: string } } }
   | { type: 'notify_failed'; channel: string; message: string }
@@ -499,6 +498,7 @@ export type EventRecord = { ts: string; iteration: number } & (
   | { type: 'review_setup'; claude_review: boolean; reason: string }
   // The session of the job's fix rounds, decided at Start, and why (src/config.ts, fixSessionDecision).
   | { type: 'fix_session_setup'; fix_session: 'fresh' | 'resume'; reason: 'setting' | 'task' | 'alternate' }
+  | { type: 'findings_checklist_unavailable'; message: string }
   // The gate level of the iteration: the level, whether the gate runs, and why.
   | { type: 'gate_level'; level: GateLevel; ran: boolean; reasons: string[] }
   // The simplification pass: its outcome (the suggestions offered, those the factory

@@ -1,7 +1,8 @@
 // Unit tests for the factory's prompt block and the per-iteration cost.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { changedFileLine, freshFixPrompt, implementCommand } from '../src/execution/prompts.js';
+import { changedFileLine, findingsBlock, firstPrompt, freshFixPrompt, implementCommand, sessionBlocks } from '../src/execution/prompts.js';
+import { checklistText } from '../src/findings-checklist.js';
 import { FACTORY_PROMPT_RULES, factoryPrompt, iterationCost } from '../src/prompts.js';
 
 test('factoryPrompt puts the prompt first, then a blank line and the rules with ticket and iteration filled in', () => {
@@ -60,6 +61,40 @@ test('the pack of a fresh fix round (SF-316, freshFixPrompt): the fix command on
   const bare = freshFixPrompt(command, '', { iteration: 1, report: 'r', files: [] }, null);
   assert.equal(bare.split('\n').slice(0, 3).join('\n'), `${command}\n\n<previous_report iteration="1">`);
   assert.match(bare, /against the base commit the commit your branch started from, as of iteration 1: [^\n]+\n\(none\)\n<\/changed_files>$/);
+});
+
+test('the findings checklist block (SF-318-2, findingsBlock): the instruction line, then the file\'s "- " lines without its generated comment; \'\' for a file without checks', () => {
+  const file = checklistText('2026-11-24', 14, 5, [{ text: 'Run the tests of every changed file', findings: 4, jobs: 2 }, { text: 'Keep error messages specific', findings: 3, jobs: 2 }]);
+  assert.equal(findingsBlock(file), [
+    '<recurring_findings>',
+    'Before you write the Report, go through these checks, fix what applies to this change, and say in `## Checks` which applied.',
+    '- Run the tests of every changed file (4)',
+    '- Keep error messages specific (3)',
+    '</recurring_findings>',
+    '',
+  ].join('\n'));
+  assert.equal(findingsBlock(file.replaceAll('\n', '\r\n')), findingsBlock(file));
+  for (const empty of ['', '<!-- generated 2026-11-24 from 0 findings in 0 jobs -->\n', 'notes\n-\n- \n']) {
+    assert.equal(findingsBlock(empty), '', empty);
+  }
+});
+
+test('the findings block in the prompts that open a session (SF-318-2): after the rules, in their place without them, before the kept files and the fresh fix pack; none without it', () => {
+  const rules = '<rules>\nNo abbreviations.\n</rules>\n';
+  const findings = '<recurring_findings>\nBefore you write the Report.\n- Check one (3)\n</recurring_findings>\n';
+  const command = '/implement .software-factory/PROJ-1.md';
+  assert.equal(firstPrompt('PROJ-1', [], rules, ['implement'], findings), `${command}\n\n${rules.trimEnd()}\n\n${findings.trimEnd()}`);
+  assert.equal(firstPrompt('PROJ-1', [], '', ['implement'], findings), `${command}\n\n${findings.trimEnd()}`);
+  assert.equal(firstPrompt('PROJ-1', [], rules), `${command}\n\n${rules.trimEnd()}`);
+  assert.equal(firstPrompt('PROJ-1', [], rules, ['implement'], ''), firstPrompt('PROJ-1', [], rules));
+  assert.ok(firstPrompt('PROJ-1', ['a.ts'], rules, ['implement'], findings).startsWith(`${command}\n\n${rules.trimEnd()}\n\n${findings.trimEnd()}\n\nThis job restarts an earlier job of PROJ-1.`));
+  const pack = { iteration: 2, report: 'r', files: [] };
+  const fix = `${command} Fix 2`;
+  assert.ok(freshFixPrompt(fix, rules, pack, 'abc', findings).startsWith(`${fix}\n\n${rules.trimEnd()}\n\n${findings.trimEnd()}\n\n<previous_report iteration="2">\n`));
+  assert.ok(freshFixPrompt(fix, '', pack, 'abc', findings).startsWith(`${fix}\n\n${findings.trimEnd()}\n\n<previous_report iteration="2">\n`));
+  assert.equal(freshFixPrompt(fix, rules, pack, 'abc', ''), freshFixPrompt(fix, rules, pack, 'abc'));
+  assert.deepEqual(sessionBlocks(rules, findings), [rules.trimEnd(), findings.trimEnd()]);
+  assert.deepEqual(sessionBlocks('', ''), []);
 });
 
 test('iterationCost with a previous meta.json without session_id (written before SF-316): the SDK total minus the previous total, or the total for a first iteration or new session', () => {

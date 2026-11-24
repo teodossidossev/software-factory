@@ -108,6 +108,7 @@ function renderDetail(detail: JobDetail): void {
   }
   renderComposer();
   refreshStop();
+  renderLastReview();
   // Approve… on a Your turn card opens its confirmation once the job is shown, and a card's button
   // its stop or its message box.
   openWantedConfirm();
@@ -133,7 +134,7 @@ function availability(action: string, job: JobRow | null): string {
     return mrAvailable() ? '' : 'no MR text yet: written at Clean.';
   }
   if (state.pending.has(pendingId(action, keyOf(job)))) {
-    // Every action run() posts has its reason; the fallback keeps any other one off too.
+    // An action without a PENDING_REASONS entry gets the fallback, so it stays off too.
     return PENDING_REASONS[action] ?? 'its request is out; waiting for its outcome.';
   }
   const unresolved = state.unresolved.get(keyOf(job));
@@ -264,6 +265,9 @@ function describeOutcome(action: string, result: unknown): Outcome {
   if (action === 'suggestion-dismiss') {
     return data.dismissed === true ? { level: 'ok', text: 'Dismissed the planner\'s suggestion.' } : { level: 'info', text: 'There was no suggestion of the planner to dismiss.' };
   }
+  if (action === 'last-review-dismiss' && typeof data.dismissed === 'number') {
+    return { level: 'ok', text: `Dismissed ${counted(data.dismissed, 'comment')} of the last review.` };
+  }
   if (action === 'retry') {
     return { level: 'ok', text: `MR preparation runs again (state ${data.state}).` };
   }
@@ -316,6 +320,7 @@ const DONE_TEXT: Readonly<Record<string, string>> = {
   pause: 'Paused', resume: 'Resumed', restart: 'Restarted', handover: 'Handed over to your checkout', takeback: 'Taken back', 'handed-done': 'Your push is recorded',
   'merged-archive': 'Merged and archived',
   'suggestion-send': 'Suggestion sent', 'suggestion-dismiss': 'Suggestion dismissed',
+  'last-review-send': 'Comments sent', 'last-review-dismiss': 'Comments dismissed',
 };
 
 // The jobs of an api/jobs answer or a jobs event; its remote says which port the page uses.
@@ -478,11 +483,12 @@ async function run(action: string, key: string, body: Readonly<Record<string, un
   if (!state.unresolved.has(key)) {
     clearDoubt(key);
   }
-  // Every action run() posts has its text.
+  // An action without a PENDING_TEXT entry shows an empty line while it is out.
   const waiting: Outcome = { level: 'pending', text: PENDING_TEXT[action] ?? '' };
   setOutcome(key, waiting);
   renderComposer();
   refreshStop();
+  renderLastReview();
   renderBoard();
   let outcome: Outcome | undefined;
   let unknownReason: string | undefined;
@@ -527,6 +533,7 @@ async function run(action: string, key: string, body: Readonly<Record<string, un
   }
   renderComposer();
   refreshStop();
+  renderLastReview();
   renderBoard();
   void refreshDetail(key);
 }
@@ -591,6 +598,7 @@ async function settleUnknown(key: string): Promise<void> {
   showDoubt(key, `${lead}: the state is being refreshed; check it before choosing a next action.`);
   renderComposer();
   refreshStop();
+  renderLastReview();
   renderBoard();
   let detail: JobDetail | undefined;
   let failure: unknown;
@@ -608,6 +616,7 @@ async function settleUnknown(key: string): Promise<void> {
     showDoubt(key, `${lead} and the current state could not be loaded (${errorMessage(failure)}). The controls stay off until it is: use Refresh state, or wait for the page to reconnect. If sf serve restarted, open the new dashboard URL.`);
     renderComposer();
     refreshStop();
+    renderLastReview();
     renderBoard();
     return;
   }

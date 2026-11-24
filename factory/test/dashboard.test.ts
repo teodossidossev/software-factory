@@ -97,8 +97,9 @@ test('dashboard: token, static files with the security headers, 404 and 405 with
     // row, mr-row.js, right before review-page.js; SF-211: point mode, pins.js, right before main.js;
     // SF-226: the home and the two main views, home.js, right after routing.js; SF-285: the job page's
     // composer, composer.js, right after job-page.js; the ticket page's planner session, planner.js,
-    // right after ticket-page.js; SF-267: the pins' selector, pin-selector.js, right after core.js).
-    assert.deepEqual([...DASHBOARD_SCRIPTS], ['core.js', 'pin-selector.js', 'job-screens.js', 'job-page.js', 'composer.js', 'header.js', 'board.js', 'coordinator.js', 'routing.js', 'home.js', 'ticket-page.js', 'planner.js', 'reports.js', 'mr-row.js', 'review-page.js', 'digest-brief.js', 'setup.js', 'skills.js', 'health.js', 'pins.js', 'main.js']);
+    // right after ticket-page.js; SF-267: the pins' selector, pin-selector.js, right after core.js;
+    // SF-309-4: the job page's last review panel, last-review.js, right after composer.js).
+    assert.deepEqual([...DASHBOARD_SCRIPTS], ['core.js', 'pin-selector.js', 'job-screens.js', 'job-page.js', 'composer.js', 'last-review.js', 'header.js', 'board.js', 'coordinator.js', 'routing.js', 'home.js', 'ticket-page.js', 'planner.js', 'reports.js', 'mr-row.js', 'review-page.js', 'digest-brief.js', 'setup.js', 'skills.js', 'health.js', 'pins.js', 'main.js']);
     // SF-136: every script of DASHBOARD_SCRIPTS is served as JavaScript, each with its own text (its
     // header names it); SF-137: none is longer than 2,500 lines.
     for (const file of DASHBOARD_SCRIPTS) {

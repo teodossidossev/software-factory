@@ -192,6 +192,8 @@ export interface Checks {
   LedgerEntry: Copy<LedgerEntry, ServerDetail['ledger'][number]>;
   ExplanationRecord: Copy<ExplanationRecord, NonNullable<ServerDetail['explanation']>>;
   JobDetail: Copy<JobDetail, ServerDetail>;
+  LastReviewView: Copy<LastReviewView, NonNullable<ServerDetail['last_review']>>;
+  LastReviewComment: Copy<LastReviewComment, NonNullable<ServerDetail['last_review']>['comments'][number]>;
   MergeRequestStatus: Copy<MergeRequestStatus, NonNullable<Awaited<ReturnType<ServerActions['mergeRequestStatus']>>['status']>>;
   CheckOutput: Copy<CheckOutput, NonNullable<NonNullable<ServerCheckView['check']>['output']>>;
   CheckView: Copy<CheckView, ServerCheckView>;

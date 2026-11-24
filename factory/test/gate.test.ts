@@ -47,7 +47,8 @@ test('the strict schema: no $schema, every object has additionalProperties false
   assert.deepEqual([...(GATE_SCHEMA.required as string[])].sort(), ['accepted_sensitive', 'items', 'summary', 'verdict']);
   // Every item has a severity (SF-051), required in the strict form.
   const item = (GATE_SCHEMA.properties as { items: { items: { properties: Record<string, { enum?: string[] }>; required: string[] } } }).items.items;
-  assert.deepEqual(item.required, ['path', 'problem', 'expected', 'severity', 'reopens', 'caused_by']);
+  assert.deepEqual(item.required, ['path', 'problem', 'expected', 'severity', 'reopens', 'caused_by', 'outside_delta']);
+  assert.deepEqual(item.properties.outside_delta?.enum, ['', 'broken_by_delta', 'asked_by_user']);
   assert.deepEqual(item.properties.severity?.enum, ['blocker', 'major', 'nit']);
   assert.deepEqual(gateArgs({ cwd: '/w', dir: '/d', model: 'm' }).slice(-3), ['--model', 'm', '-']);
 });

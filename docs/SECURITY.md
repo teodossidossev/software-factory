@@ -114,6 +114,12 @@ refused), and the factory's test command passed in a sandbox without network on 
   agents' instructions files) and no path outside the Task's scope, and can be read. Otherwise the
   job goes through the full review loop by itself and says why. The guard's scan, the test step
   and the commit-tree check still run on every quick fix.
+- **A follow-up round is reviewed by its delta, the security rules whole.** A light delta after a
+  hand-over is gated at least once, from the baseline; a delta at level none, or with the gate off,
+  follows the rule of a first round. A delta path that is sensitive, named by `may_touch`,
+  security-relevant, in `SF_GATE_FULL_PATHS` or an agents' instructions file is reviewed whole and
+  gates the round at level full; a marked path whose mark changed since the clean round is judged
+  again, by the reviewers, `sf accept` and MR preparation alike.
 - **The Codex gate runs in a read-denying wrapper.** It sees no secrets and no other jobs. Secrets
   in its findings are masked. The wrapper refuses new Unix sockets, so the gate cannot reach your
   X server, session bus or other local services through one.
@@ -270,6 +276,9 @@ refused), and the factory's test command passed in a sandbox without network on 
 - **A quick fix's lines reach the merge request read by no reviewer but you.** Within its bound
   and away from the sensitive paths, no Claude review and no Codex gate read them. The bound is per
   quick fix, measured from the change you last had: several quick fixes in a row add up.
+- **Code accepted at a clean round is not judged again by a later delta that leaves it alone.**
+  A finding about it stands only when the delta breaks it or you ask for it after the clean round;
+  a reviewer that misses that link lets it through.
 - **A pin from another page holds that page's text and address:** the coordinator reads them as
   data, not instructions, and a note typed next to the pin is typed into that page, whose scripts
   can read it.

@@ -68,13 +68,15 @@ export interface GateInput extends ReviewInput {
 export const ONLY_REVIEWER_LINE = 'You are the only reviewer of this iteration, and your verdict decides.';
 export const JOINT_REVIEWER_LINE = "You are one of two independent reviewers of this iteration; either's blocker or major item makes a fix.";
 
-// The prompt of the gate: the Claude review's prompt, adapted to Codex in a read-only worktree.
+// The prompt of the gate: the Claude review's prompt, adapted to Codex in a read-only worktree; in a
+// delta round with the command that shows the delta.
 export function gatePrompt(input: GateInput): string {
   const role = input.onlyReviewer === true ? ONLY_REVIEWER_LINE : JOINT_REVIEWER_LINE;
   return [
     `Code review of iteration ${input.iteration} of ticket ${input.ticket}. ${role} You review; you change nothing.`,
     `The current directory is the job's worktree: it holds the change of this iteration, not committed, against the base commit ${input.baseCommit}.`,
     `You work read-only. You may run read-only commands in the worktree: \`git diff ${input.baseCommit}\`, \`git status\`, \`rg\`, reading files. Do not leave the worktree. Do not read credentials: \`.env*\` files, keys, \`~/.ssh\`, \`~/.config\`.`,
+    ...(input.delta !== undefined ? [`\`git diff ${input.delta.fromTree} ${input.delta.toTree}\` shows the delta since the clean round of iteration ${input.delta.from} (the two trees, new files included).`] : []),
     'Answer with JSON matching the output schema: verdict, summary, items and accepted_sensitive.',
     ...reviewBody(input),
   ].join('\n');

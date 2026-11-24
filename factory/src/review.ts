@@ -14,6 +14,7 @@ import type { UserMessage } from './job-stream.js';
 import type { FileChange } from './jobs.js';
 import { type FixItem, fixItemLine, LEDGER_REF, type LedgerEntry, SCOPE_PROBLEM, SENSITIVE_PROBLEM, settledLines } from './ledger.js';
 import { handbookSection, userDecisionLines } from './prompts.js';
+import { acceptedLines, type DeltaMaterial, deltaLines, OUTSIDE_DELTA, OUTSIDE_DELTA_DESCRIPTION } from './review-delta.js';
 import { ENV_FILE_RULES } from './rules.js';
 import { type PathDenials, type SandboxDenials, withSandboxDenials } from './sandbox-denials.js';
 import { JOB_SESSION_SETTINGS, sessionEnvironment, withSandboxEnvDenials } from './session.js';
@@ -47,6 +48,9 @@ const reviewItem = z.strictObject({
   // verdicts and records written before the findings ledger, read as "".
   reopens: z.string().regex(LEDGER_REF).default('').describe('The ledger id of the settled finding this item reopens (only when the settlement is wrong by evidence in the worktree; say why in problem), or "".'),
   caused_by: z.string().regex(LEDGER_REF).default('').describe('The ledger id of the fix whose change caused this item, or "".'),
+  // Optional, with no default: a stored item holds it only when the reviewer gave a reason
+  // (withoutEmptyReasons); every round's schema has it, the strict gate schema requires it.
+  outside_delta: z.enum(OUTSIDE_DELTA).optional().describe(OUTSIDE_DELTA_DESCRIPTION),
 });
 export const reviewOutput = z.strictObject({
   verdict: z.enum(['clean', 'fix']),
@@ -145,6 +149,8 @@ export interface ReviewInput {
   skillBlocks?: string;
   // The workspace's decision documents in the job's worktree (src/decisions.ts); absent or none listed: no block.
   decision_docs?: DecisionDocs;
+  // A delta round's material (src/review-delta.ts); absent: the round reviews the whole Patch.
+  delta?: DeltaMaterial;
 }
 
 // The buffer's first maxBytes bytes as text, never splitting a UTF-8 character.
@@ -169,6 +175,28 @@ function pathLines(files: FileChange[] | undefined): string[] {
   return lines.length > 0 ? lines : ['None.'];
 }
 
+// One block of a delta round's material inline up to MAX_REVIEW_PATCH_BYTES, after a note when it
+// is cut here or was cut before (cutBefore: the text was rebuilt only up to the Patch size limit).
+function inlineBlock(open: string, close: string, what: string, text: Buffer, cutBefore = false): string[] {
+  const shown = Math.min(text.length, MAX_REVIEW_PATCH_BYTES);
+  return [
+    ...(cutBefore || shown < text.length ? [`Note: ${what} has ${cutBefore ? 'more than ' : ''}${text.length} bytes; only the first ${shown} are below. Read the changed files in the worktree for the rest.`] : []),
+    open, cutBuffer(text, shown).trimEnd(), close,
+  ];
+}
+
+// A delta round's blocks: the delta, the whole paths' sections when there are any, the accepted change.
+function deltaBlocks(delta: DeltaMaterial): string[] {
+  return [
+    ...inlineBlock(`<delta_patch from="${delta.from}">`, '</delta_patch>', 'The delta', delta.patch, delta.patchCut),
+    ...(delta.wholePaths.length > 0 ? ['', ...inlineBlock('<patch>', '</patch>', 'The whole sections of the security-relevant paths', delta.whole)] : []),
+    '',
+    '<accepted_change>',
+    ...acceptedLines(delta.change),
+    '</accepted_change>',
+  ];
+}
+
 // The prompt of the review: what it is and how to answer, the Handbook's review rules, then the
 // material of the iteration.
 export function reviewPrompt(input: ReviewInput): string {
@@ -184,9 +212,13 @@ export function reviewPrompt(input: ReviewInput): string {
 // the Handbook's review rules and the material of the iteration: the job's coding rules when it has them, the
 // Task file, the user's messages to the job, the Report, the marked paths (sensitive,
 // outside the Task's scope, deleted), the Patch, inline up to MAX_REVIEW_PATCH_BYTES, and last the
-// list of the workspace's decision documents when it has any.
+// list of the workspace's decision documents when it has any. A delta round (input.delta) opens with
+// its baseline and the rules of items outside the delta (deltaLines), lists the marked paths among
+// the judged ones, and sends the delta as <delta_patch> in place of <patch>, the whole paths'
+// sections as <patch>, and the whole change's file list as <accepted_change>, each inline up to
+// MAX_REVIEW_PATCH_BYTES.
 export function reviewBody(input: ReviewInput): string[] {
-  const { ticket } = input;
+  const { ticket, delta } = input;
   const rules = input.rules ?? '';
   const method = input.method ?? '';
   const cut = input.patch.length > MAX_REVIEW_PATCH_BYTES;
@@ -199,6 +231,7 @@ export function reviewBody(input: ReviewInput): string[] {
   }
   return [
     '',
+    ...(delta !== undefined ? deltaLines(delta) : []),
     '- Verify the claims of the Report against the files. Do not trust them.',
     `- Review the change against the Task file (${TASK_DIR}/${ticket}.md, below), its \`## Review brief\` section when it has one, and the repository standards: AGENTS.md, CLAUDE.md and the docs you find.`,
     ...(rules !== '' ? ['- A review item that is a rule violation names the rule\'s file (and heading) in `problem`.'] : []),
@@ -230,17 +263,19 @@ export function reviewBody(input: ReviewInput): string[] {
     '</report>',
     '',
     '<marked_paths>',
-    ...pathLines(input.files),
+    ...pathLines(delta !== undefined ? delta.marked : input.files),
     '</marked_paths>',
     '',
     '<settled_findings>',
     ...settledLines(input.ledger ?? []),
     '</settled_findings>',
     '',
-    ...notes.map((note) => `Note: ${note}`),
-    '<patch>',
-    (cut ? cutBuffer(input.patch, MAX_REVIEW_PATCH_BYTES) : input.patch.toString('utf8')).trimEnd(),
-    '</patch>',
+    ...(delta !== undefined ? deltaBlocks(delta) : [
+      ...notes.map((note) => `Note: ${note}`),
+      '<patch>',
+      (cut ? cutBuffer(input.patch, MAX_REVIEW_PATCH_BYTES) : input.patch.toString('utf8')).trimEnd(),
+      '</patch>',
+    ]),
     ...reviewDecisionLines(input.decision_docs),
   ];
 }

@@ -18,6 +18,7 @@ import type { LastReviewRecord, SkillCopy } from './last-review.js';
 import { type LedgerEntry, ledgerSchema } from './ledger.js';
 import type { ReviewItem, ReviewMethod } from './review.js';
 import { quickFixSchema } from './quick-fix.js';
+import { cleanSchema, type IterationDelta } from './review-delta.js';
 import type { Suggestion } from './simplify.js';
 import type { TestsOutcome, TestsRecord } from './test-command.js';
 
@@ -241,8 +242,7 @@ const jobSchema = z.strictObject({
   // Number of Fix sections written: the reviewers', sf fix, the user's Must fix, Simplify and the
   // Guard's (not the Tests Fix).
   fixes: z.number().int().min(0).default(0),
-  // Fix sections the gate asked for (a joint Fix only when the gate's verdict is a fix); the light
-  // gate level reads it.
+  // Fix sections the gate asked for (a joint Fix only when the gate's verdict is a fix); the light gate level reads it (a delta round counts from its clean round, src/review-delta.ts).
   gate_fixes: z.number().int().min(0).default(0),
   // Input plus output tokens of every gate run of the job; the gate budget limits them
   // (SF_GATE_MAX_TOKENS for every started 2000 changed lines).
@@ -250,8 +250,7 @@ const jobSchema = z.strictObject({
   // The job's review rounds without progress: rounds that asked for a Fix while no fewer blocker
   // and major ledger entries were open than after any earlier such round, or that reopened one. Absent: 0.
   stalled_fixes: z.number().int().min(0).optional(),
-  // The fewest open blocker and major ledger entries after any review round of the job that asked
-  // for a Fix; absent before the first.
+  // The fewest open blocker and major ledger entries after any review round of the job that asked for a Fix; absent before the first.
   least_open: z.number().int().min(0).optional(),
   // Of those rounds without progress, the ones whose Fix the gate asked for. Absent: 0.
   gate_stalled: z.number().int().min(0).optional(),
@@ -259,8 +258,7 @@ const jobSchema = z.strictObject({
   gate_budget_from: z.number().int().min(0).optional(),
   // The ticket is important: its Task file said important: true at Start. Absent: not important.
   important: z.literal(true).optional(),
-  // The iteration the simplification pass started on, written before it runs; absent until then.
-  // Once set, the pass never runs again on the job, whatever became of that run.
+  // The iteration the simplification pass started on, written before it runs; absent until then. Once set, the pass never runs again on the job, whatever became of that run.
   simplify_iteration: z.number().int().min(1).optional(),
   // Whether the Claude review runs on the job, decided at Start (SF_CLAUDE_REVIEW, the Task file's
   // review, the gate) and never changed after; false: the Codex gate is the review. Absent in a
@@ -311,6 +309,7 @@ const jobSchema = z.strictObject({
   handoff_skipped: z.strictObject({ code: z.string(), message: z.string() }).optional(),
   // While a quick fix runs (sf quickfix, src/quick-fix.ts): where it came from, its baseline tree, the paths accepted before it.
   quick_fix: quickFixSchema.optional(),
+  clean: cleanSchema.optional(),
   // The merge request the factory opened on the Git host, from pushed on; null before.
   mr: z.strictObject({
     host: z.enum(['github', 'gitlab']),
@@ -365,6 +364,7 @@ export interface IterationMeta {
   // The tree the factory's commit would have when the iteration was published (worktreeTree of
   // src/guard.ts against base_commit, in a temporary index); absent in a meta.json written without it.
   commit_tree?: string;
+  delta?: IterationDelta;
 }
 
 // iterations/NNN/review.json: the Claude review of the iteration, or why it failed. review_method

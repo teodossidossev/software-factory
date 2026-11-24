@@ -463,6 +463,23 @@ test('lineEntries: the park on a usage limit and the resume from it (SF-072) car
   assert.equal((await one({ state: { from: 'waiting_limit', to: 'aborted' } })).text, undefined);
 });
 
+test('lineEntries: the gate\'s failure after a clean Claude review in a delta iteration names the next round only when an unaccepted marked path is among the judged paths', async () => {
+  const change = (path: string, scope: 'in' | 'out'): NonNullable<IterationMeta['files']>[number] => ({ path, status: 'modified', sensitive: 'no', scope, additions: 1, deletions: 0 });
+  const review: ReviewRecord = { reviewer: 'claude', verdict: 'clean', summary: 'Right.', items: [], accepted_sensitive: [], cost_usd: null, started_at: TS, ended_at: TS };
+  const failed = { type: 'review_failed', reviewer: 'codex', error: 'exit 2' };
+  const baseline = meta(1, { files: [change('a.css', 'in'), change('docs/x.md', 'out')] });
+  const files = [change('a.css', 'in'), change('docs/x.md', 'out')];
+  const again = 'The gate failed (gate_failed); it runs again in the next round, with the Claude review.';
+  const notes = async (delta: string[]): Promise<string[]> => {
+    const iteration = meta(2, { files, delta: { from: 1, from_tree: 'f'.repeat(40), files: delta.map((path) => files.find((file) => file.path === path)!) } });
+    return (await build(failed, { meta: { 1: baseline, 2: iteration }, review: { 2: review } })).map((entry) => (entry.t === 'note' ? entry.text : ''));
+  };
+  // docs/x.md, outside the scope as at the baseline and untouched by the delta, is not judged: no note.
+  assert.deepEqual(await notes(['a.css']), ['review by codex failed: exit 2']);
+  // The same path in the delta is judged and not accepted: the round goes on with a Fix, the gate runs again.
+  assert.deepEqual(await notes(['a.css', 'docs/x.md']), ['review by codex failed: exit 2', again]);
+});
+
 test('lineEntries (SF-129): a state entry with a code carries its canonical row\'s stop_code and stop_kind, an alias resolved; one without a code none', async () => {
   assert.deepEqual(await one({ state: { from: 'preparing_mr', to: 'needs_human', error: { code: 'mr_rebase_failed', message: 'Git failed.' } } }), {
     t: 'state', who: 'factory', from: 'preparing_mr', to: 'needs_human', code: 'mr_rebase_failed', msg: 'Git failed.', stop_code: 'mr_failed', stop_kind: 'error', k: '7', ts: TS, it: 2,

@@ -17,7 +17,7 @@ import { checkLastReviewSend, dismissShownComments, sendShownComments } from '..
 import { answerFix, escalationMessage, headings, heldBackNote, type LedgerEntry, roundProgress, type RoundProgress, userFixItems } from '../ledger.js';
 import { rebaseInProgress } from '../mr.js';
 import { checkSuggestionSend, removeSuggestion, sendShownSuggestion } from '../planner.js';
-import { buildPatch, changedFilesSection, fileChanges, notificationLine, type Patch } from '../patch.js';
+import { buildPatch, changedFilesSection, fileChanges, iterationDelta, notificationLine, type Patch } from '../patch.js';
 import { factoryPrompt, iterationCost, quickFixNote, roundUsd } from '../prompts.js';
 import { quickFixBaseline, quickFixRecord, withoutQuickFix } from '../quick-fix.js';
 import { DENIED_TOOLS, type Marks, marksOf } from '../rules.js';
@@ -398,8 +398,8 @@ export class TurnsPart {
   }
 
   // Writes the next iteration (Report, Patch, the file list and commit_tree, the tree the
-  // factory's commit of the worktree would have against the job's base) and returns the job with
-  // its iteration counted.
+  // factory's commit of the worktree would have against the job's base, and after a clean round
+  // its delta from that round, src/review-delta.ts) and returns the job with its iteration counted.
   async publish(job: Job, live: Live, outcome: Success, built: Patch, extraSections: string[]): Promise<{ job: Job; changes: FileChange[] }> {
     const { workspace: workspaceName, ticket } = job;
     const number = job.iteration + 1;
@@ -407,6 +407,13 @@ export class TurnsPart {
     const previous = number > 1 ? await this.#store.jobs.readMeta(workspaceName, ticket, number - 1) : undefined;
     const changes = await fileChanges(live.cwd, job.base_commit!, built.files, await this.#marks(live.workspace, ticket));
     const commitTree = await worktreeTree(live.cwd, job.base_commit!);
+    const clean = job.clean?.iteration;
+    // A baseline meta.json that cannot be read skips the delta (iterationDelta says why).
+    const baseline = clean === undefined ? undefined : await this.#store.jobs.readMeta(workspaceName, ticket, clean).catch((error: unknown): undefined => {
+      console.error(error);
+      return undefined;
+    });
+    const delta = clean === undefined ? {} : { delta: await iterationDelta(live.cwd, clean, baseline, { tree: commitTree, truncated: built.truncated, files: changes }) };
     const sections = [outcome.text.trim() || '(The Implementer wrote no report text.)', ...extraSections, changedFilesSection(built.files, built.truncated, changes)];
     if (outcome.denials.length > 0) {
       sections.push(['## Denied actions', '', ...outcome.denials.map((tool) => `- ${tool}`)].join('\n'));
@@ -431,6 +438,7 @@ export class TurnsPart {
         duration_ms: outcome.result.duration_ms ?? null,
         base_commit: job.base_commit!,
         commit_tree: commitTree,
+        ...delta,
       },
     });
     // The carried spend is in this iteration's cost now.

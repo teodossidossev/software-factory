@@ -1,5 +1,6 @@
 // The gate level of an iteration: how much of the Codex gate a clean Claude verdict gets,
-// by the risk of the job's whole change at that iteration (its meta.json files).
+// by the risk of the job's whole change at that iteration (its meta.json files), or in a delta
+// round by the risk of the delta since the clean round (src/review-delta.ts).
 // - full: every round of the gate, up to SF_GATE_MAX_ROUNDS. When SF_GATE_LEVEL=full, or
 //   a changed path is sensitive, named by the Task's may_touch, security-relevant (SECURITY_WORDS,
 //   SF_GATE_FULL_PATHS) or an agents' instructions file (CLAUDE.md, AGENTS.md at any depth), or the
@@ -76,23 +77,42 @@ function named(rule: string, paths: string[]): string {
 // rename's old path), may_touch, security (SECURITY_WORDS), SF_GATE_FULL_PATHS and agents (an
 // agents' instructions file at any depth). The gate level applies them to its iteration's paths;
 // a quick fix (src/quick-fix.ts) to the paths of its change since the hand-over.
-export function pathRiskReasons(paths: readonly string[], rules: { mayTouch: readonly string[]; fullPaths: readonly string[]; sensitivePaths: readonly string[]; files?: readonly FileChange[] }): string[] {
-  const files = rules.files ?? [];
-  const checks: Array<[string, (path: string) => boolean]> = [
-    ['sensitive', (path) => files.some((file) => file.path === path && file.sensitive !== 'no') || sensitivityOf(path, [], rules.sensitivePaths) !== 'no'],
-    ['may_touch', (path) => names(rules.mayTouch, path)],
-    ['security', (path) => pathWords(path).some((word) => SECURITY_WORDS.has(word))],
-    ['SF_GATE_FULL_PATHS', (path) => names(rules.fullPaths, path)],
-    ['agents', (path) => AGENT_FILES.includes(path.split('/').at(-1)!)],
-  ];
+export function pathRiskReasons(paths: readonly string[], rules: PathRules): string[] {
   const reasons: string[] = [];
-  for (const [rule, matches] of checks) {
+  for (const [rule, matches] of riskChecks(rules)) {
     const matched = paths.filter(matches);
     if (matched.length > 0) {
       reasons.push(named(rule, matched));
     }
   }
   return reasons;
+}
+
+// The paths of paths that some rule of pathRiskReasons matches, in their order: a delta round
+// reviews their whole section of the change (src/review-delta.ts).
+export function fullRulePaths(paths: readonly string[], rules: PathRules): string[] {
+  const checks = riskChecks(rules);
+  return paths.filter((path) => checks.some(([, matches]) => matches(path)));
+}
+
+// What the path rules read: the Task's may_touch, SF_GATE_FULL_PATHS, SF_SENSITIVE_PATHS and the
+// iteration's file list with its marks.
+export interface PathRules {
+  mayTouch: readonly string[];
+  fullPaths: readonly string[];
+  sensitivePaths: readonly string[];
+  files?: readonly FileChange[];
+}
+
+function riskChecks(rules: PathRules): Array<[string, (path: string) => boolean]> {
+  const files = rules.files ?? [];
+  return [
+    ['sensitive', (path) => files.some((file) => file.path === path && file.sensitive !== 'no') || sensitivityOf(path, [], rules.sensitivePaths) !== 'no'],
+    ['may_touch', (path) => names(rules.mayTouch, path)],
+    ['security', (path) => pathWords(path).some((word) => SECURITY_WORDS.has(word))],
+    ['SF_GATE_FULL_PATHS', (path) => names(rules.fullPaths, path)],
+    ['agents', (path) => AGENT_FILES.includes(path.split('/').at(-1)!)],
+  ];
 }
 
 // The level of an iteration, with the rules that decided it (at least one).
@@ -136,10 +156,19 @@ export function changedLines(files: FileChange[]): number {
   return files.reduce((sum, file) => sum + file.additions + file.deletions, 0);
 }
 
+export interface GateDecision {
+  level: GateLevel;
+  reasons: string[];
+  ran: boolean;
+  files: number | null;
+  lines: number | null;
+}
+
 // The decision of an iteration (gate-level.json without its time): the level, whether the gate runs
-// (full always, none never, light while the job's gate_fixes is 0), and the change's counts (null
-// when its files are not known).
-export function gateDecision(input: GateLevelInput, gateFixes: number): { level: GateLevel; reasons: string[]; ran: boolean; files: number | null; lines: number | null } {
+// (full always, none never, light while gateFixes, the gate's fixes counted, is 0), and the change's
+// counts (null when its files are not known). A delta round's decision is roundGateDecision's
+// (src/review-delta.ts), which counts the gate's fixes since the clean round.
+export function gateDecision(input: GateLevelInput, gateFixes: number): GateDecision {
   const { level, reasons } = gateLevel(input);
   const skipped = level === 'light' && gateFixes > 0;
   return {

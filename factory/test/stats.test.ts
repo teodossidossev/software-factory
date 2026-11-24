@@ -592,6 +592,66 @@ test('arms (SF-132): the jobs started in the period by claude_review true and fa
   ]);
 });
 
+test('arms_fix_session (SF-316-2): the jobs started in the period by fix_session fresh and resume, one without it in neither; fix_round_usd the meta.json costs of the iterations after the first over all of them, incomplete with an unknown one, mean iterations of all the arm\'s jobs', async () => {
+  const env = await newEnv('stats-fix-session');
+  const jobs = new JobStore(env.state);
+  // Fresh: pushed with 3 iterations (fix rounds 0.5 and 0.25) and a gate blocker; aborted after its first iteration (no fix round).
+  await makeJob(jobs, 'app', 'FR-1', [{ ended: on('2026-11-05'), cost: 1 }, { ended: on('2026-11-05'), cost: 0.5 }, { ended: on('2026-11-05'), cost: 0.25 }], { fix_session: 'fresh', state: 'pushed' });
+  await jobs.writeGate('app', 'FR-1', 1, gate([item('a', 'A.', 'blocker'), item('c', 'C.', 'nit')], on('2026-11-05')));
+  await makeJob(jobs, 'app', 'FR-2', [{ ended: on('2026-11-05'), cost: 2 }], { fix_session: 'fresh', state: 'aborted' });
+  // Resume: handed over with one fix round of 1.5; still working with a fix round of unknown cost (counted as a round, its cost not known: at least 1.5 / 2).
+  await makeJob(jobs, 'app', 'RS-1', [{ ended: on('2026-11-06'), cost: 1 }, { ended: on('2026-11-06'), cost: 1.5 }], { fix_session: 'resume', state: 'handed_over' });
+  await makeJob(jobs, 'app', 'RS-2', [{ ended: on('2026-11-06'), cost: 1 }, { ended: on('2026-11-06'), cost: null }], { fix_session: 'resume' });
+  // Left out: started before the period; no fix_session (a job.json written before SF-316).
+  await makeJob(jobs, 'app', 'RS-0', [{ ended: on('2026-11-02'), cost: 7 }, { ended: on('2026-11-02'), cost: 7 }], { fix_session: 'resume', created_at: on('2026-10-20') });
+  await makeJob(jobs, 'app', 'OLD-1', [{ ended: on('2026-11-05'), cost: 10 }, { ended: on('2026-11-05'), cost: 10 }], { claude_review: true, state: 'pushed' });
+  await jobs.writeGate('app', 'OLD-1', 1, gate([item('e', 'E.', 'major')], on('2026-11-05')));
+
+  const payload = await stats(env.state, jobs).compute({ days: 7, workspace: null });
+  assert.deepEqual(payload.arms_fix_session, [
+    {
+      arm: 'fresh', jobs: 2, delivered: 1, aborted: 1, cost_usd: 3.75, cost_complete: true, usd_per_delivered: 3.75, median_iterations: 3,
+      mean_iterations: 2, fix_round_usd: 0.375, fix_round_complete: true, codex_findings: 1, codex_findings_per_job: 0.5,
+    },
+    {
+      arm: 'resume', jobs: 2, delivered: 1, aborted: 0, cost_usd: 3.5, cost_complete: false, usd_per_delivered: 3.5, median_iterations: 2,
+      mean_iterations: 2, fix_round_usd: 0.75, fix_round_complete: false, codex_findings: 0, codex_findings_per_job: 0,
+    },
+  ]);
+  // The existing arms are unchanged: OLD-1 is the only job with claude_review.
+  assert.deepEqual(payload.arms.map((arm) => [arm.arm, arm.jobs]), [['on', 1], ['off', 0]]);
+
+  // No job with fix_session in the period: both rows, empty.
+  const none = await newEnv('stats-fix-session-none');
+  const oldJobs = new JobStore(none.state);
+  await makeJob(oldJobs, 'app', 'OLD-1', [{ ended: on('2026-11-05'), cost: 10 }, { ended: on('2026-11-05'), cost: 10 }], { state: 'pushed' });
+  const empty = await stats(none.state, oldJobs).compute({ days: 7, workspace: null });
+  assert.deepEqual(empty.arms_fix_session.map((arm) => [arm.arm, arm.jobs, arm.cost_usd, arm.usd_per_delivered, arm.mean_iterations, arm.fix_round_usd, arm.fix_round_complete, arm.codex_findings_per_job]), [
+    ['fresh', 0, 0, null, null, null, true, null], ['resume', 0, 0, null, null, null, true, null],
+  ]);
+});
+
+test('arms_fix_session (SF-316-2): a fix round whose meta.json is malformed counts with an unknown cost', async () => {
+  const env = await newEnv('stats-fix-session-malformed');
+  const jobs = new JobStore(env.state);
+  // Fix rounds: iteration 2 malformed (unknown), iteration 3 at 0.25.
+  await makeJob(jobs, 'app', 'FM-1', [{ ended: on('2026-11-05'), cost: 1 }, { ended: on('2026-11-05'), cost: 0.5 }, { ended: on('2026-11-05'), cost: 0.25 }], { fix_session: 'fresh', state: 'pushed' });
+  await writeFile(join(jobs.iterationDir('app', 'FM-1', 2), 'meta.json'), '{"ended_at":');
+  const payload = await stats(env.state, jobs).compute({ days: 7, workspace: null });
+  const fresh = payload.arms_fix_session[0]!;
+  assert.deepEqual([fresh.arm, fresh.jobs, fresh.fix_round_usd, fresh.fix_round_complete], ['fresh', 1, 0.125, false]);
+});
+
+test('arms_fix_session (SF-316-2): a running job\'s current iteration without a meta.json counts as a fix round with an unknown cost', async () => {
+  const env = await newEnv('stats-fix-session-missing');
+  const jobs = new JobStore(env.state);
+  // Iterations 1 and 2 published (fix round 0.5); iteration 3 running, no meta.json yet.
+  await makeJob(jobs, 'app', 'RM-1', [{ ended: on('2026-11-06'), cost: 1 }, { ended: on('2026-11-06'), cost: 0.5 }], { fix_session: 'resume', iteration: 3 });
+  const payload = await stats(env.state, jobs).compute({ days: 7, workspace: null });
+  const resume = payload.arms_fix_session[1]!;
+  assert.deepEqual([resume.arm, resume.jobs, resume.mean_iterations, resume.fix_round_usd, resume.fix_round_complete], ['resume', 1, 3, 0.25, false]);
+});
+
 test('simplify (SF-132): offered counts the period\'s simplification records with a suggestion; taken and skipped the period\'s simplify_chosen lines', async () => {
   const env = await newEnv('stats-simplify');
   const jobs = new JobStore(env.state);

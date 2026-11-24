@@ -792,6 +792,13 @@ interface StatsArmRow {
   codex_findings: number;
   codex_findings_per_job: number | null;
 }
+// src/stats.ts FixSessionArmRow.
+interface StatsFixSessionArmRow extends Omit<StatsArmRow, 'arm'> {
+  arm: 'fresh' | 'resume';
+  mean_iterations: number | null;
+  fix_round_usd: number | null;
+  fix_round_complete: boolean;
+}
 // src/stats.ts JobRow.
 interface StatsJobRow {
   workspace: string;
@@ -838,6 +845,7 @@ interface StatsPayload {
   task_check_modes: StatsTaskCheckModeRow[];
   second_opinion: { codex_after_claude: StatsSecondOpinion; claude_after_codex: StatsSecondOpinion };
   arms: StatsArmRow[];
+  arms_fix_session: StatsFixSessionArmRow[];
   // src/stats.ts SimplifyCounts.
   simplify: { offered: number; taken: number; skipped: number };
   jobs: StatsJobRow[];

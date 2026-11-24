@@ -835,6 +835,9 @@ function stSecondOpinion(data: StatsPayload): HTMLElement {
   return section;
 }
 
+// An arm's cost: "—" when unknown, "at least" when one of its jobs' costs is incomplete.
+const stArmCost = (value: number | null, complete: boolean): string => (value === null ? '—' : complete ? stMoney(value) : `at least ${stMoney(value)}`);
+
 // The Claude review experiment: one line per arm, on and off, of the jobs that recorded
 // claude_review; the empty text when neither has a job.
 const ST_ARMS: Readonly<Record<string, string>> = { on: 'On', off: 'Off' };
@@ -844,11 +847,26 @@ function stArms(data: StatsPayload): HTMLElement {
     section.append(el('p', 'muted fs13', 'No jobs of the experiment yet.'));
     return section;
   }
-  const cost = (value: number | null, complete: boolean): string => (value === null ? '—' : complete ? stMoney(value) : `at least ${stMoney(value)}`);
   section.append(stTable(['Claude review', 'Jobs', 'Delivered', 'Aborted', 'Cost', 'Per delivered', 'Median iterations', 'Codex findings', 'Per job'], data.arms.map((row) => [
-    ST_ARMS[row.arm] ?? row.arm, String(row.jobs), String(row.delivered), String(row.aborted), cost(row.cost_usd, row.cost_complete),
-    cost(row.usd_per_delivered, row.cost_complete), stCount(row.median_iterations), String(row.codex_findings), stCount(row.codex_findings_per_job),
+    ST_ARMS[row.arm] ?? row.arm, String(row.jobs), String(row.delivered), String(row.aborted), stArmCost(row.cost_usd, row.cost_complete),
+    stArmCost(row.usd_per_delivered, row.cost_complete), stCount(row.median_iterations), String(row.codex_findings), stCount(row.codex_findings_per_job),
   ])), el('p', 'muted fs13', 'Jobs started before the experiment are in neither arm.'));
+  return section;
+}
+
+// The fix session comparison: one line per arm, fresh and resume, of the jobs whose job.json
+// has fix_session; the empty text when neither has a job.
+const ST_FIX_SESSIONS: Readonly<Record<string, string>> = { fresh: 'Fresh', resume: 'Resume' };
+function stFixSessionArms(data: StatsPayload): HTMLElement {
+  const section = stSection('Fix session fresh/resume');
+  if (data.arms_fix_session.every((row) => row.jobs === 0)) {
+    section.append(el('p', 'muted fs13', 'No jobs with a recorded fix session in this period.'));
+    return section;
+  }
+  section.append(stTable(['Fix session', 'Jobs', 'Delivered', 'Aborted', 'Cost', 'Per delivered', 'Per fix round', 'Mean iterations', 'Codex findings', 'Per job'], data.arms_fix_session.map((row) => [
+    ST_FIX_SESSIONS[row.arm] ?? row.arm, String(row.jobs), String(row.delivered), String(row.aborted), stArmCost(row.cost_usd, row.cost_complete),
+    stArmCost(row.usd_per_delivered, row.cost_complete), stArmCost(row.fix_round_usd, row.fix_round_complete), stCount(row.mean_iterations), String(row.codex_findings), stCount(row.codex_findings_per_job),
+  ])), el('p', 'muted fs13', 'Per fix round: the Implementer\'s cost of an iteration after the first, "at least" when a round\'s cost is unknown. Jobs started without a recorded fix session are in neither arm.'));
   return section;
 }
 
@@ -1036,7 +1054,7 @@ function renderStats(): void {
       stTile('Running', String(data.now.running)), stTile('Waiting for you', String(data.now.waiting_for_you)),
       stTile('Paused', String(data.now.paused)), stTile('Queued', data.now.queued === null ? '—' : String(data.now.queued)),
     ));
-    body.append(stWarnings(data), now, stSecondOpinion(data), stArms(data), stStages(data), stSpend(data), stLoad(data), stJobs(data), ...stNotes(data));
+    body.append(stWarnings(data), now, stSecondOpinion(data), stArms(data), stFixSessionArms(data), stStages(data), stSpend(data), stLoad(data), stJobs(data), ...stNotes(data));
   }
   // The focus stays on the control it was on; the scroll where it was.
   const active = document.activeElement;

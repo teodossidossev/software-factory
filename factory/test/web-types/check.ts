@@ -253,6 +253,7 @@ export interface Checks {
   StatsTaskCheckModeRow: Copy<StatsTaskCheckModeRow, ServerStats['task_check_modes'][number]>;
   StatsSecondOpinion: Copy<StatsSecondOpinion, ServerStats['second_opinion']['codex_after_claude']>;
   StatsArmRow: Copy<StatsArmRow, ServerStats['arms'][number]>;
+  StatsFixSessionArmRow: Copy<StatsFixSessionArmRow, ServerStats['arms_fix_session'][number]>;
   StatsJobRow: Copy<StatsJobRow, ServerStats['jobs'][number]>;
   StatsTarget: Copy<StatsTarget, NonNullable<ServerStats['warnings'][number]['target']>>;
   StatsPayload: Copy<StatsPayload, ServerStats>;

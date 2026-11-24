@@ -1,8 +1,8 @@
 // The Stats page in static/reports.js (SF-117), run under node:vm against the fake page of
 // test/support/fake-dom.ts: #stats and the Stats button, the period and workspace reads (an older
 // answer ignored), the warnings first with their links, the second opinion, the Claude review
-// on/off table (SF-132), the stage and role tables, the Table toggle, the SVG charts
-// (createElementNS, class attributes, no style attribute), the all-zero chart's box, leaving a job
+// on/off table (SF-132), the fix session fresh/resume table (SF-316-2), the stage and role
+// tables, the Table toggle, the SVG charts (createElementNS, class attributes, no style attribute), the all-zero chart's box, leaving a job
 // page or the drawer, the loading, error and empty states, Escape, and the other pages hiding #stats. Script checks, not browser acceptance: the layout is
 // test/browser/stats-page.test.ts.
 import assert from 'node:assert/strict';
@@ -55,6 +55,10 @@ function payload(extra: Record<string, unknown> = {}) {
     arms: [
       { arm: 'on', jobs: 3, delivered: 2, aborted: 1, cost_usd: 5, cost_complete: false, usd_per_delivered: 2.5, median_iterations: 3, codex_findings: 2, codex_findings_per_job: 2 / 3 },
       { arm: 'off', jobs: 1, delivered: 0, aborted: 0, cost_usd: 3, cost_complete: true, usd_per_delivered: null, median_iterations: null, codex_findings: 1, codex_findings_per_job: 1 },
+    ],
+    arms_fix_session: [
+      { arm: 'fresh', jobs: 2, delivered: 1, aborted: 1, cost_usd: 3.75, cost_complete: true, usd_per_delivered: 3.75, median_iterations: 3, mean_iterations: 2, fix_round_usd: 0.375, fix_round_complete: false, codex_findings: 1, codex_findings_per_job: 0.5 },
+      { arm: 'resume', jobs: 3, delivered: 1, aborted: 0, cost_usd: 3.5, cost_complete: false, usd_per_delivered: 3.5, median_iterations: 2, mean_iterations: 7 / 3, fix_round_usd: null, fix_round_complete: true, codex_findings: 0, codex_findings_per_job: 0 },
     ],
     simplify: { offered: 2, taken: 1, skipped: 1 },
     jobs: [{
@@ -177,7 +181,7 @@ test('stats client: the warnings come first with their links (job, ticket, diges
   assert.equal(first!.querySelectorAll('details li').length, 8);
   assert.equal(first!.querySelectorAll('button').some((node) => node.textContent.startsWith('Show all')), false);
   assert.deepEqual(sections(page).map((section) => section.querySelector('h3')!.textContent),
-    ['Warnings (5)', 'Now', 'Does a second model pay?', 'Claude review on/off', 'Review stages', 'Spend', 'Load', 'Jobs (1)']);
+    ['Warnings (5)', 'Now', 'Does a second model pay?', 'Claude review on/off', 'Fix session fresh/resume', 'Review stages', 'Spend', 'Load', 'Jobs (1)']);
   assert.deepEqual(sectionOf(page, /^Now$/).querySelectorAll('.st-tile').map((tile) => tile.textContent), ['Running2', 'Waiting for you1', 'Paused0', 'Queued—']);
 
   const none = await openStats(payload({ warnings: [] }));
@@ -237,6 +241,27 @@ test('stats client: the Claude review on/off table (SF-132) after the second opi
   const noArms = sectionOf(none, /^Claude review on\/off$/);
   assert.equal(noArms.querySelector('table'), null);
   assert.deepEqual(noArms.querySelectorAll('p').map((p) => p.textContent), ['No jobs of the experiment yet.']);
+});
+
+test('stats client: the fix session fresh/resume table (SF-316-2) right under the Claude review one, per fix round and mean iterations, its note; with no job in either arm one line', async () => {
+  const page = await openStats();
+  const titles = sections(page).map((section) => section.querySelector('h3')!.textContent);
+  assert.equal(titles.indexOf('Fix session fresh/resume'), titles.indexOf('Claude review on/off') + 1);
+  const arms = sectionOf(page, /^Fix session fresh\/resume$/);
+  assert.deepEqual(rowTexts(tableAfter(arms)), [
+    ['Fix session', 'Jobs', 'Delivered', 'Aborted', 'Cost', 'Per delivered', 'Per fix round', 'Mean iterations', 'Codex findings', 'Per job'],
+    ['Fresh', '2', '1', '1', '$3.75', '$3.75', 'at least $0.38', '2', '1', '0.5'],
+    ['Resume', '3', '1', '0', 'at least $3.50', 'at least $3.50', '—', '2.3', '0', '0'],
+  ]);
+  assert.match(arms.querySelector('p')!.textContent, /^Per fix round: /);
+
+  const empty = (arm: string) => ({
+    arm, jobs: 0, delivered: 0, aborted: 0, cost_usd: 0, cost_complete: true, usd_per_delivered: null, median_iterations: null, mean_iterations: null, fix_round_usd: null, fix_round_complete: true, codex_findings: 0, codex_findings_per_job: null,
+  });
+  const none = await openStats(payload({ arms_fix_session: [empty('fresh'), empty('resume')] }));
+  const noArms = sectionOf(none, /^Fix session fresh\/resume$/);
+  assert.equal(noArms.querySelector('table'), null);
+  assert.deepEqual(noArms.querySelectorAll('p').map((p) => p.textContent), ['No jobs with a recorded fix session in this period.']);
 });
 
 test('stats client: the stage table, the by-role table with "not recorded" and "at least"; the Table toggle swaps a chart for its numbers and back', async () => {

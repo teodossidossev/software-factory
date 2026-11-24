@@ -2,10 +2,10 @@
 // state directory and only read from it. What each review stage found and what of it was fixed,
 // how often the Codex gate caught what the Claude review passed (and the other way round), the
 // cost and the tokens per day, workspace and role, the jobs running and waiting now, the Claude
-// review experiment's two arms and the simplification's offers taken, and the warnings
-// when a job, a stage or a day is far from the usual. The payload holds numbers, times,
-// workspace names, tickets, job directory names, states, Task titles and the warnings' own
-// sentences; never a review's text, a prompt, a message or a setting.
+// review experiment's two arms, the fresh and the resumed fix session, the simplification's
+// offers taken, and the warnings when a job, a stage or a day is far from the usual. The payload
+// holds numbers, times, workspace names, tickets, job directory names, states, Task titles and
+// the warnings' own sentences; never a review's text, a prompt, a message or a setting.
 //
 // Every cost and token count is on the local day of its own record. Job directories are read once
 // and kept until a file of theirs changes (a signature of their stats); an event log is read on
@@ -24,7 +24,7 @@ import { QueueStore } from './queue.js';
 import { REVIEWER, type ReviewItem, type Severity } from './review.js';
 import { codesWith } from './stops.js';
 import { type CheckMode, recordMode } from './task-check.js';
-import { parseFrontMatter } from './task-file.js';
+import { parseFrontMatter, type TaskFixSession } from './task-file.js';
 
 // The periods the page offers, in local days ending today.
 export const STATS_DAYS = [7, 30, 90] as const;
@@ -206,6 +206,18 @@ export interface ArmRow {
   codex_findings_per_job: number | null;
 }
 
+// One arm of the fix session comparison: the jobs started in the period whose job.json has
+// fix_session fresh or resume, measured as ArmRow, by mean_iterations (of all its jobs; null with
+// no job) and by the Implementer's cost per fix round (an iteration after the first: its meta.json
+// cost_usd), the sum of the known costs over every fix round (null with none); fix_round_complete
+// false when a round's cost is unknown, fix_round_usd then a lower bound.
+export interface FixSessionArmRow extends Omit<ArmRow, 'arm'> {
+  arm: TaskFixSession;
+  mean_iterations: number | null;
+  fix_round_usd: number | null;
+  fix_round_complete: boolean;
+}
+
 // The simplification pass in the period: the records with a suggestion, and the user's
 // choices.
 export interface SimplifyCounts {
@@ -263,6 +275,8 @@ export interface StatsPayload {
   second_opinion: { codex_after_claude: SecondOpinion; claude_after_codex: SecondOpinion };
   // On, then off; a job without claude_review is in neither.
   arms: ArmRow[];
+  // Fresh, then resume; a job without fix_session is in neither.
+  arms_fix_session: FixSessionArmRow[];
   simplify: SimplifyCounts;
   jobs: JobRow[];
   warnings: StatsWarning[];
@@ -366,6 +380,9 @@ interface JobSummary {
   signature: string;
   title: string | null;
   costs: Array<{ role: JobCostRole; at: string; cost: number | null }>;
+  // The cost of each fix round (every iteration after the first); null when its meta.json is
+  // missing, unreadable or malformed, or has no ended_at or no valid cost_usd.
+  fixRounds: Array<number | null>;
   // Every gate.json, a verdict or a failed run.
   gateRuns: Array<{ at: string; tokens: GateTokens }>;
   reviews: Map<number, VerdictSummary>;
@@ -635,17 +652,21 @@ export class Stats {
       }
     };
     const summary: JobSummary = {
-      signature, title: null, costs: [], gateRuns: [], reviews: new Map(), gates: new Map(), simplifies: [], explanation: null, churn: null, unreadable: 0,
+      signature, title: null, costs: [], fixRounds: [], gateRuns: [], reviews: new Map(), gates: new Map(), simplifies: [], explanation: null, churn: null, unreadable: 0,
     };
     const ledger = await attempt(() => jobs.readLedger(workspace, name));
     for (let number = 1; number <= job.iteration; number += 1) {
       const meta = await attempt(() => jobs.readMeta(workspace, name, number));
+      const ended = isObject(meta) && typeof meta.ended_at === 'string';
       if (meta !== undefined) {
-        if (isObject(meta) && typeof meta.ended_at === 'string') {
+        if (ended) {
           summary.costs.push({ role: 'implementer', at: meta.ended_at, cost: costOf(meta.cost_usd) });
         } else {
           unreadable += 1;
         }
+      }
+      if (number > 1) {
+        summary.fixRounds.push(ended ? costOf(meta.cost_usd) : null);
       }
       const review = await attempt(() => jobs.readReview(workspace, name, number));
       const reviewVerdict = verdictOf(review, number, REVIEWER, ledger);
@@ -1222,6 +1243,7 @@ export class Stats {
       task_check_modes: [...modes.values()],
       second_opinion: { codex_after_claude: secondOpinion(codexAfterClaude), claude_after_codex: secondOpinion(claudeAfterCodex) },
       arms: armRows(jobRows, inPeriod),
+      arms_fix_session: fixSessionArmRows(jobRows, inPeriod),
       simplify,
       jobs: jobRows.sort((a, b) => b.cost_usd - a.cost_usd || b.created_at.localeCompare(a.created_at)).slice(0, MAX_JOB_ROWS).map(({ data: _data, ...row }) => row),
       warnings,
@@ -1259,17 +1281,33 @@ async function readCheck(path: string, workspace: string, ticket: string): Promi
 // The arms of the Claude review experiment, on then off: the job rows started in the
 // period with claude_review true or false, before the job list is cut to MAX_JOB_ROWS.
 function armRows(rows: readonly JobRow[], inPeriod: (ts: unknown) => boolean): ArmRow[] {
-  return (['on', 'off'] as const).map((arm): ArmRow => {
-    const jobs = rows.filter((row) => row.claude_review === (arm === 'on') && inPeriod(row.created_at));
-    const delivered = jobs.filter((row) => DELIVERED_STATES.includes(row.state));
-    const cost = jobs.reduce((total, row) => total + row.cost_usd, 0);
-    const findings = jobs.reduce((total, row) => total + row.codex.blocker + row.codex.major, 0);
+  return (['on', 'off'] as const).map((arm) => armRow(arm, rows.filter((row) => row.claude_review === (arm === 'on') && inPeriod(row.created_at))));
+}
+
+// The fix session arms, fresh then resume, as armRows: the job rows with that fix_session.
+function fixSessionArmRows(rows: ReadonlyArray<JobRow & { data: JobData }>, inPeriod: (ts: unknown) => boolean): FixSessionArmRow[] {
+  return (['fresh', 'resume'] as const).map((arm): FixSessionArmRow => {
+    const jobs = rows.filter((row) => row.data.job.fix_session === arm && inPeriod(row.created_at));
+    const rounds = jobs.flatMap((row) => row.data.summary.fixRounds);
     return {
-      arm, jobs: jobs.length, delivered: delivered.length, aborted: jobs.filter((row) => row.state === 'aborted').length,
-      cost_usd: cost, cost_complete: jobs.every((row) => row.cost_complete), usd_per_delivered: delivered.length === 0 ? null : cost / delivered.length,
-      median_iterations: median(delivered.map((row) => row.iterations)), codex_findings: findings, codex_findings_per_job: jobs.length === 0 ? null : findings / jobs.length,
+      ...armRow(arm, jobs),
+      mean_iterations: jobs.length === 0 ? null : jobs.reduce((total, row) => total + row.iterations, 0) / jobs.length,
+      fix_round_usd: rounds.length === 0 ? null : rounds.reduce((total: number, cost) => total + (cost ?? 0), 0) / rounds.length,
+      fix_round_complete: rounds.every((cost) => cost !== null),
     };
   });
+}
+
+// An arm's ArmRow measures over its job rows.
+function armRow<A extends string>(arm: A, jobs: readonly JobRow[]): Omit<ArmRow, 'arm'> & { arm: A } {
+  const delivered = jobs.filter((row) => DELIVERED_STATES.includes(row.state));
+  const cost = jobs.reduce((total, row) => total + row.cost_usd, 0);
+  const findings = jobs.reduce((total, row) => total + row.codex.blocker + row.codex.major, 0);
+  return {
+    arm, jobs: jobs.length, delivered: delivered.length, aborted: jobs.filter((row) => row.state === 'aborted').length,
+    cost_usd: cost, cost_complete: jobs.every((row) => row.cost_complete), usd_per_delivered: delivered.length === 0 ? null : cost / delivered.length,
+    median_iterations: median(delivered.map((row) => row.iterations)), codex_findings: findings, codex_findings_per_job: jobs.length === 0 ? null : findings / jobs.length,
+  };
 }
 
 // The ticket a warning names, '' for a day or a digest.

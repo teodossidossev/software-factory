@@ -243,6 +243,7 @@ function renderJobs(): void {
     renderHead();
     renderComposer();
     refreshStop();
+    renderLastReview();
   }
 }
 
@@ -273,7 +274,7 @@ function onClick(event: MouseEvent): void {
   }
   const clicked = targetOf(event.target);
   const target = clicked !== null
-    ? clicked.closest<HTMLElement>('[data-colfold],[data-cxtree],[data-tk],[data-tkimg],[data-tktab],[data-dep],[data-menu],[data-qact],[data-qtoggle],[data-qforce],#limUp,#limDown,[data-run],[data-open],[data-ticket],[data-back],[data-goto],[data-cfile],[data-changes],[data-fstep],[data-trow],[data-fold],[data-mode],[data-flat],[data-toggle],[data-act],[data-homenu],[data-dismiss],[data-settle],[data-copy-branch],[data-mr],[data-mrtab],[data-mrdiff],#stream li.e,#done-all,#toast-close,#open-workspaces,#open-new-ticket,#open-archived,#open-digest,#open-stats')
+    ? clicked.closest<HTMLElement>('[data-colfold],[data-cxtree],[data-tk],[data-tkimg],[data-tktab],[data-dep],[data-menu],[data-qact],[data-qtoggle],[data-qforce],#limUp,#limDown,[data-run],[data-open],[data-ticket],[data-back],[data-goto],[data-cfile],[data-changes],[data-fstep],[data-trow],[data-fold],[data-mode],[data-flat],[data-toggle],[data-act],[data-homenu],[data-dismiss],[data-settle],[data-lr],[data-lrpick],[data-copy-branch],[data-mr],[data-mrtab],[data-mrdiff],#stream li.e,#done-all,#toast-close,#open-workspaces,#open-new-ticket,#open-archived,#open-digest,#open-stats')
     : null;
   // An open ⋯ menu closes on any click but its own toggle (its items act, then it is closed).
   if (state.openMenu !== null && (target === null || target.dataset.menu === undefined)) {
@@ -428,6 +429,11 @@ function onClick(event: MouseEvent): void {
     // "<id>:<decision>" (job-screens.js ledgerFinding): both parts are there.
     const [id = '', decision = ''] = target.dataset.settle.split(':');
     settle(id, decision);
+  } else if (target.dataset.lr !== undefined) {
+    lastReviewAct(target.dataset.lr);
+  } else if (target.dataset.lrpick !== undefined) {
+    // A comment's box: its native toggle stays; the choice follows what it shows.
+    lastReviewPick(target.dataset.lrpick, target);
   } else if (target.hasAttribute('data-copy-branch')) {
     const job = shownJob();
     if (job !== null) {

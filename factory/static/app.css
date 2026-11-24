@@ -188,6 +188,12 @@ code, pre, .mono { font-family: var(--mono); }
 .finding .expected { font-size: 12px; color: var(--muted); }
 .finding .decide { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-top: 2px; }
 .finding .decided { font-size: 12px; font-weight: 600; }
+/* The last review's panel, above the Stream: it scrolls inside itself, so the Stream keeps room. */
+.lastreview { flex: none; min-width: 0; max-height: 45vh; overflow-y: auto; margin-top: 8px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.lastreview .lr-note { font-weight: 400; white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
+.lastreview .lr-acts { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; font-size: 12px; }
+.lastreview .lr-kind { margin: 4px 0 0; font-size: 12px; font-weight: 600; }
+.lastreview .finding input { margin: 0; align-self: center; }
 .sev { font: 600 11px var(--sans); border-radius: 999px; padding: 0 7px; white-space: nowrap; }
 .sev-blocker { color: var(--del); background: var(--del-bg); }
 .sev-major { color: var(--warn); background: var(--warn-bg); }
@@ -1006,6 +1012,7 @@ a.mq-badge:hover { text-decoration: underline; }
   .e > .who.cont { display: none; }
   .e > .body { grid-column: 1 / -1; grid-row: 2; }
   .composer { max-height: 60vh; overflow-y: auto; }
+  .lastreview { max-height: 30vh; }
   /* The composer scrolls inside itself here, which would cut a menu off: a sheet instead. */
   .ready .ho-menu { position: fixed; top: auto; left: max(16px, env(safe-area-inset-left, 0px)); right: max(16px, env(safe-area-inset-right, 0px)); bottom: max(16px, env(safe-area-inset-bottom, 0px)); width: auto; max-height: 70vh; overflow-y: auto; }
   .composer textarea { flex: 1 1 100%; }

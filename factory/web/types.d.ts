@@ -147,8 +147,8 @@ interface ActionResult {
   discarded?: boolean;
   worktree?: string | null;
   queued?: boolean;
-  // Dismiss of the planner's suggestion: whether there was one.
-  dismissed?: boolean;
+  // Dismiss of the planner's suggestion: whether there was one; of the last review's comments: how many were dismissed.
+  dismissed?: boolean | number;
 }
 
 // A running job's progress: src/progress.ts Progress, its phase src/progress.ts PHASES.
@@ -244,6 +244,29 @@ interface ExplanationRecord {
   error: string | null;
 }
 
+// One comment of the last review: src/last-review.ts LastReviewComment (ids C1, C2, … start again in
+// every iteration).
+interface LastReviewComment {
+  id: string;
+  path: string;
+  line: number;
+  text: string;
+  kind: 'change' | 'question' | 'follow_up';
+}
+
+// The last review of the job's iteration while the job waits for the user:
+// src/last-review-choices.ts LastReviewView (the comments neither sent nor dismissed).
+interface LastReviewView {
+  iteration: number;
+  summary: string | null;
+  comments: LastReviewComment[];
+  sent: number;
+  dismissed: number;
+  error: string | null;
+  timed_out: boolean;
+  ended_at: string;
+}
+
 // A job's detail, api/jobs/<ws>/<ticket> and the stream's job events: src/dashboard.ts jobView.
 interface JobDetail {
   job: JobSummary;
@@ -254,6 +277,8 @@ interface JobDetail {
   ledger: LedgerEntry[];
   settle_ids: string[];
   explanation: ExplanationRecord | null;
+  // Optional: older fixtures and pages hold details without it.
+  last_review?: LastReviewView | null;
 }
 
 // What the host said of a merge request: src/forge.ts MergeRequestStatus.

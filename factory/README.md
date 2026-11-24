@@ -5358,6 +5358,9 @@ naming the type, when a type of `web/types.d.ts` has neither.
 - `job-page.js`: the job page's header and the job's actions (availability, outcomes, requests, confirmations).
 - `composer.js`: the job page's composer: its sentence, the planner block, the message box and the
   actions' row, the hand-over panel and the composer's More ▾ menu.
+- `last-review.js`: the job page's last review panel at the top of the Stream (its note, its
+  comments by kind, Send, Send chosen, Dismiss and Dismiss all), drawn again only when what it shows
+  changed.
 - `header.js`: the top bar of the home and the board: what waits for you, the pages, the workspace
   filter, the pill's running count, the run limit and the reset rule.
 - `board.js`: board, cards, workspaces and dependencies, queue, toast.

@@ -391,6 +391,9 @@ async function readRecord(path: string): Promise<CheckRecord | undefined> {
 export const recordVerdict = (record: CheckRecord): CheckVerdict | 'failed' =>
   record.status === 'failed' || record.output === null ? 'failed' : record.codex?.output?.verdict === 'not_ready' ? 'not_ready' : record.output.verdict;
 
+// How a stored check ran, from its mode as read: follow_up, or full for none or any other value.
+export const recordMode = (mode: unknown): CheckMode => (mode === 'follow_up' ? 'follow_up' : 'full');
+
 // A skeleton is not checked: the Context owner has not written the Task yet.
 export function refuseDraft(ticket: string, task: string): void {
   if (isDraft(task)) {

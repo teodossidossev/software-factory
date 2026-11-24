@@ -20,7 +20,7 @@ import { listPrototypes, PROTOTYPE_FRAME_CSP, PROTOTYPE_PAGE_CSP, type Prototype
 import { WORKSPACE_NAME_PATTERN } from './registry.js';
 import { skillsForClients, skillsView, skillText } from './skills.js';
 import { STATS_DAYS, type StatsDays } from './stats.js';
-import type { CheckRecord } from './task-check.js';
+import { type CheckMode, type CheckRecord, type CheckVerdict, recordMode, recordVerdict } from './task-check.js';
 import { readVisionPage, VISION_PAGE_CSP } from './vision.js';
 import { followLines } from './watch.js';
 
@@ -42,6 +42,26 @@ interface GetRoute {
   pattern: string;
   when?: (query: URLSearchParams) => boolean;
   handler: (get: GetRequest) => Promise<void> | void;
+}
+
+// One plan-check round of the ticket page: when it ended, how the Claude check ran (a record
+// without mode counts as full), what it counts as (recordVerdict) and its estimated cost (null
+// when unknown).
+export interface CheckRound {
+  ended_at: string;
+  mode: CheckMode;
+  verdict: CheckVerdict | 'failed';
+  cost_usd: number | null;
+}
+
+// The ticket's check records as rounds, newest first.
+export function checkRoundList(records: readonly CheckRecord[]): CheckRound[] {
+  return records.map((record): CheckRound => ({
+    ended_at: record.ended_at,
+    mode: recordMode(record.mode),
+    verdict: recordVerdict(record),
+    cost_usd: record.cost_usd,
+  })).sort((a, b) => b.ended_at.localeCompare(a.ended_at));
 }
 
 // GET api/coordinator: the coordinator's state and landed_today, the jobs landed today
@@ -334,7 +354,8 @@ export function readHandlers(ctx: DashboardContext) {
   // row with its conversation, the Task file and its sha256 (the version a Save starts from), the
   // plan in plain words, the last check (null without the Task checks), the plan-check rounds of
   // every version (check_rounds, failed ones included; check_usd, the sum of the known costs;
-  // check_usd_complete, false when a cost is unknown; all-time), the history, newest first,
+  // check_usd_complete, false when a cost is unknown; check_round_list, checkRoundList's rounds,
+  // newest first; all-time), the history, newest first,
   // queue, always null, the planner session's view (null when none runs or without the planner)
   // and the ticket's prototypes (listPrototypes', [] without the prototypes folder). A ticket that
   // is not in the tickets list is an empty 404.
@@ -378,6 +399,7 @@ export function readHandlers(ctx: DashboardContext) {
       check_rounds: records.length,
       check_usd: records.reduce((total, record) => total + (record.cost_usd ?? 0), 0),
       check_usd_complete: records.every((record) => record.cost_usd !== null),
+      check_round_list: checkRoundList(records),
       history: await history.timeline(...key, { sha256: file.sha256, mtime: file.mtime }),
       queue: null,
       planner_session: plannerSession,

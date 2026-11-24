@@ -529,6 +529,14 @@ interface TicketsPayload {
   changed?: Array<{ workspace: string; ticket: string }>;
 }
 
+// One plan-check round of the ticket page: src/dashboard-reads.ts CheckRound.
+interface CheckRound {
+  ended_at: string;
+  mode: 'full' | 'follow_up';
+  verdict: 'ready' | 'not_ready' | 'failed';
+  cost_usd: number | null;
+}
+
 // The planned ticket page, api/tickets/<ws>/<ticket>/page: src/dashboard.ts ticketPage. The check is
 // null without the Task checks; the history is src/ticket-history.ts TimelineEntry, newest first.
 interface TicketPage {
@@ -539,6 +547,8 @@ interface TicketPage {
   check_rounds: number;
   check_usd: number;
   check_usd_complete: boolean;
+  // Each round, newest first.
+  check_round_list: CheckRound[];
   history: Array<{ ts: string | null; text: string }>;
   // The ticket's planner session while one runs, else null.
   planner_session: PlannerSessionView | null;
@@ -749,6 +759,18 @@ interface StatsStageRow {
   cost_usd: number | null;
   tokens: StatsClaudeTokens | StatsGateTokens | null;
 }
+// src/stats.ts TaskCheckModeRow.
+interface StatsTaskCheckModeRow {
+  mode: 'full' | 'follow_up';
+  runs: number;
+  failed: number;
+  cost_usd: number;
+  cost_complete: boolean;
+  usd_per_run: number | null;
+  started: number;
+  over_two: number;
+  over_two_share: number | null;
+}
 // src/stats.ts SecondOpinion and SecondOpinionCase.
 interface StatsSecondOpinion {
   iterations: number;
@@ -812,6 +834,8 @@ interface StatsPayload {
   roles: StatsRoleRow[];
   by_workspace: StatsWorkspaceRow[];
   stages: StatsStageRow[];
+  // Full, then follow_up.
+  task_check_modes: StatsTaskCheckModeRow[];
   second_opinion: { codex_after_claude: StatsSecondOpinion; claude_after_codex: StatsSecondOpinion };
   arms: StatsArmRow[];
   // src/stats.ts SimplifyCounts.

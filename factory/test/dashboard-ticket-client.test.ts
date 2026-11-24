@@ -260,8 +260,18 @@ test('ticket client (SF-130): a Task that needs no check: the header line and th
   assert.equal(cardOf(stale, /^Plan check/).querySelector('.tk-rounds')!.textContent, '2 rounds · at least $0.75');
   // A checked ticket: the rounds under the result.
   const checked = ticket('T-1', { check: summary({ state: 'ready', start_note: null }) });
-  const ready = await openTicketPage([checked], payload(checked, { check: VIEW({ paraphrase: 'p', verdict: 'ready', files: [], findings: [] }), check_rounds: 3, check_usd: 1.25, check_usd_complete: true }));
+  const ready = await openTicketPage([checked], payload(checked, {
+    check: VIEW({ paraphrase: 'p', verdict: 'ready', files: [], findings: [] }), check_rounds: 3, check_usd: 1.25, check_usd_complete: true,
+    check_round_list: [
+      { ended_at: '2026-11-05T12:00:00.000Z', mode: 'follow_up', verdict: 'ready', cost_usd: 0.25 },
+      { ended_at: '2026-11-04T12:00:00.000Z', mode: 'full', verdict: 'not_ready', cost_usd: 0.5 },
+      { ended_at: '2026-11-03T12:00:00.000Z', mode: 'full', verdict: 'failed', cost_usd: null },
+    ],
+  }));
   assert.equal(cardOf(ready, /^Plan check/).querySelector('.tk-rounds')!.textContent, '3 rounds · $1.25');
+  // Each round in the order given (newest first): its date, mode, verdict and cost.
+  const listed = [...cardOf(ready, /^Plan check/).querySelectorAll('.tk-round-list li')].map((item) => item.textContent!.split(' · ').slice(1).join(' · '));
+  assert.deepEqual(listed, ['follow-up · ready · $0.25', 'full · not ready · $0.50', 'full · failed · —']);
   // Not checked yet and needed: no rounds yet.
   const fresh = await openTicketPage([ticket('T-1')], payload(ticket('T-1'), { check_rounds: 0, check_usd: 0, check_usd_complete: true }));
   assert.equal(cardOf(fresh, /^Plan check/).querySelector('.tk-rounds')!.textContent, 'no rounds yet');

@@ -321,7 +321,7 @@ test('dashboard ticket page (SF-081): the page payload of a skeleton and of a wr
   await withDashboard('dash-ticket-page', fake, async (dashboard) => {
     const base = dashboard.url;
     const skeleton = JSON.parse((await fetchRaw(new URL('api/tickets/app/T-1/page', base))).body);
-    assert.deepEqual(Object.keys(skeleton), ['ticket', 'task', 'plan', 'check', 'check_rounds', 'check_usd', 'check_usd_complete', 'history', 'queue', 'planner_session', 'prototypes']);
+    assert.deepEqual(Object.keys(skeleton), ['ticket', 'task', 'plan', 'check', 'check_rounds', 'check_usd', 'check_usd_complete', 'check_round_list', 'history', 'queue', 'planner_session', 'prototypes']);
     assert.deepEqual([skeleton.ticket.ticket, skeleton.ticket.draft, skeleton.ticket.conversation.message], ['T-1', true, ticketConversation('app', 'T-1')]);
     assert.deepEqual(skeleton.task, { text: draftContent('T-1', 'Skeleton', 'main'), sha256: taskSha256(draftContent('T-1', 'Skeleton', 'main')) });
     assert.deepEqual(skeleton.plan, { starts_from: 'main', files: [], scoped: false, waits_for: [] });
@@ -692,13 +692,36 @@ test('dashboard ticket page (SF-081) through the real Setup: the history and the
     assert.deepEqual(saved.task, { text: plan, sha256: taskSha256(plan) });
     assert.deepEqual(saved.history.map((entry: { text: string }) => entry.text), ['Edited by you', 'Created by you']);
     // A checked plan: the check of this version; a save makes it stale.
+    assert.deepEqual(saved.check_round_list, []);
     await new CheckStore(env.state).write({
       workspace: 'app', ticket: 'T-1', sha256: taskSha256(plan), commit: null, status: 'checked', error: null, model: 'm', cost_usd: 0.48,
       started_at: '2099-01-01T00:00:00.000Z', ended_at: '2099-01-01T00:01:00.000Z', output: { paraphrase: 'p', verdict: 'ready', files: [], findings: [] },
+      mode: 'follow_up', follow_up_of: skeleton.task.sha256,
+    });
+    // An earlier round of the skeleton, recorded without a mode: full; Claude ready but its Codex part
+    // not ready, so not ready. A failed one, cost unknown.
+    await new CheckStore(env.state).write({
+      workspace: 'app', ticket: 'T-1', sha256: skeleton.task.sha256, commit: null, status: 'checked', error: null, model: 'm', cost_usd: 0.5,
+      started_at: '2098-12-31T00:00:00.000Z', ended_at: '2098-12-31T00:01:00.000Z', output: { paraphrase: 'p', verdict: 'ready', files: [], findings: [] },
+      codex: {
+        reason: 'r', status: 'checked', output: { paraphrase: 'p', verdict: 'not_ready', files: [], findings: [] }, error: null, model: null,
+        tokens: { input: 0, cached_input: 0, output: 0 }, started_at: '2098-12-31T00:00:00.000Z', ended_at: '2098-12-31T00:01:00.000Z',
+      },
+    });
+    await new CheckStore(env.state).write({
+      workspace: 'app', ticket: 'T-1', sha256: 'f'.repeat(64), commit: null, status: 'failed', error: 'x', model: 'm', cost_usd: null,
+      started_at: '2098-12-30T00:00:00.000Z', ended_at: '2098-12-30T00:01:00.000Z', output: null, mode: 'full',
     });
     const checked = await pageOf();
     assert.deepEqual([checked.check.check.output.verdict, checked.check.stale], ['ready', false]);
     assert.equal(checked.history[0].text, 'Checked: ready · $0.48');
+    // The rounds, newest first, each with its mode, verdict and cost.
+    assert.equal(checked.check_rounds, 3);
+    assert.deepEqual(checked.check_round_list, [
+      { ended_at: '2099-01-01T00:01:00.000Z', mode: 'follow_up', verdict: 'ready', cost_usd: 0.48 },
+      { ended_at: '2098-12-31T00:01:00.000Z', mode: 'full', verdict: 'not_ready', cost_usd: 0.5 },
+      { ended_at: '2098-12-30T00:01:00.000Z', mode: 'full', verdict: 'failed', cost_usd: null },
+    ]);
 
     // A stale sha256 (the skeleton's): refused, nothing written. An invalid file. A running job.
     assert.deepEqual(error(await act(base, 'api/tickets/app/T-1/task', { content: `${plan}More.\n`, sha256: skeleton.task.sha256 })), { status: 409, code: 'task_changed' });

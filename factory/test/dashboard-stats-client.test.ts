@@ -44,6 +44,10 @@ function payload(extra: Record<string, unknown> = {}) {
       { stage: 'codex_gate', runs: 1, failed: 0, findings: { blocker: 0, major: 1, nit: 0 }, outcomes, revised: null, fixed: 1, tickets: null, cost_usd: null, tokens: { input: 1000, cached_input: 0, output: 100 } },
       { stage: 'task_check', runs: 4, failed: 1, findings: { blocker: 0, major: 1, nit: 0 }, outcomes: null, revised: 1, fixed: 1, tickets: 2, cost_usd: 0.5, tokens: null },
     ],
+    task_check_modes: [
+      { mode: 'full', runs: 3, failed: 1, cost_usd: 0.45, cost_complete: false, usd_per_run: 0.15, started: 4, over_two: 1, over_two_share: 0.25 },
+      { mode: 'follow_up', runs: 1, failed: 0, cost_usd: 0.05, cost_complete: true, usd_per_run: 0.05, started: 0, over_two: 0, over_two_share: null },
+    ],
     second_opinion: {
       codex_after_claude: { iterations: 4, caught: 1, findings: 2, fixed: 1, cases: [{ workspace: 'app', ticket: 'T-1', dir: 'T-1', archived: false, iteration: 2, findings: 2, fixed: 1 }] },
       claude_after_codex: { iterations: 3, caught: 2, findings: 2, fixed: 0, cases: [{ workspace: 'app', ticket: 'C-1', dir: 'C-1.20261101T100000Z', archived: true, iteration: 3, findings: 1, fixed: 0 }] },
@@ -244,6 +248,12 @@ test('stats client: the stage table, the by-role table with "not recorded" and "
     ['Codex gate', '1', '0', '0', '1', '0', '1', '—', '1k in (0 cached) · 100 out', '—', '—'],
     // SF-130: (4 runs + 1 failed) / 2 tickets.
     ['Plan check', '4', '1', '0', '1', '0', '1 (Task revised)', '$0.50', 'not recorded', '$0.13', '2.5'],
+  ]);
+  // SF-317-2: the plan check by mode, with the tickets started after each and the share over 2 iterations.
+  assert.deepEqual(rowTexts(tableAfter(stages, 1)), [
+    ['Mode', 'Runs', 'Failed', 'Cost', 'Cost per run', 'Tickets started after it', 'More than 2 iterations'],
+    ['Full', '3', '1', 'at least $0.45', 'at least $0.15', '4', '1 (25%)'],
+    ['Follow-up', '1', '0', '$0.05', '$0.05', '0', '—'],
   ]);
   const spend = sectionOf(page, /^Spend$/);
   assert.deepEqual(spend.querySelectorAll('.st-tile').map((tile) => tile.textContent), ['Cost$12.50Codex gate in tokens only', 'Codex gate tokens2.1M2.1M in (1.0M cached) · 40k out']);

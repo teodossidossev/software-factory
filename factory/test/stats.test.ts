@@ -13,7 +13,7 @@ import { type EventRecord, type GateRecord, type Job, JobStore, type ReviewRecor
 import type { LedgerEntry } from '../src/ledger.js';
 import type { ReviewItem } from '../src/review.js';
 import { STATS_CACHE_MS, Stats, type StatsPayload } from '../src/stats.js';
-import { CheckStore } from '../src/task-check.js';
+import { type CheckMode, CheckStore } from '../src/task-check.js';
 import { newEnv } from './support/harness.js';
 
 process.env.TZ = 'Europe/Sofia';
@@ -62,9 +62,10 @@ async function explanation(jobs: JobStore, workspace: string, dir: string, ended
   await writeFile(join(jobs.dir(workspace, dir), 'explanation.json'), JSON.stringify(record));
 }
 
-async function check(state: string, workspace: string, ticket: string, sha: string, status: 'checked' | 'failed', started: string, severities: string[], cost: number | null = 0): Promise<void> {
+async function check(state: string, workspace: string, ticket: string, sha: string, status: 'checked' | 'failed', started: string, severities: string[], cost: number | null = 0, mode?: CheckMode): Promise<void> {
   await new CheckStore(state).write({
     workspace, ticket, sha256: sha.repeat(64).slice(0, 64), commit: null, status, error: status === 'failed' ? 'x' : null, model: 'm', cost_usd: cost, started_at: started, ended_at: started,
+    ...(mode === undefined ? {} : { mode }),
     output: status === 'failed' ? null : { paraphrase: 'P.', findings: severities.map((severity) => ({ kind: 'missing', severity, where: 'x', problem: 'SECRET-CHECK', expected: 'y' })), files: [], verdict: 'ready' },
   } as never);
 }
@@ -502,6 +503,57 @@ test('plan checks per job and per ticket (SF-130): each job row counts every rec
   // In the period: app/P-1 (two), app/P-2 (two) and web/P-1; the October one is not.
   assert.deepEqual([stage(payload, 'task_check').tickets, stage(payload, 'task_check').runs, stage(payload, 'task_check').failed], [3, 4, 1]);
   assert.deepEqual([stage(payload, 'claude_review').tickets, stage(payload, 'codex_gate').tickets], [null, null]);
+});
+
+test('plan check modes (SF-317-2): runs, failed and cost by mode, a record without mode counted as full; a ticket started in the period counts once, by its latest job, under the mode of its last check before that start (failed ones too, full without one), with the share over 2 iterations', async () => {
+  const env = await newEnv('stats-check-modes');
+  const jobs = new JobStore(env.state);
+  // The jobs start on 2026-11-05 09:00. M-1: an old full check (no mode), then a follow-up; one after the start does not decide.
+  await makeJob(jobs, 'app', 'M-1', Array.from({ length: 3 }, () => ({ ended: on('2026-11-06'), cost: 1 })));
+  await check(env.state, 'app', 'M-1', 'a', 'checked', on('2026-11-03'), [], 0.5);
+  await check(env.state, 'app', 'M-1', 'b', 'checked', on('2026-11-04'), [], 0.25, 'follow_up');
+  await check(env.state, 'app', 'M-1', 'c', 'checked', on('2026-11-06'), [], 0.25, 'full');
+  // M-2: a follow-up, then a record without mode: full.
+  await makeJob(jobs, 'app', 'M-2', [{ ended: on('2026-11-06'), cost: 1 }]);
+  await check(env.state, 'app', 'M-2', 'd', 'checked', on('2026-11-03'), [], 0.25, 'follow_up');
+  await check(env.state, 'app', 'M-2', 'e', 'checked', on('2026-11-04'), [], 0.25);
+  // M-3: a full one, then a failed follow-up (unknown cost): the failed follow-up is the last check.
+  await makeJob(jobs, 'app', 'M-3', Array.from({ length: 4 }, () => ({ ended: on('2026-11-06'), cost: 1 })));
+  await check(env.state, 'app', 'M-3', 'f', 'checked', on('2026-11-02'), [], 0.5, 'full');
+  await check(env.state, 'app', 'M-3', '1', 'failed', on('2026-11-04'), [], null, 'follow_up');
+  // M-4: never checked (another workspace's M-4 is not its ticket): full.
+  await makeJob(jobs, 'app', 'M-4', Array.from({ length: 5 }, () => ({ ended: on('2026-11-06'), cost: 1 })));
+  await check(env.state, 'web', 'M-4', '2', 'checked', on('2026-11-04'), [], 0.25, 'follow_up');
+  // M-5: started before the period, after a follow-up before it: counted nowhere.
+  await makeJob(jobs, 'app', 'M-5', Array.from({ length: 3 }, () => ({ ended: on('2026-10-21'), cost: 1 })), { created_at: on('2026-10-20') });
+  await check(env.state, 'app', 'M-5', '3', 'checked', on('2026-10-19'), [], 0.25, 'follow_up');
+  // M-6: two jobs in the period, counted once by the latest: a follow-up before the first job (5
+  // iterations, archived), a record without mode before the second (1 iteration): full, not over 2.
+  await check(env.state, 'app', 'M-6', '4', 'checked', on('2026-11-01'), [], 0.25, 'follow_up');
+  await makeJob(jobs, 'app', 'M-6', Array.from({ length: 5 }, () => ({ ended: on('2026-11-02', '18:00'), cost: 1 })), { created_at: on('2026-11-02', '09:00') });
+  await jobs.archive('app', 'M-6');
+  await check(env.state, 'app', 'M-6', '5', 'checked', on('2026-11-03'), [], 0.25);
+  await makeJob(jobs, 'app', 'M-6', [{ ended: on('2026-11-06'), cost: 1 }]);
+
+  const payload = await stats(env.state, jobs).compute({ days: 7, workspace: null });
+  assert.deepEqual(payload.task_check_modes, [
+    { mode: 'full', runs: 5, failed: 0, cost_usd: 1.75, cost_complete: true, usd_per_run: 0.35, started: 3, over_two: 1, over_two_share: 1 / 3 },
+    { mode: 'follow_up', runs: 4, failed: 1, cost_usd: 1, cost_complete: false, usd_per_run: 0.25, started: 2, over_two: 2, over_two_share: 1 },
+  ]);
+  // The modes split the stage.
+  assert.deepEqual([stage(payload, 'task_check').runs, stage(payload, 'task_check').failed], [9, 1]);
+
+  // A workspace chosen: only its checks and jobs.
+  const web = await stats(env.state, jobs).compute({ days: 7, workspace: 'web' });
+  assert.deepEqual(web.task_check_modes.map((row) => [row.mode, row.runs, row.cost_usd, row.started]), [['full', 0, 0, 0], ['follow_up', 1, 0.25, 0]]);
+
+  // No checks: both rows, empty.
+  const none = await newEnv('stats-check-modes-none');
+  const empty = await stats(none.state, new JobStore(none.state)).compute({ days: 7, workspace: null });
+  assert.deepEqual(empty.task_check_modes, [
+    { mode: 'full', runs: 0, failed: 0, cost_usd: 0, cost_complete: true, usd_per_run: null, started: 0, over_two: 0, over_two_share: null },
+    { mode: 'follow_up', runs: 0, failed: 0, cost_usd: 0, cost_complete: true, usd_per_run: null, started: 0, over_two: 0, over_two_share: null },
+  ]);
 });
 
 test('arms (SF-132): the jobs started in the period by claude_review true and false, one without it in neither; delivered, aborted, cost as the job rows sum it, per delivered, median iterations, Codex findings', async () => {

@@ -69,7 +69,7 @@ test('SF_KEEP_AWAKE: on, off, empty is on; anything else is invalid_config', () 
   assert.throws(() => keepAwakeSetting({ SF_KEEP_AWAKE: 'yes' }), { code: 'invalid_config', message: 'SF_KEEP_AWAKE must be on or off, got "yes".' });
 });
 
-test('one inhibitor while jobs run, none when none run: started with sleep:idle and the count, ended when the last job stops; each start and end is one line', async () => {
+test('one inhibitor while jobs run, none when none run: started with idle:handle-lid-switch and the count, ended when the last job stops; each start and end is one line', async () => {
   const fake = await fakeInhibit();
   let jobs: Job[] = [job('A-1', 'working'), job('A-2', 'awaiting_review'), job('A-3', 'pushed')];
   const lines: string[] = [];
@@ -79,7 +79,7 @@ test('one inhibitor while jobs run, none when none run: started with sleep:idle 
     assert.equal(keepAwake.holding, true);
     await until(async () => (await fake.starts()).length === 1, 'the inhibitor to start');
     const [first] = await fake.starts();
-    assert.equal(first!.args, '--what=sleep:idle --who=Software Factory --why=2 jobs running --mode=block sh -c read _');
+    assert.equal(first!.args, '--what=idle:handle-lid-switch --who=Software Factory --why=2 jobs running --mode=block sh -c read _');
     await until(() => lines.length === 1, 'the start line');
     assert.deepEqual(lines, ['keeping the laptop awake: 2 jobs running']);
 

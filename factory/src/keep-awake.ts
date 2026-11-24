@@ -1,10 +1,12 @@
-// The laptop stays awake while a job runs: sf serve holds a systemd sleep inhibitor
-// (systemd-inhibit --what=sleep:idle --mode=block sh -c 'read _') as its child while any job of any
-// workspace runs (runningJobs of src/jobs.ts), and ends it when none runs any more or sf serve stops.
-// One child at most. The child's stdin is a pipe from sf serve: when sf serve dies, even by SIGKILL,
-// the pipe closes, `read _` ends and the inhibitor with it. The lid switch is not inhibited: closing
-// the lid still suspends. A missing command, or a child that exits with an error by itself, is one
-// log line; nothing more is tried until sf serve restarts.
+// The laptop stays awake while a job runs: sf serve holds a systemd idle and lid-switch inhibitor
+// (systemd-inhibit --what=idle:handle-lid-switch --mode=block sh -c 'read _') as its child while any
+// job of any workspace runs (runningJobs of src/jobs.ts), and ends it when none runs any more or
+// sf serve stops. One child at most. The child's stdin is a pipe from sf serve: when sf serve dies,
+// even by SIGKILL, the pipe closes, `read _` ends and the inhibitor with it. Idle and the lid switch
+// are inhibited, sleep is not: a closed lid keeps the jobs running, and a suspend the user chooses
+// (the desktop's Suspend, systemctl suspend) still suspends. A missing command, or a child that exits
+// with an error by itself (polkit refusing the lock, say), is one log line; nothing more is tried
+// until sf serve restarts.
 import { type ChildProcess, spawn } from 'node:child_process';
 import { type Job, runningJobs } from './jobs.js';
 
@@ -25,7 +27,7 @@ export interface KeepAwakeOptions {
 const jobsRunning = (count: number): string => `${count} ${count === 1 ? 'job' : 'jobs'} running`;
 const message = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
-// sf serve's sleep inhibitor: start() once, stop() when sf serve stops.
+// sf serve's idle and lid-switch inhibitor: start() once, stop() when sf serve stops.
 export class KeepAwake {
   readonly #options: KeepAwakeOptions;
   readonly #log: (line: string) => void;
@@ -97,7 +99,7 @@ export class KeepAwake {
   // The count in --why is the one at the start: the inhibitor is not restarted when it changes.
   #begin(running: number): void {
     const why = jobsRunning(running);
-    const child = spawn(this.#options.command, ['--what=sleep:idle', '--who=Software Factory', `--why=${why}`, '--mode=block', 'sh', '-c', 'read _'], {
+    const child = spawn(this.#options.command, ['--what=idle:handle-lid-switch', '--who=Software Factory', `--why=${why}`, '--mode=block', 'sh', '-c', 'read _'], {
       // Its own group: a Ctrl+C of sf up reaches sf serve, which ends it, not the child itself.
       stdio: ['pipe', 'ignore', 'inherit'], detached: true,
     });

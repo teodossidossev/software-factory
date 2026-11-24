@@ -218,14 +218,15 @@ Recovery). The systemd unit is unchanged: the service's `sf serve` runs the tunn
 clock of a job's timers, so a run that slept looked hung for hours. With `SF_KEEP_AWAKE=on` (the
 default) `sf serve` looks at the jobs of every workspace right after it starts and then every 30 s;
 while any job runs (`starting`, `working`, `awaiting_review`, `preparing_mr`, `waiting_limit`) it
-holds one systemd inhibitor, `systemd-inhibit --what=sleep:idle --who="Software Factory"
+holds one systemd inhibitor, `systemd-inhibit --what=idle:handle-lid-switch --who="Software Factory"
 --why="<n> jobs running" --mode=block sh -c 'read _'` (`<n>`: the count at its start), as its child, and ends it when no job runs
 any more, when the jobs cannot be listed, or when `sf serve` stops. Never two. The child's stdin is a pipe from `sf serve`, so it also
 ends when `sf serve` dies (even by SIGKILL). Each start and end is one line in the service log
 (`keeping the laptop awake: 2 jobs running`, `letting the laptop sleep: no job running`). Without
 `systemd-inhibit` on the PATH, or when it exits with an error (polkit refused it, say), `sf serve`
-logs one `keep-awake: off until sf serve restarts (...)` line and tries nothing more. **Closing the
-lid still suspends**: the lid switch is not inhibited, so a closed lid stops the jobs as before.
+logs one `keep-awake: off until sf serve restarts (...)` line and tries nothing more. **A closed lid
+keeps the jobs running; a manual suspend still suspends**: idle and the lid switch are inhibited,
+sleep is not, so the desktop's Suspend and `systemctl suspend` suspend as usual.
 `SF_KEEP_AWAKE=off` holds none.
 
 `sf up` is `sf serve` in the same process, with its tunnel (`--no-tunnel` equals `SF_TUNNEL=off`),
@@ -714,7 +715,7 @@ relative one is one warning at start, and the dashboard then shows none.
 | `SF_TASK_CHECK_PARALLEL` | `1` | The automatic Task checks that run at once over every workspace, 1 to 4 (SF-086); a manual Check counts toward it but never waits. Anything else refuses to start (`invalid_config`). |
 | `SF_TASK_CHECK_CODEX` | `off` | The Codex check of a Task not written by ChatGPT's `write_task` (section Task check): `auto` runs it beside the Claude check, `off` never. Empty is the default; anything else refuses to start (`invalid_config`). |
 | `SF_HEALTH` | `on` | `sf serve`'s health checks (SF-153, section Health checks): `on` runs them every 30 s for the dashboard's light and the notifications; `off` runs none (the tests' own `sf serve`s), the light stays grey. `sf health` runs its checks whatever it says. Empty is the default; anything else refuses to start (`invalid_config`). |
-| `SF_KEEP_AWAKE` | `on` | Keeps the laptop from sleeping while a job runs (SF-158, section sf up): `on` holds a `systemd-inhibit --what=sleep:idle` child of `sf serve` while any job runs; `off` holds none (the tests' own `sf serve`s). Closing the lid still suspends. Empty is the default; anything else refuses to start (`invalid_config`). |
+| `SF_KEEP_AWAKE` | `on` | Keeps the laptop from sleeping while a job runs (SF-158, section sf up): `on` holds a `systemd-inhibit --what=idle:handle-lid-switch` child of `sf serve` while any job runs; `off` holds none (the tests' own `sf serve`s). A closed lid keeps the jobs running; a manual suspend still suspends. Empty is the default; anything else refuses to start (`invalid_config`). |
 | `SF_TUNNEL` | `auto` | The ChatGPT tunnel in `sf serve` (SF-154, section sf up): `auto` starts `scripts/sf-tunnel.sh run` as its child when a tunnel profile exists and no tunnel answers on `SF_TUNNEL_HEALTH`; `off` starts none (run `npm run tunnel` in a terminal of its own). `sf up --no-tunnel` is `off`. Empty is the default; anything else refuses to start (`invalid_config`). |
 | `SF_TUNNEL_HEALTH` | `127.0.0.1:8790` | The tunnel client's admin endpoint (`host:port`) that `sf info`, the health check `tunnel` (`/readyz`, `/metrics`) and `sf serve`'s tunnel start (`/readyz`: anything answering means a tunnel already runs) ask. |
 | `SF_RULES_MAX_BYTES` | `49152` (48 KiB) | The bytes of rule file content the agents are given at most (SF-059, section Coding rules); the headings and the fixed sentence do not count. The user's rules files are taken first, and one over the budget is cut to it (SF-093). A positive integer up to 16 MiB. |

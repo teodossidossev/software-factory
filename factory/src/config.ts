@@ -12,6 +12,9 @@ import { DEFAULT_RULES_MAX_BYTES } from './rules-docs.js';
 import { snapshotSkillFile } from './skills.js';
 import type { TaskFixSession, TaskReview } from './task-file.js';
 
+// SF_TOOL_STALL_MIN's default, in minutes (src/tool-stall.ts).
+export const DEFAULT_TOOL_STALL_MIN = 10;
+
 export interface Config {
   stateDir: string;
   checkAfterStartMin: number;
@@ -20,6 +23,10 @@ export interface Config {
   // Continuations the factory sends by itself after an Implementer turn ended at maxTurns while
   // making progress, per chain of turns (SF_TURN_LIMIT_CONTINUES); 0 turns them off.
   turnLimitContinues: number;
+  // Minutes a Bash call of the Implementer may stay open with no command process before the runner
+  // ends the turn and sends its instruction again (SF_TOOL_STALL_MIN); 0 turns the watch off. A
+  // Config without it (the tests' literals) counts as DEFAULT_TOOL_STALL_MIN.
+  toolStallMin?: number;
   maxIterations: number;
   // The bound of a quick fix's change since the hand-over (sf quickfix, src/quick-fix.ts): added plus
   // deleted lines (SF_QUICK_FIX_MAX_LINES, default 30) and files (SF_QUICK_FIX_MAX_FILES, default 2).
@@ -532,6 +539,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     checkAfterFixMin: positiveInteger(env, 'SF_CHECK_AFTER_FIX_MIN', 5),
     maxTurns: positiveInteger(env, 'SF_MAX_TURNS', 150),
     turnLimitContinues: countSetting(env, 'SF_TURN_LIMIT_CONTINUES', 1, 10),
+    toolStallMin: countSetting(env, 'SF_TOOL_STALL_MIN', DEFAULT_TOOL_STALL_MIN, 60),
     maxIterations: positiveInteger(env, 'SF_MAX_ITERATIONS', 3),
     quickFixMaxLines: positiveInteger(env, 'SF_QUICK_FIX_MAX_LINES', 30),
     quickFixMaxFiles: positiveInteger(env, 'SF_QUICK_FIX_MAX_FILES', 2),

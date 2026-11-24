@@ -13,6 +13,7 @@ import { decide, unacceptedItems } from './review.js';
 import { rolesOf } from './skill-roles.js';
 import { skillsText } from './skills.js';
 import { canonicalStop, type StopCode, type StopKind, STOPS, withoutDropped } from './stops.js';
+import { STALL_LEAD } from './tool-stall.js';
 import { CONTINUE_PROMPT } from './turn-limit.js';
 import { describeEvent, limitStateText, shortInput } from './watch.js';
 
@@ -187,6 +188,15 @@ function withoutQuickFixNote(text: string): string {
 }
 
 async function promptEntry(prompt: string, ctx: StreamContext, sent: unknown): Promise<Draft> {
+  // A turn's instruction sent again after a hung command (src/session.ts): the stalled prompt, then
+  // the stall note as its last paragraph. It shows as the factory's continuation with the note as
+  // its text, and is never one of the user's messages; checked on the whole prompt, before the rules
+  // block is cut, since the note comes after it.
+  const last = prompt.lastIndexOf('\n\n');
+  if (last >= 0 && prompt.startsWith(STALL_LEAD, last + 2)) {
+    const note = prompt.slice(last + 2);
+    return { t: 'prompt', who: 'factory', kind: 'continue', text: note, first: note.split('\n')[0]!, task_changed: false };
+  }
   const rules = prompt.indexOf(RULES_MARK);
   let text = (rules < 0 ? prompt : prompt.slice(0, rules)).replace(IMAGES_LINE, '');
   // The note of changed images is cut too; task_changed stays the Task text's.

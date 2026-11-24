@@ -10,7 +10,11 @@
 // With the sandbox on, every query's Claude Code runs inside the bwrap wrapper (session-wrapper.ts); a
 // missing bwrap, or a wrapper that fails before Claude Code answers, fails the turn with
 // sandbox_unavailable, and Claude Code is never started without it.
-import { query, type SandboxSettings, type SDKMessage, type SDKResultMessage } from '@anthropic-ai/claude-agent-sdk';
+// With toolStall, a Bash call the watch finds hung (tool-stall.ts) ends the turn; the turn's
+// instruction is sent once more with the stall note, and a second stall in the chain fails it with
+// tool_stalled.
+import { query, type SandboxSettings, type SDKMessage, type SDKResultMessage, type SpawnedProcess, type SpawnOptions } from '@anthropic-ai/claude-agent-sdk';
+import type { ChildProcess } from 'node:child_process';
 import { homedir } from 'node:os';
 import { type ImageRef, promptInput } from './attachments.js';
 import { makeSessionTmp, removeSessionTmp } from './host-tmp.js';
@@ -20,6 +24,7 @@ import { claudeConfigDir, claudeUserSettings, type PathDenials, withSandboxDenia
 import { factoryRoots, reapOrphanedSandboxes } from './sandbox-reaper.js';
 import { implementerSkills } from './skills.js';
 import { BWRAP_MISSING, prepareClaudeState, SANDBOX_UNAVAILABLE, WrappedSpawn } from './session-wrapper.js';
+import { type Stall, type StallAction, stallNote, stallStopMessage, type ToolStallOptions, ToolStallWatch } from './tool-stall.js';
 
 // Markers a running Claude Code session sets for its children; a session inheriting them acts as
 // a child and may not save its transcript.
@@ -118,6 +123,8 @@ export interface SessionOptions {
   // The skill folders the wrapper binds (src/skills.ts), asked again for each turn's wrapper; default:
   // the Implementer's chosen skills in the state directory's snapshot link (implementerSkills).
   skills?: (() => Promise<string[]>) | undefined;
+  // The watch of every turn's Bash calls (SF_TOOL_STALL_MIN); undefined turns it off.
+  toolStall?: ToolStallOptions | undefined;
 }
 
 // After a turn's result, Claude Code ends its stream unless something keeps it alive (a background
@@ -177,6 +184,8 @@ interface Queued {
   images?: ImageRef[] | undefined;
   // Continuations sent before this prompt in its chain: 0 for a prompt sent, n for the nth continuation.
   continued: number;
+  // Stalls before this prompt in its chain: 0 for a prompt sent, 1 once its instruction was resent.
+  stalls: number;
 }
 
 // One tool call of the main thread of a turn, as the model made it.
@@ -221,6 +230,9 @@ export interface SessionHooks {
   // A turn's stream stayed open the grace time after its result (waitedS: that time in seconds); the
   // session then ends Claude Code and the turn finishes with the result.
   streamStuck?(waitedS: number): Promise<void>;
+  // A Bash call of a turn hung and the session ended the turn: action resent, its instruction goes
+  // again next; stopped, the chain had its resend and the turn fails with tool_stalled.
+  toolStalled?(stall: Stall, action: StallAction): Promise<void>;
   // The queue is empty after one or more turns.
   idle(outcome: IdleOutcome): Promise<void>;
 }
@@ -237,6 +249,13 @@ class TurnError extends Error {
     message: string,
   ) {
     super(message);
+  }
+}
+
+// A turn the session ended because a Bash call of it hung.
+class StallError extends TurnError {
+  constructor(readonly stall: Stall) {
+    super('tool_stalled', stallStopMessage(stall));
   }
 }
 
@@ -329,7 +348,7 @@ export class ImplementerSession {
     if (this.#closed) {
       throw new Error('The session is closed.');
     }
-    this.#queue.push({ prompt, disallowedTools, continued: 0, ...(images !== undefined && images.length > 0 ? { images } : {}) });
+    this.#queue.push({ prompt, disallowedTools, continued: 0, stalls: 0, ...(images !== undefined && images.length > 0 ? { images } : {}) });
     if (!this.#running) {
       this.#running = true;
       this.#drained = this.#drain();
@@ -369,17 +388,7 @@ export class ImplementerSession {
         try {
           turn = await this.#turn(next);
         } catch (error) {
-          if (!(error instanceof TurnError) || error.code !== 'max_turns') {
-            throw error;
-          }
-          const continuation = await this.#continuation(next);
-          if (typeof continuation === 'string') {
-            throw new TurnError('max_turns', continuation);
-          }
-          if (continuation === undefined || this.#closed) {
-            throw error;
-          }
-          this.#queue.unshift(continuation);
+          this.#queue.unshift(await this.#again(next, error));
           continue;
         }
         denials.push(...turn.denials);
@@ -415,7 +424,42 @@ export class ImplementerSession {
     if ('stop' in answer) {
       return answer.stop;
     }
-    return turn.continued < allowed ? { prompt: answer.prompt, disallowedTools: turn.disallowedTools, continued: turn.continued + 1 } : undefined;
+    return turn.continued < allowed ? { prompt: answer.prompt, disallowedTools: turn.disallowedTools, continued: turn.continued + 1, stalls: turn.stalls } : undefined;
+  }
+
+  // The turn that runs next after a failed one: its continuation after the turn limit, or its
+  // instruction once more after a stall; throws the turn's failure when none goes on.
+  async #again(turn: Queued, error: unknown): Promise<Queued> {
+    if (error instanceof StallError) {
+      return this.#resend(turn, error);
+    }
+    if (!(error instanceof TurnError) || error.code !== 'max_turns') {
+      throw error;
+    }
+    const continuation = await this.#continuation(turn);
+    if (typeof continuation === 'string') {
+      throw new TurnError('max_turns', continuation);
+    }
+    if (continuation === undefined || this.#closed) {
+      throw error;
+    }
+    return continuation;
+  }
+
+  // After a stall: the first of its chain sends the stalled prompt again verbatim (a leading slash
+  // command still runs), its deny list and continued kept, no images, the stall note after a blank
+  // line; a later one fails the turn. The toolStalled hook is told first, either way.
+  async #resend(turn: Queued, error: StallError): Promise<Queued> {
+    // Closed meanwhile: the turn ends as closed, and no stall is recorded.
+    if (this.#closed) {
+      throw error;
+    }
+    const action: StallAction = turn.stalls === 0 ? 'resent' : 'stopped';
+    await this.#hooks.toolStalled?.(error.stall, action).catch((failure: unknown) => console.error(failure));
+    if (action === 'stopped' || this.#closed) {
+      throw error;
+    }
+    return { prompt: `${turn.prompt}\n\n${stallNote(error.stall)}`, disallowedTools: turn.disallowedTools, continued: turn.continued, stalls: turn.stalls + 1 };
   }
 
   // The Bash sandboxes the query's Claude Code left behind end once it has exited: looked
@@ -500,6 +544,15 @@ export class ImplementerSession {
     const input = await promptInput(prompt, images);
     const mode = this.permissionMode;
     const allowed = sessionAllowedTools(this.#options);
+    // The wrapper's pid, the root the stall probe reads /proc from: the wrapper's own spawner
+    // (bwrap, session-wrapper.ts) starts Claude Code, and its process is kept here.
+    let root: number | undefined;
+    const wrapped = wrapper?.spawn;
+    const spawnTracked = wrapped === undefined ? undefined : (options: SpawnOptions): SpawnedProcess => {
+      const spawned = wrapped(options);
+      root = (spawned as ChildProcess).pid;
+      return spawned;
+    };
     const turn = query({
       prompt: input.prompt,
       options: {
@@ -521,11 +574,21 @@ export class ImplementerSession {
         ...(denials?.hooks !== undefined ? { hooks: denials.hooks } : {}),
         ...(this.#options.model !== undefined ? { model: this.#options.model } : {}),
         ...(this.#options.claudePath !== undefined ? { pathToClaudeCodeExecutable: this.#options.claudePath } : {}),
-        ...(wrapper !== undefined ? { spawnClaudeCodeProcess: wrapper.spawn } : {}),
+        ...(spawnTracked !== undefined ? { spawnClaudeCodeProcess: spawnTracked } : {}),
       },
     });
     let text = '';
     let result: SDKResultMessage | undefined;
+    // A hung Bash call ends the turn as close() does; a turn already ending (closed, aborted or past
+    // its result) is never a stall.
+    let stalled: Stall | undefined;
+    const watch = this.#options.toolStall === undefined ? undefined : new ToolStallWatch(this.#options.toolStall, () => root, (stall) => {
+      if (!this.#closed && !abortController.signal.aborted && result === undefined) {
+        stalled = stall;
+        abortController.abort();
+      }
+    });
+    const stallError = (): StallError | undefined => (stalled !== undefined && result === undefined && !this.#closed ? new StallError(stalled) : undefined);
     // The safety net, started by the first result: a stream still open after the grace time is
     // stuck; the hook is told, then the process ended, and the turn finishes with its result.
     const graceMs = this.#options.streamGraceMs ?? STREAM_GRACE_MS;
@@ -540,6 +603,8 @@ export class ImplementerSession {
     };
     try {
       for await (const message of turn) {
+        // Before the hook: a tool_result closes its call while the hook still writes the message.
+        watch?.see(message);
         await this.#hooks.message(message);
         if (message.type === 'system' && message.subtype === 'init') {
           if (message.permissionMode !== mode) {
@@ -560,6 +625,11 @@ export class ImplementerSession {
       if (stuck && result !== undefined) {
         return this.#finished(text, result);
       }
+      // The watch ended a turn whose Bash call hung.
+      const hung = stallError();
+      if (hung !== undefined) {
+        throw hung;
+      }
       // A failure of the wrapper before the result fails the turn as the sandbox's; the session's own
       // refusals (TurnError) and a turn it aborted (closed) stand as they are.
       const wrapped = error instanceof TurnError || abortController.signal.aborted ? undefined : await this.#wrapperFailure(wrapper, result !== undefined);
@@ -573,6 +643,7 @@ export class ImplementerSession {
       }
       throw error;
     } finally {
+      watch?.stop();
       clearTimeout(grace);
       input.done();
       // Ends the child process when the turn stopped early (a mismatch or an error).
@@ -580,7 +651,7 @@ export class ImplementerSession {
       this.#reapAfterQuery();
     }
     if (result === undefined) {
-      throw (await this.#wrapperFailure(wrapper, false)) ?? new TurnError('session_failed', 'The Implementer ended the turn without a result.');
+      throw stallError() ?? (await this.#wrapperFailure(wrapper, false)) ?? new TurnError('session_failed', 'The Implementer ended the turn without a result.');
     }
     return this.#finished(text, result);
   }

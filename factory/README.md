@@ -699,6 +699,7 @@ relative one is one warning at start, and the dashboard then shows none.
 | `SF_CHECK_AFTER_FIX_MIN` | `5` | `check_after_minutes` in the job's status during later iterations. |
 | `SF_MAX_TURNS` | `150` | `maxTurns` of every Implementer turn. |
 | `SF_TURN_LIMIT_CONTINUES` | `1` | Continuations the factory sends by itself, per chain of Implementer turns, after a turn that reached `SF_MAX_TURNS` while making progress (SF-069, below); `0` to `10`, `0` stops at the first limit. |
+| `SF_TOOL_STALL_MIN` | `10` | Minutes a Bash call of the Implementer may stay open with no process of its command running before the runner ends the turn and sends the turn's instruction again, once per chain (SF-315, **The stalled command** in section Jobs); `0` to `60`, `0` turns the watch off. |
 | `SF_MAX_ITERATIONS` | `3` | Review rounds without progress a job may have (the job's `stalled_fixes`): a round that asks for a Fix while no fewer blocker and major ledger entries are open than after any earlier such round (the job's `least_open`), or that reopens a fixed or left entry. The round that reaches the limit has its Fix refused (`iteration_limit`, job `needs_human`): its items become open ledger entries, and the stop can be accepted whatever the last verdict (SF-131), with the open findings listed on the Merge request screen. A round that lowers the open findings does not count; the first round that asks for a Fix sets the low. An `sf say` turn does not count, nor a Tests Fix (SF-128, section MR preparation: `TEST_FIX_ROUNDS` bounds those). The job's `fixes` still counts every Fix section. A job whose Task says `important: true` is never stopped by it. |
 | `SF_QUICK_FIX_MAX_LINES` | `30` | The added plus deleted lines a quick fix's change since the hand-over may have and still skip the review round (`sf quickfix`, Quick fix below); over it, the full loop. |
 | `SF_QUICK_FIX_MAX_FILES` | `2` | The files a quick fix's change since the hand-over may touch and still skip the review round; over it, the full loop. |
@@ -2679,6 +2680,36 @@ the job's `events.jsonl` (`sf watch`: "the turn's result came but Claude Code di
 120 s …"), ends Claude Code as an aborted turn does, and the turn finishes with that result. The net
 starts at the result, never before; a `close()` meanwhile (abort, hand-over) still ends the turn
 as closed.
+
+**The stalled command** (SF-315, `src/tool-stall.ts`). A Bash call can hang with no process of its
+command left: the session then sends only `tool_progress` heartbeats, and the sandbox holds nothing
+but the proxy's `socat` bridges. The session watches every `Bash` call of a turn, main thread and
+sub-agents alike: a call is open from the assistant message holding its `tool_use` until a user
+message holds its `tool_result`, timed by the runner's clock; a heartbeat is not activity, and other
+tools are not watched (an `Agent` call may think long with no process). While a call is open the
+session checks once a minute (`STALL_CHECK_MS`). The oldest open call is stalled when it is open
+longer than `SF_TOOL_STALL_MIN` (default 10 minutes; `0` turns the watch off) and the check finds
+no command process alive, or when it is open longer than 65 minutes (`STALL_HARD_MS`,
+5 minutes past the Bash tool's 60-minute cap) whatever runs; a call whose command still runs (a
+40-minute e2e run) is left alone. The probe reads `/proc` from the pid of the turn's `bwrap`
+wrapper: Claude Code is the topmost process below it not named `bwrap`, and a command process is any
+process below Claude Code that is not a zombie and is named neither `bwrap` (its Bash sandbox) nor
+`socat`. The probe answers alive, none or unknown; unknown (no `/proc`, no wrapper with
+`SF_SANDBOX=off`, the wrapper or Claude Code gone) counts as alive, so only the 65 minutes apply. A
+stalled call ends the turn as `close()` does (the orphaned sandbox is reaped after it), the Claude
+session id kept. The first stall of a chain (a prompt sent and its turn-limit continuations) sends
+the stalled turn's prompt again verbatim, so a leading `/implement …` still runs the skill, with its
+deny list, without its images, and then, after a blank line, a one-paragraph note: "The factory
+ended your last command because it hung:" (`STALL_LEAD`), the command on one line (whitespace runs
+one space, at most 200 characters), how long it was open and why it counts as hung, and that the
+Implementer should not run it again as it was, give a long command a `timeout` and not redo
+finished work. A second stall in the same chain fails the turn with `tool_stalled`: a working job
+goes to `needs_human` (Tell it how, Tell it to go on, Abort…), and a stalled MR text or conflict
+turn ends as any failed turn of its kind. The user's message starts a new chain and a new count.
+Each stall is recorded before the resend or the stop as `{ts, iteration, type: "tool_stalled",
+tool: "Bash", command, open_s, reason: "no_process" | "past_cap", action: "resent" | "stopped"}`
+(one line in `sf watch` and in the Stream's factory note); in the Stream the resent prompt shows as
+the factory's continuation, its text the note, never as one of the user's messages.
 
 **The Implementer's wrapper** (SF-181, `src/session-wrapper.ts`). With the sandbox on, every
 `query()` of the Implementer session (its first, Fix, Tests Fix and MR text turns) passes
@@ -4866,6 +4897,7 @@ words of each row, keyed by `stop_code`:
 | `sandbox_unavailable` | error | Sandbox unavailable | Tell it to go on |
 | `publish_failed` | error | Iteration not published | Tell it to go on |
 | `mr_conflict` | error | Rebase conflict | Tell it how |
+| `tool_stalled` | error | Command hung | Tell it how |
 | `implementer_question` | decision | Question for you before any change | Answer |
 | `mr_text_missing`, `mr_text_invalid` | error | MR text missing or invalid | Tell it to fix it |
 | `mr_empty` | error | Nothing to commit | Tell it what is missing |
@@ -4905,6 +4937,7 @@ confirmation where it has one; *Tell it to go on* is a message, "Go on." when th
 | `session_failed` with the usage-limit message (before SF-072, and MR preparation), `sandbox_unavailable` | the message | Tell it to go on, Abort… |
 | `session_failed`, `turn_failed`, `permission_mode_mismatch` | the whole message | Tell it to go on, Restart…, Abort… |
 | `mr_conflict` | the conflicting files | Tell it how (Send), Abort… |
+| `tool_stalled` | the whole message (the hung command, how long it was open and why) | Tell it how (Send), Tell it to go on, Abort… |
 | `implementer_question` | the Implementer's open questions (the message) | Send, Abort… |
 | `mr_text_missing`, `mr_text_invalid` | the rule it breaks | Send, Abort… |
 | `mr_empty` | nothing | Send, Abort… |

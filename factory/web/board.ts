@@ -69,7 +69,7 @@ const mrOff = (job: JobRow): string => (job.mr_host === null || typeof job.mr_ho
 // The iteration a job shows, numbered from 1, the same on its card and on its page: the one under
 // way while the Implementer works on it (starting, working, paused in its turn, stopped by its
 // session), else the last one published; never 0.
-const SESSION_CODES: readonly string[] = ['serve_restarted', 'session_failed', 'turn_failed', 'max_turns', 'sandbox_unavailable', 'permission_mode_mismatch', 'publish_failed'];
+const SESSION_CODES: readonly string[] = ['serve_restarted', 'session_failed', 'turn_failed', 'max_turns', 'sandbox_unavailable', 'permission_mode_mismatch', 'publish_failed', 'tool_stalled'];
 function shownIteration(job: JobRow): number {
   const underWay = job.state === 'starting' || job.state === 'working' || (job.availability?.resume === '' && job.paused?.step === 'turn')
     || (job.state === 'needs_human' && SESSION_CODES.includes(job.error?.code ?? ''));
@@ -183,6 +183,10 @@ const STOPS = {
   mr_conflict: {
     reason: 'Rebase conflict', button: () => 'Tell it how',
     sentence: (job: JobRow) => `The rebase onto ${job.base} conflicts and the Implementer could not resolve it. Tell it how, or abort.`,
+  },
+  tool_stalled: {
+    reason: 'Command hung', button: () => 'Tell it how',
+    sentence: (job: JobRow) => `A command of the Implementer hung twice in iteration ${shownIteration(job)}. Tell it how to go on, or abort.`,
   },
   implementer_question: {
     reason: 'Question for you before any change', button: () => 'Answer',

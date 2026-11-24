@@ -86,6 +86,8 @@ export const STOPS = {
   sandbox_unavailable: row('error', [GO_ON, ABORT]),
   publish_failed: row('error', [GO_ON, ABORT]),
   mr_conflict: row('error', [action('say', 'Tell it how'), ABORT]),
+  // A Bash call of the Implementer hung again after the factory sent the turn's instruction once more (src/tool-stall.ts).
+  tool_stalled: row('error', [action('say', 'Tell it how'), GO_ON, ABORT]),
   // The Implementer changed nothing and its Report asks something (question-stop.ts).
   implementer_question: row('decision', [SEND, ABORT]),
   mr_text_missing: row('error', [SEND, ABORT], { aliases: ['mr_text_invalid'] }),

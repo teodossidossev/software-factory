@@ -196,6 +196,18 @@ function recordLines(record: Record<string, unknown>): string[] {
     const moved = [typeof record.branch === 'string' ? `branch ${record.branch}` : '', typeof record.base === 'string' ? `base ${record.base}` : ''].filter((part) => part !== '');
     return [`${prefix} ${line}${moved.length > 0 ? ` (${moved.join(', ')})` : ''}`];
   }
+  // A quick fix (sf quickfix): asked, then quick (no review) or full (the review round), with why.
+  if (record.type === 'quick_fix') {
+    if (record.action === 'asked') {
+      return [`${prefix} quick fix asked (from ${String(record.from)})`];
+    }
+    if (record.action === 'quick') {
+      const count = (value: unknown, one: string): string => `${String(value)} ${value === 1 ? one : `${one}s`}`;
+      return [`${prefix} quick fix: ${count(record.files, 'file')}, ${count(record.lines, 'line')} since the hand-over; no review, on to MR preparation`];
+    }
+    const reasons = Array.isArray(record.reasons) ? record.reasons.map(String).join('; ') : '';
+    return [`${prefix} quick fix goes through the full loop: ${oneLine(reasons)}`];
+  }
   // MR preparation committed nothing: the worktree changed since the reviewed iteration.
   if (record.type === 'unreviewed_change') {
     const more = typeof record.more === 'number' && record.more > 0 ? ` and ${record.more} more` : '';

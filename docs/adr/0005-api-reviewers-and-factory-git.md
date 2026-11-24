@@ -263,3 +263,23 @@ lines of the description to delete, so the text of a job prepared before this am
 cleaned on the Merge request screen and pushed.
 
 The rest of this ADR stands.
+
+## Amendment 2026-11-23 (SF-313): a quick fix is committed without a review round
+
+What changes: `sf quickfix` on a job ready for human review or handed over runs one Implementer
+turn, then MR preparation as after a clean round, with no Claude review and no Codex gate, while
+the change since the tree the user had (the hand-over's saved commit or the prepared commit, the
+user's checkout edits included) has at most `SF_QUICK_FIX_MAX_LINES` added plus deleted lines
+(default 30) in at most `SF_QUICK_FIX_MAX_FILES` files (default 2), no binary or submodule entry,
+no path the gate level's path rules name (sensitive paths, the Task's `may_touch`, security words,
+`SF_GATE_FULL_PATHS`, agents' instructions files), no path outside the Task's scope, and can be
+read. Otherwise the job falls back to the full loop by itself, with the reasons in its events.
+Read the sentences "Every published iteration is reviewed" and "including a fix asked during
+human review" with this exception. The guard's scan, the test step and the commit-tree check
+still run on every quick fix.
+
+Why: the user's decision (SF-313): small changes after the hand-over must be cheap. A one-line CSS
+fix sent with `sf say` to a handed-over job took a 20-minute turn, then a Claude review and a
+Codex gate over the whole 29-file change: over an hour, like a new ticket.
+
+The rest of this ADR stands.

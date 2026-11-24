@@ -17,7 +17,8 @@ import { answerFix, escalationMessage, headings, heldBackNote, type LedgerEntry,
 import { rebaseInProgress } from '../mr.js';
 import { checkSuggestionSend, removeSuggestion, sendShownSuggestion } from '../planner.js';
 import { buildPatch, changedFilesSection, fileChanges, notificationLine, type Patch } from '../patch.js';
-import { factoryPrompt, iterationCost, roundUsd } from '../prompts.js';
+import { factoryPrompt, iterationCost, quickFixNote, roundUsd } from '../prompts.js';
+import { quickFixBaseline, quickFixRecord, withoutQuickFix } from '../quick-fix.js';
 import { DENIED_TOOLS, type Marks, marksOf } from '../rules.js';
 import type { Workspace } from '../registry.js';
 import { copyRulesRecord, readJobRules } from '../rules-docs.js';
@@ -667,25 +668,59 @@ export class TurnsPart {
     }
   }
 
+  // sf quickfix: a user message as one turn, then MR preparation without a review round while the
+  // change stays small (src/quick-fix.ts); only on a job ready for human review or handed over.
+  quickFix(workspaceName: string, ticket: string, message: string): Promise<{ state: JobState; queued: boolean }> {
+    return this.#peers.control.request(workspaceName, ticket, { kind: 'quick_fix', message }) as Promise<{ state: JobState; queued: boolean }>;
+  }
+
+  // sf quickfix needs ready_for_human_review or handed_over, the commit the user had (the hand-over's
+  // saved commit, or the prepared commit) to measure the fix against, and what sf say needs.
+  checkQuickFix(job: Job, message: string): void {
+    if (job.state !== 'ready_for_human_review' && job.state !== 'handed_over') {
+      throw new FactoryError('invalid_state', `sf quickfix needs ready_for_human_review or handed_over; the job is ${job.state}. Use sf say.`);
+    }
+    this.checkSay(job, message);
+    quickFixBaseline(job);
+  }
+
+  // The quick fix in the runner: sayInRunner's steps with the quick fix's record and note.
+  quickFixInRunner(workspaceName: string, ticket: string, message: string): Promise<{ state: JobState; queued: boolean }> {
+    return this.#userTurn(workspaceName, ticket, message, true);
+  }
+
   // The message in the runner. A message at a limit stop starts the limits' counts again
   // (stalled_fixes and gate_stalled to 0, the gate budget from the tokens used so far; least_open
   // stays), written with the turn's transition; after iteration_limit it carries the findings the
-  // refused Fix held back (heldBackNote), which the turn's Report answers as a Fix section's.
+  // refused Fix held back (heldBackNote), which the turn's Report answers as a Fix section's. A
+  // message ends a quick fix: its record goes, and the next iteration gets a review round.
   sayInRunner(workspaceName: string, ticket: string, message: string): Promise<{ state: JobState; queued: boolean }> {
+    return this.#userTurn(workspaceName, ticket, message, false);
+  }
+
+  // The user's turn of sf say or, with quick, of sf quickfix. The quick fix's record is read on the
+  // job as the user had it, before Ask for changes and #reopen change it, and written with the turn's
+  // transition, before the turn is sent.
+  #userTurn(workspaceName: string, ticket: string, message: string, quick: boolean): Promise<{ state: JobState; queued: boolean }> {
     return this.#locks.locked(async () => {
       let job = await this.#store.job(workspaceName, ticket);
-      this.checkSay(job, message);
-      // The planner's note or the last review's comments a Send is sending go only while the job
-      // still waits for the User at the iteration the Send checked: a message that came first may
-      // have moved it on.
-      await checkSuggestionSend(this.#store.jobs, job, message);
-      await checkLastReviewSend(this.#store.jobs, job, message);
+      if (quick) {
+        this.checkQuickFix(job, message);
+      } else {
+        this.checkSay(job, message);
+        // The planner's note or the last review's comments a Send is sending go only while the job
+        // still waits for the User at the iteration the Send checked: a message that came first may
+        // have moved it on.
+        await checkSuggestionSend(this.#store.jobs, job, message);
+        await checkLastReviewSend(this.#store.jobs, job, message);
+      }
       // Read on the job as it stopped, before anything below changes it; an unreadable ledger
       // refuses the message with nothing written.
       const atLimit = job.state === 'needs_human' && LIMIT_STOPS.includes(job.error?.code ?? '');
       const note = job.state === 'needs_human' && job.error?.code === 'iteration_limit' ? heldBackNote(await this.#store.jobs.readLedger(workspaceName, ticket), job.iteration) : '';
       const restart: Pick<Job, 'stalled_fixes' | 'gate_stalled' | 'gate_budget_from'> = atLimit ? { stalled_fixes: 0, gate_stalled: 0, gate_budget_from: job.gate_tokens } : {};
       const workspace = this.#sessions.live.get(`${workspaceName}/${ticket}`)?.workspace ?? (await this.#settings.resolve(workspaceName));
+      const record = quick ? await quickFixRecord(job, workspace.workCheckout, await this.#store.jobs.readMeta(workspaceName, ticket, job.iteration)) : undefined;
       if (job.state === 'handed_over') {
         // Ask for changes: the checkout's state back into the job; by hand, so the run queue's
         // limit does not apply.
@@ -710,11 +745,20 @@ export class TurnsPart {
       // A change made while the job was paused and not handed on yet.
       const change = job.task_sha256 === undefined ? undefined : await this.#peers.control.taskChange(workspace, job);
       job = await this.#peers.start.syncTask(workspace, job);
-      if (job.state !== 'working') {
+      let text = note === '' ? message : `${message}\n\n${note}`;
+      if (record !== undefined) {
+        await this.#store.jobs.appendEvent(workspaceName, ticket, { ts: now(), iteration: job.iteration, type: 'quick_fix', action: 'asked', from: record.from });
+        // from: ready_for_human_review, handed_over (checkQuickFix)
+        job = await this.#store.transition({ ...job, quick_fix: record }, 'working', 'quick_fix');
+        text = `${message}\n\n${quickFixNote(this.#settings.config.quickFixMaxLines, this.#settings.config.quickFixMaxFiles)}`;
+      } else if (job.state !== 'working') {
         // from: awaiting_review, needs_human, ready_for_human_review, handed_over (checkSay; working changes no state)
-        job = await this.#store.transition({ ...job, ...restart }, 'working', 'say');
+        job = await this.#store.transition({ ...withoutQuickFix(job), ...restart }, 'working', 'say');
+      } else if (job.quick_fix !== undefined) {
+        job = withoutQuickFix(job);
+        await this.#store.jobs.write(job);
       }
-      session.send(factoryPrompt(this.withChange(note === '' ? message : `${message}\n\n${note}`, ticket, change), ticket, job.iteration + 1, this.imagesLine(job), job.base_commit), DENIED_TOOLS);
+      session.send(factoryPrompt(this.withChange(text, ticket, change), ticket, job.iteration + 1, this.imagesLine(job), job.base_commit), DENIED_TOOLS);
       return { state: job.state, queued };
     });
   }

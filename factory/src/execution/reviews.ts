@@ -32,6 +32,7 @@ import { LEDGER_ACCEPT_CODES } from './errors.js';
 import { testsEvent } from './events.js';
 import { LastReviewStep } from './last-review-step.js';
 import { markedGroups } from './prompts.js';
+import { QuickFixStep } from './quick-fix-step.js';
 import { exists, type FixOptions, type RunningReview } from './shared.js';
 
 // The stops whose settlement moves the job on by itself once nothing is left to settle
@@ -89,6 +90,8 @@ export class ReviewsPart {
   readonly #peers: ReviewsPeers;
   // The last review after a clean round, beside MR preparation.
   readonly #lastReview: LastReviewStep;
+  // The decision of a quick fix, before any round.
+  readonly #quickFix: QuickFixStep;
 
   constructor(store: JobStorePort, locks: LockPort, sessions: LivePort, runner: RunnerPort, settings: SettingsPort, stop: StopPort, peers: ReviewsPeers) {
     this.#store = store;
@@ -99,6 +102,10 @@ export class ReviewsPart {
     this.#stop = stop;
     this.#peers = peers;
     this.#lastReview = new LastReviewStep({ store, locks, sessions, runner, settings, stop });
+    this.#quickFix = new QuickFixStep({
+      store, settings, mayTouch: (job) => this.#mayTouch(job),
+      prepare: (job, accepted) => this.applying(job, async () => void (await peers.mr.prepareMr(job, accepted))),
+    });
   }
 
   // The job's images as prompt images: the job's own copy, with the alt texts of the Task
@@ -115,10 +122,16 @@ export class ReviewsPart {
   // the gate budget gets no gate. A review still running for the job is cancelled. Nothing with
   // SF_REVIEW=off. Every caller (the publish, the go-on after a settlement, the end of a conflict
   // turn, the retry, the pick-up of a runner) goes through here. Only under the lock.
-  async startReview(job: Job): Promise<void> {
+  // A job with quick_fix meets the quick fix's decision first, whatever SF_REVIEW says
+  // (QuickFixStep): quick goes on to MR preparation with no round; full goes on below.
+  async startReview(given: Job): Promise<void> {
     this.#runner.runnerJob();
     const { config } = this.#settings;
-    if (!config.review || this.#stop.isStopping()) {
+    if (this.#stop.isStopping()) {
+      return;
+    }
+    const job = given.quick_fix === undefined ? given : await this.#quickFix.decide(given);
+    if (job === undefined || !config.review) {
       return;
     }
     const { workspace, ticket, iteration } = job;
@@ -530,10 +543,11 @@ export class ReviewsPart {
   }
 
   // The undeclared sensitive paths and the paths outside the Task's scope of the job's
-  // last iteration not in accepted, nor accepted by the user as a risk, as fix items.
+  // last iteration not in accepted, nor accepted by the user as a risk, nor, while a quick fix
+  // runs, accepted before it (quick_fix.accepted), as fix items.
   async unaccepted(job: Job, accepted: string[]): Promise<ReviewItem[]> {
     const byUser = await this.#markedAcceptedByUser(job);
-    return unacceptedItems((await this.#peers.status.lastFiles(job)) ?? [], [...accepted, ...byUser]);
+    return unacceptedItems((await this.#peers.status.lastFiles(job)) ?? [], [...accepted, ...byUser, ...(job.quick_fix?.accepted ?? [])]);
   }
 
   // The marked paths (undeclared sensitive, outside the Task's scope) whose ledger entry the user

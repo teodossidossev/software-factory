@@ -72,6 +72,8 @@ export interface ControlStart {
 export interface ControlTurns {
   checkFix(job: Job): void;
   checkSay(job: Job, message: string): void;
+  checkQuickFix(job: Job, message: string): void;
+  quickFixInRunner(workspaceName: string, ticket: string, message: string): Promise<{ state: JobState; queued: boolean }>;
   fix(current: Job, content: string, options?: FixOptions): Promise<{ iteration: number; check_after_minutes: number }>;
   imagesLine(job: Job): { dir: string; names: string[] } | undefined;
   sayInRunner(workspaceName: string, ticket: string, message: string): Promise<{ state: JobState; queued: boolean }>;
@@ -591,6 +593,9 @@ export class ControlPart {
       case 'say':
         this.#peers.turns.checkSay(job, request.message);
         break;
+      case 'quick_fix':
+        this.#peers.turns.checkQuickFix(job, request.message);
+        break;
       case 'fix':
         this.#peers.turns.checkFix(job);
         break;
@@ -636,6 +641,8 @@ export class ControlPart {
         });
       case 'say':
         return this.#peers.turns.sayInRunner(workspace, ticket, request.message);
+      case 'quick_fix':
+        return this.#peers.turns.quickFixInRunner(workspace, ticket, request.message);
       case 'fix':
         return this.#locks.locked(async () => this.#peers.turns.fix(await this.#store.job(workspace, ticket), request.content));
       case 'clean':

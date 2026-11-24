@@ -17,6 +17,7 @@ import { GATE_LEVELS, type GateLevel } from './gate-level.js';
 import type { LastReviewRecord, SkillCopy } from './last-review.js';
 import { type LedgerEntry, ledgerSchema } from './ledger.js';
 import type { ReviewItem, ReviewMethod } from './review.js';
+import { quickFixSchema } from './quick-fix.js';
 import type { Suggestion } from './simplify.js';
 import type { TestsOutcome, TestsRecord } from './test-command.js';
 
@@ -64,9 +65,7 @@ export const statesWith = (trait: Trait): readonly JobState[] => JOB_STATES.filt
 export const ACTIVE_STATES = statesWith('active');
 export const RUNNING_STATES = statesWith('running');
 // The running jobs of every workspace (RUNNING_STATES): what the run queue's limit counts.
-export function runningJobs(jobs: Job[]): Job[] {
-  return jobs.filter((job) => RUNNING_STATES.includes(job.state));
-}
+export const runningJobs = (jobs: Job[]): Job[] => jobs.filter((job) => RUNNING_STATES.includes(job.state));
 export const TERMINAL_STATES = statesWith('terminal');
 // A tuple for z.enum (paused.from); it equals statesWith('pausable'). PAUSE_STEPS: what was interrupted when the job was
 // paused: the Implementer's turn, or a round of the Claude review, the gate or the simplification pass (none when nothing
@@ -87,7 +86,7 @@ export const JOB_ACTIONS = [
   // tests: the end of the run of the workspace's test command, a Tests Fix or a stop. mr_retry: the Retry's own stop when MR
   // preparation fails again before it began (retryMr). move: the move of a part onto its base, and its stop.
   'tests', 'mr_retry', 'ready', 'move', 'hand_over', 'take_back', 'push', 'pushed_by_user', 'marked_done', 'abort', 'pause', 'resume', 'park',
-  'limit_reset', 'fix', 'say', 'ask_for_changes',
+  'limit_reset', 'fix', 'say', 'ask_for_changes', 'quick_fix',
 ] as const;
 export type JobAction = (typeof JOB_ACTIONS)[number];
 
@@ -148,15 +147,14 @@ export const JOB_TRANSITIONS: readonly JobTransition[] = Object.freeze([
   ...rows('fix', ['awaiting_review', 'needs_human', 'ready_for_human_review'], ['working', 'needs_human']),
   ...rows('say', ['awaiting_review', 'needs_human', 'ready_for_human_review', 'handed_over'], ['working']),
   ...rows('ask_for_changes', ['handed_over'], ['needs_human']),
+  ...rows('quick_fix', ['ready_for_human_review', 'handed_over'], ['working']), // sf quickfix (src/quick-fix.ts)
 ].map((row) => Object.freeze(row)));
 
 // Every refusal of checkTransition in this process; nothing clears it.
 const refusals: JobTransition[] = [];
 
 // The refusals of checkTransition in this process so far, oldest first.
-export function refusedTransitions(): JobTransition[] {
-  return refusals.map((row) => ({ ...row }));
-}
+export const refusedTransitions = (): JobTransition[] => refusals.map((row) => ({ ...row }));
 
 // Refuses (illegal_transition) a state change that is not a row of JOB_TRANSITIONS, a bug of the
 // factory: the refusal is recorded and written to stderr as one line, so a test sees it even where
@@ -311,6 +309,8 @@ const jobSchema = z.strictObject({
   handover: handoverSchema.optional(),
   // Why the automatic hand-over did not happen; absent once the job leaves ready_for_human_review.
   handoff_skipped: z.strictObject({ code: z.string(), message: z.string() }).optional(),
+  // While a quick fix runs (sf quickfix, src/quick-fix.ts): where it came from, its baseline tree, the paths accepted before it.
+  quick_fix: quickFixSchema.optional(),
   // The merge request the factory opened on the Git host, from pushed on; null before.
   mr: z.strictObject({
     host: z.enum(['github', 'gitlab']),
@@ -552,6 +552,7 @@ export type EventRecord = { ts: string; iteration: number } & (
   | { type: 'tests'; run: string; command: string; outcome: TestsOutcome; exit_code: number | null; timed_out: boolean; duration_ms: number; reason?: string; tail: string; tail_truncated?: true }
   // skills: what a job uses, once at its start (src/skills.ts); skill_missing: the Implementer's session listed no such skill (its slash command reached the model as plain text).
   | import('./skills.js').SkillsEvent | { type: 'skill_missing'; skill: string }
+  | import('./quick-fix.js').QuickFixEvent // a quick fix asked, then quick (no review) or full (the review round)
   // The merge check before sf mr merge (src/merge-check.ts): its last base commit (null: none), how it ended.
   | { type: 'merge_checked'; base_commit: string | null; outcome: 'passed' | 'failed' | 'conflict' | 'timed_out' | 'aborted'; duration_ms: number }
   // Landed on the target, then archived; how (absent: base): the pass found commit on the target, the host said merge request mr merged, or the user's Merged — archive.
@@ -606,13 +607,9 @@ export function cutEvent(value: unknown): { value: unknown; truncated: boolean }
 
 // Whether the Claude review runs on the job: its claude_review, true when absent (a job.json
 // written without it). False: the Codex gate is the review, and its last gate.json decides.
-export function claudeReviews(job: Pick<Job, 'claude_review'>): boolean {
-  return job.claude_review !== false;
-}
+export const claudeReviews = (job: Pick<Job, 'claude_review'>): boolean => job.claude_review !== false;
 
-export function isActive(job: Job): boolean {
-  return ACTIVE_STATES.includes(job.state);
-}
+export const isActive = (job: Job): boolean => ACTIVE_STATES.includes(job.state);
 
 export function now(): string {
   return new Date().toISOString();

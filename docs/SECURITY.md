@@ -105,6 +105,15 @@ refused), and the factory's test command passed in a sandbox without network on 
   committed: the worktree as it is goes back to review as a new iteration, whose Report names the
   changed paths. The comparison is of the commit before its rebase; a rebase conflict's
   resolution goes back to review as before.
+- **A quick fix is committed unreviewed only when it is small and away from sensitive paths.**
+  `sf quickfix` on a job ready for review or handed over runs one turn, then MR preparation with no
+  review round, only while the change since the tree you had (your checkout's edits included) has
+  at most `SF_QUICK_FIX_MAX_LINES` added plus deleted lines (30) in at most
+  `SF_QUICK_FIX_MAX_FILES` files (2), no binary or submodule entry, no path the gate level's path
+  rules name (sensitive paths, the Task's `may_touch`, security words, `SF_GATE_FULL_PATHS`,
+  agents' instructions files) and no path outside the Task's scope, and can be read. Otherwise the
+  job goes through the full review loop by itself and says why. The guard's scan, the test step
+  and the commit-tree check still run on every quick fix.
 - **The Codex gate runs in a read-denying wrapper.** It sees no secrets and no other jobs. Secrets
   in its findings are masked. The wrapper refuses new Unix sockets, so the gate cannot reach your
   X server, session bus or other local services through one.
@@ -258,6 +267,9 @@ refused), and the factory's test command passed in a sandbox without network on 
 
 ## Open
 
+- **A quick fix's lines reach the merge request read by no reviewer but you.** Within its bound
+  and away from the sensitive paths, no Claude review and no Codex gate read them. The bound is per
+  quick fix, measured from the change you last had: several quick fixes in a row add up.
 - **A pin from another page holds that page's text and address:** the coordinator reads them as
   data, not instructions, and a note typed next to the pin is typed into that page, whose scripts
   can read it.

@@ -73,6 +73,7 @@ bin/sf queue release              # needs sf serve; a job parked on a usage limi
 bin/sf queue on-limit resume-then-queue|resume-only|wait  # what the queue does when a usage limit resets (section Usage limit); needs sf serve
 bin/sf queue force <workspace> <ticket>        # Start anyway: the queued ticket starts whatever its Task check says; needs sf serve
 bin/sf say <workspace> <ticket> <message...>   # a user message into the session; on a handed-over job it is Ask for changes (section Hand-over to your checkout); needs sf serve
+bin/sf quickfix <workspace> <ticket> <message...>  # a quick fix of a job ready for review or handed over: one turn, then MR preparation without a review round while the change stays small and away from sensitive paths, else the full loop (Quick fix, below); needs sf serve
 bin/sf review <workspace> <ticket>             # retry a failed Claude review (needs_human with review_failed); needs sf serve
 bin/sf retry <workspace> <ticket>              # retry a transient MR preparation failure (fetch_failed, mr_serve_restarted, mr_interrupted, mr_commit_failed, mr_rebase_failed, mr_failed) or a stop of the guard (guard_hit, guard_terms_invalid, guard_failed), a test command that could not run (tests_unavailable) or a part whose `builds_on` ticket has no prepared commit (builds_on_not_ready) without a new review; on mr_push_failed: push again; needs sf serve
 bin/sf accept <workspace> <ticket>             # accept the last iteration over a stopped gate (gate_rounds, gate_budget, gate_failed) or a ledger stop (review_churn, review_disputed), with a clean Claude review or none on the job, or at the Fix round limit (iteration_limit) whatever the last verdict, and prepare the MR; or skip the simplification pass's suggestions (simplify_offered); needs sf serve
@@ -699,6 +700,8 @@ relative one is one warning at start, and the dashboard then shows none.
 | `SF_MAX_TURNS` | `150` | `maxTurns` of every Implementer turn. |
 | `SF_TURN_LIMIT_CONTINUES` | `1` | Continuations the factory sends by itself, per chain of Implementer turns, after a turn that reached `SF_MAX_TURNS` while making progress (SF-069, below); `0` to `10`, `0` stops at the first limit. |
 | `SF_MAX_ITERATIONS` | `3` | Review rounds without progress a job may have (the job's `stalled_fixes`): a round that asks for a Fix while no fewer blocker and major ledger entries are open than after any earlier such round (the job's `least_open`), or that reopens a fixed or left entry. The round that reaches the limit has its Fix refused (`iteration_limit`, job `needs_human`): its items become open ledger entries, and the stop can be accepted whatever the last verdict (SF-131), with the open findings listed on the Merge request screen. A round that lowers the open findings does not count; the first round that asks for a Fix sets the low. An `sf say` turn does not count, nor a Tests Fix (SF-128, section MR preparation: `TEST_FIX_ROUNDS` bounds those). The job's `fixes` still counts every Fix section. A job whose Task says `important: true` is never stopped by it. |
+| `SF_QUICK_FIX_MAX_LINES` | `30` | The added plus deleted lines a quick fix's change since the hand-over may have and still skip the review round (`sf quickfix`, Quick fix below); over it, the full loop. |
+| `SF_QUICK_FIX_MAX_FILES` | `2` | The files a quick fix's change since the hand-over may touch and still skip the review round; over it, the full loop. |
 | `SF_CLAUDE` | bundled binary | Absolute path of the Claude Code executable (`pathToClaudeCodeExecutable`). |
 | `SF_MODEL` | unset | Model of every Implementer turn, passed as is as the `model` option of `query()`; unset uses the user's Claude Code default. |
 | `SF_REVIEW` | on | `off` runs no Claude review (nor the gate): a published iteration stays in `awaiting_review` until the user goes on with `sf say` or aborts. |
@@ -1104,7 +1107,7 @@ a new `sf serve` and an old runner.
 ## State format version
 
 The state directory holds `state-version` (SF-101, `src/state-version.ts`), a whole number: the
-format of the state files the factory last wrote. This release writes `7`. `sf serve` and every
+format of the state files the factory last wrote. This release writes `10`. `sf serve` and every
 runner (`sf run`) read it at start: a missing file gets the current version; an equal one goes on;
 a lower one runs the migrations from it to the current one in order (`MIGRATIONS`), then
 writes the new number; a higher one refuses to start with `state_too_new` ("the state
@@ -1128,6 +1131,8 @@ nothing, since the page still reads a record of plain strings without `in_progre
 nothing. Version 6 (SF-291): `job.json` may hold `stalled_fixes`, `least_open`, `gate_stalled`,
 `gate_budget_from` and `important`; its migration from 5 changes nothing. Version 7 (SF-264): a
 pin in `pins.json` may hold `url` (a pin of another page); its migration from 6 changes nothing.
+Version 10 (SF-313): `job.json` may hold `quick_fix` (a quick fix under way); its migration from 9
+changes nothing.
 
 A new file or event that no older factory reads, and that changes the meaning of nothing it does
 read, is not a change of the format. So SF-128 kept `STATE_VERSION` at 1: its `tests-<N>.json`
@@ -2445,6 +2450,58 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   `ready_for_human_review`, where it reopens the worktree like the fix path); outside `working`
   the job goes back to `working` and publishes a new iteration at the end. At a limit stop it also
   starts the limits' counts again (above).
+- **Quick fix** (SF-313, `sf quickfix <workspace> <ticket> <message...>`, `src/quick-fix.ts`,
+  `src/execution/quick-fix-step.ts`). A small fix to a change waiting for the user is one
+  Implementer turn, then MR preparation as after a clean round, without a review round.
+  - *Where.* Only `ready_for_human_review` and `handed_over`; in any other state `invalid_state`
+    "sf quickfix needs ready_for_human_review or handed_over; the job is <state>. Use sf say.", and
+    an empty message is `invalid_content` as for `sf say`. On `handed_over` it is Ask for changes
+    first, as `sf say` is.
+  - *The baseline* is the tree the user had: the hand-over's saved commit (`handover.saved`) on
+    `handed_over`, the prepared commit on `ready_for_human_review`; without one,
+    `quick_fix_unavailable` "The job has no prepared commit to measure a quick fix against. Use sf
+    say." Your checkout's edits count toward the bound: they are unreviewed too.
+  - *The record.* `job.json` gets `quick_fix: {from, tree, accepted}`: the state it came from, the
+    baseline's tree, and the paths of the last iteration's `meta.json` files with a mark (sensitive,
+    or outside the scope), which passed MR preparation's `sensitive_unacknowledged` check then;
+    all read from the job before Ask for changes, and written with the turn's state change (action
+    `quick_fix`, to `working`) before the turn. It is removed at the fallback, at the ready step
+    (either outcome) and by any `sf say`.
+  - *The turn* gets the message, then a note (`quickFixNote`, `src/prompts.ts`): only this change;
+    the bound and the paths that send it to the full loop; the lint, type check and unit tests of
+    the touched files, not the whole suite. The Stream and the user's messages show your words
+    alone. The turn publishes an iteration as any turn: no Fix section, `fixes` unchanged, no
+    count toward `SF_MAX_ITERATIONS`.
+  - *The decision* runs first in the review round's start for a job with `quick_fix` (the quick
+    fix's turn, a Tests Fix in the lane, an unreviewed change at the MR text turn and the runner's
+    pick-up all pass it), before `SF_REVIEW` (with `SF_REVIEW=off` a quick one goes on to MR
+    preparation, a full one waits in `awaiting_review`), not while the runner stops. The change is
+    `git diff --numstat --no-renames` from the baseline to the new iteration's `commit_tree`. It is
+    quick with at most `SF_QUICK_FIX_MAX_LINES` added plus deleted lines (default 30) and at most
+    `SF_QUICK_FIX_MAX_FILES` files (default 2), and none of: a binary or submodule entry; a path
+    the gate level's path rules name (`pathRiskReasons`: sensitive, `may_touch`, security words,
+    `SF_GATE_FULL_PATHS`, agents' files), applied to the change's paths only; a path the new
+    iteration marks outside the Task's scope; a change or a Task file that cannot be read. Reasons:
+    `size: 31 lines`, `size: 3 files`, `binary: <path>`, `submodule: <path>`, the gate level's
+    (`sensitive: package.json`), `scope: <path>`, `unknown: <message>`.
+  - *Quick:* the event, then MR preparation with `quick_fix.accepted` (also accepted by the
+    `sensitive_unacknowledged` check while the quick fix runs): the guard's scan, the test step,
+    the MR text turn, the commit-tree check, the rebase and the ready step. No Claude review, gate,
+    gate level record, simplification pass or last review. *Full:* the event with its reasons,
+    `quick_fix` removed, and the round runs as for any iteration.
+  - *The MR text turn* is given the job's MR text, to write back as it is but where the fix makes
+    it wrong.
+  - *The way back.* From `handed_over` the ready step hands over again whatever the workspace's
+    `handoff` and `handoff_sensitive` say (you had this change in your checkout; the fix added no
+    sensitive path); a refused hand-over is `ready_for_human_review` with `handoff_skipped`. From
+    `ready_for_human_review` it decides as for any job.
+  - *A stop inside the lane* (the test step, the guard, MR preparation) goes on only by `sf say`,
+    through the full loop: `sf accept` and `sf retry` need a clean review of the last iteration and
+    refuse as they do without one.
+  - *The event* `{type: "quick_fix", action: "asked" | "quick" | "full", from?, files?, lines?,
+    reasons?}`, shown by `sf watch` and in the Stream as `quick fix asked (from handed_over)`,
+    `quick fix: 1 file, 3 lines since the hand-over; no review, on to MR preparation` and
+    `quick fix goes through the full loop: size: 31 lines; sensitive: package.json`.
 - **The turn limit** (SF-069, `src/turn-limit.ts`). An Implementer turn that reaches `SF_MAX_TURNS`
   (the SDK's `error_max_turns`) goes on by itself when it made progress: the worktree changed
   during the turn (its changed paths or the hash of its whole Patch, binary content included and
@@ -3072,6 +3129,7 @@ any other is refused with `illegal_transition`.
 | `waiting_limit` | `aborted` | `abort` |
 | `ready_for_human_review` | `working` | `fix` |
 | `ready_for_human_review` | `working` | `say` |
+| `ready_for_human_review` | `working` | `quick_fix` |
 | `ready_for_human_review` | `needs_human` | `repair_handover` |
 | `ready_for_human_review` | `needs_human` | `hand_over` |
 | `ready_for_human_review` | `needs_human` | `push` |
@@ -3082,6 +3140,7 @@ any other is refused with `illegal_transition`.
 | `ready_for_human_review` | `pushed` | `push` |
 | `ready_for_human_review` | `aborted` | `abort` |
 | `handed_over` | `working` | `say` |
+| `handed_over` | `working` | `quick_fix` |
 | `handed_over` | `needs_human` | `repair_handover` |
 | `handed_over` | `needs_human` | `ask_for_changes` |
 | `handed_over` | `ready_for_human_review` | `take_back` |
@@ -4389,8 +4448,8 @@ State layout under `${SF_STATE_DIR}`:
 ```
 sf.sock                                  # 0600, while sf serve runs; one JSON request/response per connection
 dashboard-token                          # 0600, the dashboard token of the last sf serve start
-jobs/<workspace>/<ticket>/job.json       # workspace, ticket, branch, base, base_commit, target_commit, worktree, prepared_commit, mr_attempts, mr_conflict_turn (SF-087: the MR preparation in progress ran a conflict turn; no Retry then), state, iteration, fixes, gate_fixes, gate_tokens, stalled_fixes, least_open, gate_stalled and gate_budget_from (the limits' counts; absent means none), important (absent: not important), simplify_iteration (SF-055, absent until the simplification pass starts), session_id, created_at, updated_at, error, mr ({host, number, url, state, merge_commit?} or null)
-jobs/<workspace>/<ticket>/events.jsonl   # {ts, iteration, message | prompt | state | type: "notify_failed" | "review" | "review_failed" | "review_message" | "gate_event" | "gate_overridden" | "gate_level" | "simplify" | "simplify_chosen" | "merge_request" | "mr_edited" | ...}; what sf watch reads
+jobs/<workspace>/<ticket>/job.json       # workspace, ticket, branch, base, base_commit, target_commit, worktree, prepared_commit, mr_attempts, mr_conflict_turn (SF-087: the MR preparation in progress ran a conflict turn; no Retry then), state, iteration, fixes, gate_fixes, gate_tokens, stalled_fixes, least_open, gate_stalled and gate_budget_from (the limits' counts; absent means none), important (absent: not important), simplify_iteration (SF-055, absent until the simplification pass starts), quick_fix ({from, tree, accepted} while a quick fix runs, absent otherwise), session_id, created_at, updated_at, error, mr ({host, number, url, state, merge_commit?} or null)
+jobs/<workspace>/<ticket>/events.jsonl   # {ts, iteration, message | prompt | state | type: "notify_failed" | "review" | "review_failed" | "review_message" | "gate_event" | "gate_overridden" | "gate_level" | "simplify" | "simplify_chosen" | "merge_request" | "mr_edited" | "quick_fix" | ...}; what sf watch reads
 jobs/<workspace>/<ticket>/iterations/NNN/{report.md,patch.diff,meta.json,review.json,gate.json,gate-level.json,gate-override.json,simplify.json,last-review.json,last-review-choices.json,gate-schema.json,gate-output.json,conflict-resolution.diff}
 jobs/<workspace>/<ticket>/ledger.json    # the findings ledger (SF-052): one entry per review item of a Fix section, from the first one on
 jobs/<workspace>/<ticket>/last-review-skill/, last-review-skill.json   # the job's copy of the last review's skill folder and what it is ({path, sha256, files}), from its first last review (SF-309)

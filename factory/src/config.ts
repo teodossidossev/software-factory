@@ -21,6 +21,10 @@ export interface Config {
   // making progress, per chain of turns (SF_TURN_LIMIT_CONTINUES); 0 turns them off.
   turnLimitContinues: number;
   maxIterations: number;
+  // The bound of a quick fix's change since the hand-over (sf quickfix, src/quick-fix.ts): added plus
+  // deleted lines (SF_QUICK_FIX_MAX_LINES, default 30) and files (SF_QUICK_FIX_MAX_FILES, default 2).
+  quickFixMaxLines: number;
+  quickFixMaxFiles: number;
   // Claude Code executable for the Implementer; undefined uses the SDK's bundled binary.
   claudePath: string | undefined;
   // Claude Code's sandbox for every Implementer turn; undefined with SF_SANDBOX=off.
@@ -529,6 +533,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     maxTurns: positiveInteger(env, 'SF_MAX_TURNS', 150),
     turnLimitContinues: countSetting(env, 'SF_TURN_LIMIT_CONTINUES', 1, 10),
     maxIterations: positiveInteger(env, 'SF_MAX_ITERATIONS', 3),
+    quickFixMaxLines: positiveInteger(env, 'SF_QUICK_FIX_MAX_LINES', 30),
+    quickFixMaxFiles: positiveInteger(env, 'SF_QUICK_FIX_MAX_FILES', 2),
     claudePath,
     sandbox: sandboxSettings(env),
     model: env.SF_MODEL || undefined,

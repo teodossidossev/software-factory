@@ -56,6 +56,7 @@ It is read when the job is ready, so a change applies to running jobs too.
 | let the factory push | **Approve…** | `sf approve my-app APP-12` | Without a commit of yours, the factory pushes its own commit and moves your branch to it ("Pushed the factory's commit …"); your uncommitted edits stay local and are not pushed. With your own commits on top of the base, it pushes the branch as it is ("Pushed your commit …"). |
 | have the factory push and open the MR | **Create merge request** | `sf mr create my-app APP-12` | The push, then the merge request on GitHub or GitLab (below). |
 | ask the Implementer for changes | **Ask for changes** (the composer's Send) | `sf say my-app APP-12 "<message>"` | Your edits go back into the job (below), and a new turn starts. |
+| have a small fix made quickly | (none yet) | `sf quickfix my-app APP-12 "<message>"` | Ask for changes, one turn, then MR preparation with no review round while the change stays small; the job comes back to your checkout (Quick fix, below). |
 | give the job back to the factory | **Take it back** | `sf takeback my-app APP-12` | Your checkout returns to the branch it was on, the job goes back to `ready_for_human_review` with its worktree. Only while your checkout is as the factory left it (`takeback_changed` otherwise). |
 | drop it | **Abort…** | `sf abort my-app APP-12` | The job ends; your checkout and the branch stay as they are (`--discard` is refused here). |
 
@@ -68,6 +69,29 @@ edits and commits, new files; not your own untracked files from before), saves i
 hand-over, and continues the job from the snapshot: your edits are uncommitted changes in the job's
 worktree, and the Implementer gets your message. The change goes through review and Clean again, and
 the next ready hands it over again.
+
+### Quick fix
+
+A small fix to a change you are reviewing (a CSS line, a typo) need not cost a review round:
+`sf quickfix my-app APP-12 "<message>"` on a job in `ready_for_human_review` or `handed_over`
+(refused in any other state: use `sf say`). On a handed-over job it is Ask for changes first. The
+Implementer gets your message and is told to make only that change and to run only the fast checks
+of the files it touches. When the turn ends, the factory measures the change since the tree you
+had (your checkout's edits count too):
+
+- **Quick** when it has at most `SF_QUICK_FIX_MAX_LINES` added plus deleted lines (30) in at most
+  `SF_QUICK_FIX_MAX_FILES` files (2), no binary file or submodule, and no sensitive, security,
+  `may_touch`, `SF_GATE_FULL_PATHS`, agents' instructions or out-of-scope path. The job goes
+  straight to MR preparation: the guard's scan, the test step, the MR text turn (given the MR text
+  to keep, changing only what the fix makes wrong), the tree check, the rebase. No Claude review,
+  no Codex gate. A job that came from your checkout is handed over again, whatever the hand-over
+  setting says; one that was `ready_for_human_review` is ready again as usual.
+- **Full** otherwise: the job says why (`quick fix goes through the full loop: size: 31 lines`)
+  and the change goes through review and Clean as any iteration.
+
+A stop inside a quick fix (failing tests after their fixes, the guard, MR preparation) goes on
+with `sf say`, which ends the quick fix: the next iteration is reviewed. `sf accept` and `sf retry`
+refuse there, as on any iteration without a clean review.
 
 ## 2. Pushing and opening the merge request from the factory
 

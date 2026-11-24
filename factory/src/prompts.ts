@@ -99,6 +99,24 @@ export interface MrPromptInput {
   previousError?: string | undefined;
   // The loaded Handbook text; its Git rules and MR template are sent verbatim.
   handbook: string;
+  // A quick fix's MR preparation: the job's MR text, to write back as it is but where the fix
+  // makes it wrong; null when it could not be read; undefined otherwise, and when the job has none.
+  mrText?: string | null | undefined;
+}
+
+// The note after the user's message in a quick fix's turn (sf quickfix): the fix stays small and
+// away from the paths that send it to the full loop, and only fast checks run. Its first line
+// (QUICK_FIX_LEAD) and its last (QUICK_FIX_END) are fixed: the Stream cuts the note
+// (src/job-stream.ts) and shows the user's words alone.
+export const QUICK_FIX_LEAD = 'This is a quick fix of the change the user has for review: make only the change asked above.';
+export const QUICK_FIX_END = 'Report those checks in ## Checks, each with its result.';
+export function quickFixNote(maxLines: number, maxFiles: number): string {
+  return [
+    QUICK_FIX_LEAD,
+    `It goes to MR preparation without a review round only while the change since the hand-over has at most ${maxLines} added plus deleted lines in at most ${maxFiles} ${maxFiles === 1 ? 'file' : 'files'}, no binary file or submodule, no sensitive path (dependency manifests, lock files, build and CI configuration), no path the Task's may_touch names, no security-relevant path (auth, token, secret, session, sandbox and such words), no agents' instructions file (CLAUDE.md, AGENTS.md) and no path outside the Task's scope; otherwise the factory sends it through the full review loop.`,
+    'Run the lint, the type check and the unit tests of the files you touched, not the whole test suite.',
+    QUICK_FIX_END,
+  ].join('\n');
 }
 
 // The slice line of the MR text: the writer reads the keys from the Task file in its worktree.
@@ -119,6 +137,10 @@ export function mrPrompt(input: MrPromptInput): string {
   }
   lines.push(
     `Your only task in this turn: write the MR text to ${path}. Its first line is the title, which is also the commit header by the Git rules below; then a blank line; then the body by the MR template below.`,
+    ...(input.mrText === undefined ? [] : input.mrText === null ? ['The MR text of the change before the fix you just made could not be read: write it anew from the change.'] : [
+      'This is the MR text of the change before the fix you just made. Write it back as it is, changing only what the fix makes wrong in it:',
+      '<mr_text>', input.mrText.replace(/\n+$/, ''), '</mr_text>',
+    ]),
     `The factory commits, rebases and pushes, not you. It commits the reviewed change as one commit on this branch; the commit message is the whole MR text: the title as the header, then the body. Then it rebases that commit onto ${targetRef}.`,
     `${MR_READER_RULE}.`,
     `${MR_TESTING_RULE}.`,

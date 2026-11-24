@@ -259,12 +259,12 @@ export class StartPart {
     }
   }
 
-  // A job awaiting review that has something to resume, with the review on: its round
-  // (src/round.ts) while a reviewer of it has no stored verdict, or with every verdict stored its
-  // outcome, which never applied (the Fix section, a stop, the pass, its record or MR preparation).
-  // Without the Claude review the gate is the round: no gate.json, or a verdict.
+  // A job awaiting review that has something to resume, with the review on (a quick fix's, whatever
+  // SF_REVIEW says: its decision first): its round (src/round.ts) while a reviewer of it has no stored
+  // verdict, or with every verdict stored its outcome, which never applied (the Fix section, a stop,
+  // the pass, its record or MR preparation). Without the Claude review the gate is the round: no gate.json, or a verdict.
   async resumable(job: Job): Promise<boolean> {
-    if (job.state !== 'awaiting_review' || job.iteration === 0 || !this.#settings.config.review) {
+    if (job.state !== 'awaiting_review' || job.iteration === 0 || (!this.#settings.config.review && job.quick_fix === undefined)) {
       return false;
     }
     const gate = await this.#store.jobs.readGate(job.workspace, job.ticket, job.iteration);

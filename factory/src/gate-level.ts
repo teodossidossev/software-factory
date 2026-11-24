@@ -71,6 +71,30 @@ function named(rule: string, paths: string[]): string {
   return `${rule}: ${shown}${paths.length > MAX_NAMED_PATHS ? ` and ${paths.length - MAX_NAMED_PATHS} more` : ''}`;
 }
 
+// The path rules that make a change full, one reason for each rule some of paths match, in this
+// order: sensitive (a path's mark in files, or sensitivityOf for a path files does not mark, as a
+// rename's old path), may_touch, security (SECURITY_WORDS), SF_GATE_FULL_PATHS and agents (an
+// agents' instructions file at any depth). The gate level applies them to its iteration's paths;
+// a quick fix (src/quick-fix.ts) to the paths of its change since the hand-over.
+export function pathRiskReasons(paths: readonly string[], rules: { mayTouch: readonly string[]; fullPaths: readonly string[]; sensitivePaths: readonly string[]; files?: readonly FileChange[] }): string[] {
+  const files = rules.files ?? [];
+  const checks: Array<[string, (path: string) => boolean]> = [
+    ['sensitive', (path) => files.some((file) => file.path === path && file.sensitive !== 'no') || sensitivityOf(path, [], rules.sensitivePaths) !== 'no'],
+    ['may_touch', (path) => names(rules.mayTouch, path)],
+    ['security', (path) => pathWords(path).some((word) => SECURITY_WORDS.has(word))],
+    ['SF_GATE_FULL_PATHS', (path) => names(rules.fullPaths, path)],
+    ['agents', (path) => AGENT_FILES.includes(path.split('/').at(-1)!)],
+  ];
+  const reasons: string[] = [];
+  for (const [rule, matches] of checks) {
+    const matched = paths.filter(matches);
+    if (matched.length > 0) {
+      reasons.push(named(rule, matched));
+    }
+  }
+  return reasons;
+}
+
 // The level of an iteration, with the rules that decided it (at least one).
 export function gateLevel(input: GateLevelInput): { level: GateLevel; reasons: string[] } {
   if (input.setting === 'full') {
@@ -89,20 +113,7 @@ export function gateLevel(input: GateLevelInput): { level: GateLevel; reasons: s
   }
   // Each changed path, a rename's old path too.
   const paths = [...new Set(files.flatMap((file) => (file.from !== undefined ? [file.path, file.from] : [file.path])))];
-  const rules: Array<[string, (path: string) => boolean]> = [
-    // A path's mark (FileChange.sensitive), or for a rename's old path the same rule (sensitivityOf).
-    ['sensitive', (path) => files.some((file) => file.path === path && file.sensitive !== 'no') || sensitivityOf(path, [], input.sensitivePaths) !== 'no'],
-    ['may_touch', (path) => names(input.mayTouch ?? [], path)],
-    ['security', (path) => pathWords(path).some((word) => SECURITY_WORDS.has(word))],
-    ['SF_GATE_FULL_PATHS', (path) => names(input.fullPaths, path)],
-    ['agents', (path) => AGENT_FILES.includes(path.split('/').at(-1)!)],
-  ];
-  for (const [rule, matches] of rules) {
-    const matched = paths.filter(matches);
-    if (matched.length > 0) {
-      reasons.push(named(rule, matched));
-    }
-  }
+  reasons.push(...pathRiskReasons(paths, { mayTouch: input.mayTouch ?? [], fullPaths: input.fullPaths, sensitivePaths: input.sensitivePaths, files }));
   const lines = changedLines(files);
   if (lines > MAX_LIGHT_LINES) {
     reasons.push(`size: ${lines} lines`);

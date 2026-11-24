@@ -6,7 +6,8 @@ import { mkdir, mkdtemp, realpath, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { claudeReviewDecision, loadConfig, smokeProbeAllow, stateDir } from '../src/config.js';
+import { createHash } from 'node:crypto';
+import { claudeReviewDecision, fixSessionDecision, fixSessionSetting, loadConfig, smokeProbeAllow, stateDir } from '../src/config.js';
 import { FactoryError } from '../src/errors.js';
 
 const COMMAND = "node probe.mjs --canary '/t/sf-smoke-x/config/auth.env' > probe.json";
@@ -124,4 +125,45 @@ test('the Claude review of a job (SF-131, claudeReviewDecision): the gate off me
   assert.deepEqual(claudeReviewDecision({ claudeReview: 'always', gate: on }, 'codex'), { claude_review: false, reason: 'the Task file says review: codex' });
   assert.deepEqual(claudeReviewDecision({ gate: on }, undefined), { claude_review: true, reason: 'SF_CLAUDE_REVIEW=always' });
   assert.deepEqual(claudeReviewDecision({ claudeReview: 'ticket', gate: off }, 'codex'), { claude_review: true, reason: 'the gate is off (SF_GATE=off)' });
+});
+
+test('SF_FIX_SESSION (SF-316): default resume; resume, fresh and alternate are read; any other value is invalid_config at start', () => {
+  const base = { HOME: '/home/u', SF_STATE_DIR: '/tmp/sf-config-test-state' };
+  assert.equal(loadConfig(base).fixSession, 'resume');
+  assert.equal(loadConfig({ ...base, SF_FIX_SESSION: '' }).fixSession, 'resume');
+  for (const value of ['resume', 'fresh', 'alternate'] as const) {
+    assert.equal(loadConfig({ ...base, SF_FIX_SESSION: value }).fixSession, value);
+    assert.equal(fixSessionSetting({ SF_FIX_SESSION: value }), value);
+  }
+  for (const value of ['Fresh', 'new', 'off']) {
+    assert.throws(() => loadConfig({ ...base, SF_FIX_SESSION: value }), (error: unknown) => {
+      assert.ok(error instanceof FactoryError);
+      assert.equal(error.code, 'invalid_config');
+      assert.equal(error.message, `SF_FIX_SESSION must be resume, fresh or alternate, got "${value}".`);
+      return true;
+    });
+  }
+});
+
+test('the fix session of a job (SF-316, fixSessionDecision): the Task key wins; else the setting, absent counting as resume; alternate gives one arm per ticket by the first byte of sha256("<workspace>/<ticket>")', () => {
+  assert.deepEqual(fixSessionDecision({ fixSession: 'resume' }, undefined, 'app', 'T-1'), { fix_session: 'resume', reason: 'setting' });
+  assert.deepEqual(fixSessionDecision({ fixSession: 'fresh' }, undefined, 'app', 'T-1'), { fix_session: 'fresh', reason: 'setting' });
+  assert.deepEqual(fixSessionDecision({}, undefined, 'app', 'T-1'), { fix_session: 'resume', reason: 'setting' });
+  // The key overrides every setting, alternate too.
+  for (const setting of ['resume', 'fresh', 'alternate'] as const) {
+    assert.deepEqual(fixSessionDecision({ fixSession: setting }, 'fresh', 'app', 'T-1'), { fix_session: 'fresh', reason: 'task' });
+    assert.deepEqual(fixSessionDecision({ fixSession: setting }, 'resume', 'app', 'T-1'), { fix_session: 'resume', reason: 'task' });
+  }
+  // alternate: the hash's first byte decides; the same ticket gets the same arm every time, and a
+  // set of names gets both arms.
+  const arms = new Set<string>();
+  for (let index = 1; index <= 20; index += 1) {
+    const ticket = `SF-${index}`;
+    const decided = fixSessionDecision({ fixSession: 'alternate' }, undefined, 'software-factory', ticket);
+    const even = createHash('sha256').update(`software-factory/${ticket}`).digest()[0]! % 2 === 0;
+    assert.deepEqual(decided, { fix_session: even ? 'fresh' : 'resume', reason: 'alternate' }, ticket);
+    assert.deepEqual(fixSessionDecision({ fixSession: 'alternate' }, undefined, 'software-factory', ticket), decided, ticket);
+    arms.add(decided.fix_session);
+  }
+  assert.deepEqual([...arms].sort(), ['fresh', 'resume']);
 });

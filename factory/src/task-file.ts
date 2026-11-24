@@ -73,6 +73,16 @@ export function taskReview(fields: Map<string, string>): TaskReview | undefined 
   return value === 'claude' || value === 'codex' ? value : undefined;
 }
 
+// The session a Task asks its fix rounds to run in: `fix_session: fresh` (a new session per fix
+// round) or `fix_session: resume` (the job's one session).
+export type TaskFixSession = 'fresh' | 'resume';
+
+// The Task's fix_session key; undefined without the key or with any other value (SF_FIX_SESSION decides).
+export function taskFixSession(fields: Map<string, string>): TaskFixSession | undefined {
+  const value = fields.get('fix_session');
+  return value === 'fresh' || value === 'resume' ? value : undefined;
+}
+
 // The planner's estimate of a Task's size: `size: small | medium | complex`; it picks the lead-time
 // target of the workspace's norms (src/lead-time.ts).
 export type TaskSize = 'small' | 'medium' | 'complex';

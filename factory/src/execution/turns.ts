@@ -5,7 +5,7 @@
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { readFile, stat } from 'node:fs/promises';
 import { join, resolve as resolvePath, sep } from 'node:path';
-import { withoutImageData } from '../attachments.js';
+import { type ImageRef, jobAttachment, type ResolvedImage, resolveTaskImages, sameImages, withoutImageData } from '../attachments.js';
 import { FactoryError } from '../errors.js';
 import { runGit } from '../git.js';
 import { worktreeTree } from '../guard.js';
@@ -17,13 +17,13 @@ import { answerFix, escalationMessage, headings, heldBackNote, type LedgerEntry,
 import { rebaseInProgress } from '../mr.js';
 import { checkSuggestionSend, removeSuggestion, sendShownSuggestion } from '../planner.js';
 import { buildPatch, changedFilesSection, fileChanges, notificationLine, type Patch } from '../patch.js';
-import { factoryPrompt, iterationCost } from '../prompts.js';
+import { factoryPrompt, iterationCost, roundUsd } from '../prompts.js';
 import { DENIED_TOOLS, type Marks, marksOf } from '../rules.js';
 import type { Workspace } from '../registry.js';
-import { copyRulesRecord } from '../rules-docs.js';
+import { copyRulesRecord, readJobRules } from '../rules-docs.js';
 import { fixContent } from '../review.js';
 import { pathDenials } from '../sandbox-denials.js';
-import { type IdleOutcome, ImplementerSession, type LimitAnswer, type LimitedTurn } from '../session.js';
+import { endSession, type IdleOutcome, ImplementerSession, type LimitAnswer, type LimitedTurn } from '../session.js';
 import { CONTINUE_PROMPT, limitDecision, worktreeChanged, type WorktreeState, worktreeState } from '../turn-limit.js';
 import { appendFix, mayTouch, parseFrontMatter, readTask, TASK_DIR, taskScope } from '../task-file.js';
 import { TicketHistory } from '../ticket-history.js';
@@ -32,7 +32,7 @@ import type { RunnerRequest } from '../runner.js';
 import { implementerSkills, jobSkills } from '../skills.js';
 import type { JobStorePort, LivePort, LockPort, RunnerPort, SettingsPort, StopPort } from './ports.js';
 import { checkNotInCheckout, cutOffError } from './errors.js';
-import { changeNote, implementCommand } from './prompts.js';
+import { changeNote, type FixPack, freshFixPrompt, implementCommand } from './prompts.js';
 import { exists, type FixOptions, type Live } from './shared.js';
 
 type Success = Extract<IdleOutcome, { ok: true }>;
@@ -73,10 +73,12 @@ export interface TurnsMr {
 export interface TurnsReviews {
   startReview(job: Job): Promise<void>;
   holdsMr(job: Job, resume: (job: Job) => Promise<void>): boolean;
+  imageRefs(job: Job, task: string): ImageRef[];
 }
 
 export interface TurnsStart {
   syncTask(workspace: Workspace, job: Job): Promise<Job>;
+  storeImages(job: Job, images: ResolvedImage[]): Promise<Job>;
 }
 
 export interface TurnsPeers {
@@ -277,14 +279,15 @@ export class TurnsPart {
   #idle(workspaceName: string, ticket: string, outcome: IdleOutcome): Promise<void> {
     return this.#locks.locked(async () => {
       const live = this.#sessions.live.get(`${workspaceName}/${ticket}`);
-      const job = await this.#store.jobs.read(workspaceName, ticket);
+      const read = await this.#store.jobs.read(workspaceName, ticket);
       // A prompt sent after the queue drained started another turn; its idle publishes.
-      if (live === undefined || job === undefined || live.session.busy) {
+      if (live === undefined || read === undefined || live.session.busy) {
         return;
       }
-      if (job.state !== 'working' && job.state !== 'preparing_mr') {
+      if (read.state !== 'working' && read.state !== 'preparing_mr') {
         return;
       }
+      const job = await this.#recordSessionCost(read, outcome);
       // Before the Patch and before the MR commit, whatever the outcome of the turn.
       await this.#peers.control.clean(job, job.iteration + 1, live.cwd);
       // The turn's sandbox has ended, before the hand-over at the end of MR preparation.
@@ -392,7 +395,7 @@ export class TurnsPart {
     const { workspace: workspaceName, ticket } = job;
     const number = job.iteration + 1;
     const total = outcome.result.total_cost_usd ?? null;
-    const previousTotal = number > 1 ? ((await this.#store.jobs.readMeta(workspaceName, ticket, number - 1)).cost_usd_total ?? null) : null;
+    const previous = number > 1 ? await this.#store.jobs.readMeta(workspaceName, ticket, number - 1) : undefined;
     const changes = await fileChanges(live.cwd, job.base_commit!, built.files, await this.#marks(live.workspace, ticket));
     const commitTree = await worktreeTree(live.cwd, job.base_commit!);
     const sections = [outcome.text.trim() || '(The Implementer wrote no report text.)', ...extraSections, changedFilesSection(built.files, built.truncated, changes)];
@@ -413,14 +416,16 @@ export class TurnsPart {
         files: changes,
         patch_truncated: built.truncated,
         submodule_changed: built.submodules,
-        cost_usd: iterationCost(total, previousTotal),
+        cost_usd: iterationCost(total, previous, outcome.sessionId, job.unpublished_cost_usd ?? 0),
         cost_usd_total: total,
+        session_id: outcome.sessionId,
         duration_ms: outcome.result.duration_ms ?? null,
         base_commit: job.base_commit!,
         commit_tree: commitTree,
       },
     });
-    return { job: { ...job, iteration: number }, changes };
+    // The carried spend is in this iteration's cost now.
+    return { job: { ...job, iteration: number, ...(job.unpublished_cost_usd !== undefined ? { unpublished_cost_usd: 0 } : {}) }, changes };
   }
 
   // The job a ledger stop held goes on: a Fix section when the user decided a fix (with the
@@ -522,12 +527,16 @@ export class TurnsPart {
     // No turn while the user's checkout holds the branch; nothing is written before.
     const free = job;
     await this.#locks.gitLocked(workspaceName, () => checkBranchFree(workspace.workCheckout, free.worktree, free.branch, ticket));
+    // A fresh fix round gives the images the Task file refers to now, read as a Resume reads them:
+    // one that cannot be used refuses the Fix (attachment_invalid) before anything is written.
+    const images = job.fix_session === 'fresh' ? await resolveTaskImages(workspace.workCheckout, ticket, await readTask(workspace, ticket)) : undefined;
     if (job.state === 'ready_for_human_review') {
       job = await this.#reopen(job, workspace);
     }
     const fix = job.iteration;
-    // A change made while the job was paused, before the factory's own Fix section.
-    const change = job.task_sha256 === undefined || job.worktree === null ? undefined : await this.#peers.control.taskChange(workspace, job);
+    // A change made while the job was paused, before the factory's own Fix section; a fresh fix
+    // round gives none.
+    const change = job.task_sha256 === undefined || job.worktree === null || job.fix_session === 'fresh' ? undefined : await this.#peers.control.taskChange(workspace, job);
     await appendFix(workspace, ticket, fix, content, title, { record: (sha256) => this.#history.append(workspaceName, ticket, { kind: 'fix_added', by: byUser ? 'you' : 'factory', sha256, fix }) });
     if (ledger !== undefined) {
       await this.#store.jobs.writeLedger(workspaceName, ticket, ledger);
@@ -539,8 +548,63 @@ export class TurnsPart {
       ? await this.#store.transition({ ...job, ...counts, prepared_commit: null }, 'working', 'tests')
       // from: awaiting_review, ready_for_human_review (checkFix), needs_human (fromStop)
       : await this.#store.transition({ ...job, ...counts, ...judged, fixes: job.fixes + 1, prepared_commit: null }, 'working', 'fix');
-    this.session(job, workspace).send(factoryPrompt(this.withChange(implementCommand(ticket, (await jobSkills(this.#settings.config.stateDir, this.#store.jobs.eventsPath(workspaceName, ticket))).roles.implementer, fix), ticket, change), ticket, job.iteration + 1, this.imagesLine(job), job.base_commit), DENIED_TOOLS);
+    const command = implementCommand(ticket, (await jobSkills(this.#settings.config.stateDir, this.#store.jobs.eventsPath(workspaceName, ticket))).roles.implementer, fix);
+    let first = this.withChange(command, ticket, change);
+    let blocks: ImageRef[] | undefined;
+    if (job.fix_session === 'fresh') {
+      // A new session reads the Task file as it is now: no change note; its images, as it refers to
+      // them now, go as blocks.
+      job = await this.#currentImages(await this.#endSessionForFix(job), images ?? []);
+      first = freshFixPrompt(command, await readJobRules(this.#store.jobs.dir(workspaceName, ticket)), await this.#fixPack(job), job.base_commit);
+      blocks = this.#peers.reviews.imageRefs(job, (await this.#store.jobs.readTaskCopy(workspaceName, ticket)) ?? '');
+    }
+    this.session(job, workspace).send(factoryPrompt(first, ticket, job.iteration + 1, this.imagesLine(job), job.base_commit), DENIED_TOOLS, blocks);
     return { iteration: job.iteration + 1, check_after_minutes: this.#settings.config.checkAfterFixMin };
+  }
+
+  // Before a fix round of a job whose fix rounds run fresh: its live session object ends and
+  // session_id is cleared, so session() builds a new one (denials, hooks and temporary folder fresh);
+  // what the ended session spent after its last published iteration (session_cost_usd against that
+  // iteration's total) is added to unpublished_cost_usd for the next published iteration. Only under the lock.
+  async #endSessionForFix(job: Job): Promise<Job> {
+    await endSession(this.#sessions.live, `${job.workspace}/${job.ticket}`);
+    const { session_cost_usd: spent, ...rest } = job;
+    let carried = job.unpublished_cost_usd ?? 0;
+    if (spent !== undefined) {
+      const last = job.iteration > 0 ? await this.#store.jobs.readMeta(job.workspace, job.ticket, job.iteration).catch(() => undefined) : undefined;
+      carried += Math.max(0, iterationCost(spent.usd, last, spent.session_id) ?? 0);
+    }
+    const next: Job = { ...rest, session_id: null, ...(carried > 0 ? { unpublished_cost_usd: roundUsd(carried) } : {}) };
+    await this.#store.jobs.write(next);
+    return next;
+  }
+
+  // The job with the images the Task file refers to now (resolved by fix): when they differ from
+  // the job's, they are copied into the job directory and the worktree and recorded (storeImages).
+  // Only under the lock.
+  async #currentImages(job: Job, images: ResolvedImage[]): Promise<Job> {
+    return sameImages(job.attachments ?? [], images.map(jobAttachment)) ? job : this.#peers.start.storeImages(job, images);
+  }
+
+  // The previous iteration a fresh fix round's prompt gives (freshFixPrompt): its Report and its
+  // file list (meta.json's files); either one that cannot be read is empty.
+  async #fixPack(job: Job): Promise<FixPack> {
+    const { workspace, ticket, iteration } = job;
+    const report = await this.#store.jobs.readIteration(workspace, ticket, iteration).then((read) => read.report, () => '');
+    const files = await this.#store.jobs.readMeta(workspace, ticket, iteration).then((meta) => meta.files ?? [], () => []);
+    return { iteration, report, files };
+  }
+
+  // A turn's outcome in a job whose fix rounds run fresh: the running total of its session, published
+  // or not, in session_cost_usd. Nothing in a job that resumes its session. Only under the lock.
+  async #recordSessionCost(job: Job, outcome: IdleOutcome): Promise<Job> {
+    const usd = outcome.ok ? outcome.result.total_cost_usd : undefined;
+    if (job.fix_session !== 'fresh' || !outcome.ok || typeof usd !== 'number') {
+      return job;
+    }
+    const next: Job = { ...job, session_cost_usd: { session_id: outcome.sessionId, usd } };
+    await this.#store.jobs.write(next);
+    return next;
   }
 
   // A user message into the session, queued as its next turn (in the runner's queue first, then,

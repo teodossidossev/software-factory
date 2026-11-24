@@ -34,7 +34,7 @@ export interface ReapOptions {
 }
 
 // One process as /proc shows it.
-interface ProcessInfo {
+export interface ProcessInfo {
   pid: number;
   name: string;
   ppid: number;
@@ -108,7 +108,7 @@ async function readProcess(proc: string, pid: number): Promise<ProcessInfo | und
 }
 
 // Every process /proc shows that can still be read.
-async function readProcesses(proc: string): Promise<Map<number, ProcessInfo>> {
+export async function readProcesses(proc: string): Promise<Map<number, ProcessInfo>> {
   const pids = (await readdir(proc)).filter((name) => /^\d+$/.test(name)).map(Number);
   const found = await Promise.all(pids.map((pid) => readProcess(proc, pid)));
   return new Map(found.filter((info): info is ProcessInfo => info !== undefined).map((info) => [info.pid, info]));

@@ -35,7 +35,7 @@ function resultText(content: unknown): string {
 export interface DescribedEvent {
   ts: string | null;
   iteration: number | null;
-  // "prompt", "state", "notify_failed", "placeholders_removed", "review", "review_failed" (Claude's or the gate's), "gate_overridden" (the user accepted over the stopped gate), "gate_level", "simplify" and "simplify_chosen", "interrupted" and "task_changed", "attachments", "turn_limit_continued", "turn_stream_stuck", "sandbox_lock_removed", "mr_edited", "gate_event" (a Codex event of the gate), "review_message" (a message of the Claude review), or the SDK message type ("assistant", "user", "result", "system", ...).
+  // "prompt", "state", "notify_failed", "placeholders_removed", "review", "review_failed" (Claude's or the gate's), "gate_overridden" (the user accepted over the stopped gate), "gate_level", "simplify" and "simplify_chosen", "interrupted" and "task_changed", "attachments", "turn_limit_continued", "turn_stream_stuck", "tool_stalled", "sandbox_lock_removed", "mr_edited", "gate_event" (a Codex event of the gate), "review_message" (a message of the Claude review), or the SDK message type ("assistant", "user", "result", "system", ...).
   type: string;
   lines: string[];
 }
@@ -182,6 +182,13 @@ function recordLines(record: Record<string, unknown>): string[] {
   // A turn's stream stayed open after its result; the factory ended Claude Code and kept the result.
   if (record.type === 'turn_stream_stuck') {
     return [`${prefix} the turn's result came but Claude Code did not end within ${String(record.waited_s)} s (a background task kept it); the factory ended it and kept the result`];
+  }
+  // A Bash call hung; the factory ended the turn and sent its instruction again, or stopped the job.
+  if (record.type === 'tool_stalled') {
+    const open = typeof record.open_s === 'number' ? `${Math.max(1, Math.round(record.open_s / 60))} min` : '?';
+    const why = record.reason === 'past_cap' ? "past the Bash tool's 60-minute cap" : 'with no process of it running';
+    const then = record.action === 'stopped' ? 'it hung again after the resend, so the job stops' : "the factory ended the turn and sent the turn's instruction again";
+    return [`${prefix} a Bash command hung (open ${open} ${why}): ${oneLine(String(record.command ?? ''))}; ${then}`];
   }
   // The sandbox's leftover config lock, removed by the factory.
   if (record.type === 'sandbox_lock_removed') {

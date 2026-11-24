@@ -520,8 +520,8 @@ export type EventRecord = { ts: string; iteration: number } & (
   // An Implementer turn ended at the turn limit while making progress and the factory sent a continuation: its
   // number in the chain, the chain's allowance, the turn's maxTurns, the worktree's changed paths and tool calls.
   | { type: 'turn_limit_continued'; continued: number; allowed: number; max_turns: number; changed_paths: number; tool_calls: number }
-  // A turn's stream stayed open waited_s seconds after its result: Claude Code ended, the result kept.
-  | { type: 'turn_stream_stuck'; waited_s: number }
+  // A turn's stream stayed open waited_s seconds after its result: Claude Code ended, the result kept. A Bash call hung (src/tool-stall.ts): its command on one line, how long it was open, why (no command process, or past the tool's cap), and whether the turn's instruction went again or the job stopped.
+  | { type: 'turn_stream_stuck'; waited_s: number } | { type: 'tool_stalled'; tool: 'Bash'; command: string; open_s: number; reason: 'no_process' | 'past_cap'; action: 'resent' | 'stopped' }
   // The merge request on the Git host: opened, reused (already open for the branch), merged by the
   // factory; by sf mr status, updated (merged or closed on the host) or found (open for the branch).
   // mr_state, not state: a record with state is a state change.

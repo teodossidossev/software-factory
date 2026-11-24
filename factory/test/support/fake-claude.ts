@@ -32,6 +32,7 @@
 // error text, then exit code 1, on which the SDK throws "Claude Code returned an error result".
 // It can also keep its stream open after the result (holdOpen, SF-196), as the real CLI does while a
 // background task runs. The log keeps the values of the Bash tool's settings (shell, SF-196).
+// A turn can hang a Bash call (hangTool, SF-315): only tool_progress heartbeats until it ends, if ever.
 // A user message with a block that is not text (the images of SF-065) is logged with its blocks too:
 // each text block's text, each image block's media type, size and sha256 (never its bytes).
 // An Implementer's init lists the tools it was given, as the real CLI does: the --tools list, else
@@ -90,6 +91,10 @@ interface Turn {
   // the real CLI stays while a background task runs; only a kill ends it. Its pid goes to
   // $HOME/fake-claude.held once its input closed.
   holdOpen?: boolean;
+  // Implementer runs only: a Bash tool_use (command, default a find piped to grep), then a
+  // tool_progress heartbeat every 100 ms, as the real CLI sends while a command hangs; its tool_result
+  // and the turn's end come after endAfterMs, never without it.
+  hangTool?: { endAfterMs?: number; command?: string };
 }
 
 const CLEAN = { verdict: 'clean', summary: 'Looks right.', items: [], accepted_sensitive: [] };
@@ -310,6 +315,9 @@ async function run(prompt: string, blocks?: LoggedBlock[]): Promise<void> {
   for (const [index, call] of (turn.calls ?? []).entries()) {
     await hookedCall(`c${index}`, call.tool, call.input, () => 'done');
   }
+  if (turn.hangTool !== undefined) {
+    await hang(turn.hangTool);
+  }
   if (turn.maxTurns === true) {
     const limit = option('max-turns') ?? '?';
     out({
@@ -329,6 +337,22 @@ async function run(prompt: string, blocks?: LoggedBlock[]): Promise<void> {
     errors: subtype === 'success' ? undefined : (turn.errors ?? ['fake failure']),
     permission_denials: (turn.denials ?? []).map((name, index) => ({ tool_name: name, tool_use_id: `d${index}`, tool_input: { command: 'git commit -m secret-input' } })),
   });
+}
+
+// A hung Bash call: its tool_use, a heartbeat every 100 ms, and its tool_result after endAfterMs;
+// without endAfterMs it never resolves (only a kill ends the run).
+async function hang(spec: { endAfterMs?: number; command?: string }): Promise<void> {
+  const id = 'h1';
+  const command = spec.command ?? 'find / -name "*.ts" | grep factory';
+  out({ type: 'assistant', parent_tool_use_id: null, message: { role: 'assistant', content: [{ type: 'tool_use', id, name: 'Bash', input: { command, description: 'Find the files' } }] } });
+  const started = Date.now();
+  const heartbeat = setInterval(() => out({ type: 'tool_progress', tool_use_id: id, tool_name: 'Bash', parent_tool_use_id: null, elapsed_time_seconds: (Date.now() - started) / 1000 }), 100);
+  if (spec.endAfterMs === undefined) {
+    await new Promise<never>(() => undefined);
+  }
+  await new Promise((resolve) => setTimeout(resolve, spec.endAfterMs));
+  clearInterval(heartbeat);
+  out({ type: 'user', parent_tool_use_id: null, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, is_error: false, content: 'found' }] } });
 }
 
 // A review: init, a Read of README.md and its result, one assistant message, and the result with

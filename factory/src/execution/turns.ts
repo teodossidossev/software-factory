@@ -6,6 +6,7 @@ import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { readFile, stat } from 'node:fs/promises';
 import { join, resolve as resolvePath, sep } from 'node:path';
 import { type ImageRef, jobAttachment, type ResolvedImage, resolveTaskImages, sameImages, withoutImageData } from '../attachments.js';
+import { DEFAULT_TOOL_STALL_MIN } from '../config.js';
 import { FactoryError } from '../errors.js';
 import { runGit } from '../git.js';
 import { worktreeTree } from '../guard.js';
@@ -149,11 +150,14 @@ export class TurnsPart {
     // The worktree at the start of the turn running, for its turn limit.
     let start: WorktreeState | undefined;
     const probe = this.#settings.config.smokeProbeAllow;
+    const toolStallMin = this.#settings.config.toolStallMin ?? DEFAULT_TOOL_STALL_MIN;
     const session = new ImplementerSession(
       {
         cwd, maxTurns: this.#settings.config.maxTurns, claudePath: this.#settings.config.claudePath,
         sessionId: job.session_id ?? undefined, sandbox: this.#settings.config.sandbox, model: this.#settings.config.model,
         turnLimitContinues: this.#settings.config.turnLimitContinues,
+        // The watch of the turns' Bash calls; SF_TOOL_STALL_MIN=0 leaves it out.
+        ...(toolStallMin > 0 ? { toolStall: { afterMs: toolStallMin * 60_000 } } : {}),
         // sf smoke's probe only, in mode dontAsk: undefined and false for every
         // real job's state directory.
         allowCommands: probe !== undefined ? [probe] : undefined,
@@ -187,6 +191,10 @@ export class TurnsPart {
         turnLimit: (turn) => this.#turnLimit(name, ticket, iteration, cwd, start, turn),
         // The session ended a stream stuck after its result; the turn goes on with that result.
         streamStuck: (waitedS) => this.#store.jobs.appendEvent(name, ticket, { ts: now(), iteration, type: 'turn_stream_stuck', waited_s: waitedS }),
+        // The session ended a turn whose Bash call hung: its instruction goes again, or the job stops.
+        toolStalled: (stall, action) => this.#store.jobs.appendEvent(name, ticket, {
+          ts: now(), iteration, type: 'tool_stalled', tool: stall.tool, command: stall.command, open_s: stall.openS, reason: stall.reason, action,
+        }),
         message: async (message: SDKMessage) => {
           // No image bytes in events.jsonl: a Read of an image returns them.
           await this.#store.jobs.appendEvent(name, ticket, { ts: now(), iteration, message: withoutImageData(message) });

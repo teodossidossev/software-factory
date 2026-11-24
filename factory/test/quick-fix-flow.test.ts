@@ -3,7 +3,8 @@
 // a small fix on a ready job and on a handed-over job goes to MR preparation with no review round;
 // a fix over the bound or on a sensitive or security path goes through the full loop; a Tests Fix
 // inside the lane is decided again; a stop inside the lane goes on only by sf say, which ends the
-// quick fix, also while its turn runs.
+// quick fix, also while its turn runs; the dashboard's route (POST api/jobs/<ws>/<ticket>/quickfix)
+// and its refusals.
 import assert from 'node:assert/strict';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -14,6 +15,7 @@ import { JobStore } from '../src/jobs.js';
 import { QUICK_FIX_END, QUICK_FIX_LEAD } from '../src/prompts.js';
 import { saveRegistry } from '../src/registry.js';
 import { writeTask } from '../src/task-file.js';
+import { act, type Reply } from './support/dashboard-client.js';
 import { call, type Env, fakeLog, git, newEnv, newRepo, reviewLog, reviewScript, runCli, runnerPids, script, serve, stop, waitFor } from './support/harness.js';
 import { status } from './support/handoff.js';
 
@@ -96,6 +98,54 @@ test('sf quickfix is refused in working, awaiting_review, needs_human and pushed
     await waitFor(served, TICKET, 'pushed', 2);
     await refused('pushed');
     assert.deepEqual(await quickFixEvents(env), []);
+  } finally {
+    await stop(served);
+  }
+});
+
+// A dashboard reply's refusal: its status, code and message.
+const refusal = (reply: Reply): { status: number; code: string; message: string } => {
+  const { code, message } = JSON.parse(reply.body).error as { code: string; message: string };
+  return { status: reply.status, code, message };
+};
+
+test('the dashboard\'s quickfix route: 200 on a ready job (working, quick_fix asked), 409 invalid_state while working, 400 invalid_content for an empty message, 409 quick_fix_unavailable without a prepared commit', async () => {
+  const { env } = await quickEnv('qf-route');
+  await script(env, [
+    { write: { 'notes.txt': 'a\nb\n' }, text: 'iteration 1' },
+    mrTurn,
+    { delayMs: 3000, write: { 'notes.txt': 'a\nB\n' }, text: 'the quick fix' },
+    mrTurn,
+  ]);
+  await reviewScript(env, [clean()]);
+  const served = await serve(env);
+  try {
+    const base = served.dashboard!;
+    const path = `api/jobs/app/${TICKET}/quickfix`;
+    await call(served, 'start', { workspace: 'app', ticket: TICKET });
+    await waitFor(served, TICKET, 'ready_for_human_review', 1);
+    const asked = await act(base, path, { message: MESSAGE });
+    assert.equal(asked.status, 200, asked.body);
+    assert.deepEqual(JSON.parse(asked.body).result, { state: 'working', queued: false });
+    assert.equal((await jobJson(env)).state, 'working');
+    assert.deepEqual(await quickFixEvents(env), [{ iteration: 1, action: 'asked', from: 'ready_for_human_review' }]);
+    // While the quick fix's turn runs: SF-313's refusal of any state but ready or handed over.
+    assert.deepEqual(refusal(await act(base, path, { message: 'again' })), {
+      status: 409, code: 'invalid_state', message: 'sf quickfix needs ready_for_human_review or handed_over; the job is working. Use sf say.',
+    });
+    await waitFor(served, TICKET, 'ready_for_human_review', 2);
+    assert.ok((await fakeLog(env))[2]!.prompt.startsWith(`${MESSAGE}\n\n${QUICK_FIX_LEAD}\n`));
+    assert.deepEqual(refusal(await act(base, path, { message: '' })), { status: 400, code: 'invalid_content', message: 'The message must be non-empty text.' });
+    // A ready job without the commit to measure the fix against: refused, and it stays ready.
+    const jobs = new JobStore(env.state);
+    await jobs.write({ ...(await jobs.read('app', TICKET))!, prepared_commit: null });
+    assert.deepEqual(refusal(await act(base, path, { message: MESSAGE })), {
+      status: 409, code: 'quick_fix_unavailable', message: 'The job has no prepared commit to measure a quick fix against. Use sf say.',
+    });
+    const after = await jobJson(env);
+    assert.deepEqual([after.state, after.iteration], ['ready_for_human_review', 2]);
+    assert.equal((await fakeLog(env)).length, 4);
+    assert.deepEqual((await quickFixEvents(env)).map((event) => event.action), ['asked', 'quick']);
   } finally {
     await stop(served);
   }

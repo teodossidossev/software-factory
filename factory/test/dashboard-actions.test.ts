@@ -49,6 +49,8 @@ const ROUTES: Record<RouteName, { body: unknown; call: unknown[]; refresh?: Post
   approve: { body: { as_is: true }, call: ['approve', 'app', 'T-1'], command: 'approve', confirm: true },
   abort: { body: { discard: true }, call: ['abort', 'app', 'T-1', true], command: 'abort' },
   say: { body: { message: 'hi' }, call: ['say', 'app', 'T-1', 'hi'], command: 'say' },
+  // SF-313-2: sf quickfix.
+  quickfix: { body: { message: 'm' }, call: ['quickFix', 'app', 'T-1', 'm'], command: 'quickfix' },
   // SF-208: the planner's suggestion, on the dashboard only.
   'suggestion-send': { body: { sha256: 'a'.repeat(64) }, call: ['sendSuggestion', 'app', 'T-1', 'a'.repeat(64)], refresh: 'job' },
   'suggestion-dismiss': { body: {}, call: ['dismissSuggestion', 'app', 'T-1'], refresh: 'job' },
@@ -90,7 +92,7 @@ const routePath = (name: RouteName): string => (POST_ROUTES[name].kind === 'job'
 test('POST_ROUTES (SF-139): every route as before: its kind, what the pages get again, its body bound, its socket command (an entry of commands.ts), the update gate (pause and mr-status open) and the confirm routes', () => {
   assert.deepEqual(ROUTE_NAMES, Object.keys(ROUTES));
   assert.deepEqual(JOB_ROUTES, [
-    'approve', 'abort', 'say', 'suggestion-send', 'suggestion-dismiss', 'last-review-send', 'last-review-dismiss', 'review', 'retry', 'accept', 'settle', 'simplify', 'archive', 'mr-create', 'mr-merge', 'mr-status', 'pause', 'resume', 'restart', 'handover', 'takeback', 'handed-done',
+    'approve', 'abort', 'say', 'quickfix', 'suggestion-send', 'suggestion-dismiss', 'last-review-send', 'last-review-dismiss', 'review', 'retry', 'accept', 'settle', 'simplify', 'archive', 'mr-create', 'mr-merge', 'mr-status', 'pause', 'resume', 'restart', 'handover', 'takeback', 'handed-done',
     'merged-archive', 'mr-save', 'mr-reset',
   ]);
   for (const name of ROUTE_NAMES) {

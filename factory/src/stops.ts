@@ -9,6 +9,7 @@
 import type { DashboardAction } from './dashboard-routes.js';
 import { claudeReviews, type GateRecord, type Job, type JobState, PAUSABLE_STATES, RESTARTABLE_STATES, RESUMABLE_STATES, type ReviewRecord, statesWith, TERMINAL_STATES } from './jobs.js';
 import type { Decision, LedgerEntry } from './ledger.js';
+import { QUICK_FIX_STATES } from './quick-fix.js';
 import { actedVerdict, type ReviewItem } from './review.js';
 import { usageLimit } from './usage-limit.js';
 
@@ -184,7 +185,7 @@ export interface JobActions {
 
 // The actions whose availability is given, every one the page may ask.
 export const ACTION_IDS: readonly ActionId[] = [
-  'approve', 'abort', 'say', 'goon', 'review', 'retry', 'accept', 'settle', 'simplify', 'archive', 'mr-create', 'mr-merge', 'mr-status',
+  'approve', 'abort', 'say', 'quickfix', 'goon', 'review', 'retry', 'accept', 'settle', 'simplify', 'archive', 'mr-create', 'mr-merge', 'mr-status',
   'pause', 'resume', 'restart', 'handover', 'takeback', 'handed-done', 'merged-archive', 'mr-save', 'mr-reset', 'review-mr',
 ];
 
@@ -286,6 +287,11 @@ function availabilityOf(id: ActionId, job: Job, facts: JobFacts, now: Date): str
       return terminal ? `the job is already ${job.state}.` : '';
     case 'archive':
       return terminal ? '' : 'only a finished job is archived.';
+    case 'quickfix':
+      // The state only: a job without the commit to measure the fix against is refused by the
+      // action (quick_fix_unavailable).
+      return (QUICK_FIX_STATES as readonly string[]).includes(job.state)
+        ? '' :`a quick fix needs a job ready for review or handed over; it is ${job.state}.`;
     case 'merged-archive':
       return job.state === 'handed_over' || job.state === 'pushed' ? '' : `only for a handed-over or pushed job; it is ${job.state}.`;
     case 'pause':

@@ -83,6 +83,8 @@ test('statusOf maps each code as the dashboard did before SF-139; any other code
     task_changed: 409, check_running: 409, restart_refused: 409,
     checkout_busy: 409, handover_refused: 409, handover_mismatch: 409, checkout_changing: 409, checkout_moved: 409,
     takeback_changed: 409, takeback_switch_failed: 409, branch_in_checkout: 409, not_pushed: 409, handed_over: 409, handover_interrupted: 409, ask_interrupted: 409,
+    // SF-313-2: a quick fix on a job without a commit to measure the fix against.
+    quick_fix_unavailable: 409,
     invalid_content: 400, invalid_ticket: 400, invalid_name: 400, workspace_invalid: 400, unknown_role: 400, skill_not_installed: 400, invalid_request: 400,
     mr_not_mergeable: 409, mr_check_failed: 409, runner_stopping: 409, mr_not_open: 409, mr_token_missing: 409, mr_host_unsupported: 409, mr_host_changed: 409, mr_text_missing: 409,
     mr_auth_failed: 502, mr_host_error: 502, mr_host_unreachable: 502,
@@ -106,6 +108,8 @@ test('statusOf maps each code as the dashboard did before SF-139; any other code
   }
   // The update gate's code is update.ts's.
   assert.equal(statusOf(UPDATE_IN_PROGRESS), 409);
+  // A quick fix without a commit to measure against is a conflict, not the fallback's 500.
+  assert.equal(statusOf('quick_fix_unavailable'), 409);
   for (const code of ['fetch_failed', 'base_not_found', 'runner_failed', 'internal_error', 'toString', 'constructor', '__proto__']) {
     assert.equal(statusOf(code), 500, code);
     assert.equal(statusOf(code, 409), 409, code);

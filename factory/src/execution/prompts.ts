@@ -1,5 +1,7 @@
-// The text the job lifecycle gives the Implementer: the first prompt of a job, the notes of a
-// changed Task file or its images, and the groups of the factory's marked paths.
+// The text the job lifecycle gives the Implementer: the first prompt of a job, the prompt of a fix
+// round in a new session, the notes of a changed Task file or its images, and the groups of the
+// factory's marked paths.
+import type { FileChange } from '../jobs.js';
 import { SCOPE_PROBLEM, SENSITIVE_PROBLEM } from '../ledger.js';
 import type { ReviewItem } from '../review.js';
 import { TASK_DIR } from '../task-file.js';
@@ -37,6 +39,51 @@ export function changeNote(ticket: string, diff: string | undefined): string {
 // job's Implementer's, src/skill-roles.ts) hold implement; else the Task file's path alone.
 export function implementCommand(ticket: string, skills: readonly string[], fix?: number): string {
   return `${skills.includes('implement') ? '/implement ' : ''}${TASK_DIR}/${ticket}.md${fix === undefined ? '' : ` Fix ${fix}`}`;
+}
+
+// The line of a changed file in a fresh fix round's <changed_files>: added A, modified M, deleted D,
+// renamed "R <from> -> <path>".
+export function changedFileLine(change: Pick<FileChange, 'path' | 'status' | 'from'>): string {
+  switch (change.status) {
+    case 'added':
+      return `A ${change.path}`;
+    case 'modified':
+      return `M ${change.path}`;
+    case 'deleted':
+      return `D ${change.path}`;
+    case 'renamed':
+      return `R ${change.from ?? change.path} -> ${change.path}`;
+  }
+}
+
+// What a fresh fix round's session is given of the previous iteration: its number, its Report and
+// its file list (meta.json's files).
+export interface FixPack {
+  iteration: number;
+  report: string;
+  files: Array<Pick<FileChange, 'path' | 'status' | 'from'>>;
+}
+
+// The prompt of a fix round that starts a new Implementer session (fix_session fresh), before
+// factoryPrompt: the fix command (implementCommand … Fix N) first, then the job's <rules> block when
+// it has one, as in a first prompt; then <previous_report> with the previous iteration's Report, then
+// <changed_files> with its files against the base commit, one "<status> <path>" line each and how to
+// read them. No diff text. base: the job's base commit, null when it has none.
+export function freshFixPrompt(command: string, rules: string, pack: FixPack, base: string | null): string {
+  const commit = base ?? 'the commit your branch started from';
+  return [
+    command,
+    ...(rules !== '' ? ['', rules.trimEnd()] : []),
+    '',
+    `<previous_report iteration="${pack.iteration}">`,
+    pack.report.trimEnd() || '(The previous iteration has no Report.)',
+    '</previous_report>',
+    '',
+    '<changed_files>',
+    `This fix round starts a new session. The files your change holds against the base commit ${commit}, as of iteration ${pack.iteration}: for A read the file; for M and D read \`git diff ${commit} -- <path>\`; for R read \`git diff ${commit} -- <from> <path>\`; all in the worktree.`,
+    ...(pack.files.length > 0 ? pack.files.map(changedFileLine) : ['(none)']),
+    '</changed_files>',
+  ].join('\n');
 }
 
 // The first prompt of a job: its command (implementCommand), then the job's <rules> block when it has

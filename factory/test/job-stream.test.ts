@@ -5,6 +5,7 @@ import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { changeNote, firstPrompt, imagesChangedNote } from '../src/execution.js';
+import { freshFixPrompt, implementCommand } from '../src/execution/prompts.js';
 import { DETAIL_CHARS, jobUserMessages, lineEntries, type StreamContext, streamContext, type StreamEntry } from '../src/job-stream.js';
 import { type GateRecord, type IterationMeta, JobStore, type ReviewRecord, type SimplifyRecord } from '../src/jobs.js';
 import type { LedgerEntry } from '../src/ledger.js';
@@ -114,6 +115,38 @@ test('lineEntries: prompt kinds by the first line; the rules block never in text
     assert.ok(!JSON.stringify(entry).includes('Rules from the Software Factory'), entry.k);
     assert.ok(!JSON.stringify(entry).includes(FACTORY_PROMPT_RULES.split('\n')[1]!));
   }
+});
+
+test('lineEntries (SF-316): a fresh fix round\'s prompt is a fix entry with its fix_n and Fix section, its rules, previous Report and changed-files blocks cut, with or without rules and images, with or without /implement', async () => {
+  const task = '# T-1\n\n## Fix 1\n\n1. [R1, major] a.ts: one.\n\n## Fix 2\n\n1. [R2, major] b.ts: two.\n';
+  const command = '/implement .software-factory/T-1.md Fix 2';
+  // A Report that holds what reads like a change note and a factory line stays inside its block.
+  const report = `# Report: T-1, iteration 2\n\n## Done\n\n${changeNote('T-1', undefined)}\n\n## Changed files\n\n- a.ts`;
+  const files = [{ path: 'a.ts', status: 'modified' as const }, { path: 'c.ts', status: 'renamed' as const, from: 'b.ts' }];
+  const images = { dir: '/w/.software-factory/T-1', names: ['1.png'] };
+  for (const rules of ['<rules>\nNo abbreviations.\n</rules>\n', '']) {
+    const prompt = factoryPrompt(freshFixPrompt(command, rules, { iteration: 2, report, files }, 'abc'), 'T-1', 3, images, 'abc');
+    const entry = await one({ prompt, images: [{ name: '1.png', type: 'image/png', bytes: 3 }] }, { task });
+    assert.deepEqual(entry, {
+      t: 'prompt', who: 'factory', kind: 'fix', text: command, first: command, task_changed: false, fix_n: 2, fix: '## Fix 2\n\n1. [R2, major] b.ts: two.', images: ['1.png'], k: '7', ts: TS, it: 2,
+    });
+    for (const cut of ['<rules>', '<previous_report', '<changed_files>', 'Report: T-1', 'R b.ts -> c.ts']) {
+      assert.ok(!JSON.stringify(entry).includes(cut), cut);
+    }
+  }
+  // A job whose Implementer has no implement skill: the command is the Task file's path alone, and
+  // the fresh fix prompt is still a fix entry.
+  const bare = implementCommand('T-1', [], 2);
+  assert.equal(bare, '.software-factory/T-1.md Fix 2');
+  const entry = await one({ prompt: factoryPrompt(freshFixPrompt(bare, '<rules>\nR\n</rules>', { iteration: 2, report, files }, 'abc'), 'T-1', 3, undefined, 'abc') }, { task });
+  assert.deepEqual(entry, {
+    t: 'prompt', who: 'factory', kind: 'fix', text: bare, first: bare, task_changed: false, fix_n: 2, fix: '## Fix 2\n\n1. [R2, major] b.ts: two.', k: '7', ts: TS, it: 2,
+  });
+  // So is a resume fix prompt in that form; a user's message that only ends like one stays the user's.
+  const resumed = await one({ prompt: factoryPrompt('.software-factory/T-1.md Fix 1', 'T-1', 2) }, { task });
+  assert.deepEqual([resumed.kind, resumed.fix_n, resumed.fix], ['fix', 1, '## Fix 1\n\n1. [R1, major] a.ts: one.']);
+  assert.equal((await one({ prompt: factoryPrompt('Please look at Fix 1', 'T-1', 2) }, { task })).t, 'user');
+  assert.equal((await one({ prompt: factoryPrompt('notes/T-1.md Fix 1', 'T-1', 2) }, { task })).t, 'user');
 });
 
 test('lineEntries (SF-065): the images line and the changed-images note are cut from the text; the prompt still has its kind, the image names come from the record', async () => {

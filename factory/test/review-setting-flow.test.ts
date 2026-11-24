@@ -5,8 +5,10 @@
 // the gate off Claude reviews; a runner killed while the gate runs resumes the gate; Accept over
 // review_churn and gate_failed without a Claude review lists what went unapplied on the Merge
 // request screen, not in the MR text;
-// the gate prompt says it is the only reviewer.
+// the gate prompt says it is the only reviewer; the session of a job's fix rounds (SF-316) is
+// decided at Start too.
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -200,6 +202,57 @@ test('review: claude under ticket runs the Claude review and the gate in one rou
   } finally {
     await stop(served);
   }
+});
+
+test('the fix session of a job (SF-316), decided at Start beside the review: by the Task key, by alternate\'s pick, by the setting; each in job.json and a fix_session_setup event; a later setting leaves a started job\'s arm as it was', async () => {
+  // The review off: the fix rounds are asked for by hand.
+  const env = await newEnv('setting-fix-session', { SF_FIX_SESSION: 'alternate' });
+  const repo = await newRepo(env, 'setting-fix-session-repo', false);
+  // A ticket alternate gives the fresh arm: the first byte of sha256("app/<ticket>") even.
+  const picked = Array.from({ length: 20 }, (_, index) => `A-${index + 1}`).find((ticket) => createHash('sha256').update(`app/${ticket}`).digest()[0]! % 2 === 0)!;
+  const keyed = task('K-1', 'Keyed').replace('base: main\n', 'base: main\nfix_session: resume\n');
+  await writeTask({ name: 'app', readCheckout: repo, workCheckout: repo }, 'K-1', keyed, new JobStore(env.state));
+  await putTask(env, repo, picked, 'Picked');
+  await putTask(env, repo, 'P-1', 'By the setting');
+  // A Task value that is not fresh or resume is ignored: the setting decides.
+  const unknown = task('U-1', 'Unknown').replace('base: main\n', 'base: main\nfix_session: alternate\n');
+  await writeTask({ name: 'app', readCheckout: repo, workCheckout: repo }, 'U-1', unknown, new JobStore(env.state));
+  await script(env, [{ text: 'K-1 one' }, { text: 'picked one' }, { text: 'P-1 one' }, { text: 'U-1 one' }, { text: 'picked two' }]);
+  const setupOf = async (ticket: string): Promise<unknown[]> => (await eventsOf(env, ticket)).filter((record) => record.type === 'fix_session_setup').map((record) => [record.iteration, record.fix_session, record.reason]);
+  const jobs = new JobStore(env.state);
+  let served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'K-1' });
+    await waitFor(served, 'K-1', 'awaiting_review', 1);
+    await call(served, 'start', { workspace: 'app', ticket: picked });
+    await waitFor(served, picked, 'awaiting_review', 1);
+  } finally {
+    await stop(served);
+  }
+  // The setting changes after Start: a new job takes it, a started one keeps its arm.
+  env.extra!.SF_FIX_SESSION = 'resume';
+  served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'P-1' });
+    await waitFor(served, 'P-1', 'awaiting_review', 1);
+    await call(served, 'start', { workspace: 'app', ticket: 'U-1' });
+    await waitFor(served, 'U-1', 'awaiting_review', 1);
+    await call(served, 'request_fix', { workspace: 'app', ticket: picked, content: '1. Again.' });
+    await waitFor(served, picked, 'awaiting_review', 2);
+  } finally {
+    await stop(served);
+  }
+  assert.deepEqual(await setupOf('K-1'), [[0, 'resume', 'task']]);
+  assert.deepEqual(await setupOf(picked), [[0, 'fresh', 'alternate']]);
+  assert.deepEqual(await setupOf('P-1'), [[0, 'resume', 'setting']]);
+  assert.deepEqual(await setupOf('U-1'), [[0, 'resume', 'setting']]);
+  assert.deepEqual(await Promise.all(['K-1', picked, 'P-1', 'U-1'].map(async (ticket) => (await jobs.read('app', ticket))!.fix_session)), ['resume', 'fresh', 'resume', 'resume']);
+  // The picked job's fix round ran fresh under the resume setting: a new session, with the pack.
+  const log = await fakeLog(env);
+  const fixTurn = log.at(-1)!;
+  assert.ok(fixTurn.prompt.startsWith(`/implement .software-factory/${picked}.md Fix 1\n\n<previous_report iteration="1">`), fixTurn.prompt);
+  assert.ok(!fixTurn.argv.some((arg) => arg.startsWith('--resume')));
+  assert.notEqual(fixTurn.sessionId, log[1]!.sessionId);
 });
 
 test('the gate off (SF_GATE=off) under ticket: Claude reviews every job, and its clean verdict decides', async () => {

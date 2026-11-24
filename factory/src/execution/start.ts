@@ -8,7 +8,7 @@ import { writeFileAtomic } from '../atomic.js';
 import { type ImageRef, jobAttachment, type ResolvedImage, resolveTaskImages, writeImages } from '../attachments.js';
 import { FactoryError } from '../errors.js';
 import { runGit } from '../git.js';
-import { claudeReviewDecision } from '../config.js';
+import { claudeReviewDecision, fixSessionDecision } from '../config.js';
 import { buildsOnPoint, buildsOnTarget, notReadyAtStart } from '../builds-on.js';
 import { startBranch, taskContinues } from '../continues.js';
 import { checkTransition, claudeReviews, type Handover, type Job, type JobState, now, RESTARTABLE_STATES, runningJobs, TERMINAL_STATES } from '../jobs.js';
@@ -20,7 +20,7 @@ import { configDir, type Workspace } from '../registry.js';
 import { collectRules, writeJobRules } from '../rules-docs.js';
 import { Runners } from '../runner.js';
 import { jobSkills, recordSkills } from '../skills.js';
-import { isDraft, parseFrontMatter, readTask, TASK_DIR, taskBuildsOn, taskImportant, type TaskReview, taskReview, taskSha256, TICKET_DESCRIPTION, TICKET_PATTERN } from '../task-file.js';
+import { isDraft, parseFrontMatter, readTask, TASK_DIR, taskBuildsOn, type TaskFixSession, taskFixSession, taskImportant, type TaskReview, taskReview, taskSha256, TICKET_DESCRIPTION, TICKET_PATTERN } from '../task-file.js';
 import { addWorktree, deleteBranch, removeWorktree } from '../worktree.js';
 import type { JobStorePort, LockPort, RunnerPort, SettingsPort } from './ports.js';
 import { checkNotInCheckout } from './errors.js';
@@ -49,7 +49,7 @@ interface BuildsOnStart {
 }
 
 // What a start reads from the Task file: the job's base, continues, builds_on and branch, its
-// review key, whether it is important, and the Task text they were read from.
+// review and fix_session keys, whether it is important, and the Task text they were read from.
 interface Plan {
   base: string;
   continues: string | null;
@@ -57,6 +57,7 @@ interface Plan {
   branch: string;
   content: string;
   review: TaskReview | undefined;
+  fixSession: TaskFixSession | undefined;
   important: boolean;
 }
 
@@ -316,7 +317,7 @@ export class StartPart {
     }
     return {
       base: fields.get('base')!, continues: taskContinues(fields), buildsOn: { ticket: buildsOn, commit }, branch: branchName(ticket, fields.get('title')!), content, review: taskReview(fields),
-      important: taskImportant(fields),
+      fixSession: taskFixSession(fields), important: taskImportant(fields),
     };
   }
 
@@ -351,21 +352,24 @@ export class StartPart {
     });
   }
 
-  // Writes the record of a new job in starting (the ticket's directory must be free); under the lock. Decided here, once: the job's Claude review (claude_review, its review_setup event), its skills (synced, its skills event) and whether it is important (important).
+  // Writes the record of a new job in starting (the ticket's directory must be free); under the lock. Decided here, once: the job's Claude review (claude_review, its review_setup event), the session of its fix rounds (fix_session, its fix_session_setup event), its skills (synced, its skills event) and whether it is important (important).
   async #claim(workspace: Workspace, ticket: string, plan: Plan, images: ResolvedImage[]): Promise<Claimed> {
     const { base, continues, buildsOn, branch } = plan;
     const created = now();
     const worktree = this.#peers.handover.worktreePath(workspace.name, ticket);
     const setup = claudeReviewDecision(this.#settings.config, plan.review);
+    const fixSession = fixSessionDecision(this.#settings.config, plan.fixSession, workspace.name, ticket);
     const job: Job = {
       workspace: workspace.name, ticket, branch, base, continues, builds_on: buildsOn.ticket, builds_on_commit: buildsOn.commit, base_commit: null, state: 'starting', worktree, prepared_commit: null,
       iteration: 0, fixes: 0, gate_fixes: 0, gate_tokens: 0, session_id: null, mr: null, target_commit: null, mr_attempts: 0, mr_conflict_turn: false, created_at: created, updated_at: created, claude_review: setup.claude_review,
+      fix_session: fixSession.fix_session,
       ...(plan.important ? { important: true as const } : {}),
     };
     checkTransition(null, 'starting', 'create');
     await this.#store.jobs.write(job);
     await this.#store.jobs.appendEvent(workspace.name, ticket, { ts: created, iteration: 0, state: { from: null, to: 'starting' } });
     await this.#store.jobs.appendEvent(workspace.name, ticket, { ts: created, iteration: 0, type: 'review_setup', ...setup });
+    await this.#store.jobs.appendEvent(workspace.name, ticket, { ts: created, iteration: 0, type: 'fix_session_setup', ...fixSession });
     await recordSkills(this.#settings.config.stateDir, (record) => this.#store.jobs.appendEvent(workspace.name, ticket, { ts: created, iteration: 0, ...record }), { job: `${workspace.name}/${ticket}`, log: join(this.#store.jobs.dir(workspace.name, ticket), 'runner.log') });
     return { workspace, ticket, base, continues, buildsOn, branch, worktree, images };
   }

@@ -1,5 +1,6 @@
 // Execution configuration, read once when `sf serve` starts.
 import type { SandboxSettings } from '@anthropic-ai/claude-agent-sdk';
+import { createHash } from 'node:crypto';
 import { accessSync, constants, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
@@ -9,7 +10,7 @@ import type { Job } from './jobs.js';
 import { configDir, HANDOFF_OFF_CODE, type HandoffMode } from './registry.js';
 import { DEFAULT_RULES_MAX_BYTES } from './rules-docs.js';
 import { snapshotSkillFile } from './skills.js';
-import type { TaskReview } from './task-file.js';
+import type { TaskFixSession, TaskReview } from './task-file.js';
 
 export interface Config {
   stateDir: string;
@@ -39,6 +40,10 @@ export interface Config {
   // those whose Task file says review: claude; always every ticket but those that say review: codex.
   // A Config without it (the tests' literals) counts as always.
   claudeReview?: 'ticket' | 'always';
+  // The session of the Implementer's fix rounds (SF_FIX_SESSION): resume, the default, the job's one
+  // session; fresh a new session per fix round; alternate one of the two per ticket. A Config without
+  // it (the tests' literals) counts as resume.
+  fixSession?: FixSessionSetting;
   // The model of the review (SF_REVIEW_MODEL, passed as is); undefined uses the user's default.
   reviewModel: string | undefined;
   // maxTurns of the review (SF_REVIEW_MAX_TURNS).
@@ -367,6 +372,33 @@ export function claudeReviewDecision(config: Pick<Config, 'claudeReview' | 'gate
   return { claude_review: setting === 'always', reason: `SF_CLAUDE_REVIEW=${setting}` };
 }
 
+export type FixSessionSetting = 'resume' | 'fresh' | 'alternate';
+
+// SF_FIX_SESSION: resume (the default), fresh or alternate.
+export function fixSessionSetting(env: NodeJS.ProcessEnv = process.env): FixSessionSetting {
+  const mode = env.SF_FIX_SESSION || 'resume';
+  if (mode !== 'resume' && mode !== 'fresh' && mode !== 'alternate') {
+    throw new FactoryError('invalid_config', `SF_FIX_SESSION must be resume, fresh or alternate, got "${mode}".`);
+  }
+  return mode;
+}
+
+// The session of a job's fix rounds, decided at Start from the Task file's fix_session
+// (taskFixSession), which wins, and SF_FIX_SESSION (absent: resume), with the reason for the job's
+// fix_session_setup event. alternate is fresh when the first byte of sha256("<workspace>/<ticket>")
+// is even, else resume: the same ticket always gets the same arm.
+export function fixSessionDecision(config: Pick<Config, 'fixSession'>, task: TaskFixSession | undefined, workspace: string, ticket: string): { fix_session: TaskFixSession; reason: 'setting' | 'task' | 'alternate' } {
+  if (task !== undefined) {
+    return { fix_session: task, reason: 'task' };
+  }
+  const setting = config.fixSession ?? 'resume';
+  if (setting !== 'alternate') {
+    return { fix_session: setting, reason: 'setting' };
+  }
+  const first = createHash('sha256').update(`${workspace}/${ticket}`).digest()[0]!;
+  return { fix_session: first % 2 === 0 ? 'fresh' : 'resume', reason: 'alternate' };
+}
+
 // SF_REVIEW_SKILL: the code-review skill file of the reviewers, read at each review; unset, the
 // skills snapshot's (src/skills.ts), which a reviewer reads in the folder its job pinned and only when
 // its role chose code-review (src/review.ts, reviewerSkills); set, it wins for both reviewers; empty, none.
@@ -505,6 +537,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     sensitivePaths: sensitivePaths(env),
     review: env.SF_REVIEW !== 'off',
     claudeReview: claudeReviewSetting(env),
+    fixSession: fixSessionSetting(env),
     reviewModel: env.SF_REVIEW_MODEL || undefined,
     reviewMaxTurns: positiveInteger(env, 'SF_REVIEW_MAX_TURNS', 60),
     reviewSkill: reviewSkillPath(env),

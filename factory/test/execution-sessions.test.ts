@@ -1,19 +1,24 @@
 // End-to-end execution tests, the Implementer's session: permission_mode_mismatch and its restart,
 // the smoke's session (dontAsk with the probe rule) against a real job's, the allowedTools, the
-// tool allow list without MCP, and the init assertion. The real `sf serve` and `sf` CLI with
+// tool allow list without MCP, the init assertion, and the session of a fix round (SF-316: resume or
+// fresh, with the fresh round's pack and the costs per session). The real `sf serve` and `sf` CLI with
 // private config and state directories, throwaway Git repositories and the fake Claude Code as the Implementer executable, as in
 // test/execution.test.ts (split so that no file runs near run-tests' per-file limit).
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdir, readFile, readlink, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { addAttachment } from '../src/attachments.js';
+import { changedFileLine, freshFixPrompt } from '../src/execution/prompts.js';
 import { JobStore } from '../src/jobs.js';
+import { factoryPrompt } from '../src/prompts.js';
 import { prepareClaudeState } from '../src/session-wrapper.js';
 import { rolesOf } from '../src/skill-roles.js';
 import { initToolsProblem } from '../src/live-smoke.js';
 import { DENIED_TOOLS, IMPLEMENTER_TOOLS } from '../src/rules.js';
 import { IMPLEMENTER_SESSION_TOOLS, SESSION_SHELL_ENV, SMOKE_PROBE_RULE, SMOKE_TOOLS, sessionAllowedTools } from '../src/session.js';
-import { bwrapLog, call, FAKE_SKILLS, fakeLog, implementerRun, newEnv, newRepo, putTask, runCli, script, serve, skillsSourceDir, stop, temp, waitFor, jobPrompt } from './support/harness.js';
+import { bwrapLog, call, type Env, FAKE_SKILLS, fakeLog, implementerRun, newEnv, newRepo, putRules, putTask, refused, runCli, script, serve, skillsSourceDir, stop, temp, waitFor, jobPrompt } from './support/harness.js';
 
 // Each role's list a job's skills event records without a choice.
 const DEFAULT_ROLES = rolesOf(undefined);
@@ -49,6 +54,178 @@ test('permission_mode_mismatch ends in needs_human; a restart turns working jobs
   assert.equal(log[1]!.prompt, await jobPrompt(env, 'please continue', 'M-1', 1));
   assert.ok(log[1]!.argv.includes('--resume=kept-session'));
   await stop(served);
+});
+
+// SF-316: the usage limit a turn ends with, and a Task file that refers to one image.
+const CLAUDE_LIMIT = { subtype: 'error_during_execution', errors: ["You've hit your 5-hour limit · resets 3am (Europe/Sofia)"] };
+const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('png-body')]);
+const PNG2 = Buffer.concat([PNG, Buffer.from('-second')]);
+const PNG3 = Buffer.concat([PNG, Buffer.from('-third')]);
+const GIF = Buffer.from('GIF89a-gif-body');
+
+// Waits until the job is parked on the usage limit.
+async function parked(env: Env, ticket: string): Promise<void> {
+  const deadline = Date.now() + 20_000;
+  while ((await new JobStore(env.state).read('app', ticket))?.state !== 'waiting_limit') {
+    assert.ok(Date.now() < deadline, `timed out waiting for ${ticket} to park`);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
+test('SF_FIX_SESSION=resume (SF-316, the default arm): a fix round resumes the job\'s session with today\'s prompt; a Resume after a usage-limit park keeps the session; the costs subtract within the session', async () => {
+  const env = await newEnv('fix-session-resume');
+  const repo = await newRepo(env, 'fix-session-resume-repo', false);
+  await putTask(env, repo, 'F-1', 'Resume');
+  await script(env, [
+    { write: { 'a.txt': 'a\n' }, costTotal: 0.25 },
+    { write: { 'a.txt': 'b\n' }, costTotal: 0.4 },
+    CLAUDE_LIMIT,
+    { write: { 'a.txt': 'c\n' }, costTotal: 0.7 },
+  ]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'F-1' });
+    await waitFor(served, 'F-1', 'awaiting_review', 1);
+    // The Task file changes while the job waits: the fix round carries the change note, as before.
+    const taskPath = join(repo, '.software-factory', 'F-1.md');
+    await writeFile(taskPath, `${await readFile(taskPath, 'utf8')}\nOne more line.\n`);
+    await call(served, 'request_fix', { workspace: 'app', ticket: 'F-1', content: '1. a.txt: again.' });
+    await waitFor(served, 'F-1', 'awaiting_review', 2);
+    await call(served, 'request_fix', { workspace: 'app', ticket: 'F-1', content: '1. a.txt: once more.' });
+    await parked(env, 'F-1');
+    assert.equal((await runCli(env, ['resume', 'app', 'F-1'])).code, 0);
+    await waitFor(served, 'F-1', 'awaiting_review', 3);
+  } finally {
+    await stop(served);
+  }
+  const jobs = new JobStore(env.state);
+  const job = (await jobs.read('app', 'F-1'))!;
+  assert.equal(job.fix_session, 'resume');
+  assert.deepEqual([job.session_cost_usd, job.unpublished_cost_usd], [undefined, undefined]);
+  const log = await fakeLog(env);
+  const prompts = log.map((entry) => entry.prompt);
+  assert.deepEqual([prompts[0], ...prompts.slice(2)], [
+    await jobPrompt(env, '/implement .software-factory/F-1.md', 'F-1', 1),
+    await jobPrompt(env, '/implement .software-factory/F-1.md Fix 2', 'F-1', 3),
+    await jobPrompt(env, 'Continue where you stopped.', 'F-1', 3),
+  ]);
+  assert.ok(prompts[1]!.startsWith('/implement .software-factory/F-1.md Fix 1\n\nThe Task file .software-factory/F-1.md changed since you were last given it'), prompts[1]);
+  assert.match(prompts[1]!, /^\+One more line\.$/m);
+  assert.doesNotMatch(prompts[1]!, /<previous_report|<changed_files>/);
+  // One session throughout.
+  assert.ok(log.every((entry) => entry.sessionId === log[0]!.sessionId));
+  assert.deepEqual(log.slice(1).map((entry) => entry.argv.includes(`--resume=${log[0]!.sessionId}`)), [true, true, true]);
+  const metas = await Promise.all([1, 2, 3].map((n) => jobs.readMeta('app', 'F-1', n)));
+  assert.deepEqual(metas.map((meta) => [meta.session_id, meta.cost_usd, meta.cost_usd_total]), [[log[0]!.sessionId, 0.25, 0.25], [log[0]!.sessionId, 0.15, 0.4], [log[0]!.sessionId, 0.3, 0.7]]);
+});
+
+test('SF_FIX_SESSION=fresh (SF-316): a fix round starts a new session with the pack (rules, the images the Task refers to now, previous Report, changed files) and no change note; an image that cannot be used refuses it; sf say continues that session; a Resume after a usage-limit park keeps it; the costs are per session, an ended session\'s unpublished spend carried', async () => {
+  const env = await newEnv('fix-session-fresh', { SF_FIX_SESSION: 'fresh' });
+  const repo = await newRepo(env, 'fix-session-fresh-repo', false);
+  const rules = await putRules(env, repo);
+  const workspace = { name: 'app', readCheckout: repo, workCheckout: repo };
+  const jobs = new JobStore(env.state);
+  await putTask(env, repo, 'F-1', 'Fresh');
+  await addAttachment(workspace, 'F-1', PNG, jobs);
+  const taskPath = join(repo, '.software-factory', 'F-1.md');
+  await writeFile(taskPath, `${await readFile(taskPath, 'utf8')}\nSee ![the error](F-1/1.png).\n`);
+  await script(env, [
+    { write: { 'README.md': 'hello fresh\n', 'new.txt': 'new\n' }, text: '# Report: F-1, iteration 1\n\nFirst.', costTotal: 0.25 },
+    { write: { 'new.txt': 'newer\n' }, text: '# Report: F-1, iteration 2\n\nSecond.', costTotal: 0.5 },
+    { write: { 'new.txt': 'newest\n' }, text: 'Third.', costTotal: 0.6 },
+    CLAUDE_LIMIT,
+    { write: { 'new.txt': 'last\n' }, text: 'Fourth.', costTotal: 0.2 },
+  ]);
+  let served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'F-1' });
+    await waitFor(served, 'F-1', 'awaiting_review', 1);
+    // An image that cannot be used refuses the Fix, as it refuses a Resume: nothing is written and
+    // no turn starts.
+    await writeFile(join(repo, '.software-factory', 'F-1', '1.png'), GIF);
+    const refusal = await refused(served, 'request_fix', { workspace: 'app', ticket: 'F-1', content: '1. new.txt: again.' });
+    assert.equal(refusal.code, 'attachment_invalid');
+    assert.match(refusal.message, /F-1\/1\.png: not the image its name says/);
+    const held = (await jobs.read('app', 'F-1'))!;
+    assert.deepEqual([held.state, held.iteration, held.fixes, held.session_id], ['awaiting_review', 1, 0, (await fakeLog(env))[0]!.sessionId]);
+    assert.doesNotMatch(await readFile(taskPath, 'utf8'), /## Fix 1/);
+    assert.equal((await fakeLog(env)).length, 1);
+    // The Task file changes while the job waits: a resume fix round would carry the change note. Its
+    // image 1.png is replaced and it refers to a new one, 2.png.
+    await writeFile(join(repo, '.software-factory', 'F-1', '1.png'), PNG2);
+    await writeFile(join(repo, '.software-factory', 'F-1', '2.png'), PNG3);
+    await writeFile(taskPath, `${await readFile(taskPath, 'utf8')}\nOne more line, and ![the form](F-1/2.png).\n`);
+    await call(served, 'request_fix', { workspace: 'app', ticket: 'F-1', content: '1. new.txt: again.' });
+    await waitFor(served, 'F-1', 'awaiting_review', 2);
+    assert.equal((await runCli(env, ['say', 'app', 'F-1', 'go', 'on'])).code, 0);
+    await waitFor(served, 'F-1', 'awaiting_review', 3);
+  } finally {
+    await stop(served);
+  }
+  let log = await fakeLog(env);
+  const base = (await jobs.read('app', 'F-1'))!.base_commit;
+  const worktree = (await jobs.read('app', 'F-1'))!.worktree!;
+  const imagesLine = { dir: join(worktree, '.software-factory', 'F-1'), names: ['1.png', '2.png'] };
+  const first = await jobs.readIteration('app', 'F-1', 1);
+  const meta1 = await jobs.readMeta('app', 'F-1', 1);
+  assert.deepEqual(meta1.files!.map(changedFileLine).sort(), ['A new.txt', 'M README.md']);
+  const fixPrompt = factoryPrompt(freshFixPrompt('/implement .software-factory/F-1.md Fix 1', rules, { iteration: 1, report: first.report, files: meta1.files! }, base), 'F-1', 2, imagesLine, base);
+  // The prompt is the first block, then the Task's images as it refers to them now: the replaced
+  // one's new bytes and the added one; their copies and records follow.
+  const sha = (data: Buffer): string => createHash('sha256').update(data).digest('hex');
+  assert.deepEqual(log[1]!.blocks, [
+    { type: 'text', text: fixPrompt },
+    { type: 'text', text: 'Image F-1/1.png ("the error"), referenced in the Task file:' },
+    { type: 'image', media_type: 'image/png', bytes: PNG2.length, sha256: sha(PNG2) },
+    { type: 'text', text: 'Image F-1/2.png ("the form"), referenced in the Task file:' },
+    { type: 'image', media_type: 'image/png', bytes: PNG3.length, sha256: sha(PNG3) },
+  ]);
+  assert.deepEqual((await jobs.read('app', 'F-1'))!.attachments, [
+    { name: '1.png', type: 'image/png', bytes: PNG2.length, sha256: sha(PNG2) }, { name: '2.png', type: 'image/png', bytes: PNG3.length, sha256: sha(PNG3) },
+  ]);
+  assert.deepEqual(await readFile(join(worktree, '.software-factory', 'F-1', '2.png')), PNG3);
+  assert.deepEqual(await readFile(join(jobs.dir('app', 'F-1'), 'attachments', '1.png')), PNG2);
+  assert.doesNotMatch(fixPrompt, /changed since you were last given it/);
+  assert.match(fixPrompt, /<previous_report iteration="1">\n# Report: F-1, iteration 1\n\nFirst\./);
+  // The fix round's session is new; sf say continues it, with the message alone.
+  assert.ok(!log[1]!.argv.some((arg) => arg.startsWith('--resume')));
+  assert.notEqual(log[1]!.sessionId, log[0]!.sessionId);
+  assert.ok(log[2]!.argv.includes(`--resume=${log[1]!.sessionId}`));
+  assert.equal(log[2]!.prompt, await jobPrompt(env, 'go on', 'F-1', 3, imagesLine));
+
+  // An MR-preparation turn of the second session that published nothing, as job.json records it.
+  const waiting = (await jobs.read('app', 'F-1'))!;
+  assert.deepEqual(waiting.session_cost_usd, { session_id: log[1]!.sessionId, usd: 0.6 });
+  await jobs.write({ ...waiting, session_cost_usd: { session_id: log[1]!.sessionId, usd: 0.75 } });
+  served = await serve(env);
+  try {
+    await call(served, 'request_fix', { workspace: 'app', ticket: 'F-1', content: '1. new.txt: last.' });
+    await parked(env, 'F-1');
+    log = await fakeLog(env);
+    // The ended session's spend after iteration 3 waits for the next published iteration.
+    const atPark = (await jobs.read('app', 'F-1'))!;
+    assert.deepEqual([atPark.session_id, atPark.session_cost_usd, atPark.unpublished_cost_usd], [log[3]!.sessionId, undefined, 0.15]);
+    assert.ok(!log[3]!.argv.some((arg) => arg.startsWith('--resume')));
+    assert.equal((await runCli(env, ['resume', 'app', 'F-1'])).code, 0);
+    await waitFor(served, 'F-1', 'awaiting_review', 4);
+  } finally {
+    await stop(served);
+  }
+  log = await fakeLog(env);
+  // The Resume after the park continues the fix round's new session.
+  assert.ok(log[4]!.argv.includes(`--resume=${log[3]!.sessionId}`));
+  assert.equal(log[4]!.prompt, await jobPrompt(env, 'Continue where you stopped.', 'F-1', 4, imagesLine));
+  const metas = await Promise.all([1, 2, 3, 4].map((n) => jobs.readMeta('app', 'F-1', n)));
+  assert.deepEqual(metas.map((meta) => [meta.session_id, meta.cost_usd, meta.cost_usd_total]), [
+    [log[0]!.sessionId, 0.25, 0.25],
+    // A second session costing more than the first's total: its own total.
+    [log[1]!.sessionId, 0.5, 0.5],
+    [log[1]!.sessionId, 0.1, 0.6],
+    // The third session's total plus the second's unpublished 0.15.
+    [log[3]!.sessionId, 0.35, 0.2],
+  ]);
+  const done = (await jobs.read('app', 'F-1'))!;
+  assert.deepEqual([done.fix_session, done.unpublished_cost_usd, done.session_cost_usd], ['fresh', 0, { session_id: log[3]!.sessionId, usd: 0.2 }]);
 });
 
 test('the smoke\'s session (SF-104, SF-109, SF-110): an sf serve whose state directory is laid out as sf smoke makes it runs the Implementer in dontAsk with exactly Bash(node probe.mjs:*) and the file tools in allowedTools; a real job stays in auto without allowedTools, and the sandbox, the path denials, the setting sources and the disallowed tools are equal for the same paths', async () => {

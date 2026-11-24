@@ -41,13 +41,30 @@ export function factoryPrompt(first: string, ticket: string, iteration: number, 
   return `${first}\n\n${line}${rules}`;
 }
 
-// This iteration's cost from the SDK's cumulative session total; a total below the previous one
-// means a new session started, so the total is this iteration's cost.
-export function iterationCost(total: number | null, previousTotal: number | null): number | null {
-  if (total === null || previousTotal === null || total < previousTotal) {
-    return total;
+// The cost record of an iteration (meta.json) the next one is measured from.
+export interface CostMark {
+  cost_usd_total: number | null;
+  // Absent in a meta.json written without it.
+  session_id?: string | undefined;
+}
+
+// A cost in dollars rounded to millionths.
+export function roundUsd(usd: number): number {
+  return Math.round(usd * 1e6) / 1e6;
+}
+
+// This iteration's cost from the SDK's cumulative total of session sessionId, plus carried (the spend
+// of sessions a fresh fix round ended after their last published iteration). The previous
+// iteration's total is subtracted when it is of the same session (a previous meta.json without
+// session_id counts as the same) and not above this total; otherwise a new session started, and its
+// total is this iteration's cost. Without a total, the carried spend alone (null when none).
+export function iterationCost(total: number | null, previous: CostMark | undefined, sessionId: string | undefined, carried = 0): number | null {
+  if (total === null) {
+    return carried > 0 ? roundUsd(carried) : null;
   }
-  return Math.round((total - previousTotal) * 1e6) / 1e6;
+  const previousTotal = previous?.cost_usd_total ?? null;
+  const sameSession = previous?.session_id === undefined || previous.session_id === sessionId;
+  return roundUsd((sameSession && previousTotal !== null && total >= previousTotal ? total - previousTotal : total) + carried);
 }
 
 // One level-2 section of the Handbook, from its heading up to the next level-2 heading outside a

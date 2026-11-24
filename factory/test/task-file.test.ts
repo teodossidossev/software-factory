@@ -8,7 +8,7 @@ import { after, before, test } from 'node:test';
 import { FactoryError } from '../src/errors.js';
 import { JobStore } from '../src/jobs.js';
 import type { Workspace } from '../src/registry.js';
-import { appendFix, checkNeed, checkTaskContent, landsAfter, MAX_TASK_BYTES, mayTouch, parseFrontMatter, taskImportant, taskReview, taskScope, taskSha256, taskSize, taskSlice, writeTask } from '../src/task-file.js';
+import { appendFix, checkNeed, checkTaskContent, landsAfter, MAX_TASK_BYTES, mayTouch, parseFrontMatter, taskFixSession, taskImportant, taskReview, taskScope, taskSha256, taskSize, taskSlice, writeTask } from '../src/task-file.js';
 
 const VALID = '---\nticket: PROJ-1\ntitle: Export as CSV\nbase: master\n---\n\n# PROJ-1: Export as CSV\n';
 
@@ -158,6 +158,15 @@ test('taskReview (SF-131) reads review: claude or codex, quoted or with a commen
   assert.equal(taskReview(fields('review: "codex"  # the gate alone')), 'codex');
   for (const other of ['review: Claude', 'review: both', 'review:', 'scope: [a]']) {
     assert.equal(taskReview(fields(other)), undefined, other);
+  }
+});
+
+test('taskFixSession (SF-316) reads fix_session: fresh or resume, quoted or with a comment too; any other value or no key is undefined, so the setting decides', () => {
+  const fields = (text: string) => parseFrontMatter(`---\nticket: T-1\ntitle: t\nbase: main\n${text}\n---\n`)!;
+  assert.equal(taskFixSession(fields('fix_session: fresh')), 'fresh');
+  assert.equal(taskFixSession(fields('fix_session: "resume"  # one session')), 'resume');
+  for (const other of ['fix_session: Fresh', 'fix_session: alternate', 'fix_session:', 'review: claude']) {
+    assert.equal(taskFixSession(fields(other)), undefined, other);
   }
 });
 

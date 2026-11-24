@@ -270,7 +270,13 @@ const jobSchema = z.strictObject({
   // review, the gate) and never changed after; false: the Codex gate is the review. Absent in a
   // job.json written without it: true (claudeReviews).
   claude_review: z.boolean().optional(),
+  // The fix rounds' session, decided at Start (SF_FIX_SESSION, the Task's fix_session); absent: resume.
+  fix_session: z.enum(['fresh', 'resume']).optional(),
   session_id: z.string().min(1).nullable(),
+  // fix_session fresh: the SDK's cost total of the session after its last turn (src/execution/turns.ts).
+  session_cost_usd: z.strictObject({ session_id: z.string().min(1), usd: z.number().min(0) }).optional(),
+  // The spend of ended sessions after their last published iteration, for the next one; absent: 0.
+  unpublished_cost_usd: z.number().min(0).optional(),
   // The sha256 of the Task file the job works from: recorded at Start, at every later copy into
   // the worktree and on a Resume that found the Task file changed; absent in a job.json written
   // without it. task.md keeps the version the Implementer was last given, which can be older.
@@ -351,6 +357,8 @@ export interface IterationMeta {
   // This iteration's cost, and the SDK's cumulative total for the session.
   cost_usd: number | null;
   cost_usd_total: number | null;
+  // The Implementer session cost_usd_total is of; absent in a meta.json written without it.
+  session_id?: string;
   duration_ms: number | null;
   // The commit the iteration's Patch is against; absent in a meta.json written without it.
   base_commit?: string;
@@ -489,6 +497,8 @@ export type EventRecord = { ts: string; iteration: number } & (
   | { type: 'gate_overridden'; code: string; unapplied: number }
   // Whether the Claude review runs on the job, decided at Start, and why.
   | { type: 'review_setup'; claude_review: boolean; reason: string }
+  // The session of the job's fix rounds, decided at Start, and why (src/config.ts, fixSessionDecision).
+  | { type: 'fix_session_setup'; fix_session: 'fresh' | 'resume'; reason: 'setting' | 'task' | 'alternate' }
   // The gate level of the iteration: the level, whether the gate runs, and why.
   | { type: 'gate_level'; level: GateLevel; ran: boolean; reasons: string[] }
   // The simplification pass: its outcome (the suggestions offered, those the factory

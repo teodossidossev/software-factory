@@ -1,6 +1,7 @@
 // Unit tests for the factory's prompt block and the per-iteration cost.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { changedFileLine, freshFixPrompt, implementCommand } from '../src/execution/prompts.js';
 import { FACTORY_PROMPT_RULES, factoryPrompt, iterationCost } from '../src/prompts.js';
 
 test('factoryPrompt puts the prompt first, then a blank line and the rules with ticket and iteration filled in', () => {
@@ -32,12 +33,58 @@ test('factoryPrompt with images (SF-065): one line names their folder and names 
   ].join('\n'));
 });
 
-test('iterationCost is the SDK total minus the previous total, or the total for a first iteration or new session', () => {
-  assert.equal(iterationCost(0.5, null), 0.5);
-  assert.equal(iterationCost(0.7084, 0.6656), 0.0428);
-  assert.equal(iterationCost(0.05, 0.0123), 0.0377);
-  assert.equal(iterationCost(0.2, 0.2), 0);
+test('the pack of a fresh fix round (SF-316, freshFixPrompt): the fix command on the first line, then the rules, the previous Report and the changed files as A, M, D and R lines; no diff text', () => {
+  const command = implementCommand('PROJ-1', ['implement'], 2);
+  const rules = '<rules>\nNo abbreviations.\n</rules>\n';
+  const files = [
+    { path: 'src/new.ts', status: 'added' as const },
+    { path: 'src/changed.ts', status: 'modified' as const },
+    { path: 'src/gone.ts', status: 'deleted' as const },
+    { path: 'src/after.ts', status: 'renamed' as const, from: 'src/before.ts' },
+  ];
+  const prompt = freshFixPrompt(command, rules, { iteration: 2, report: '# Report: PROJ-1, iteration 2\n\nDone.\n', files }, 'abc123');
+  assert.equal(prompt, [
+    '/implement .software-factory/PROJ-1.md Fix 2',
+    '',
+    '<rules>', 'No abbreviations.', '</rules>',
+    '',
+    '<previous_report iteration="2">', '# Report: PROJ-1, iteration 2', '', 'Done.', '</previous_report>',
+    '',
+    '<changed_files>',
+    'This fix round starts a new session. The files your change holds against the base commit abc123, as of iteration 2: for A read the file; for M and D read `git diff abc123 -- <path>`; for R read `git diff abc123 -- <from> <path>`; all in the worktree.',
+    'A src/new.ts', 'M src/changed.ts', 'D src/gone.ts', 'R src/before.ts -> src/after.ts',
+    '</changed_files>',
+  ].join('\n'));
+  assert.deepEqual(files.map(changedFileLine), ['A src/new.ts', 'M src/changed.ts', 'D src/gone.ts', 'R src/before.ts -> src/after.ts']);
+  // Without rules the blocks follow the command; without files the list says so.
+  const bare = freshFixPrompt(command, '', { iteration: 1, report: 'r', files: [] }, null);
+  assert.equal(bare.split('\n').slice(0, 3).join('\n'), `${command}\n\n<previous_report iteration="1">`);
+  assert.match(bare, /against the base commit the commit your branch started from, as of iteration 1: [^\n]+\n\(none\)\n<\/changed_files>$/);
+});
+
+test('iterationCost with a previous meta.json without session_id (written before SF-316): the SDK total minus the previous total, or the total for a first iteration or new session', () => {
+  const old = (total: number | null) => ({ cost_usd_total: total });
+  assert.equal(iterationCost(0.5, undefined, 's-1'), 0.5);
+  assert.equal(iterationCost(0.5, old(null), 's-1'), 0.5);
+  assert.equal(iterationCost(0.7084, old(0.6656), 's-1'), 0.0428);
+  assert.equal(iterationCost(0.05, old(0.0123), 's-1'), 0.0377);
+  assert.equal(iterationCost(0.2, old(0.2), 's-1'), 0);
   // A smaller total means the session started over: its total is this iteration's cost.
-  assert.equal(iterationCost(0.1, 0.6), 0.1);
-  assert.equal(iterationCost(null, 0.6), null);
+  assert.equal(iterationCost(0.1, old(0.6), 's-1'), 0.1);
+  assert.equal(iterationCost(null, old(0.6), 's-1'), null);
+});
+
+test('iterationCost across sessions (SF-316): the previous total is subtracted only for the same session; a second session costing more than the first\'s total is its own total; the carried spend of an ended session is added', () => {
+  // The same session: the difference.
+  assert.equal(iterationCost(0.9, { cost_usd_total: 0.6, session_id: 's-1' }, 's-1'), 0.3);
+  // A total below the previous one of the same session id is taken whole, never a negative cost.
+  assert.equal(iterationCost(0.2, { cost_usd_total: 0.6, session_id: 's-1' }, 's-1'), 0.2);
+  // A new session whose total is above the first session's: its whole total, not the difference.
+  assert.equal(iterationCost(0.9, { cost_usd_total: 0.6, session_id: 's-1' }, 's-2'), 0.9);
+  assert.equal(iterationCost(0.1, { cost_usd_total: 0.6, session_id: 's-1' }, 's-2'), 0.1);
+  // The ended session's spend after its last published iteration (an MR-preparation turn that
+  // published nothing) is carried into the next iteration, not lost.
+  assert.equal(iterationCost(0.9, { cost_usd_total: 0.6, session_id: 's-1' }, 's-2', 0.25), 1.15);
+  assert.equal(iterationCost(null, { cost_usd_total: 0.6, session_id: 's-1' }, 's-2', 0.25), 0.25);
+  assert.equal(iterationCost(null, { cost_usd_total: 0.6, session_id: 's-1' }, 's-2', 0), null);
 });

@@ -12,7 +12,7 @@ import { FactoryError } from './errors.js';
 
 export const STATE_VERSION_FILE = 'state-version';
 // The format this release reads and writes.
-export const STATE_VERSION = 7;
+export const STATE_VERSION = 8;
 
 // One step of the format: the state written at version from becomes the state of version from + 1.
 export interface Migration {
@@ -43,6 +43,10 @@ export const MIGRATIONS: readonly Migration[] = [
   // 6 → 7: a pin in pins.json may hold url (a pin of another page), which an older factory's strict
   // schema refuses. A pin without it is a dashboard pin, so nothing is rewritten.
   { from: 6, run: async () => undefined },
+  // 7 → 8: job.json may hold fix_session, session_cost_usd and unpublished_cost_usd, which an older
+  // factory's strict schema refuses. A job without them resumes its session for every fix round and
+  // has no cost carried, so nothing is rewritten.
+  { from: 7, run: async () => undefined },
 ];
 
 export interface StateVersionOptions {

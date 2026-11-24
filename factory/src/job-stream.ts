@@ -32,6 +32,10 @@ const CONTINUE = 'Continue where you stopped.';
 // followed by a blank line or by the end.
 const FIRST_RULES = /^\n\n<rules>\n[\s\S]*?\n<\/rules>(?=\n\n|$)/u;
 const LEADING_RULES = /^<rules>\n[\s\S]*?\n<\/rules>(?:\n\n|$)/u;
+// The pack of a fix round in a new session (freshFixPrompt, src/execution/prompts.ts) after its
+// fix command line: the job's <rules> block when it has one, <previous_report> and <changed_files>,
+// up to the end of the text before the factory's rules.
+const FIX_PACK = /^([^\n]* Fix \d+)\n\n(?:<rules>\n[\s\S]*?\n<\/rules>\n\n)?<previous_report iteration="\d+">\n[\s\S]*?\n<\/previous_report>\n\n<changed_files>\n[\s\S]*\n<\/changed_files>$/u;
 
 export type Who = 'implementer' | 'claude' | 'codex' | 'you' | 'factory' | 'mr';
 export type PromptKind = 'implement' | 'fix' | 'mr' | 'conflict' | 'continue';
@@ -177,6 +181,9 @@ async function promptEntry(prompt: string, ctx: StreamContext, sent: unknown): P
   let text = (rules < 0 ? prompt : prompt.slice(0, rules)).replace(IMAGES_LINE, '');
   // The note of changed images is cut too; task_changed stays the Task text's.
   text = text.replace(IMAGES_CHANGED, '');
+  // A fresh fix round's pack is cut as a first prompt's rules are, before a Report in it could
+  // read as a change note: the command line stays.
+  text = text.replace(FIX_PACK, '$1');
   const note = CHANGE_NOTE.exec(text);
   const taskChanged = note !== null;
   if (note !== null) {
@@ -187,7 +194,9 @@ async function promptEntry(prompt: string, ctx: StreamContext, sent: unknown): P
   const images = names.length > 0 ? { images: names } : {};
   const first = text.split('\n')[0]!;
   const implement = /^\/implement \S+$/u.test(first);
-  const fix = /^\/implement \S+ Fix (\d+)$/u.exec(first);
+  // A fix command in either form of implementCommand (src/execution/prompts.ts): with /implement, or
+  // the Task file's path alone when the job's Implementer has no implement skill.
+  const fix = /^(?:\/implement \S+|\.software-factory\/\S+\.md) Fix (\d+)$/u.exec(first);
   const rest = text.slice(first.length);
   const base = { t: 'prompt' as const, text, first, task_changed: taskChanged, ...images };
   if (implement) {

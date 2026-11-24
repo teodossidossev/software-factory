@@ -5846,8 +5846,8 @@ start; the period is the chosen number of days ending today. The sections, in or
   - **review churn**: a ledger entry reopened twice or more (the one reopened most, the lowest id
     on a tie), or else a stop with `review_churn` or `review_disputed` on one of those 7 days.
   - **a stage failing**: the 3 newest runs of the Claude review, the Codex gate, the
-    simplification, the plan check, the digest or the explanation all failed, the newest in the
-    period.
+    simplification, the last review, the plan check, the digest or the explanation all failed, the
+    newest in the period.
   - **a cost spike**: a day whose cost is more than twice the median of the days with a cost among
     the 30 days before it (at least 7 such days) and at least $5, naming the job that cost most
     that day.
@@ -5877,11 +5877,12 @@ start; the period is the chosen number of days ending today. The sections, in or
   runs divided by the distinct tickets with a check record in the period (`tickets` in the
   payload, null for the other stages).
 - **Spend**: the cost (every role but the Codex gate) and the Codex gate's tokens; cost per day by
-  role, Codex gate tokens per day; per role (Implementer, Claude review, simplification, Codex
-  gate, plan check, digest, explanations) the cost, tokens and runs; per workspace. The
-  simplification's line also says `offered N · taken N · skipped N` (`simplify` in the payload,
-  SF-132): the passes of the period whose `simplify.json` offered at least one suggestion, and the
-  `simplify_chosen` lines of `events.jsonl` in the period with the choice `simplify` or `skip`.
+  role, Codex gate tokens per day; per role (Implementer, Claude review, simplification, last
+  review, Codex gate, plan check, digest, explanations) the cost, tokens and runs; per workspace.
+  The simplification's line also says `offered N · taken N · skipped N` (`simplify` in the
+  payload, SF-132): the passes of the period whose `simplify.json` offered at least one suggestion,
+  and the `simplify_chosen` lines of `events.jsonl` in the period with the choice `simplify` or
+  `skip`.
 - **Load**: jobs started and finished, the median time to ready (from the job's creation to its
   first `ready_for_human_review` or `handed_over`) and the median iterations of the pushed jobs.
 - **Jobs**: the jobs of the period (created or changed in it, or not finished), by cost, at most 200.
@@ -5893,14 +5894,15 @@ start; the period is the chosen number of days ending today. The sections, in or
 Where the numbers come from: the Implementer's cost is each iteration's `meta.json` at its end,
 its tokens the SDK result messages in `events.jsonl`; the Claude review's cost is each
 `review.json` verdict, its tokens its `review_message` results; the same for the simplification
-(`simplify.json`); the Codex gate's tokens are each `gate.json`'s; the plan check's cost is each
-check record under `checks/`; the digests' each digest record; the explanations' the job's
-`explanation.json`. Failed Claude reviews and gate runs are counted from the `review_failed` lines
-of `events.jsonl`, because a retry removes their files; with a removed `gate.json` its tokens go
-too, so the days' Codex tokens can be below a job's `gate_tokens`. Not recorded: a dollar figure
-for the Codex gate (Codex reports tokens, and the factory has no price for them), tokens of the plan
-check, the digest and the explanations ("not recorded"), and earlier explanations (each stop
-replaces the job's one). A cost that was not recorded counts 0 and marks its role "at least".
+(`simplify.json`); the last review's cost is each `last-review.json`'s, without tokens; the Codex
+gate's tokens are each `gate.json`'s; the plan check's cost is each check record under `checks/`;
+the digests' each digest record; the explanations' the job's `explanation.json`. Failed Claude
+reviews and gate runs are counted from the `review_failed` lines of `events.jsonl`, because a
+retry removes their files; with a removed `gate.json` its tokens go too, so the days' Codex tokens
+can be below a job's `gate_tokens`. Not recorded: a dollar figure for the Codex gate (Codex reports
+tokens, and the factory has no price for them), tokens of the last review, the plan check, the
+digest and the explanations ("not recorded"), and earlier explanations (each stop replaces the
+job's one). A cost that was not recorded counts 0 and marks its role "at least".
 
 Limits and caches: at most the 1000 newest job directories are read (a note says how many were
 left out); an event log above 256 MiB is not read (its tokens and time to ready are missing); an

@@ -568,15 +568,29 @@ function tkWaits(plan: TicketPlan): HTMLElement[] {
 }
 
 // The plan-check rounds of the ticket, every version: "N rounds · $X" ("at least $X" when a
-// cost is unknown), or "no rounds yet".
+// cost is unknown), or "no rounds yet"; under it each round, newest first: its date, mode,
+// verdict and cost.
 function tkRounds(): HTMLElement {
   const data = tkData();
   const rounds = typeof data?.check_rounds === 'number' ? data.check_rounds : 0;
   if (data === null || rounds === 0) {
     return el('div', 'muted fs12 tk-rounds', 'no rounds yet');
   }
-  return el('div', 'muted fs12 tk-rounds', roundsText(rounds, data.check_usd, data.check_usd_complete !== false, money));
+  const box = el('div');
+  box.append(el('div', 'muted fs12 tk-rounds', roundsText(rounds, data.check_usd, data.check_usd_complete !== false, money)));
+  const list = Array.isArray(data.check_round_list) ? data.check_round_list : [];
+  if (list.length > 0) {
+    const items = el('ul', 'muted fs12 tk-round-list');
+    for (const round of list) {
+      items.append(el('li', '', `${day(round.ended_at)} · ${TK_ROUND_MODES[round.mode] ?? round.mode} · ${TK_ROUND_VERDICTS[round.verdict] ?? round.verdict} · ${money(round.cost_usd)}`));
+    }
+    box.append(items);
+  }
+  return box;
 }
+// A round's mode and verdict in words.
+const TK_ROUND_MODES: Readonly<Record<CheckRound['mode'], string>> = { full: 'full', follow_up: 'follow-up' };
+const TK_ROUND_VERDICTS: Readonly<Record<CheckRound['verdict'], string>> = { ready: 'ready', not_ready: 'not ready', failed: 'failed' };
 
 // Plan-check rounds and their cost in words: "N rounds · $X", "at least $X" when a cost
 // is unknown; format: the page's money or the Stats page's.

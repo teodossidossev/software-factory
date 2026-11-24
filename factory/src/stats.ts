@@ -23,6 +23,7 @@ import { entryOf, type Outcome, type Outcomes, outcomeOf } from './metrics.js';
 import { QueueStore } from './queue.js';
 import { REVIEWER, type ReviewItem, type Severity } from './review.js';
 import { codesWith } from './stops.js';
+import { type CheckMode, recordMode } from './task-check.js';
 import { parseFrontMatter } from './task-file.js';
 
 // The periods the page offers, in local days ending today.
@@ -117,6 +118,27 @@ export interface StageRow {
   tickets: number | null;
   cost_usd: number | null;
   tokens: ClaudeTokens | GateTokens | null;
+}
+
+// The plan check by how its Claude check ran: full or follow_up; a record without mode counts as
+// full.
+export interface TaskCheckModeRow {
+  mode: CheckMode;
+  // The checks of the mode that ended in the period, as the plan check's StageRow counts them: ok
+  // ones (runs) and failed ones; the sum of the known costs of both, false when one is unknown;
+  // cost_usd / runs, null with no run.
+  runs: number;
+  failed: number;
+  cost_usd: number;
+  cost_complete: boolean;
+  usd_per_run: number | null;
+  // The quality signal: the tickets started in the period (each once, by its latest job started
+  // in it) whose last check that ended before that job's start, failed or not, ran in this mode
+  // (full for a ticket with no such check), and those of them whose job needed more than 2
+  // iterations; over_two / started, null with none.
+  started: number;
+  over_two: number;
+  over_two_share: number | null;
 }
 
 export interface SecondOpinionCase {
@@ -236,6 +258,8 @@ export interface StatsPayload {
   roles: RoleRow[];
   by_workspace: WorkspaceRow[];
   stages: StageRow[];
+  // Full, then follow_up.
+  task_check_modes: TaskCheckModeRow[];
   second_opinion: { codex_after_claude: SecondOpinion; claude_after_codex: SecondOpinion };
   // On, then off; a job without claude_review is in neither.
   arms: ArmRow[];
@@ -376,6 +400,8 @@ interface CheckRow {
   ticket: string;
   sha256: string;
   status: 'checked' | 'failed';
+  // full for a record without mode or with one not known.
+  mode: CheckMode;
   findings: Findings;
   cost: number | null;
   started_at: string;
@@ -1088,23 +1114,55 @@ export class Stats {
 
     // The plan check: its cost, runs, findings, revisions and tickets.
     const checkedTickets = new Set<string>();
+    const modes = new Map<CheckMode, TaskCheckModeRow>((['full', 'follow_up'] as const).map((mode) => [mode, {
+      mode, runs: 0, failed: 0, cost_usd: 0, cost_complete: true, usd_per_run: null, started: 0, over_two: 0, over_two_share: null,
+    }]));
     for (const record of checkRecords) {
       addCost('task_check', record.ended_at, record.cost, record.workspace, null);
       if (!inPeriod(record.ended_at)) {
         continue;
       }
       checkedTickets.add(`${record.workspace}/${record.ticket}`);
+      const mode = modes.get(record.mode)!;
+      mode.cost_usd += record.cost ?? 0;
+      mode.cost_complete &&= record.cost !== null;
       if (record.status === 'failed') {
         stages.task_check.failed += 1;
+        mode.failed += 1;
         continue;
       }
       stages.task_check.runs += 1;
+      mode.runs += 1;
       addFindings(stages.task_check.findings, record.findings);
       const revised = (record.findings.blocker > 0 || record.findings.major > 0) && checkRecords.some((other) =>
         other.workspace === record.workspace && other.ticket === record.ticket && other.sha256 !== record.sha256 && Date.parse(other.started_at) > Date.parse(record.started_at));
       if (revised) {
         stages.task_check.revised! += 1;
       }
+    }
+    // The quality signal: each ticket started in the period once, by its latest job started in it,
+    // under the mode of the ticket's last check (failed ones included) that ended before that
+    // job's start; full without one.
+    const startedJobs = new Map<string, Job>();
+    for (const { job, dir } of read) {
+      const key = `${dir.workspace}/${job.ticket}`;
+      const kept = startedJobs.get(key);
+      if (inPeriod(job.created_at) && (kept === undefined || job.created_at > kept.created_at)) {
+        startedJobs.set(key, job);
+      }
+    }
+    for (const job of startedJobs.values()) {
+      const start = Date.parse(job.created_at);
+      const last = checkRecords.reduce<CheckRow | undefined>((found, record) => (
+        record.workspace === job.workspace && record.ticket === job.ticket && Date.parse(record.ended_at) < start
+        && (found === undefined || Date.parse(record.ended_at) > Date.parse(found.ended_at)) ? record : found), undefined);
+      const mode = modes.get(last?.mode ?? 'full')!;
+      mode.started += 1;
+      mode.over_two += job.iteration > 2 ? 1 : 0;
+    }
+    for (const mode of modes.values()) {
+      mode.usd_per_run = mode.runs === 0 ? null : mode.cost_usd / mode.runs;
+      mode.over_two_share = mode.started === 0 ? null : mode.over_two / mode.started;
     }
     for (const digest of digests) {
       addCost('digest', digest.ended_at, costOf(digest.cost_usd), null, null);
@@ -1161,6 +1219,7 @@ export class Stats {
         ...row, total_usd: sumCosts(row.cost), median_time_to_ready_s: median(ready),
       })),
       stages: [stages.claude_review, stages.codex_gate, stages.task_check],
+      task_check_modes: [...modes.values()],
       second_opinion: { codex_after_claude: secondOpinion(codexAfterClaude), claude_after_codex: secondOpinion(claudeAfterCodex) },
       arms: armRows(jobRows, inPeriod),
       simplify,
@@ -1191,7 +1250,10 @@ async function readCheck(path: string, workspace: string, ticket: string): Promi
       findings[severity] += 1;
     }
   }
-  return { workspace, ticket, sha256: record.sha256, status: record.status, findings, cost: costOf(record.cost_usd), started_at: record.started_at, ended_at: record.ended_at };
+  return {
+    workspace, ticket, sha256: record.sha256, status: record.status, mode: recordMode(record.mode), findings, cost: costOf(record.cost_usd),
+    started_at: record.started_at, ended_at: record.ended_at,
+  };
 }
 
 // The arms of the Claude review experiment, on then off: the job rows started in the

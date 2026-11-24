@@ -157,6 +157,7 @@ type ServerTicketPage = {
   check_rounds: number;
   check_usd: number;
   check_usd_complete: boolean;
+  check_round_list: DashboardReads.CheckRound[];
   history: Awaited<ReturnType<TicketHistory.TicketHistory['timeline']>>;
   queue: null;
   planner_session: ReturnType<typeof Dashboard.plannerSessionView>;
@@ -222,6 +223,7 @@ export interface Checks {
   WorkspacesPayload: Copy<WorkspacesPayload, ServerWorkspaces>;
   TicketsPayload: Copy<TicketsPayload, ServerTicketsPayload>;
   TicketPage: Copy<TicketPage, ServerTicketPage>;
+  CheckRound: Copy<CheckRound, DashboardReads.CheckRound>;
   TicketPlan: Copy<TicketPlan, ServerPlan>;
   PlanDependency: Copy<PlanDependency, ServerPlan['waits_for'][number]>;
   PlannerSessionView: Copy<PlannerSessionView, NonNullable<ReturnType<typeof Dashboard.plannerSessionView>>>;
@@ -248,6 +250,7 @@ export interface Checks {
   StatsRoleRow: Copy<StatsRoleRow, ServerStats['roles'][number]>;
   StatsWorkspaceRow: Copy<StatsWorkspaceRow, ServerStats['by_workspace'][number]>;
   StatsStageRow: Copy<StatsStageRow, ServerStats['stages'][number]>;
+  StatsTaskCheckModeRow: Copy<StatsTaskCheckModeRow, ServerStats['task_check_modes'][number]>;
   StatsSecondOpinion: Copy<StatsSecondOpinion, ServerStats['second_opinion']['codex_after_claude']>;
   StatsArmRow: Copy<StatsArmRow, ServerStats['arms'][number]>;
   StatsJobRow: Copy<StatsJobRow, ServerStats['jobs'][number]>;

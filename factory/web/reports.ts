@@ -864,8 +864,19 @@ function stStages(data: StatsPayload): HTMLElement {
     row.cost_usd === null || row.runs === 0 ? '—' : stMoney(row.cost_usd / row.runs),
     typeof row.tickets === 'number' && row.tickets > 0 ? ((row.runs + row.failed) / row.tickets).toFixed(1) : '—',
   ])));
+  const modes = Array.isArray(data.task_check_modes) ? data.task_check_modes : [];
+  if (modes.length > 0) {
+    section.append(el('h4', '', 'Plan check: full and follow-up'), stTable(['Mode', 'Runs', 'Failed', 'Cost', 'Cost per run', 'Tickets started after it', 'More than 2 iterations'], modes.map((row) => {
+      const atLeast = (value: number | null): string => (value === null || row.cost_complete ? stMoney(value) : `at least ${stMoney(value)}`);
+      return [
+        ST_CHECK_MODES[row.mode] ?? row.mode, String(row.runs), String(row.failed), atLeast(row.cost_usd), atLeast(row.usd_per_run), String(row.started),
+        row.started === 0 ? '—' : `${row.over_two} (${stPercent(row.over_two, row.started)})`,
+      ];
+    })), el('p', 'muted fs13', 'A ticket started in this period counts once, by its latest job, under the mode of its last check before that job started, failed or not; a ticket with no check before it, or a check without a recorded mode, counts as full.'));
+  }
   return section;
 }
+const ST_CHECK_MODES: Readonly<Record<StatsTaskCheckModeRow['mode'], string>> = { full: 'Full', follow_up: 'Follow-up' };
 
 function stSpend(data: StatsPayload): HTMLElement {
   const section = stSection('Spend');

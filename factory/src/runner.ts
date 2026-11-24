@@ -25,6 +25,9 @@ import { isAlive, liveOwner, staleOwner, tryLock } from './pid-lock.js';
 export type RunnerRequest =
   | { kind: 'turn'; prompt: string; images?: ImageRef[] }
   | { kind: 'say'; message: string }
+  // The user's quick fix (sf quickfix): one turn, then MR preparation without a review round
+  // while its change stays small (src/quick-fix.ts).
+  | { kind: 'quick_fix'; message: string }
   | { kind: 'fix'; content: string }
   | { kind: 'clean'; sensitive: string[] }
   | { kind: 'review' }

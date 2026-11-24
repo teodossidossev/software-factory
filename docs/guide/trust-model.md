@@ -266,7 +266,11 @@ trust dialog alone, ended once the answer is read. None of these
 are open to an agent; the agent only writes files in its worktree, and the factory decides what
 to commit. It commits only what the reviewers saw: the tree it stages must be the one the reviewed
 iteration recorded when it was published; otherwise nothing is committed, and the worktree goes
-back to review as a new iteration. The planner of a planning copy writes only its prototypes, with
+back to review as a new iteration. The one exception is a quick fix (`sf quickfix`): a change since
+the hand-over within `SF_QUICK_FIX_MAX_LINES` lines and `SF_QUICK_FIX_MAX_FILES` files, away from
+sensitive, security, `may_touch`, `SF_GATE_FULL_PATHS`, agents' and out-of-scope paths, is
+committed with no review round, after the guard's scan, the test step and the same tree check.
+The planner of a planning copy writes only its prototypes, with
 Write and Edit, which run outside its sandbox and which its settings hold to the workspace's
 prototypes folder.
 

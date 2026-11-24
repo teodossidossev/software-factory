@@ -428,7 +428,7 @@ async function mergeWorld(name: string, command: string | undefined): Promise<Me
   });
   await mkdir(join(w.worktreeRoot, 'app'), { recursive: true });
   const config: Config = {
-    stateDir: w.env.state, checkAfterStartMin: 15, checkAfterFixMin: 5, maxTurns: 10, turnLimitContinues: 1, maxIterations: 5, claudePath: FAKE,
+    stateDir: w.env.state, checkAfterStartMin: 15, checkAfterFixMin: 5, maxTurns: 10, turnLimitContinues: 1, maxIterations: 5, quickFixMaxLines: 30, quickFixMaxFiles: 2, claudePath: FAKE,
     sandbox: undefined, model: undefined, worktreeRoot: w.worktreeRoot, maxJobs: 3, sensitivePaths: [],
     review: false, reviewModel: undefined, reviewMaxTurns: 60, simplify: false, taskCheckMaxTurns: 30, taskCheckAuto: false, taskCheckParallel: 1, rulesMaxBytes: 49152,
     gate: { on: false, reason: 'SF_GATE=off' }, codexModel: undefined, gateMaxRounds: 3, gateMaxTokens: 5_000_000, gateTimeoutMs: 900_000, gateLevel: 'auto', gateFullPaths: [],

@@ -30,6 +30,7 @@ import { withoutDropped } from '../stops.js';
 import { implementerQuestion } from '../question-stop.js';
 import { readTask } from '../task-file.js';
 import { checksLine, TEST_CODES } from '../test-command.js';
+import { withoutQuickFix } from '../quick-fix.js';
 import { removeWorktree } from '../worktree.js';
 import type { RunnerRequest } from '../runner.js';
 import type { JobStorePort, LivePort, LockPort, NoticePort, RunnerPort, SettingsPort, StopPort } from './ports.js';
@@ -348,16 +349,19 @@ export class MrPart {
   // checkout at once (handed_over); a refusal leaves it in ready_for_human_review with the reason
   // (handoff_skipped), and so do hand-over off, naming the setting, and a change to a file the
   // user's IDE or tools run (handoff_sensitive), which a person hands over. The worktree stays.
+  // A quick fix's record goes here, either way; one from handed_over hands over again whatever
+  // those settings say: the user had this change in the checkout, and the fix added no sensitive path.
   async #ready(job: Job, cwd: string, workspace: Workspace, mrText: string): Promise<void> {
     const tip = (await runGit(cwd, ['rev-parse', '--verify', `refs/heads/${job.branch}`])).stdout.toString('utf8').trim();
     const content = mrMessage(mrText);
     await endSession(this.#sessions.live, `${job.workspace}/${job.ticket}`);
     const lines = [content.title, notificationLine((await this.#peers.status.lastFiles(job)) ?? [])];
-    let ready: Job = { ...job, base_commit: job.target_commit, prepared_commit: tip };
+    let ready: Job = { ...withoutQuickFix(job), base_commit: job.target_commit, prepared_commit: tip };
     // The registry as it is now (its handoff may have changed while the job ran); when it cannot be
     // read, the setting from the job's start (the hand-over then answers the checkout's problem).
     const own = (await this.#settings.resolve(job.workspace).catch(() => workspace)).handoff;
-    const skip = handoffOffNotice(own, this.#settings.config.handoff, job.ticket) ?? (await handoffSensitive(cwd, job.target_commit!, tip, this.#settings.config.sensitivePaths));
+    const skip = job.quick_fix?.from === 'handed_over' ? undefined
+      : handoffOffNotice(own, this.#settings.config.handoff, job.ticket) ?? (await handoffSensitive(cwd, job.target_commit!, tip, this.#settings.config.sensitivePaths));
     if (skip !== undefined) {
       ready = { ...ready, handoff_skipped: skip };
     } else {
@@ -631,7 +635,7 @@ export class MrPart {
       this.#tests.start(next, workspace, command, { attempts, passed: (job, at) => this.#mrTextTurn(job, at, turn) });
       return { state: next.state, iteration: next.iteration, branch: next.branch };
     }
-    this.#mrTextTurn(next, workspace, turn);
+    await this.#mrTextTurn(next, workspace, turn);
     return { state: next.state, iteration: next.iteration, branch: next.branch };
   }
 
@@ -653,11 +657,17 @@ export class MrPart {
     return { ...(await resolveTarget(checkout, targetBranch(job))), onPart: false };
   }
 
-  // The MR text turn of MR preparation, in the job's session. Only under the lock.
-  #mrTextTurn(job: Job, workspace: Workspace, turn: MrTurn): void {
+  // The MR text turn of MR preparation, in the job's session; a quick fix's is given the job's MR
+  // text, to keep but where the fix makes it wrong (null: it could not be read, and the turn is told
+  // so). Only under the lock.
+  async #mrTextTurn(job: Job, workspace: Workspace, turn: MrTurn): Promise<void> {
+    const mrText = job.quick_fix === undefined ? undefined : await this.#store.jobs.readMrText(job.workspace, job.ticket).catch((error: unknown) => {
+      console.error(error);
+      return null;
+    });
     const prompt = mrPrompt({
       ticket: job.ticket, branch: job.branch, targetRef: turn.targetRef, targetCommit: turn.targetCommit, attempt: turn.attempt,
-      previousError: turn.previousError, handbook: this.#settings.handbook,
+      previousError: turn.previousError, handbook: this.#settings.handbook, mrText,
     });
     const session = this.#peers.turns.session(job, workspace);
     this.#sessions.live.get(`${job.workspace}/${job.ticket}`)!.mr = { targetRef: turn.targetRef };

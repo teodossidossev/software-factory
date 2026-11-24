@@ -124,6 +124,11 @@ export const COMMANDS = {
     description: 'Send a message into the job\'s Implementer session; on a handed-over job: Ask for changes (your checkout\'s edits go back into the job first)',
     run: (s, [w = '', t = '', ...words]) => s.execution.say(w, t, words.join(' ')),
   },
+  quickfix: {
+    name: 'quickfix', args: ['<workspace>', '<ticket>', '<message...>'],
+    description: 'A quick fix of a job ready for review or handed over: one turn, then MR preparation without a review round while the change since the hand-over stays small (SF_QUICK_FIX_MAX_LINES, SF_QUICK_FIX_MAX_FILES) and away from sensitive paths; otherwise the full loop. On a handed-over job: Ask for changes first',
+    run: (s, [w = '', t = '', ...words]) => s.execution.quickFix(w, t, words.join(' ')),
+  },
   review: {
     name: 'review', args: ['<workspace>', '<ticket>'],
     description: 'Retry a failed Claude review (needs_human with review_failed) of the last iteration',

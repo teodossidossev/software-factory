@@ -8,6 +8,7 @@ import { createInterface } from 'node:readline';
 import { GATE_SANDBOX_UNAVAILABLE } from './gate.js';
 import type { GateRecord, IterationMeta, JobStore, ReviewRecord, SimplifyRecord } from './jobs.js';
 import { FACTORY_PROBLEMS, type LedgerEntry } from './ledger.js';
+import { QUICK_FIX_END, QUICK_FIX_LEAD } from './prompts.js';
 import { decide, unacceptedItems } from './review.js';
 import { rolesOf } from './skill-roles.js';
 import { skillsText } from './skills.js';
@@ -178,6 +179,13 @@ function fixSection(task: string | undefined, fix: number): string {
   return start < 0 ? '' : lines.slice(start).join('\n').trim();
 }
 
+// A quick fix's prompt without the note after the user's message (quickFixNote, src/prompts.ts):
+// from the last blank line followed by its first line, through its last line at the end.
+function withoutQuickFixNote(text: string): string {
+  const start = text.lastIndexOf(`\n\n${QUICK_FIX_LEAD}\n`);
+  return start >= 0 && text.endsWith(`\n${QUICK_FIX_END}`) ? text.slice(0, start) : text;
+}
+
 async function promptEntry(prompt: string, ctx: StreamContext, sent: unknown): Promise<Draft> {
   const rules = prompt.indexOf(RULES_MARK);
   let text = (rules < 0 ? prompt : prompt.slice(0, rules)).replace(IMAGES_LINE, '');
@@ -191,6 +199,7 @@ async function promptEntry(prompt: string, ctx: StreamContext, sent: unknown): P
   if (note !== null) {
     text = text.slice(0, note.index);
   }
+  text = withoutQuickFixNote(text);
   text = text.replace(LEADING_BLOCKS, '');
   const names = Array.isArray(sent) ? sent.map((image) => asRecord(image).name).filter((name): name is string => typeof name === 'string') : [];
   const images = names.length > 0 ? { images: names } : {};

@@ -12,7 +12,7 @@ import { FactoryError } from './errors.js';
 
 export const STATE_VERSION_FILE = 'state-version';
 // The format this release reads and writes.
-export const STATE_VERSION = 10;
+export const STATE_VERSION = 11;
 
 // One step of the format: the state written at version from becomes the state of version from + 1.
 export interface Migration {
@@ -53,6 +53,11 @@ export const MIGRATIONS: readonly Migration[] = [
   // 9 → 10: job.json may hold quick_fix (a quick fix under way), which an older factory's strict
   // schema refuses. A job without it runs no quick fix, so nothing is rewritten.
   { from: 9, run: async () => undefined },
+  // 10 → 11: job.json may hold clean, an iteration's meta.json delta and a stored review or gate item
+  // outside_delta, which an older factory's strict schemas refuse or misread. A job without clean has
+  // no clean round recorded, an iteration without delta was reviewed whole, and an item without
+  // outside_delta gave no reason, so nothing is rewritten.
+  { from: 10, run: async () => undefined },
 ];
 
 export interface StateVersionOptions {

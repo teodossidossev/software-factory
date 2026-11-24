@@ -275,6 +275,15 @@ The Round's verdict (in a Joint round both Reviews', else the one that runs), as
 Patch needs no further Fix section (no blocker or major item), with every undeclared Sensitive path acknowledged. It starts MR
 preparation (after the Simplification pass, when one runs); it accepts nothing and pushes nothing.
 
+**Delta round**:
+A Round of an iteration published after a Clean Round of the Job (the baseline: an Accept over a
+stop is none): its Reviews judge the delta since the baseline, with the files it touches and their
+direct callers as context, and the rest of the Patch counts as accepted. An item on a file outside
+the delta stands only when the delta breaks that code or a User message after the baseline asks for
+it; a security-relevant delta path is reviewed whole. The delta grows over the Fix rounds inside it
+until the next Clean Round moves the baseline.
+_Avoid_: incremental review, follow-up review
+
 **Simplification pass**:
 One read-only Claude session per Job, after the Clean Round of a Job that had a Fix
 section: it names what the review fixes added that the Task does not need, never what a fixed

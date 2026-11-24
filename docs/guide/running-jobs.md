@@ -66,7 +66,8 @@ when the branch exists already (`branch_exists`), a worktree of the ticket is le
    job with the Claude review it comes from the job's whole change: `full` (sensitive or
    `may_touch` paths, security-relevant names, agents' instruction files, more than 400 changed
    lines or 12 files), `light` (the gate runs while it has asked for no fix yet), or `none`
-   (documentation only).
+   (documentation only). After a clean round, the level of a later round comes from its delta
+   since that round, and a `light` delta runs the gate until the gate asks for a fix after it.
 5. **The review round**: by default (`SF_CLAUDE_REVIEW=ticket`) the Codex CLI in a read-only
    sandbox (the gate) reviews the iteration alone. On a ticket whose Task file says
    `review: claude` (with `SF_CLAUDE_REVIEW=always`, every ticket but those that say
@@ -75,6 +76,10 @@ when the branch exists already (`branch_exists`), a worktree of the ticket is le
    (`SF_GATE=off`, or no Codex found) the Claude review reviews alone. Each reviewer reads the
    Task file, the Review brief, the rules and the ledger and returns `fix` or `clean` with items,
    each `blocker`, `major` or `nit`; in a joint round the iteration is clean only when both are.
+   Once a round was clean, a later round (after your message, a Tests Fix, a fix round) is a
+   delta round: the reviewers judge the delta since that clean round, the rest of the change counts
+   as accepted, and an item on a file the delta leaves alone is dropped unless the delta breaks that
+   code or a message of yours after the clean round asks for it.
 6. **Fix**: a verdict of either with a blocker or major item makes one `## Fix N` in the Task
    file: a lead line per reviewer, then each item with its ledger id, `1. [R7, major] …`, and who
    raised it (an item both raised is one item), the nits last, as optional. The next turn runs

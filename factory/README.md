@@ -1108,7 +1108,7 @@ a new `sf serve` and an old runner.
 ## State format version
 
 The state directory holds `state-version` (SF-101, `src/state-version.ts`), a whole number: the
-format of the state files the factory last wrote. This release writes `10`. `sf serve` and every
+format of the state files the factory last wrote. This release writes `11`. `sf serve` and every
 runner (`sf run`) read it at start: a missing file gets the current version; an equal one goes on;
 a lower one runs the migrations from it to the current one in order (`MIGRATIONS`), then
 writes the new number; a higher one refuses to start with `state_too_new` ("the state
@@ -1133,7 +1133,8 @@ nothing. Version 6 (SF-291): `job.json` may hold `stalled_fixes`, `least_open`, 
 `gate_budget_from` and `important`; its migration from 5 changes nothing. Version 7 (SF-264): a
 pin in `pins.json` may hold `url` (a pin of another page); its migration from 6 changes nothing.
 Version 10 (SF-313): `job.json` may hold `quick_fix` (a quick fix under way); its migration from 9
-changes nothing.
+changes nothing. Version 11 (SF-314): `job.json` may hold `clean`, `meta.json` `delta` and a stored
+review or gate item `outside_delta`; its migration from 10 changes nothing.
 
 A new file or event that no older factory reads, and that changes the meaning of nothing it does
 read, is not a change of the format. So SF-128 kept `STATE_VERSION` at 1: its `tests-<N>.json`
@@ -1822,7 +1823,8 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   (`worktreeTree` in `src/guard.ts`: `git read-tree <base commit>`, `git add --all` of the commit
   paths and `git write-tree`, in a temporary index), so the worktree's index is not touched; the
   new objects go into the checkout's object store, referenced by nothing until a commit. MR
-  preparation commits only that tree (section MR preparation, step 3). The job goes to
+  preparation commits only that tree (section MR preparation, step 3). An iteration published
+  after a clean round (the job's `clean`) records its `delta` too (the delta rounds, section Jobs). The job goes to
   `awaiting_review`, and the
   review round of the iteration starts (below): on a job with the Claude review whose gate runs,
   the Claude review and the gate together (the joint round, SF-214).
@@ -1909,7 +1911,10 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   variant of a risk already accepted, a nice-to-have); `reopens` (the settled finding the item
   reopens) and `caused_by` (the fix whose change caused it) each a ledger id (`R7`) or `""`, by the
   pattern `^(?:R[1-9]\d{0,5})?$`, required in the schema sent and read as `""` when absent (records
-  before SF-052); any other value is an invalid verdict. One definition, `reviewItem` in
+  before SF-052); any other value is an invalid verdict. Each item may also carry `outside_delta`
+  (`""`, `"broken_by_delta"` or `"asked_by_user"`; the delta rounds, section Jobs): optional in Claude's
+  schema, required in the gate's strict one, read as `""` when absent, and stored only when it is
+  not `""`. One definition, `reviewItem` in
   `src/review.ts` (SF-051, SF-052), for both reviewers. The SDK hands the schema to the Claude
   Code CLI as `--json-schema`. It is generated as draft-07 and sent without `$schema`, because the
   CLI refuses the draft 2020-12 `$schema` that zod writes by default (SF-044). The fake Claude of
@@ -1934,7 +1939,8 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   outcome is then never applied; a newer review of the same job cancels an older one.
 - Every review that ends is kept in `iterations/NNN/review.json`: `{reviewer: "claude", verdict,
   summary, items, accepted_sensitive, dropped?, cost_usd, started_at, ended_at}` (`dropped`: the
-  items that reopened an accepted risk, SF-052), or `{reviewer, error}` when
+  items that reopened an accepted risk, SF-052, and in a delta round those outside its delta
+  without a reason; the delta rounds, section Jobs), or `{reviewer, error}` when
   it failed; both with `review_method`: `"none"` when the review had no method, else `{path,
   sha256}` of the skill file it read (the sha256 of its bytes), absent in older records. The verdict is recorded as the reviewer gave it. One line goes to `events.jsonl`:
   `{type: "review", reviewer, verdict, items: <count>}`, with `effective: "clean" | "fix"` when the
@@ -2244,7 +2250,8 @@ ended. A restart of `sf serve` therefore leaves a working job working.
 - The **gate level** (SF-092, `src/gate-level.ts`): as each round starts with the gate on, before
   either review and before the gate's budget check, the iteration gets a level: on a job without
   the Claude review always `full` (reason `no Claude review`: the gate is its only reviewer); on a
-  job with it, from the job's whole change at that iteration (its `meta.json` `files`):
+  job with it, from the job's whole change at that iteration (its `meta.json` `files`), or in a
+  delta round from its delta (below):
   - `full` (the gate's rounds, up to `SF_GATE_MAX_ROUNDS`) when `SF_GATE_LEVEL=full`; or a changed
     path (a rename's old path too, by `SENSITIVE_PATHS` and `SF_SENSITIVE_PATHS`) is sensitive
     (`declared` or `undeclared`, section Marked paths), named by the Task's `may_touch` (read from
@@ -2278,6 +2285,52 @@ ended. A restart of `sf serve` therefore leaves a working job working.
     status, and a pause during the simplification pass is the step `simplify`. The dashboard's
     "now" line may still say the gate reviews the iteration then (an accepted limit, as with the
     gate off).
+  - In a delta round (below) the gate's fixes count from the clean baseline (`gate_fixes` minus
+    the baseline's), its delta built or skipped, so a `light` round after the baseline runs the gate
+    until the gate asks for a fix after it. A built delta is decided on the delta's files, not the
+    whole change's: a one-line CSS delta is `light`, a delta path that a `full` rule names makes it
+    `full`. Its reasons begin `delta since iteration N: F files, L lines` (`['delta since iteration
+    N: …', 'light: the gate already asked for a fix']` when a later light round skips the gate;
+    `['no Claude review', 'delta since iteration N: …']` on a job without the Claude review), and
+    `gate-level.json` `files` and `lines` are the delta's. A skipped delta keeps the whole change's
+    level, reasons and counts, with `whole change: <why>` last. A first round's reasons are as
+    above. `full` and `none` behave as in a first round; the gate budget counts the whole change.
+- The **delta rounds** (SF-314, `src/review-delta.ts`): the deciding clean verdict of a round
+  (`afterClean`, the glossary's Clean) records the job's baseline in `job.json`, `clean: {iteration,
+  at, gate_fixes}`, at once; a `clean` that already names the iteration (the job picked up again)
+  stays as it is, an Accept over a stop sets none, and a reset starts a new job without it. Every
+  iteration published after it (a `sf say`, a Tests Fix, a Guard fix, Simplify, a conflict turn, a
+  later Fix round) is a delta round from it, until the next clean round moves it.
+  - At publish, `meta.json` gets `delta`: `{from, from_tree, files}`, the change from the
+    baseline's `commit_tree` to the new one (`git diff --no-renames`, limited to the paths of either
+    iteration's file list, so upstream changes of a rebase reach it only for the change's own
+    files), each path's marks as the new file list gives them (the baseline's for a path the delta
+    took out of the change) and its counts from the delta; or `{from, skipped: <why>}` when it
+    cannot be built (the baseline's `meta.json` unreadable, no `commit_tree` or file list, a Patch
+    cut at either end, Git unable to compare the trees): that round reviews the whole change.
+  - The reviewers' prompt opens with the baseline ("the change was clean at iteration N; judge the
+    delta since then") and the rules below, sends the delta (rebuilt from the two trees for each
+    reviewer) as `<delta_patch from="N">` in place of `<patch>`, the whole section of each delta
+    path that a `full` rule of the gate level names in `<patch>`, and the whole change's file list
+    as `<accepted_change>`, context only; each block is cut at 256 KiB with a note, and the note
+    says "more than" when the rebuilt delta passed the Patch's 2 MiB limit. The reviewer
+    reads each delta file in full and finds its direct callers itself. The gate's prompt adds that
+    `git diff <from_tree> <commit_tree>` shows the delta (two trees, so the job's untracked new
+    files are in it). A delta that can no longer be rebuilt from the two trees (a tree object
+    gone, a Git failure) when the round decides its gate level, or later when a reviewer reads it,
+    is written to `meta.json` as `{from, skipped: <why>}`; that round reviews the whole change. Only
+    a failure to write that `meta.json` fails the review.
+  - An item on a file of the new tree outside the delta stands only with `outside_delta`
+    `broken_by_delta`, or `asked_by_user` when a user message's `at` is later than `clean.at`;
+    otherwise it is dropped before the round's outcome, listed in the record's `dropped`, and never
+    reaches the ledger, a Fix or the progress count. An item whose path (without `./` and a trailing
+    `:line` or `:a-b`) is empty or not a file of the tree is kept, and so is every item when that
+    read fails. A whole round ignores the field.
+  - The judged paths are the delta's and every path of the change whose mark (sensitive, scope)
+    differs from the baseline's; `<marked_paths>`, the unaccepted paths of the round, `sf accept`,
+    MR preparation's `sensitive_unacknowledged` and the Stream's note after a failed gate read only
+    them: the baseline's clean round accepted the others. A baseline whose `meta.json` cannot be
+    read, or holds no file list, leaves every path judged.
 - Every gate run that ends is kept in `iterations/NNN/gate.json`: `{reviewer: "codex", verdict,
   summary, items, accepted_sensitive, dropped?, model?, tokens: {input, cached_input, output},
   started_at, ended_at}` (`dropped` as in `review.json`), or `{reviewer, error, model?, tokens, started_at, ended_at}` when it failed (`model`

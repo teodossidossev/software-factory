@@ -3,9 +3,10 @@
 // paths and sandbox placeholders (src/placeholders.ts) are left out; the result is valid UTF-8 and at most MAX_PATCH_BYTES.
 import { createHash } from 'node:crypto';
 import { runGit, runGitToFile, runGitToHash } from './git.js';
-import type { ChangedFile, FileChange } from './jobs.js';
+import type { ChangedFile, FileChange, IterationMeta } from './jobs.js';
 import { isPlaceholder } from './placeholders.js';
 import { isForbidden } from './repo-files.js';
+import { deltaFiles, type IterationDelta } from './review-delta.js';
 import { type Marks, sensitivityOf } from './rules.js';
 import { TASK_DIR } from './task-file.js';
 
@@ -288,5 +289,102 @@ export async function writeResolutionPatch(cwd: string, commit: string, fd: numb
   for (const path of untracked) {
     // Exit code 1 means "differences found", which is always the case here.
     await diff(['--no-index', '--', '/dev/null', path], [0, 1]);
+  }
+}
+
+// One path of the change between two trees: its status and line counts (0 for a binary file).
+export interface TreeChange {
+  path: string;
+  status: FileChange['status'];
+  added: number;
+  removed: number;
+}
+
+const literal = (paths: readonly string[]): string[] => paths.map((path) => `:(literal)${path}`);
+
+// Git's whole output, never cut: refused when Git fails or its output does not fit. The message
+// names no path.
+async function wholeOutput(cwd: string, args: string[], input?: string): Promise<Buffer> {
+  const result = await runGit(cwd, args, MAX_PATCH_BYTES, undefined, {}, input);
+  if (result.code !== 0 || result.truncated) {
+    throw new Error(result.truncated ? `git ${args[0]} gave more than ${MAX_PATCH_BYTES} bytes` : `git ${args[0]} failed (exit ${String(result.code)})`);
+  }
+  return result.stdout;
+}
+
+// The change from the tree from to the tree to in cwd's repository, limited to paths (literal
+// pathspecs, git diff --no-renames): each changed path's status and line counts. No paths: none.
+export async function treeChanges(cwd: string, from: string, to: string, paths: readonly string[]): Promise<TreeChange[]> {
+  if (paths.length === 0) {
+    return [];
+  }
+  const args = ['--no-renames', '--no-ext-diff', '--no-textconv', '-z', from, to, '--', ...literal(paths)];
+  const statuses = nulList(await wholeOutput(cwd, ['diff', '--name-status', ...args]));
+  // --numstat -z: "<added>\t<deleted>\t<path>" for each path, "-\t-\t<path>" for a binary one.
+  const counts = new Map<string, [number, number]>();
+  for (const record of nulList(await wholeOutput(cwd, ['diff', '--numstat', ...args]))) {
+    const [added = '', removed = '', ...rest] = record.split('\t');
+    counts.set(rest.join('\t'), [/^\d+$/.test(added) ? Number(added) : 0, /^\d+$/.test(removed) ? Number(removed) : 0]);
+  }
+  const changes: TreeChange[] = [];
+  for (let index = 0; index + 1 < statuses.length; index += 2) {
+    const path = statuses[index + 1]!;
+    const [added, removed] = counts.get(path) ?? [0, 0];
+    changes.push({ path, status: STATUS_LETTERS[statuses[index]!.charAt(0)] ?? 'modified', added, removed });
+  }
+  return changes;
+}
+
+// The text of the change from the tree from to the tree to, limited to paths, as the Patch shows
+// a change (valid UTF-8, at most MAX_PATCH_BYTES), and whether it was cut at that limit: git()
+// reads one byte more than the limit, so a longer text is always seen as cut. No paths: empty.
+export async function treeDiff(cwd: string, from: string, to: string, paths: readonly string[]): Promise<{ patch: Buffer; truncated: boolean }> {
+  if (paths.length === 0) {
+    return { patch: Buffer.alloc(0), truncated: false };
+  }
+  return assemblePatch([await git(cwd, ['diff', ...DIFF_FLAGS, from, to, '--', ...literal(paths)])]);
+}
+
+// Which of paths are files (blobs) of tree in cwd's repository (git cat-file --batch-check of
+// <tree>:<path>): a directory, a submodule or a path that is not there is not. An empty path, or one
+// with a line break, never is. Throws when Git fails or answers with another number of lines.
+export async function filesOfTree(cwd: string, tree: string, paths: readonly string[]): Promise<Set<string>> {
+  const asked = [...new Set(paths)].filter((path) => path !== '' && !/[\r\n]/.test(path));
+  if (asked.length === 0) {
+    return new Set();
+  }
+  const input = asked.map((path) => `${tree}:${path}\n`).join('');
+  const lines = (await wholeOutput(cwd, ['cat-file', '--batch-check=%(objecttype)'], input)).toString('utf8').split('\n');
+  if (lines.at(-1) === '') {
+    lines.pop();
+  }
+  if (lines.length !== asked.length) {
+    throw new Error(`git cat-file answered ${lines.length} lines for ${asked.length} paths`);
+  }
+  return new Set(asked.filter((_path, index) => lines[index] === 'blob'));
+}
+
+// The delta of an iteration published after the clean round of iteration from (meta.json's delta,
+// src/review-delta.ts): the change from base's commit_tree (base: that iteration's meta.json,
+// undefined when it cannot be read) to tree, the new iteration's, limited to the paths of either
+// file list. Skipped, with why, when the baseline has no commit_tree or file list, a Patch was cut
+// at either end, or Git cannot compare the trees (a tree object gone).
+export async function iterationDelta(cwd: string, from: number, base: IterationMeta | undefined, to: { tree: string; truncated: boolean; files: FileChange[] }): Promise<IterationDelta> {
+  const skipped = (why: string): IterationDelta => ({ from, skipped: why });
+  if (base === undefined) {
+    return skipped(`the meta.json of iteration ${from} cannot be read`);
+  }
+  if (base.commit_tree === undefined || base.files === undefined) {
+    return skipped(`iteration ${from} has no ${base.commit_tree === undefined ? 'commit_tree' : 'file list'}`);
+  }
+  if (base.patch_truncated || to.truncated) {
+    return skipped(`the Patch of ${base.patch_truncated ? `iteration ${from}` : 'this iteration'} was cut at its size limit`);
+  }
+  const paths = [...new Set([...base.files, ...to.files].map((file) => file.path))];
+  try {
+    return { from, from_tree: base.commit_tree, files: deltaFiles(await treeChanges(cwd, base.commit_tree, to.tree, paths), to.files, base.files) };
+  } catch (error) {
+    console.error(error);
+    return skipped(`git could not compare the trees of iteration ${from} and this iteration`);
   }
 }

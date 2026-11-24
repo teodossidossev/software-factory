@@ -6,15 +6,18 @@
 // output is redacted (Redactor.output) right after its session ends, before it is stored or used.
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { writeFileAtomic } from '../atomic.js';
 import { type ImageRef, imageRefs } from '../attachments.js';
 import { workspaceDecisionDocs } from '../decisions.js';
 import { FactoryError } from '../errors.js';
-import { changedLines, gateDecision } from '../gate-level.js';
+import { changedLines } from '../gate-level.js';
 import { findBwrap, GATE_REVIEWER, type GateOutcome, gatePrompt, noTokens, redactedGateOutcome, runGate } from '../gate.js';
 import { jobUserMessages } from '../job-stream.js';
 import { claudeReviews, type FileChange, type GateOverride, type GateRecord, type IterationMeta, type Job, type JobState, now, type PauseStep, type ReviewRecord, type SimplifyRecord } from '../jobs.js';
 import { entryItem, isSimplification, SIMPLIFIER, type Decision, DECISIONS, LEDGER_ID, type LedgerEntry, FACTORY_PROBLEMS, settle, unappliedEntries, unsettled } from '../ledger.js';
+import { fileSections, filesOfTree, treeDiff } from '../patch.js';
 import { Redactor } from '../redact.js';
+import { checkedMeta, type DeltaReads, deltaMaterial, dropOutside, judgedChange, roundGateDecision, withClean, withinDelta, withoutEmptyReasons } from '../review-delta.js';
 import { budgetMessage, type GateBudget, gateBudget, type GatePlace, gatePlace, roundOutcome, roundRuns, type SessionEnd } from '../round.js';
 import { readJobRules } from '../rules-docs.js';
 import { actedVerdict, decide, type Verdict, REVIEWER, type ReviewInput, type ReviewItem, type RecordedSkills, reviewerSkills, type ReviewOutcome, type ReviewOutput, reviewPrompt, runReview, type StructuredOutcome, unacceptedItems } from '../review.js';
@@ -180,12 +183,15 @@ export class ReviewsPart {
   // The round's outcome (roundOutcome) from the reviewers' records of the iteration and how each
   // ended in this round: a usage limit parks the job, a failure or a stop hands it to the user, a fix
   // is the next Fix section, clean goes on to Clean with the paths the verdicts accepted. The items
-  // a verdict dropped (they reopened an accepted risk) are marked in its record. Only under the lock.
+  // a verdict dropped (they reopened an accepted risk, or lie outside a delta round's delta without
+  // a reason, dropOutside) are marked in its record. Only under the lock.
   async #applyRound(job: Job, place: GatePlace, ends: { claude?: SessionEnd; gate?: SessionEnd }, limit: GateBudget): Promise<void> {
     const { workspace, ticket, iteration } = job;
     const { config } = this.#settings;
-    const review = place !== 'only' ? await this.#store.jobs.readReview(workspace, ticket, iteration) : undefined;
-    const gate = place === 'only' || place === 'joint' ? await this.#store.jobs.readGate(workspace, ticket, iteration) : undefined;
+    const stored = place !== 'only' ? await this.#store.jobs.readReview(workspace, ticket, iteration) : undefined;
+    const storedGate = place === 'only' || place === 'joint' ? await this.#store.jobs.readGate(workspace, ticket, iteration) : undefined;
+    const [review, outside] = await withinDelta(job, stored, this.#deltaReads(job));
+    const [gate, gateOutside] = await withinDelta(job, storedGate, this.#deltaReads(job));
     const extra = async (record: ReviewRecord | GateRecord | undefined): Promise<ReviewItem[]> => (record !== undefined && 'verdict' in record ? this.unaccepted(job, record.accepted_sensitive) : []);
     const outcome = roundOutcome({
       place, ledger: await this.#store.jobs.readLedger(workspace, ticket), iteration,
@@ -194,11 +200,12 @@ export class ReviewsPart {
       gateFixes: job.gate_fixes, least: job.least_open, gateStalled: job.gate_stalled ?? 0, gateTokens: countedTokens(job), maxRounds: job.important === true ? Infinity : config.gateMaxRounds,
       maxTokens: limit.budget, lines: limit.lines,
     });
-    if (review !== undefined && 'verdict' in review && (outcome.dropped.claude?.length ?? 0) > 0) {
-      await this.#store.jobs.writeReview(workspace, ticket, iteration, { ...review, dropped: outcome.dropped.claude });
+    const dropped = { claude: [...outside, ...(outcome.dropped.claude ?? [])], gate: [...gateOutside, ...(outcome.dropped.gate ?? [])] };
+    if (stored !== undefined && 'verdict' in stored && dropped.claude.length > 0) {
+      await this.#store.jobs.writeReview(workspace, ticket, iteration, { ...stored, dropped: dropped.claude });
     }
-    if (gate !== undefined && 'verdict' in gate && (outcome.dropped.gate?.length ?? 0) > 0) {
-      await this.#store.jobs.writeGate(workspace, ticket, iteration, { ...gate, dropped: outcome.dropped.gate });
+    if (storedGate !== undefined && 'verdict' in storedGate && dropped.gate.length > 0) {
+      await this.#store.jobs.writeGate(workspace, ticket, iteration, { ...storedGate, dropped: dropped.gate });
     }
     if (outcome.kind === 'park') {
       await this.#peers.control.park(job, outcome.step, outcome.limit);
@@ -464,6 +471,8 @@ export class ReviewsPart {
       decision_docs: await workspaceDecisionDocs(name, worktree),
       // Every message sent up to and including the reviewed iteration.
       userMessages: (await jobUserMessages(this.#store.jobs, name, ticket)).filter((m) => m.iteration <= iteration),
+      // A delta round's material; none when its delta can no longer be rebuilt (then recorded as skipped: a whole round).
+      ...(await deltaMaterial(meta, patch, { mayTouch: await this.#mayTouch(job), fullPaths: this.#settings.config.gateFullPaths, sensitivePaths: this.#settings.config.sensitivePaths }, this.#deltaReads(job)).then((delta) => (delta === undefined ? {} : { delta }))),
       ...(await reviewerSkills(await jobSkills(this.#settings.config.stateDir, this.#store.jobs.eventsPath(name, ticket)), role, this.#settings.config.reviewSkill, this.#settings.config.reviewSkillSet)),
     };
   }
@@ -524,7 +533,7 @@ export class ReviewsPart {
     }
     const ignored = job.state === 'awaiting_review' && job.iteration === iteration ? {} : { ignored: true as const };
     const record: ReviewRecord = outcome.ok
-      ? { reviewer: REVIEWER, ...outcome.output, cost_usd: outcome.costUsd, started_at: outcome.startedAt, ended_at: outcome.endedAt, ...method }
+      ? { reviewer: REVIEWER, ...withoutEmptyReasons(outcome.output), cost_usd: outcome.costUsd, started_at: outcome.startedAt, ended_at: outcome.endedAt, ...method }
       : { reviewer: REVIEWER, error: outcome.message, ...method };
     await this.#store.jobs.writeReview(name, ticket, iteration, record);
     await this.#store.jobs.appendEvent(name, ticket, outcome.ok
@@ -544,10 +553,24 @@ export class ReviewsPart {
 
   // The undeclared sensitive paths and the paths outside the Task's scope of the job's
   // last iteration not in accepted, nor accepted by the user as a risk, nor, while a quick fix
-  // runs, accepted before it (quick_fix.accepted), as fix items.
+  // runs, accepted before it (quick_fix.accepted), as fix items; of a delta round's iteration only
+  // those on its judged paths (src/review-delta.ts): the clean round accepted the others.
   async unaccepted(job: Job, accepted: string[]): Promise<ReviewItem[]> {
     const byUser = await this.#markedAcceptedByUser(job);
-    return unacceptedItems((await this.#peers.status.lastFiles(job)) ?? [], [...accepted, ...byUser, ...(job.quick_fix?.accepted ?? [])]);
+    const files = job.iteration === 0 ? undefined : await judgedChange(job.iteration, this.#deltaReads(job).meta);
+    return unacceptedItems(files ?? [], [...accepted, ...byUser, ...(job.quick_fix?.accepted ?? [])]);
+  }
+
+  // What a delta round reads of the job (src/review-delta.ts): meta.json, the user's messages, the trees in its worktree; its record of a skipped delta writes meta.json under the lock (held: the caller's) while the job is this one.
+  #deltaReads(job: Job, held = false): DeltaReads {
+    const { workspace, ticket } = job;
+    const cwd = (): string => job.worktree ?? ((): never => { throw new Error('the job has no worktree'); })();
+    const record = async (meta: IterationMeta): Promise<void> => ((await this.#store.jobs.read(workspace, ticket))?.created_at === job.created_at ? writeFileAtomic(join(this.#store.jobs.iterationDir(workspace, ticket, meta.iteration), 'meta.json'), Buffer.from(`${JSON.stringify(meta, null, 2)}\n`)) : undefined);
+    return {
+      meta: (iteration) => this.#store.jobs.readMeta(workspace, ticket, iteration), messages: () => jobUserMessages(this.#store.jobs, workspace, ticket),
+      filesOf: async (tree, paths) => filesOfTree(cwd(), tree, paths), diff: async (from, to, paths) => treeDiff(cwd(), from, to, paths), sections: fileSections,
+      record: (meta) => (held ? record(meta) : this.#locks.locked(() => record(meta))),
+    };
   }
 
   // The marked paths (undeclared sensitive, outside the Task's scope) whose ledger entry the user
@@ -558,9 +581,11 @@ export class ReviewsPart {
       .map((entry) => entry.path);
   }
 
-  // The reviewer's verdict for the event, with the one the factory acts on (decide) when it differs.
+  // The reviewer's verdict for the event, with the one the factory acts on (decide, without the
+  // items a delta round drops) when it differs.
   async #verdictOf(job: Job, output: ReviewOutput): Promise<{ verdict: Verdict; effective?: Verdict }> {
-    const effective = decide(output, await this.unaccepted(job, output.accepted_sensitive)).verdict;
+    const { kept } = await dropOutside(job, output.items, this.#deltaReads(job));
+    const effective = decide({ items: kept }, await this.unaccepted(job, output.accepted_sensitive)).verdict;
     return effective === output.verdict ? { verdict: output.verdict } : { verdict: output.verdict, effective };
   }
 
@@ -569,8 +594,8 @@ export class ReviewsPart {
   // before the gate's budget check, so a gate that does not run never stops on gate_budget. A
   // decision already recorded in gate-level.json (the job picked up again after a pause, a park or
   // a restart of sf serve) is used as it is; otherwise the level is decided from the job's change at
-  // the iteration (its meta.json files) and the Task's may_touch, and recorded with its gate_level
-  // event. Only under the lock.
+  // the iteration (its meta.json files), or in a delta round from its delta (skipped first if it can no longer be rebuilt,
+  // checkedMeta), and the Task's may_touch (roundGateDecision), and recorded with its gate_level event. Only under the lock.
   async #gateRuns(job: Job): Promise<boolean> {
     const { workspace, ticket, iteration } = job;
     const recorded = await this.#store.jobs.readGateLevel(workspace, ticket, iteration);
@@ -579,17 +604,17 @@ export class ReviewsPart {
     }
     let meta: IterationMeta | undefined;
     try {
-      meta = claudeReviews(job) ? await this.#store.jobs.readMeta(workspace, ticket, iteration) : undefined;
+      meta = await checkedMeta(iteration, this.#deltaReads(job, true));
     } catch (error) {
       // No file list: the level cannot be known, so it is full.
       console.error(error);
     }
     const { config } = this.#settings;
     // Without the Claude review the gate is the job's only review: it always runs, at level full.
-    const decision = !claudeReviews(job) ? { level: 'full' as const, ran: true, reasons: ['no Claude review'], files: null, lines: null } : gateDecision({
-      files: meta?.files, patchTruncated: meta?.patch_truncated === true, mayTouch: await this.#mayTouch(job), setting: config.gateLevel, fullPaths: config.gateFullPaths,
-      sensitivePaths: config.sensitivePaths,
-    }, job.gate_fixes);
+    const decision = roundGateDecision({
+      files: meta?.files, patchTruncated: meta?.patch_truncated === true, mayTouch: claudeReviews(job) ? await this.#mayTouch(job) : [], setting: config.gateLevel,
+      fullPaths: config.gateFullPaths, sensitivePaths: config.sensitivePaths,
+    }, { claudeReview: claudeReviews(job), gateFixes: job.gate_fixes, clean: job.clean }, meta?.delta);
     const at = now();
     await this.#store.jobs.writeGateLevel(workspace, ticket, iteration, { ...decision, at });
     await this.#store.jobs.appendEvent(workspace, ticket, { ts: at, iteration, type: 'gate_level', level: decision.level, ran: decision.ran, reasons: decision.reasons });
@@ -708,7 +733,7 @@ export class ReviewsPart {
     const model = this.#settings.config.codexModel !== undefined ? { model: this.#settings.config.codexModel } : {};
     const times = { started_at: outcome.startedAt, ended_at: outcome.endedAt };
     const record: GateRecord = outcome.ok
-      ? { reviewer: GATE_REVIEWER, ...outcome.output, ...model, tokens: outcome.tokens, ...times, ...method }
+      ? { reviewer: GATE_REVIEWER, ...withoutEmptyReasons(outcome.output), ...model, tokens: outcome.tokens, ...times, ...method }
       : { reviewer: GATE_REVIEWER, error: outcome.message, ...model, tokens: outcome.tokens, ...times, ...method };
     await this.#store.jobs.writeGate(name, ticket, iteration, record);
     const omitted = method.skills_omitted !== undefined && method.skills_omitted.length > 0 ? { skills_omitted: method.skills_omitted } : {};
@@ -721,9 +746,15 @@ export class ReviewsPart {
   // preparation with the accepted paths (sensitive), and with it the iteration's last review
   // (#prepare). A pass that already ended on this iteration (its runner stopped before the outcome
   // applied) applies its record; one that started on it and never ended (its runner stopped while
-  // it ran) is recorded as failed and goes on, as a failed run does. Only under the lock.
-  async afterClean(job: Job, sensitive: string[]): Promise<void> {
-    const { workspace, ticket, iteration } = job;
+  // it ran) is recorded as failed and goes on, as a failed run does. First the iteration becomes
+  // the baseline of later delta rounds (job.json's clean, src/review-delta.ts), written at once; a
+  // clean that names it already (the job picked up again) is kept as it is. Only under the lock.
+  async afterClean(given: Job, sensitive: string[]): Promise<void> {
+    const { workspace, ticket, iteration } = given;
+    const job = withClean(given, now());
+    if (job !== given) {
+      await this.#store.jobs.write(job);
+    }
     const record = await this.#store.jobs.readSimplify(workspace, ticket, iteration);
     if (record !== undefined) {
       await this.#offerSimplify(job, record, sensitive);

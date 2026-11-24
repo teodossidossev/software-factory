@@ -106,6 +106,11 @@ the same round as the gate, at the same time (the joint round); the iteration is
 both verdicts are. A `fix` verdict of either becomes the next `## Fix N`, written by the factory
 (in a joint round one section, with a lead line per reviewer and each item naming who raised it),
 and the next iteration starts; a clean round goes to Clean.
+Once a round was clean, every later round (after a message of the user, a Tests Fix, a fix round)
+is a delta round: its reviewers judge the delta since that clean round, with the files it touches
+and their direct callers as context; the rest of the change counts as accepted. A delta path that
+is security-relevant is reviewed whole and gated at level full, and a light delta after the
+hand-over is gated at least once.
 At Clean, when the workspace has a test command, the factory first runs it itself on the reviewed
 worktree, in a sandbox without network: a failure becomes the next `## Fix N: Tests` (with the
 command and the end of its output) and a new iteration, at most twice per job, and then the job
@@ -454,6 +459,12 @@ with every iteration. The Context owner does not review.
 - Set `caused_by` to the id of the fix whose change caused an item. When every blocker and major
   item was caused by earlier fixes, the fixes are making the findings and the loop stops for the
   user.
+- In a delta round (the prompt opens with "the change was clean at iteration N"), judge the delta
+  (`<delta_patch>`); the rest of the change (`<accepted_change>`) was accepted at that clean round.
+  An item on a file outside the delta sets `outside_delta`: `broken_by_delta` when the delta breaks
+  that code or requires a change there (say in `problem` which delta line, or what), or
+  `asked_by_user` when a user message after the clean round asks for it (cite it); without one the
+  factory drops it. Outside a delta round, `outside_delta` is `""`.
 - An undeclared sensitive path (one the Task file's `may_touch` does not name) stays only when
   the change needs it and the verdict says why; otherwise it is a major fix item, whatever
   severity the reviewer gives it.

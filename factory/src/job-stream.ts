@@ -10,6 +10,7 @@ import type { GateRecord, IterationMeta, JobStore, ReviewRecord, SimplifyRecord 
 import { FACTORY_PROBLEMS, type LedgerEntry } from './ledger.js';
 import { QUICK_FIX_END, QUICK_FIX_LEAD } from './prompts.js';
 import { decide, unacceptedItems } from './review.js';
+import { judgedChange } from './review-delta.js';
 import { rolesOf } from './skill-roles.js';
 import { skillsText } from './skills.js';
 import { canonicalStop, type StopCode, type StopKind, STOPS, withoutDropped } from './stops.js';
@@ -378,7 +379,8 @@ async function gateAgainEntry(record: Record<string, unknown>, it: number, ctx: 
     return [];
   }
   const byUser = (await ctx.ledger()).filter((entry) => entry.status === 'accepted_risk' && FACTORY_PROBLEMS.includes(entry.problem)).map((entry) => entry.path);
-  const unaccepted = unacceptedItems((await ctx.meta(it))?.files ?? [], [...review.accepted_sensitive, ...byUser]);
+  // In a delta iteration only its judged paths count, as in the round (src/review-delta.ts).
+  const unaccepted = unacceptedItems((await judgedChange(it, (iteration) => ctx.meta(iteration))) ?? [], [...review.accepted_sensitive, ...byUser]);
   if (decide(withoutDropped(review), unaccepted).verdict !== 'fix') {
     return [];
   }

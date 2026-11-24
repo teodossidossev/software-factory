@@ -26,7 +26,7 @@ import type { JobStorePort, LivePort, LockPort, RunnerPort, SettingsPort, StopPo
 import { archiveWithTask, MergedPass } from './archive.js';
 import type { ExclusiveScope, Resumed, Retired } from './dto.js';
 import { checkNotInCheckout } from './errors.js';
-import { firstPrompt, imagesChangedNote } from './prompts.js';
+import { firstPrompt, imagesChangedNote, readJobFindings, sessionBlocks } from './prompts.js';
 import { exists, type FixOptions, gateSkipped } from './shared.js';
 
 // What ControlPart calls of the other parts, by just those methods.
@@ -448,18 +448,19 @@ export class ControlPart {
   }
 
   // The first prompt of a Resume from working: the message, else "Continue where you stopped.". A
-  // Resume that opens a new Implementer session (no session_id yet) gives the job's <rules> block
-  // first: with iteration 0 and no message, the job's first prompt.
+  // Resume that opens a new Implementer session (no session_id yet) gives the job's <rules> and
+  // <recurring_findings> blocks first: with iteration 0 and no message, the job's first prompt.
   async #resumePrompt(job: Job, message: string): Promise<string> {
     const text = message.trim() !== '' ? message : 'Continue where you stopped.';
     if (job.session_id !== null) {
       return text;
     }
-    const rules = await readJobRules(this.#store.jobs.dir(job.workspace, job.ticket));
+    const dir = this.#store.jobs.dir(job.workspace, job.ticket);
+    const [rules, findings] = await Promise.all([readJobRules(dir), readJobFindings(dir)]);
     if (message.trim() === '' && job.iteration === 0) {
-      return firstPrompt(job.ticket, [], rules);
+      return firstPrompt(job.ticket, [], rules, undefined, findings);
     }
-    return rules === '' ? text : `${rules.trimEnd()}\n\n${text}`;
+    return [...sessionBlocks(rules, findings), text].join('\n\n');
   }
 
   // Whether the ticket's Task file changed since the Implementer was last given it (the job's copy, else the worktree's), and its diff; undefined when it did not, or when nothing tells.

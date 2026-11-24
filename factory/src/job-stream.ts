@@ -26,16 +26,18 @@ const KEPT_FILES = '\n\nThis job restarts an earlier job of ';
 const IMAGES_LINE = /\n\nThe Task's images are in .+: .+\. Read them when you need them\.$/u;
 const IMAGES_CHANGED = /\n\nThe Task's images changed while the job was paused: .+\.$/u;
 const CONTINUE = 'Continue where you stopped.';
-// The job's <rules> block in the first prompt, after the /implement line and a blank line
-// (firstPrompt, src/execution/shared.ts), and before a Resume's message in a new session
-// (#resumePrompt, src/execution/control.ts): each up to the first line that is exactly </rules>
-// followed by a blank line or by the end.
-const FIRST_RULES = /^\n\n<rules>\n[\s\S]*?\n<\/rules>(?=\n\n|$)/u;
-const LEADING_RULES = /^<rules>\n[\s\S]*?\n<\/rules>(?:\n\n|$)/u;
+// The job's <rules> block, then its <recurring_findings> block (each when it has one), in the first
+// prompt, after the /implement line and a blank line (firstPrompt, src/execution/prompts.ts), and
+// before a Resume's message in a new session (#resumePrompt, src/execution/control.ts): each up to
+// the first line that is exactly its closing tag followed by a blank line or by the end.
+const RULES_BLOCK = '<rules>\\n[\\s\\S]*?\\n<\\/rules>';
+const FINDINGS_BLOCK = '<recurring_findings>\\n[\\s\\S]*?\\n<\\/recurring_findings>';
+const FIRST_BLOCKS = new RegExp(`^(?:\\n\\n${RULES_BLOCK}(?=\\n\\n|$))?(?:\\n\\n${FINDINGS_BLOCK}(?=\\n\\n|$))?`, 'u');
+const LEADING_BLOCKS = new RegExp(`^(?:${RULES_BLOCK}(?:\\n\\n|$))?(?:${FINDINGS_BLOCK}(?:\\n\\n|$))?`, 'u');
 // The pack of a fix round in a new session (freshFixPrompt, src/execution/prompts.ts) after its
-// fix command line: the job's <rules> block when it has one, <previous_report> and <changed_files>,
-// up to the end of the text before the factory's rules.
-const FIX_PACK = /^([^\n]* Fix \d+)\n\n(?:<rules>\n[\s\S]*?\n<\/rules>\n\n)?<previous_report iteration="\d+">\n[\s\S]*?\n<\/previous_report>\n\n<changed_files>\n[\s\S]*\n<\/changed_files>$/u;
+// fix command line: the job's <rules> and <recurring_findings> blocks when it has them,
+// <previous_report> and <changed_files>, up to the end of the text before the factory's rules.
+const FIX_PACK = new RegExp(`^([^\\n]* Fix \\d+)\\n\\n(?:${RULES_BLOCK}\\n\\n)?(?:${FINDINGS_BLOCK}\\n\\n)?<previous_report iteration="\\d+">\\n[\\s\\S]*?\\n<\\/previous_report>\\n\\n<changed_files>\\n[\\s\\S]*\\n<\\/changed_files>$`, 'u');
 
 export type Who = 'implementer' | 'claude' | 'codex' | 'you' | 'factory' | 'mr';
 export type PromptKind = 'implement' | 'fix' | 'mr' | 'conflict' | 'continue';
@@ -189,7 +191,7 @@ async function promptEntry(prompt: string, ctx: StreamContext, sent: unknown): P
   if (note !== null) {
     text = text.slice(0, note.index);
   }
-  text = text.replace(LEADING_RULES, '');
+  text = text.replace(LEADING_BLOCKS, '');
   const names = Array.isArray(sent) ? sent.map((image) => asRecord(image).name).filter((name): name is string => typeof name === 'string') : [];
   const images = names.length > 0 ? { images: names } : {};
   const first = text.split('\n')[0]!;
@@ -200,8 +202,9 @@ async function promptEntry(prompt: string, ctx: StreamContext, sent: unknown): P
   const rest = text.slice(first.length);
   const base = { t: 'prompt' as const, text, first, task_changed: taskChanged, ...images };
   if (implement) {
-    // The first prompt of a job with rules: the block is cut, the rest decides as without it.
-    const left = rest.startsWith('\n\n<rules>\n') ? rest.replace(FIRST_RULES, '') : rest;
+    // The first prompt of a job with rules or a findings checklist: the blocks are cut, the rest
+    // decides as without them.
+    const left = rest.replace(FIRST_BLOCKS, '');
     if (left === '' || left.startsWith(KEPT_FILES)) {
       return { ...base, text: `${first}${left}`, who: 'factory', kind: 'implement' };
     }

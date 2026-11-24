@@ -67,6 +67,9 @@ export interface Config {
   taskCheckFollowUp?: boolean;
   // The bytes of rule file content given to the agents at most (SF_RULES_MAX_BYTES).
   rulesMaxBytes: number;
+  // sf serve's daily refresh of each workspace's findings checklist (SF_FINDINGS_CHECKLIST,
+  // src/findings-checklist.ts): on by default; a Config without it (the tests' literals) counts as on.
+  findingsChecklist?: boolean;
   // The Codex gate, beside the Claude review in the same round: the executable, or why the gate is off.
   gate: Gate;
   // The model of the gate (SF_CODEX_MODEL, passed as --model); undefined uses Codex's default.
@@ -426,6 +429,15 @@ export function taskCheckAutoSetting(env: NodeJS.ProcessEnv = process.env): bool
   return mode === 'on';
 }
 
+// SF_FINDINGS_CHECKLIST: on (the default) or off.
+export function findingsChecklistSetting(env: NodeJS.ProcessEnv = process.env): boolean {
+  const mode = env.SF_FINDINGS_CHECKLIST || 'on';
+  if (mode !== 'on' && mode !== 'off') {
+    throw new FactoryError('invalid_config', `SF_FINDINGS_CHECKLIST must be on or off, got "${mode}".`);
+  }
+  return mode === 'on';
+}
+
 // SF_TASK_CHECK_CODEX: auto or off (the default).
 export function taskCheckCodexSetting(env: NodeJS.ProcessEnv = process.env): 'auto' | 'off' {
   const mode = env.SF_TASK_CHECK_CODEX || 'off';
@@ -504,6 +516,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     taskCheckCodex: taskCheckCodexSetting(env),
     taskCheckFollowUp: taskCheckFollowUpSetting(env),
     rulesMaxBytes: rulesMaxBytes(env),
+    findingsChecklist: findingsChecklistSetting(env),
     gate: gateConfig(env),
     codexModel: env.SF_CODEX_MODEL || undefined,
     gateMaxRounds: positiveInteger(env, 'SF_GATE_MAX_ROUNDS', 5),

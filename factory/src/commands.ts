@@ -10,6 +10,7 @@ import type { Digests } from './digest-run.js';
 import { COORDINATOR_ANSWERS, COORDINATOR_COMMANDS } from './coordinator.js';
 import { FactoryError } from './errors.js';
 import type { Execution } from './execution.js';
+import { FINDINGS_ANSWERS, FINDINGS_COMMANDS } from './findings-checklist.js';
 import type { OpenRequest, ReviewThread } from './forge-comments.js';
 import { type Decision, DECISIONS } from './ledger.js';
 import { localTime } from './local-time.js';
@@ -236,6 +237,7 @@ export const COMMANDS = {
   ...COORDINATOR_COMMANDS,
   ...NORMS_COMMANDS, ...VISION_COMMANDS, // sf norms: the norms in force, norms.json read at each call (src/norms.ts); sf vision (src/vision.ts).
   ...PINS_COMMANDS, // sf pins: the dashboard's pins, pins.json (src/pins.ts).
+  ...FINDINGS_COMMANDS, // sf findings: a workspace's findings checklist (src/findings-checklist.ts).
 
   // The requests of sf's own steps, no command of their own.
   // sf info: whether sf serve answers; sf service install: which process does.
@@ -589,7 +591,7 @@ const ANSWERS = new Map<Command, (result: Result, flags: Flags) => Answer>([
   [COMMANDS.skills, (result) => ({ lines: skillsLines(result as unknown as SkillsView), failed: false })],
   [COMMANDS.skillsSet, (result) => ({ lines: skillsLines(result as unknown as SkillsView), failed: false })],
   ...COORDINATOR_ANSWERS,
-  ...NORMS_ANSWERS, ...VISION_ANSWERS,
+  ...NORMS_ANSWERS, ...VISION_ANSWERS, ...FINDINGS_ANSWERS,
   ...PINS_ANSWERS,
   [COMMANDS.abort, (result, flags) => ({
     lines: [

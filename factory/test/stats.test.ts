@@ -652,6 +652,62 @@ test('arms_fix_session (SF-316-2): a running job\'s current iteration without a 
   assert.deepEqual([resume.arm, resume.jobs, resume.mean_iterations, resume.fix_round_usd, resume.fix_round_complete], ['resume', 1, 3, 0.25, false]);
 });
 
+test('arms_findings_checklist (SF-318-3): the jobs started in the period with a findings_checklist sha (with) or null (without), one without the field in neither; Codex fix verdicts, mean iterations and the Implementer\'s cost per delivered ticket', async () => {
+  const env = await newEnv('stats-findings-checklist');
+  const jobs = new JobStore(env.state);
+  const sha = 'a'.repeat(64);
+  // With: pushed in 2 iterations (Implementer 1 and 0.5, a Claude review of 0.25 not the Implementer's), a fix gate then a clean one; aborted with an unknown Implementer cost.
+  await makeJob(jobs, 'app', 'WI-1', [{ ended: on('2026-11-05'), cost: 1 }, { ended: on('2026-11-05'), cost: 0.5 }], { findings_checklist: sha, state: 'pushed' });
+  await jobs.writeReview('app', 'WI-1', 1, review([], on('2026-11-05'), 0.25));
+  await jobs.writeGate('app', 'WI-1', 1, gate([item('a', 'A.', 'blocker'), item('c', 'C.', 'nit')], on('2026-11-05')));
+  await jobs.writeGate('app', 'WI-1', 2, gate([], on('2026-11-05')));
+  await makeJob(jobs, 'app', 'WI-2', [{ ended: on('2026-11-05'), cost: null }], { findings_checklist: sha, state: 'aborted' });
+  // Without: handed over in 3 iterations after two fix gates; still working.
+  await makeJob(jobs, 'app', 'WO-1', Array.from({ length: 3 }, () => ({ ended: on('2026-11-06'), cost: 1 })), { findings_checklist: null, state: 'handed_over' });
+  await jobs.writeGate('app', 'WO-1', 1, gate([item('d', 'D.', 'major')], on('2026-11-06')));
+  await jobs.writeGate('app', 'WO-1', 2, gate([item('e', 'E.', 'major')], on('2026-11-06')));
+  await makeJob(jobs, 'app', 'WO-2', [{ ended: on('2026-11-06'), cost: 2 }], { findings_checklist: null });
+  // Left out: started before the period; no findings_checklist (a job.json written before SF-318-2).
+  await makeJob(jobs, 'app', 'WI-0', [{ ended: on('2026-11-02'), cost: 7 }], { findings_checklist: sha, state: 'pushed', created_at: on('2026-10-20') });
+  await makeJob(jobs, 'app', 'OLD-1', [{ ended: on('2026-11-05'), cost: 10 }], { state: 'pushed' });
+  await jobs.writeGate('app', 'OLD-1', 1, gate([item('f', 'F.', 'blocker')], on('2026-11-05')));
+
+  const payload = await stats(env.state, jobs).compute({ days: 7, workspace: null });
+  assert.deepEqual(payload.arms_findings_checklist, [
+    {
+      arm: 'with', jobs: 2, delivered: 1, aborted: 1, cost_usd: 1.75, cost_complete: false, usd_per_delivered: 1.75, median_iterations: 2, codex_findings: 1, codex_findings_per_job: 0.5,
+      codex_fix_verdicts: 1, codex_fix_verdicts_per_job: 0.5, mean_iterations: 1.5, implementer_usd: 1.5, implementer_complete: false, implementer_usd_per_delivered: 1.5,
+    },
+    {
+      arm: 'without', jobs: 2, delivered: 1, aborted: 0, cost_usd: 5, cost_complete: true, usd_per_delivered: 5, median_iterations: 3, codex_findings: 2, codex_findings_per_job: 1,
+      codex_fix_verdicts: 2, codex_fix_verdicts_per_job: 1, mean_iterations: 2, implementer_usd: 5, implementer_complete: true, implementer_usd_per_delivered: 5,
+    },
+  ]);
+  // The other arm tables are unchanged: no job here has claude_review or fix_session.
+  assert.deepEqual([...payload.arms, ...payload.arms_fix_session].map((arm) => arm.jobs), [0, 0, 0, 0]);
+
+  // No job with findings_checklist in the period: both rows, empty.
+  const none = await newEnv('stats-findings-checklist-none');
+  const oldJobs = new JobStore(none.state);
+  await makeJob(oldJobs, 'app', 'OLD-1', [{ ended: on('2026-11-05'), cost: 10 }], { state: 'pushed' });
+  const empty = await stats(none.state, oldJobs).compute({ days: 7, workspace: null });
+  assert.deepEqual(empty.arms_findings_checklist.map((arm) => [
+    arm.arm, arm.jobs, arm.codex_fix_verdicts, arm.codex_fix_verdicts_per_job, arm.mean_iterations, arm.implementer_usd, arm.implementer_complete, arm.implementer_usd_per_delivered,
+  ]), [
+    ['with', 0, 0, null, null, 0, true, null], ['without', 0, 0, null, null, 0, true, null],
+  ]);
+});
+
+test('arms_findings_checklist (SF-318-3): a running job\'s current iteration without a meta.json leaves the Implementer\'s cost a lower bound', async () => {
+  const env = await newEnv('stats-findings-checklist-running');
+  const jobs = new JobStore(env.state);
+  // Iteration 1 published at 1; iteration 2 running, no meta.json yet.
+  await makeJob(jobs, 'app', 'WR-1', [{ ended: on('2026-11-06'), cost: 1 }], { findings_checklist: null, iteration: 2, state: 'handed_over' });
+  const payload = await stats(env.state, jobs).compute({ days: 7, workspace: null });
+  const without = payload.arms_findings_checklist[1]!;
+  assert.deepEqual([without.arm, without.jobs, without.implementer_usd, without.implementer_complete, without.implementer_usd_per_delivered], ['without', 1, 1, false, 1]);
+});
+
 test('simplify (SF-132): offered counts the period\'s simplification records with a suggestion; taken and skipped the period\'s simplify_chosen lines', async () => {
   const env = await newEnv('stats-simplify');
   const jobs = new JobStore(env.state);

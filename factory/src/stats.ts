@@ -2,7 +2,8 @@
 // state directory and only read from it. What each review stage found and what of it was fixed,
 // how often the Codex gate caught what the Claude review passed (and the other way round), the
 // cost and the tokens per day, workspace and role, the jobs running and waiting now, the Claude
-// review experiment's two arms, the fresh and the resumed fix session, the simplification's
+// review experiment's two arms, the fresh and the resumed fix session, the jobs with and without
+// the recurring findings checklist (the arm tables: src/stats-arms.ts), the simplification's
 // offers taken, and the warnings when a job, a stage or a day is far from the usual. The payload
 // holds numbers, times, workspace names, tickets, job directory names, states, Task titles and
 // the warnings' own sentences; never a review's text, a prompt, a message or a setting.
@@ -22,9 +23,10 @@ import { localTime } from './local-time.js';
 import { entryOf, type Outcome, type Outcomes, outcomeOf } from './metrics.js';
 import { QueueStore } from './queue.js';
 import { REVIEWER, type ReviewItem, type Severity } from './review.js';
+import { type ArmRow, armRows, type FindingsChecklistArmRow, findingsChecklistArmRows, type FixSessionArmRow, fixSessionArmRows, median } from './stats-arms.js';
 import { codesWith } from './stops.js';
 import { type CheckMode, recordMode } from './task-check.js';
-import { parseFrontMatter, type TaskFixSession } from './task-file.js';
+import { parseFrontMatter } from './task-file.js';
 
 // The periods the page offers, in local days ending today.
 export const STATS_DAYS = [7, 30, 90] as const;
@@ -185,39 +187,6 @@ export interface JobRow {
   claude_review: boolean | null;
 }
 
-// One arm of the Claude review experiment: the jobs started in the period whose
-// claude_review is true (on) or false (off).
-export interface ArmRow {
-  arm: 'on' | 'off';
-  jobs: number;
-  // In pushed or handed_over.
-  delivered: number;
-  aborted: number;
-  // The sum of its jobs' JobRow.cost_usd; false when one of them is incomplete.
-  cost_usd: number;
-  cost_complete: boolean;
-  // null with none delivered.
-  usd_per_delivered: number | null;
-  // Of the delivered jobs; null with none.
-  median_iterations: number | null;
-  // The Codex gate's blockers and majors of its jobs (JobRow.codex).
-  codex_findings: number;
-  // null with no job.
-  codex_findings_per_job: number | null;
-}
-
-// One arm of the fix session comparison: the jobs started in the period whose job.json has
-// fix_session fresh or resume, measured as ArmRow, by mean_iterations (of all its jobs; null with
-// no job) and by the Implementer's cost per fix round (an iteration after the first: its meta.json
-// cost_usd), the sum of the known costs over every fix round (null with none); fix_round_complete
-// false when a round's cost is unknown, fix_round_usd then a lower bound.
-export interface FixSessionArmRow extends Omit<ArmRow, 'arm'> {
-  arm: TaskFixSession;
-  mean_iterations: number | null;
-  fix_round_usd: number | null;
-  fix_round_complete: boolean;
-}
-
 // The simplification pass in the period: the records with a suggestion, and the user's
 // choices.
 export interface SimplifyCounts {
@@ -277,6 +246,8 @@ export interface StatsPayload {
   arms: ArmRow[];
   // Fresh, then resume; a job without fix_session is in neither.
   arms_fix_session: FixSessionArmRow[];
+  // With, then without; a job without findings_checklist is in neither.
+  arms_findings_checklist: FindingsChecklistArmRow[];
   simplify: SimplifyCounts;
   jobs: JobRow[];
   warnings: StatsWarning[];
@@ -298,7 +269,6 @@ const READY_STATES: readonly string[] = statesWith('ready');
 const CHURN_CODES: readonly string[] = codesWith('ledger');
 // Only the event lines with one of these are parsed.
 const EVENT_MARKS = ['"type":"result"', '"type":"review"', '"type":"review_failed"', '"type":"simplify_chosen"', '"state":{'];
-const DELIVERED_STATES = statesWith('delivered');
 const CHECK_FILE = /^[0-9a-f]{16}\.json$/;
 const READ_CHUNK = 1024 * 1024;
 
@@ -322,16 +292,6 @@ function localDays(now: Date, count: number): string[] {
 function midnight(day: string): string {
   const [year, month, date] = day.split('-').map(Number) as [number, number, number];
   return new Date(year, month - 1, date).toISOString();
-}
-
-// The median of the values: the mean of the middle two of an even count; null of none.
-export function median(values: readonly number[]): number | null {
-  if (values.length === 0) {
-    return null;
-  }
-  const sorted = [...values].sort((a, b) => a - b);
-  const middle = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 1 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
 }
 
 const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -370,9 +330,10 @@ interface ItemSummary {
   caused: boolean;
 }
 
-// A verdict record (review.json or gate.json): its time and its items.
+// A verdict record (review.json or gate.json): its time, whether its verdict is fix, and its items.
 interface VerdictSummary {
   at: string;
+  fix: boolean;
   items: ItemSummary[];
 }
 
@@ -541,7 +502,7 @@ function verdictOf(record: unknown, iteration: number, reviewer: string, ledger:
     const outcome = ledger === undefined ? 'open' : outcomeOf(entry?.severity ?? severity, entry?.status);
     return { severity, outcome, entry: entry?.id ?? null, caused: typeof item.caused_by === 'string' && item.caused_by !== '' };
   });
-  return { at: record.ended_at, items };
+  return { at: record.ended_at, fix: record.verdict === 'fix', items };
 }
 
 // The number of a ledger id (R12: 12), to order ids.
@@ -1244,6 +1205,7 @@ export class Stats {
       second_opinion: { codex_after_claude: secondOpinion(codexAfterClaude), claude_after_codex: secondOpinion(claudeAfterCodex) },
       arms: armRows(jobRows, inPeriod),
       arms_fix_session: fixSessionArmRows(jobRows, inPeriod),
+      arms_findings_checklist: findingsChecklistArmRows(jobRows, inPeriod),
       simplify,
       jobs: jobRows.sort((a, b) => b.cost_usd - a.cost_usd || b.created_at.localeCompare(a.created_at)).slice(0, MAX_JOB_ROWS).map(({ data: _data, ...row }) => row),
       warnings,
@@ -1275,38 +1237,6 @@ async function readCheck(path: string, workspace: string, ticket: string): Promi
   return {
     workspace, ticket, sha256: record.sha256, status: record.status, mode: recordMode(record.mode), findings, cost: costOf(record.cost_usd),
     started_at: record.started_at, ended_at: record.ended_at,
-  };
-}
-
-// The arms of the Claude review experiment, on then off: the job rows started in the
-// period with claude_review true or false, before the job list is cut to MAX_JOB_ROWS.
-function armRows(rows: readonly JobRow[], inPeriod: (ts: unknown) => boolean): ArmRow[] {
-  return (['on', 'off'] as const).map((arm) => armRow(arm, rows.filter((row) => row.claude_review === (arm === 'on') && inPeriod(row.created_at))));
-}
-
-// The fix session arms, fresh then resume, as armRows: the job rows with that fix_session.
-function fixSessionArmRows(rows: ReadonlyArray<JobRow & { data: JobData }>, inPeriod: (ts: unknown) => boolean): FixSessionArmRow[] {
-  return (['fresh', 'resume'] as const).map((arm): FixSessionArmRow => {
-    const jobs = rows.filter((row) => row.data.job.fix_session === arm && inPeriod(row.created_at));
-    const rounds = jobs.flatMap((row) => row.data.summary.fixRounds);
-    return {
-      ...armRow(arm, jobs),
-      mean_iterations: jobs.length === 0 ? null : jobs.reduce((total, row) => total + row.iterations, 0) / jobs.length,
-      fix_round_usd: rounds.length === 0 ? null : rounds.reduce((total: number, cost) => total + (cost ?? 0), 0) / rounds.length,
-      fix_round_complete: rounds.every((cost) => cost !== null),
-    };
-  });
-}
-
-// An arm's ArmRow measures over its job rows.
-function armRow<A extends string>(arm: A, jobs: readonly JobRow[]): Omit<ArmRow, 'arm'> & { arm: A } {
-  const delivered = jobs.filter((row) => DELIVERED_STATES.includes(row.state));
-  const cost = jobs.reduce((total, row) => total + row.cost_usd, 0);
-  const findings = jobs.reduce((total, row) => total + row.codex.blocker + row.codex.major, 0);
-  return {
-    arm, jobs: jobs.length, delivered: delivered.length, aborted: jobs.filter((row) => row.state === 'aborted').length,
-    cost_usd: cost, cost_complete: jobs.every((row) => row.cost_complete), usd_per_delivered: delivered.length === 0 ? null : cost / delivered.length,
-    median_iterations: median(delivered.map((row) => row.iterations)), codex_findings: findings, codex_findings_per_job: jobs.length === 0 ? null : findings / jobs.length,
   };
 }
 

@@ -79,6 +79,13 @@ export const POST_ROUTES = {
     shape: '{"message": string}', body: z.strictObject({ message: z.string() }), command: 'say',
     call: (actions, _queue, [w, t], body) => actions.say(w, t, body.message),
   }),
+  // sf quickfix (src/quick-fix.ts): the message as say's; the Execution refuses any state but
+  // ready_for_human_review and handed_over, and a job without the commit to measure the fix
+  // against (quick_fix_unavailable).
+  quickfix: job({
+    shape: '{"message": string}', body: z.strictObject({ message: z.string() }), command: 'quickfix',
+    call: (actions, _queue, [w, t], body) => actions.quickFix(w, t, body.message),
+  }),
   // The planner's suggestion (src/planner.ts), on the dashboard only: Send gives the note the page
   // showed (its sha256) to say, as the User's own message; Dismiss removes it.
   'suggestion-send': job({

@@ -62,6 +62,8 @@ export const ERROR_STATUS: Readonly<Record<string, number>> = {
   // The hand-over to the user's checkout and its way back.
   checkout_busy: 409, handover_refused: 409, handover_mismatch: 409, checkout_changing: 409, checkout_moved: 409,
   takeback_changed: 409, takeback_switch_failed: 409, branch_in_checkout: 409, not_pushed: 409, handed_over: 409, handover_interrupted: 409, ask_interrupted: 409,
+  // A quick fix (src/quick-fix.ts) on a job without a commit to measure the fix against.
+  quick_fix_unavailable: 409,
   invalid_content: 400, invalid_ticket: 400, invalid_name: 400, workspace_invalid: 400,
   // The agent roles' skills (src/skill-roles.ts): no such role, or a skill that is not installed.
   unknown_role: 400, skill_not_installed: 400,

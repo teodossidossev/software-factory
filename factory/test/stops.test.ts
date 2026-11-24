@@ -213,6 +213,14 @@ test('availability: every action has an entry, \'\' or its one-line reason, as t
   for (const subject of [stopped('gate_rounds'), job('working'), job('ready_for_human_review')]) {
     assert.equal(reason(subject, 'settle'), 'only while a stop waits for you to settle ledger findings (escalated, review_churn, review_disputed).');
   }
+  // SF-313-2: a quick fix by the state alone; a ready job without the commit to measure from is
+  // left to the action (quick_fix_unavailable).
+  for (const subject of [ready, job('ready_for_human_review', { prepared_commit: null }), job('handed_over')]) {
+    assert.equal(reason(subject, 'quickfix'), '', subject.state);
+  }
+  for (const state of ['working', 'pushed'] as const) {
+    assert.equal(reason(job(state), 'quickfix'), `a quick fix needs a job ready for review or handed over; it is ${state}.`, state);
+  }
 });
 
 test('the derived lists: settleCodes, codesWith and the Execution\'s constants are the table\'s, as the hand-kept lists were', () => {

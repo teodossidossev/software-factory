@@ -120,8 +120,8 @@ const STATIC_FILES: Record<string, { file: string; type: string }> = {
 };
 
 // The User's actions, bound by `sf serve` to its one Execution: the same methods, guards and
-// results as the socket commands of sf start, sf approve, sf abort, sf say, sf review and sf retry
-// (retryMr: the Retry of a transient MR preparation failure). A job is started from its ticket on
+// results as the socket commands of sf start, sf approve, sf abort, sf say, sf quickfix, sf review and
+// sf retry (retryMr: the Retry of a transient MR preparation failure). A job is started from its ticket on
 // the start screen once the Task file is written, or with sf start. Archive of a job card is
 // archiveFinished (terminal only), never the any-state reset.
 // The merge request on the Git host: mr-create, mr-merge and mr-status as sf mr create,
@@ -134,7 +134,7 @@ const STATIC_FILES: Record<string, { file: string; type: string }> = {
 // mr-view), saveMr and resetMr (POST mr-save and mr-reset). On the dashboard only: sendSuggestion
 // and dismissSuggestion, the planner's suggestion (src/planner.ts), and sendLastReview and
 // dismissLastReview, the last review's comments (src/last-review-choices.ts).
-export type DashboardActions = Pick<Execution, 'start' | 'approve' | 'abort' | 'say' | 'retryReview' | 'retryMr' | 'acceptGate' | 'settle' | 'simplify' | 'archiveFinished'
+export type DashboardActions = Pick<Execution, 'start' | 'approve' | 'abort' | 'say' | 'quickFix' | 'retryReview' | 'retryMr' | 'acceptGate' | 'settle' | 'simplify' | 'archiveFinished'
   | 'createMergeRequest' | 'mergeMergeRequest' | 'mergeRequestStatus' | 'mergeRequestHost' | 'pause' | 'resumePaused' | 'restart'
   | 'handover' | 'takeback' | 'handedDone' | 'markMerged' | 'checkHandedOver' | 'mergeRequestView' | 'saveMr' | 'resetMr' | 'openMergeRequests' | 'mergeRequestThreads' | 'mergeRequestOverview'
   | 'sendSuggestion' | 'dismissSuggestion' | 'sendLastReview' | 'dismissLastReview'>;

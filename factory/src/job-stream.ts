@@ -74,6 +74,9 @@ type Body =
   | { t: 'verdict'; verdict: string; effective: string | null; summary?: string; items?: VerdictItem[] }
   | { t: 'changes'; files: number; paths: string[] }
   | { t: 'simplify'; suggestions: SimplifySuggestion[]; saves_lines: number }
+  // The last review's one line: its count of comments, or its error; never the comments' text
+  // (they show in the job page's panel).
+  | { t: 'last_review'; comments: number; error: string | null }
   // A run of the workspace's test command: tests when it starts, tests_result when it ends
   // or the user accepts it, joined by the client by run (the run's start); a tests_result without
   // its tests shows on its own.
@@ -417,6 +420,14 @@ async function drafts(raw: string, record: Record<string, unknown>, it: number, 
       return noteEntry(raw, reviewerWho(record.reviewer));
     }
     return typeof record.error === 'string' ? noteEntry(raw, 'factory') : [await simplifyEntry(it, ctx)];
+  }
+  if (record.type === 'last_review') {
+    if (record.ignored === true) {
+      return noteEntry(raw, 'factory');
+    }
+    return [{
+      t: 'last_review', who: 'claude', comments: typeof record.comments === 'number' ? record.comments : 0, error: typeof record.error === 'string' ? record.error : null,
+    }];
   }
   if (record.type === 'review_message') {
     // The Claude review's and the simplification pass's session alike.

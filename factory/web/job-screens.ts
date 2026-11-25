@@ -2183,6 +2183,11 @@ function entryBody(entry: ShownEntry, open: boolean): Array<Node | string> {
       }
       return [block];
     }
+    case 'last_review': {
+      // One line leading to the panel at the top of the Stream (web/last-review.ts lastReviewAct).
+      const error = typeof entry.error === 'string' ? entry.error.split('\n')[0] : null;
+      return [button('line', error !== null ? `Last review failed: ${error}` : `Last review: ${counted(entry.comments ?? 0, 'comment')}`, { lr: `panel:${entry.it}` })];
+    }
     case 'user': {
       const block = el('div', 'block you');
       const text = el('div', 'prose');

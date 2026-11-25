@@ -3,8 +3,9 @@
 // with the review's note, the comments by kind with Send and Dismiss, Send chosen and Dismiss all
 // (the ids and the iteration they post), when their buttons are off and why, a failed review and
 // one with no comment left, the dismiss outcome, and that a jobs event that changes nothing the
-// panel shows leaves it as it is (its node, its scroll, the focus on a box). Script checks, not
-// browser acceptance.
+// panel shows leaves it as it is (its node, its scroll, the focus on a box); and (SF-309-5) the job
+// card's count of the comments and the Stream's one line that leads to the panel. Script checks,
+// not browser acceptance.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { served, servedDetail } from './support/dashboard-client.js';
@@ -53,14 +54,18 @@ function detail(row: Job, lastReview: unknown, omit = false) {
 
 type Detail = ReturnType<typeof detail>;
 
-// The page with the job open on its Stream; hold.detail set leaves the next detail reads pending.
-async function openJob(shown: Detail, hold = { detail: false }): Promise<Page> {
+// The page with the job open on its Stream; hold.detail set leaves the next detail reads pending;
+// entries: the Stream's one page (none: its read stays pending).
+async function openJob(shown: Detail, hold = { detail: false }, entries?: unknown[]): Promise<Page> {
   const page = await loadPage(STATIC_DIR, (path) => {
     if (path === 'api/jobs') {
       return { jobs: [shown.job] };
     }
     if (path === 'api/jobs/app/T-1') {
       return hold.detail ? undefined : shown;
+    }
+    if (entries !== undefined && path === 'api/jobs/app/T-1/stream?from=0') {
+      return { entries, next: entries.length, end: true };
     }
     return undefined;
   });
@@ -275,4 +280,79 @@ test('last review panel (LR4-9): an unknown outcome turns Dismiss off with its r
   lr(quiet, 'dismiss:C2').click();
   await quiet.flush();
   assert.deepEqual(posted(quiet), [['api/jobs/app/T-1/last-review-dismiss', { iteration: 1, ids: ['C2'] }]]);
+});
+
+// The board with these jobs (no job open).
+async function openBoard(rows: Job[]): Promise<Page> {
+  const page = await loadPage(STATIC_DIR, (path) => (path === 'api/jobs' ? { jobs: rows } : undefined));
+  page.document.dispatch('DOMContentLoaded');
+  await page.flush();
+  const stream = page.streams.at(-1)!;
+  stream.emit('open');
+  stream.emit('jobs', { jobs: rows });
+  await page.flush();
+  return page;
+}
+
+const cardOf = (page: Page, key: string): FakeElement => page.document.querySelectorAll('li.card').find((item) => item.dataset.open === key)!;
+const reviewLines = (item: FakeElement): string[] => item.all().filter((node) => node.className === 'meta note' && node.textContent.startsWith('Review:')).map((node) => node.textContent);
+
+test('job card (LR5-1): a waiting job counts the last review\'s comments shown, "Review: N comment(s)"; none at 0, without a review, or while it runs; a click opens the job', async () => {
+  const rows = [
+    job({ ticket: 'T-1', last_review: { comments: 3 } }),
+    job({ ticket: 'T-2', state: 'handed_over', error: undefined, last_review: { comments: 1 } }),
+    job({ ticket: 'T-3', last_review: { comments: 0 } }),
+    job({ ticket: 'T-4', last_review: null }),
+    job({ ticket: 'T-5' }),
+    job({ ticket: 'T-6', state: 'working', error: undefined, last_review: { comments: 3 } }),
+  ];
+  const page = await openBoard(rows);
+  assert.deepEqual(['T-1', 'T-2', 'T-3', 'T-4', 'T-5', 'T-6'].map((ticket) => reviewLines(cardOf(page, `app/${ticket}`))), [
+    ['Review: 3 comments'], ['Review: 1 comment'], [], [], [], [],
+  ]);
+  cardOf(page, 'app/T-1').all().find((node) => node.textContent === 'Review: 3 comments')!.click();
+  await page.flush();
+  assert.equal(page.location.hash, '#app/T-1');
+});
+
+// A Stream entry of the last review of iteration it.
+const lastReviewEntry = (k: string, it: number, comments: number, error: string | null = null) => ({ k, ts: '2026-11-01T10:06:00.000Z', it, who: 'claude', t: 'last_review', comments, error });
+const streamLine = (page: Page, k: string): FakeElement => page.$('stream').children.find((node) => (node as FakeElement).dataset.k === k) as FakeElement;
+
+test('Stream (LR5-3): a last review is one line, "Last review: N comments", without its comments; a click brings the panel of its iteration into view and focuses it, else a toast', async () => {
+  const page = await openJob(detail(job(), view()), { detail: false }, [lastReviewEntry('4', 1, 2)]);
+  const line = streamLine(page, '4');
+  const buttons = line.querySelectorAll('button');
+  assert.deepEqual(buttons.map((node) => [node.className, node.dataset.lr, node.textContent]), [['line', 'panel:1', 'Last review: 2 comments']]);
+  for (const text of ['Rename', 'Why here?', 'Guard null']) {
+    assert.equal(line.textContent.includes(text), false, text);
+  }
+  assert.equal(panel(page).getAttribute('tabindex'), '-1');
+  buttons[0]!.click();
+  await page.flush();
+  assert.deepEqual([panel(page).scrolledIntoView, page.document.activeElement === panel(page), posts(page).length], [1, true, 0]);
+  assert.equal(page.$('toast').hidden, true);
+
+  // The panel shows iteration 2's review: the line of iteration 1 gives the toast.
+  await emit(page, 'job', detail(job({ iteration: 2 }), view({ iteration: 2 })));
+  page.$('stream').querySelector('[data-lr="panel:1"]')!.click();
+  await page.flush();
+  assert.equal(panel(page).scrolledIntoView, 1);
+  assert.deepEqual([page.$('toast').hidden, page.$('toast-text').textContent], [false, "The last review's comments are no longer shown: the job moved on."]);
+
+  // No panel at all: the toast too.
+  const gone = await openJob(detail(job(), null), { detail: false }, [lastReviewEntry('4', 1, 2)]);
+  streamLine(gone, '4').querySelector('button')!.click();
+  await gone.flush();
+  assert.deepEqual([panel(gone).scrolledIntoView, gone.$('toast-text').textContent], [0, "The last review's comments are no longer shown: the job moved on."]);
+});
+
+test('Stream (LR5-3): a failed last review\'s line names the error\'s first line and brings the failed panel of its iteration into view', async () => {
+  const error = 'The session ended: no answer in 10 minutes.\nmore detail';
+  const page = await openJob(detail(job(), view({ summary: null, comments: [], error, timed_out: true })), { detail: false }, [lastReviewEntry('4', 1, 0, error)]);
+  const button = streamLine(page, '4').querySelector('button')!;
+  assert.equal(button.textContent, 'Last review failed: The session ended: no answer in 10 minutes.');
+  button.click();
+  await page.flush();
+  assert.deepEqual([panel(page).scrolledIntoView, page.document.activeElement === panel(page), page.$('toast').hidden], [1, true, true]);
 });

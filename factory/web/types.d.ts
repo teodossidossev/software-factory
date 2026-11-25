@@ -85,8 +85,10 @@ interface JobPlanner {
 }
 
 // A job of api/jobs and of the stream's jobs events: src/dashboard.ts jobsPayload, jobSummary with
-// title, cost_usd, review, now, tool_calls and stop (boardFacts, nowOf, stopOf). They are optional
-// here, as the page also holds a detail's job (JobSummary) as a JobRow.
+// title, cost_usd, review, now, tool_calls, stop (boardFacts, nowOf, stopOf) and last_review (the
+// count of the last review's comments shown while the job waits, src/last-review-choices.ts
+// lastReviewCount). They are optional here, as the page also holds a detail's job (JobSummary) as a
+// JobRow.
 interface JobRow extends JobSummary {
   title?: string | null;
   cost_usd?: number | null;
@@ -94,6 +96,7 @@ interface JobRow extends JobSummary {
   now?: { who: string; what: string; ts: string | null } | null;
   tool_calls?: number;
   stop?: JobStop | null;
+  last_review?: { comments: number } | null;
 }
 
 // The merge request on the Git host: src/jobs.ts JobMr.
@@ -390,6 +393,7 @@ type StreamEntry = { k: string; ts: string | null; it: number; who: StreamWho } 
   | { t: 'verdict'; verdict: string; effective: string | null; summary?: string; items?: StreamItem[] }
   | { t: 'changes'; files: number; paths: string[] }
   | { t: 'simplify'; suggestions: Suggestion[]; saves_lines: number }
+  | { t: 'last_review'; comments: number; error: string | null }
   | { t: 'tests'; run: string; command: string }
   | { t: 'tests_result'; run: string; command: string; outcome: string; exit_code: number | null; timed_out: boolean; ms: number | null; reason: string | null; tail: string; tail_truncated: boolean }
   | { t: 'note'; text: string }

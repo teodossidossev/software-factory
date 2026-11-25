@@ -669,7 +669,7 @@ function jobCard(job: JobRow): HTMLLIElement {
     }
     item.append(meta, ...doneFoot(job));
   }
-  item.append(...plannerLines(job));
+  item.append(...plannerLines(job), ...lastReviewCardLine(job));
   // The Implementer's turn went on by itself after the turn limit.
   if (typeof job.turn_limit === 'string') {
     item.append(el('div', 'meta note', job.turn_limit));

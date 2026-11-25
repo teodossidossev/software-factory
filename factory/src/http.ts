@@ -101,6 +101,10 @@ export const ERROR_STATUS: Readonly<Record<string, number>> = {
   // copy that is not set up, holds the repository's Claude Code configuration or is not trusted by
   // Claude Code.
   planner_starting: 409, planning_copy_missing: 409, planning_copy_unsafe: 409, planning_copy_untrusted: 409,
+  // New ticket's issue read (src/issue-import.ts): a workspace that does not import issues, a key
+  // that is not one or not the workspace's, a refusal of the user's allowlist hook, the Atlassian
+  // server not connected or no hook to run, no such issue, a read that failed.
+  issue_import_off: 409, issue_key_invalid: 400, issue_key_not_allowed: 403, issue_import_refused: 403, issue_import_unavailable: 503, issue_not_found: 404, issue_import_failed: 502,
 };
 
 // The HTTP status of a FactoryError's code: ERROR_STATUS's, else fallback.

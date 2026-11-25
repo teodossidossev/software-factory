@@ -100,6 +100,8 @@ test('statusOf maps each code as the dashboard did before SF-139; any other code
     pin_not_found: 404, too_many_pins: 409, pins_unreadable: 409, pin_holds_token: 400,
     // The ticket's planner session: a start under way and the planning copy's refusals.
     planner_starting: 409, planning_copy_missing: 409, planning_copy_unsafe: 409, planning_copy_untrusted: 409,
+    // New ticket's issue read: its refusals.
+    issue_import_off: 409, issue_key_invalid: 400, issue_key_not_allowed: 403, issue_import_refused: 403, issue_import_unavailable: 503, issue_not_found: 404, issue_import_failed: 502,
   };
   assert.deepEqual({ ...ERROR_STATUS }, before);
   for (const [code, status] of Object.entries(before)) {

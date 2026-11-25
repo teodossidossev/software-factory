@@ -29,6 +29,7 @@ import {
 } from './dashboard.js';
 import { FactoryError } from './errors.js';
 import { currentExplanation, Explainer, explanationLines } from './explain.js';
+import { importIssue } from './issue-import.js';
 import { Execution, type ExecutionOptions, MERGED_EVERY_MS, MERGED_FIRST_MS, type Retired, type StateListener } from './execution.js';
 import { startFindingsRefresh } from './findings-checklist.js';
 import { checkForgeToken, chooseForge, forgeSettings } from './forge.js';
@@ -343,6 +344,7 @@ async function serve(options: { tunnel?: 'off' } = {}): Promise<{ dashboard: URL
       dashboard = await startDashboard(dashboardPort, config.stateDir, jobs, execution, setup, {
         gate: config.gate.on, checks, queue: runQueue, onWorkspacesChanged: () => void autoChecks?.rereadWorkspaces(), digests, remoteOrigins, remoteLogins, remotePort,
         planner: { start: (w, t, result) => startPlanner(w, t, sessionDeps, result), session: (w, t) => plannerSession(w, t, sessionDeps), stop: (w, t) => stopPlanner(w, t, sessionDeps) },
+        issues: { import: (w, t) => importIssue(w, t, { configDir: configDir(), claudePath: config.claudePath, model: config.reviewModel }) },
         ...(healthMonitor !== undefined ? { health: healthMonitor } : {}),
         ...(prototypes !== undefined ? { prototypes } : {}),
       });

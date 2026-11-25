@@ -2,10 +2,10 @@
 // the one call it stands for: the job and queue actions of POST_ROUTES (src/dashboard-routes.ts,
 // routePost), the setup actions (setupPost), the Task check's start (checkPost), the planned
 // ticket page's Save (taskPost), a ticket's images (attachmentAddPost, attachmentRemovePost), a
-// ticket's planner session (plannerPost), the pins and a request for the coordinator's status
-// (through setupPost) and an agent role's skills (skillRolesPost, the one PUT); handlePost runs the
-// transport checks, the call, and tells the open pages through the change feed. Nothing here
-// changes a job by itself.
+// ticket's planner session (plannerPost), the pins, a request for the coordinator's status and New
+// ticket's issue read (through setupPost) and an agent role's skills (skillRolesPost, the one
+// PUT); handlePost runs the transport checks, the call, and tells the open pages through the
+// change feed. Nothing here changes a job by itself.
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import * as z from 'zod/v4';
 import { MAX_ATTACHMENT_BYTES } from './attachments.js';
@@ -92,6 +92,8 @@ const BODIES = {
   'ticket-planner': { shape: '{}', schema: z.strictObject({}) },
   'ticket-planner-stop': { shape: '{}', schema: z.strictObject({}) },
   'ticket-planner-discuss': { shape: '{}', schema: z.strictObject({}) },
+  // New ticket's issue read of the key in the path: {}.
+  'ticket-import': { shape: '{}', schema: z.strictObject({}) },
   // The dashboard's pins (src/pins.ts, with their bounds): a new one, a change of one, a removal.
   'pin-add': { shape: PIN_INPUT_SHAPE, schema: PIN_INPUT },
   'pin-change': { shape: PIN_CHANGE_SHAPE, schema: PIN_CHANGE },
@@ -105,7 +107,7 @@ const setupBody = (route: SetupRoute): { route: SetupRoute; shape: string } => (
 
 // The posts' handlers, each a Post for handle in startDashboard or undefined (an empty 404).
 export function postHandlers(ctx: DashboardContext, feed: Pick<DashboardFeed, 'changed' | 'jobChanged'>) {
-  const { stateDir, remoteOrigins, onWorkspacesChanged, jobs, actions, setup, checks, queue, digests, planner, empty, tokenText } = ctx;
+  const { stateDir, remoteOrigins, onWorkspacesChanged, jobs, actions, setup, checks, queue, digests, planner, issues, empty, tokenText } = ctx;
   // The workspace change succeeded: the hook hears of it (a failing hook is logged).
   const workspacesChanged = <T>(result: T): T => {
     try {
@@ -383,6 +385,17 @@ export function postHandlers(ctx: DashboardContext, feed: Pick<DashboardFeed, 'c
       const methods = { archive: setup.archiveTicket, restore: setup.restoreTicket, delete: setup.deleteTicket };
       const method = methods[target.action].bind(setup);
       return { ...setupBody(route), call: (data) => (BODIES[route].schema.safeParse(data).success ? () => method(workspace, ticket) : undefined), refreshSetup: true, refreshJobs: target.action !== 'restore' };
+    }
+    if (target.kind === 'ticket-import') {
+      // POST api/tickets/<ws>/<ticket>/import with {}: the issue read of the ticket key
+      // (DashboardIssues.import); its answer {ticket, title, request, images} fills the New
+      // ticket form. Nothing is stored and no page is told; none without the issue read.
+      const key = jobKey(target.workspace, target.ticket);
+      const read = issues;
+      if (key === undefined || read === undefined) {
+        return undefined;
+      }
+      return { ...setupBody('ticket-import'), call: (data) => (BODIES['ticket-import'].schema.safeParse(data).success ? () => read.import(...key) : undefined) };
     }
     if (target.kind === 'ticket-owner') {
       // Setup.setTicketOwner: the names, a live job and a missing Task file refused as the other

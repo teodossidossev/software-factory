@@ -18,6 +18,10 @@
 // its script comes from $HOME/fake-explain.json ({"explains": [...]}, through $HOME/fake-explain.count),
 // it logs to $HOME/fake-explain.log and it gives a valid explanation by default, so the reviews'
 // scripts and logs stay as they are when sf serve explains a stop.
+// A run whose schema is the issue read's (`found` and `attachments`) is an issue read: its script
+// comes from $HOME/fake-issue.json ({"issues": [...]}, through $HOME/fake-issue.count), it logs to
+// $HOME/fake-issue.log, its init lists the servers of --mcp-config, each with the turn's mcpStatus
+// (default connected), and its probes, put to the hooks like the Task check's, answer with their result.
 // A review entry's probes (the Task check, SF-054) are Read, Grep and Glob calls made after the
 // init: each is first put to the SDK's PreToolUse hooks (registered at initialize) through the
 // hook_callback control request, as the real CLI does; a denied one gets an error result, an
@@ -81,7 +85,10 @@ interface Turn {
   // Review runs only: the structured output of the result (default: a clean verdict), or none.
   output?: unknown;
   // Review runs only (SF-054): tool calls put to the PreToolUse hooks, then run when allowed.
-  probes?: Array<{ tool: string; input: Record<string, unknown> }>;
+  // A probe's result: its output when allowed; default: run on the real files.
+  probes?: Array<{ tool: string; input: Record<string, unknown>; result?: string }>;
+  // Issue reads only: the status of every --mcp-config server in the init (default connected).
+  mcpStatus?: string;
   noOutput?: boolean;
   // Implementer runs only (SF-069): tool calls made after the writes, each with a tool_result.
   calls?: Array<{ tool: string; input: Record<string, unknown> }>;
@@ -102,6 +109,7 @@ const EXPLANATION = {
   headline: 'The job needs your answer.', explanation: 'The fake explains the stop.',
   choices: [{ choice: 'Go on', effect: 'The job goes on.', recommended: true }], recommendation: 'Go on: it is the simplest.',
 };
+const ISSUE = { found: true, problem: '', title: 'Export the report as CSV', description: 'Users need the report as CSV.', comments: [], attachments: [] };
 
 const argv = process.argv.slice(2);
 // The health checks' login status (SF-153): logged in, like the real CLI's `claude auth status`;
@@ -146,12 +154,13 @@ const home = process.env.HOME ?? '.';
 const review = schema !== undefined;
 const properties = review ? ((JSON.parse(schema) as { properties?: Record<string, unknown> }).properties ?? {}) : {};
 const explain = review && 'headline' in properties && 'choices' in properties;
-const name = explain ? 'fake-explain' : review ? 'fake-review' : 'fake-claude';
+const issue = review && 'found' in properties && 'attachments' in properties;
+const name = issue ? 'fake-issue' : explain ? 'fake-explain' : review ? 'fake-review' : 'fake-claude';
 const controlPath = join(home, `${name}.json`);
 const countPath = join(home, `${name}.count`);
-const control = existsSync(controlPath) ? (JSON.parse(readFileSync(controlPath, 'utf8')) as { turns?: Turn[]; reviews?: Turn[]; explains?: Turn[] }) : {};
-const turns: Turn[] = (explain ? control.explains : review ? control.reviews : control.turns) ?? [];
-const defaultOutput = explain ? EXPLANATION : CLEAN;
+const control = existsSync(controlPath) ? (JSON.parse(readFileSync(controlPath, 'utf8')) as { turns?: Turn[]; reviews?: Turn[]; explains?: Turn[]; issues?: Turn[] }) : {};
+const turns: Turn[] = (issue ? control.issues : explain ? control.explains : review ? control.reviews : control.turns) ?? [];
+const defaultOutput = issue ? ISSUE : explain ? EXPLANATION : CLEAN;
 const count = existsSync(countPath) ? Number(readFileSync(countPath, 'utf8')) : 0;
 writeFileSync(countPath, String(count + 1));
 const turn: Turn = turns[count] ?? {};
@@ -251,9 +260,9 @@ async function hookedCall(id: string, tool: string, input: Record<string, unknow
 }
 
 // The probes of a review run, each through the hooks first.
-async function runProbes(probes: Array<{ tool: string; input: Record<string, unknown> }>): Promise<void> {
+async function runProbes(probes: NonNullable<Turn['probes']>): Promise<void> {
   for (const [index, probe] of probes.entries()) {
-    await hookedCall(`p${index}`, probe.tool, probe.input, () => runProbe(probe.tool, probe.input));
+    await hookedCall(`p${index}`, probe.tool, probe.input, () => probe.result ?? runProbe(probe.tool, probe.input));
   }
 }
 
@@ -355,11 +364,22 @@ async function hang(spec: { endAfterMs?: number; command?: string }): Promise<vo
   out({ type: 'user', parent_tool_use_id: null, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, is_error: false, content: 'found' }] } });
 }
 
+// An issue read's init servers: every server of the --mcp-config JSON with the turn's mcpStatus
+// (default connected); none without the option.
+function mcpServers(): Array<{ name: string; status: string }> {
+  const config = option('mcp-config');
+  if (config === undefined) {
+    return [];
+  }
+  const servers = (JSON.parse(config) as { mcpServers?: Record<string, unknown> }).mcpServers ?? {};
+  return Object.keys(servers).map((server) => ({ name: server, status: turn.mcpStatus ?? 'connected' }));
+}
+
 // A review: init, a Read of README.md and its result, one assistant message, and the result with
 // the structured output.
 async function runReview(): Promise<void> {
   out({
-    type: 'system', subtype: 'init', permissionMode: option('permission-mode') ?? 'default', cwd: process.cwd(), tools: [], mcp_servers: [],
+    type: 'system', subtype: 'init', permissionMode: option('permission-mode') ?? 'default', cwd: process.cwd(), tools: [], mcp_servers: issue ? mcpServers() : [],
     model: 'fake-model', slash_commands: [], output_style: 'default', skills: [], plugins: [], apiKeySource: 'none', claude_code_version: '0.0.0-fake',
   });
   out({ type: 'assistant', parent_tool_use_id: null, message: { role: 'assistant', content: [{ type: 'tool_use', id: 'r1', name: 'Read', input: { file_path: 'README.md' } }] } });

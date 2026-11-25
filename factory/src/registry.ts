@@ -17,7 +17,8 @@
 // and an optional `auto_planner` (New ticket on the dashboard with the owner Claude Code starts the
 // ticket's planner session once its images are stored; absent: false) and an optional
 // `last_review_skill` (src/last-review.ts: the absolute path of the folder of the last review's
-// skill; absent: no last review).
+// skill; absent: no last review) and an optional `issue_import` (src/issue-import.ts: on, the issue
+// key prefixes, the Jira site and the allowlist hook of the issue read; absent or off: no import).
 import { mkdir, readFile, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
@@ -42,6 +43,19 @@ const absolutePath = z
   .string()
   .min(1)
   .refine((value) => isAbsolute(value) && !value.includes('\0'), 'must be an absolute path without NUL');
+
+// A workspace's issue import (src/issue-import.ts): on, the issue key prefixes it may read, the
+// Jira site's host (the cloudId of every call) and the user's allowlist hook every call goes through.
+export const ISSUE_PREFIX_PATTERN = /^[A-Z][A-Z0-9_]{0,19}$/;
+export const ISSUE_SITE_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
+export const MAX_ISSUE_PREFIXES = 20;
+const issueImportSchema = z.strictObject({
+  on: z.boolean(),
+  prefixes: z.array(z.string().regex(ISSUE_PREFIX_PATTERN, 'must be an issue key prefix: A-Z, then up to 19 of A-Z, 0-9 and _')).min(1).max(MAX_ISSUE_PREFIXES),
+  site: z.string().regex(ISSUE_SITE_PATTERN, 'must be the Jira site\'s host name in lower case, such as example.atlassian.net'),
+  hook: absolutePath,
+});
+export type IssueImportSettings = Omit<z.infer<typeof issueImportSchema>, 'on'>;
 
 // The hand-over settings: checkout hands a job ready for review over to the
 // workspace's checkout; off leaves it in ready_for_human_review.
@@ -148,6 +162,7 @@ const registrySchema = z.strictObject({
       auto_queue: z.boolean().optional(),
       auto_planner: z.boolean().optional(),
       last_review_skill: absolutePath.optional(),
+      issue_import: issueImportSchema.optional(),
     }),
   ),
   digest: digestSettingsSchema.optional(),
@@ -200,6 +215,16 @@ export function workspaceApp(name: string, entry: WorkspaceEntry): string {
   return entry.app ?? name;
 }
 
+// A workspace's issue import when it is on: its prefixes, site and hook; undefined when the key
+// is absent or "on" is false.
+export function workspaceIssueImport(entry: WorkspaceEntry): IssueImportSettings | undefined {
+  const settings = entry.issue_import;
+  if (settings === undefined || !settings.on) {
+    return undefined;
+  }
+  return { prefixes: [...settings.prefixes], site: settings.site, hook: settings.hook };
+}
+
 // A workspace's notify setting, absent full.
 export function workspaceNotify(entry: WorkspaceEntry): NotifyMode {
   return entry.notify ?? 'full';
@@ -243,8 +268,8 @@ export async function setWorkspaceAutoPlanner(name: string, on: boolean, dir = c
 
 // What the Setup's Edit replaces; "" removes description, app and label, 'default' the handoff
 // key, 'auto' the color key, and digest with both false the digest key; an absent label keeps the
-// label. work_checkout, rules_skip, guard, test_command, notify, auto_queue, auto_planner and
-// last_review_skill stay as they are.
+// label. work_checkout, rules_skip, guard, test_command, notify, auto_queue, auto_planner,
+// last_review_skill and issue_import stay as they are.
 export interface WorkspaceEdit {
   read_checkout: string;
   description: string;

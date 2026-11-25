@@ -8,7 +8,7 @@ import { after, before, test } from 'node:test';
 import { FactoryError } from '../src/errors.js';
 import {
   configDir, digestSettings, editedEntry, MAX_DIGEST_TIMES, MAX_LABEL_CHARS, explainSettings, isNotifyMode, loadRegistry, NOTIFY_MODES, parseRegistry, resolveWorkspace, saveRegistry, setWorkspaceAutoPlanner, WORKSPACE_COLORS, workspaceApp, workspaceColor,
-  workspaceDigest, workspaceNotify, workspaceNotifyMode,
+  workspaceDigest, workspaceIssueImport, workspaceNotify, workspaceNotifyMode,
 } from '../src/registry.js';
 
 let temp: string;
@@ -130,6 +130,35 @@ test('parseRegistry, resolveWorkspace and editedEntry (SF-301): auto_planner is 
   assert.deepEqual(await resolveWorkspace('off', dir), { name: 'off', readCheckout: repo, workCheckout: repo });
   const edit = { read_checkout: '/srv/b', description: '', app: '', handoff: 'default', color: 'auto', digest: { track: false, my_work: false } } as const;
   assert.deepEqual(editedEntry({ read_checkout: '/srv/a', auto_planner: true }, edit), { read_checkout: '/srv/b', auto_planner: true });
+});
+
+test('parseRegistry, workspaceIssueImport and editedEntry (SF-311): issue_import needs every field, each checked; the settings only when on; the Edit keeps it', () => {
+  const issueImport = { on: true, prefixes: ['ABC', 'X_1'], site: 'example.atlassian.net', hook: '/home/you/.claude/hooks/atlassian-allowlist.py' };
+  const withImport = (value: unknown): string => JSON.stringify({ workspaces: { app: { read_checkout: '/srv/app', issue_import: value } } });
+  assert.deepEqual(parseRegistry(withImport(issueImport)).workspaces.app, { read_checkout: '/srv/app', issue_import: issueImport });
+  const refused: unknown[] = [
+    ...(['on', 'prefixes', 'site', 'hook'] as const).map((field) => Object.fromEntries(Object.entries(issueImport).filter(([name]) => name !== field))),
+    { ...issueImport, extra: 1 },
+    { ...issueImport, prefixes: [] },
+    { ...issueImport, prefixes: Array.from({ length: 21 }, (_, index) => `P${index}`) },
+    { ...issueImport, prefixes: ['abc'] },
+    { ...issueImport, prefixes: ['A-B'] },
+    { ...issueImport, prefixes: ['ABCDEFGHIJKLMNOPQRSTU'] },
+    { ...issueImport, site: 'https://example.atlassian.net' },
+    { ...issueImport, site: 'Example.atlassian.net' },
+    { ...issueImport, site: 'localhost' },
+    { ...issueImport, hook: 'hooks/atlassian-allowlist.py' },
+  ];
+  for (const value of refused) {
+    invalid(withImport(value));
+    assert.throws(() => parseRegistry(withImport(value)), /workspaces\.app\.issue_import/, JSON.stringify(value));
+  }
+  assert.equal(parseRegistry(withImport({ ...issueImport, prefixes: Array.from({ length: 20 }, (_, index) => `P${index}`) })).workspaces.app?.issue_import?.prefixes.length, 20);
+  assert.deepEqual(workspaceIssueImport({ read_checkout: '/srv/app', issue_import: issueImport }), { prefixes: ['ABC', 'X_1'], site: 'example.atlassian.net', hook: '/home/you/.claude/hooks/atlassian-allowlist.py' });
+  assert.equal(workspaceIssueImport({ read_checkout: '/srv/app', issue_import: { ...issueImport, on: false } }), undefined);
+  assert.equal(workspaceIssueImport({ read_checkout: '/srv/app' }), undefined);
+  const edit = { read_checkout: '/srv/b', description: '', app: '', handoff: 'default', color: 'auto', digest: { track: false, my_work: false } } as const;
+  assert.deepEqual(editedEntry({ read_checkout: '/srv/a', issue_import: issueImport }, edit), { read_checkout: '/srv/b', issue_import: issueImport });
 });
 
 test('setWorkspaceAutoPlanner (SF-301): on writes auto_planner true, off removes the key and keeps the others, an unknown name is workspace_not_found', async () => {

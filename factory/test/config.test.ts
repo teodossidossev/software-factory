@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { createHash } from 'node:crypto';
-import { claudeReviewDecision, fixSessionDecision, fixSessionSetting, loadConfig, reviewEffortSetting, smokeProbeAllow, stateDir } from '../src/config.js';
+import { claudeReviewDecision, codexEffortSetting, fixSessionDecision, fixSessionSetting, loadConfig, reviewEffortSetting, smokeProbeAllow, stateDir } from '../src/config.js';
 import { FactoryError } from '../src/errors.js';
 
 const COMMAND = "node probe.mjs --canary '/t/sf-smoke-x/config/auth.env' > probe.json";
@@ -158,6 +158,24 @@ test('SF_REVIEW_EFFORT (SF-320): unset or empty gives high; low, medium, high, x
       assert.ok(error instanceof FactoryError);
       assert.equal(error.code, 'invalid_config');
       assert.equal(error.message, `SF_REVIEW_EFFORT must be low, medium, high, xhigh or max, got "${value}".`);
+      return true;
+    });
+  }
+});
+
+test('SF_CODEX_EFFORT (SF-320-2): unset or empty gives none; low, medium, high and xhigh are kept; any other value is invalid_config at start, naming the setting', () => {
+  const base = { HOME: '/home/u', SF_STATE_DIR: '/tmp/sf-config-test-state' };
+  assert.equal(loadConfig(base).codexEffort, undefined);
+  assert.equal(loadConfig({ ...base, SF_CODEX_EFFORT: '' }).codexEffort, undefined);
+  for (const value of ['low', 'medium', 'high', 'xhigh'] as const) {
+    assert.equal(loadConfig({ ...base, SF_CODEX_EFFORT: value }).codexEffort, value);
+    assert.equal(codexEffortSetting({ SF_CODEX_EFFORT: value }), value);
+  }
+  for (const value of ['max', 'extreme', 'High', ' high', '3']) {
+    assert.throws(() => loadConfig({ ...base, SF_CODEX_EFFORT: value }), (error: unknown) => {
+      assert.ok(error instanceof FactoryError);
+      assert.equal(error.code, 'invalid_config');
+      assert.equal(error.message, `SF_CODEX_EFFORT must be low, medium, high or xhigh, got "${value}".`);
       return true;
     });
   }

@@ -340,6 +340,21 @@ test('CC-7: a Task ChatGPT wrote through write_task (owner chatgpt, its last wri
   assert.equal(existsSync(join(env.home, 'fake-codex.log')), false);
 });
 
+test('SF-320-2: with SF_CODEX_EFFORT the Codex check runs with -c model_reasoning_effort=<effort> right after the memories pair; without it, none', async () => {
+  // The fake Codex's argv after the memories pair, up to --cd.
+  const afterMemories = async (name: string, ticket: string, extra: Record<string, string>): Promise<string[]> => {
+    const { env } = await codexEnv(name, ticket, extra);
+    await reviewScript(env, [{ output: CLAUDE }]);
+    await codexScript(env, [{ output: CODEX }]);
+    const run = await runCli(env, ['check-task', 'app', ticket]);
+    assert.equal(run.code, 0, run.stderr);
+    const [codex] = await codexLog(env);
+    return codex!.argv.slice(codex!.argv.indexOf('memories.use_memories=false') + 1, codex!.argv.indexOf('--cd'));
+  };
+  assert.deepEqual(await afterMemories('codex-effort', 'X-11', { SF_CODEX_EFFORT: 'high' }), ['-c', 'model_reasoning_effort=high']);
+  assert.deepEqual(await afterMemories('codex-no-effort', 'X-12', {}), []);
+});
+
 test('CC-8: over SF_GATE_MAX_TOKENS the Codex part is failed and its findings are not applied', async () => {
   const { env, content } = await codexEnv('codex-tokens', 'X-4', { SF_GATE_MAX_TOKENS: '1' });
   await reviewScript(env, [{ output: CLAUDE }]);

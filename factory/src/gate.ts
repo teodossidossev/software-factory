@@ -12,6 +12,7 @@ import { spawn, type SpawnOptions } from 'node:child_process';
 import { accessSync, constants } from 'node:fs';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { delimiter, isAbsolute, join } from 'node:path';
+import type { CodexEffort } from './config.js';
 import type { GateTokens } from './jobs.js';
 import type { Redactor } from './redact.js';
 import { filterSupports, spawnSeccomped } from './seccomp.js';
@@ -89,6 +90,9 @@ export interface GateOptions {
   // The iteration's directory of the job: the schema file and the output file go there.
   dir: string;
   model: string | undefined;
+  // The reasoning effort (SF_CODEX_EFFORT), passed as -c model_reasoning_effort; undefined leaves
+  // it to Codex's own config.
+  effort?: CodexEffort | undefined;
   timeoutMs: number;
   // Cancels the run (abort, reset, a newer review): the process is killed.
   signal: AbortSignal;
@@ -165,11 +169,12 @@ export function redactedGateOutcome<T>(outcome: CodexOutcome<T>, redactor: Pick<
 // The user's global AGENTS.md has no documented switch and still loads. The Task's images go
 // before --cd, so each --image is followed by another option, never by the
 // final "-" (--image takes several values). files names the schema and output files in options.dir
-// (the gate's by default).
-export function gateArgs(options: Pick<GateOptions, 'cwd' | 'dir' | 'model' | 'images'>, files: Pick<CodexTask<unknown>, 'schemaFile' | 'outputFile'> = GATE_TASK): string[] {
+// (the gate's by default). The effort, when given, overrides Codex's own config.
+export function gateArgs(options: Pick<GateOptions, 'cwd' | 'dir' | 'model' | 'effort' | 'images'>, files: Pick<CodexTask<unknown>, 'schemaFile' | 'outputFile'> = GATE_TASK): string[] {
   return [
     'exec', '--ephemeral', '--sandbox', 'read-only',
     '--disable', 'memories', '-c', 'memories.use_memories=false',
+    ...(options.effort !== undefined ? ['-c', `model_reasoning_effort=${options.effort}`] : []),
     ...(options.images ?? []).flatMap((path) => ['--image', path]),
     '--cd', options.cwd,
     '--output-schema', join(options.dir, files.schemaFile), '--output-last-message', join(options.dir, files.outputFile), '--json',

@@ -714,9 +714,10 @@ test('stream client: the composer per state: its sentence, its message box and i
     assert.equal(acts(page)[0]!.className, primary ? 'btn primary' : buttons[0] === 'Abort…' ? 'btn danger' : 'btn', name);
   }
   // A job ready for review: the chip and its line in place of the bold sentence; #acts holds Send
-  // only, in .crow, hidden until Ask for a change; the ready panel's row, its one primary first.
+  // and Quick fix only (SF-313-3), in .crow, hidden until Ask for a change; the ready panel's row,
+  // its one primary first.
   await update(page, job('ready_for_human_review'));
-  assert.deepEqual(acts(page).map((node) => [node.textContent, node.className]), [['Send', 'btn']]);
+  assert.deepEqual(acts(page).map((node) => [node.textContent, node.className]), [['Send', 'btn'], ['Quick fix', 'btn']]);
   const status = page.$('composer-sentence').children[0] as FakeElement;
   assert.deepEqual([status.className, (status.children as FakeElement[]).map((node) => [node.className, node.textContent])],
     ['ready-status', [['ready-chip', 'Ready to push'], ['', 'Reviews are clean and the MR text is written.']]]);
@@ -729,7 +730,7 @@ test('stream client: the composer per state: its sentence, its message box and i
   assert.equal(page.$('composer-sentence').children[0]!.textContent, 'In your checkout on T-1-demo.');
   assert.deepEqual([labels(page), page.$('composer').querySelector('.crow')!.hidden, page.$('msg').disabled], [[], true, false]);
   assert.deepEqual(page.$('handover-panel').querySelectorAll('button').map((node) => node.textContent),
-    ['More ▾', 'Take it backYour checkout returns to how it was; the job stays ready.', 'Refresh MR status', 'Abort the job…', 'I opened the MR', 'Merged — archive', 'Push and open the MR…', 'Ask for changes']);
+    ['More ▾', 'Take it backYour checkout returns to how it was; the job stays ready.', 'Refresh MR status', 'Abort the job…', 'I opened the MR', 'Merged — archive', 'Push and open the MR…', 'Ask for changes', 'Quick fix']);
   // The merge request line of a pushed job, a link to its https URL.
   await update(page, job('pushed', { mr: mr('open') }));
   assert.equal(page.$('mr-line').textContent, 'Merge request #7 (open): https://github.com/o/r/pull/7');

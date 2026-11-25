@@ -324,7 +324,7 @@ test('job client (SF-107): a handed-over job shows the hand-over panel: the head
   const ask = panel.querySelector('.ho-ask')!;
   assert.equal(ask.children[0], page.$('msg'));
   assert.equal((page.$('msg') as unknown as { placeholder: string }).placeholder, 'What should the Implementer change? Your edits in the checkout go with the message.');
-  assert.deepEqual(texts(ask.querySelector('.ho-askrow')!), ['Ask for changes', "The job takes your checkout's edits back and works on your message."]);
+  assert.deepEqual(texts(ask.querySelector('.ho-askrow')!), ['Ask for changes', 'Quick fix', 'Ask for changes: the full loop. Quick fix: one turn and the checks, no review while the change stays small.']);
   // No muted SF-073 sentence and none of the old row's buttons.
   assert.deepEqual(texts(page.$('composer-sentence')), ['In your checkout on T-1-demo.']);
   for (const label of ['Approve…', 'I opened the MR myself', 'Create merge request', 'Abort…']) {
@@ -578,7 +578,7 @@ test('job client (SF-286): a ready job shows the chip and the ready panel in pla
   const status = page.$('composer-sentence').children[0] as FakeElement;
   assert.deepEqual([status.className, texts(status)], ['ready-status', ['Ready to push', 'Reviews are clean and the MR text is written.']]);
   assert.equal(page.$('composer-sentence').querySelector('.ready-note'), null);
-  // The panel right after #confirm; the row's primary first, Abort… last; .crow hidden with Send alone in #acts.
+  // The panel right after #confirm; the row's primary first, Abort… last; .crow hidden with Send and Quick fix alone in #acts.
   const composer = page.$('composer');
   const panel = readyOf(page);
   assert.equal(composer.children.indexOf(panel), composer.children.indexOf(page.$('confirm')) + 1);
@@ -586,7 +586,7 @@ test('job client (SF-286): a ready job shows the chip and the ready panel in pla
   assert.deepEqual(rowLabels(page), ['Review the MR and push', 'Ask for a change', 'More ▾', 'Abort…']);
   assert.deepEqual(panel.all().filter((node) => node.classList.contains('primary')).map((node) => node.id), ['review-mr-button']);
   assert.equal(page.$('abort-button').className, 'btn danger rd-abort');
-  assert.deepEqual([crowOf(page).hidden, texts(page.$('acts'))], [true, ['Send']]);
+  assert.deepEqual([crowOf(page).hidden, texts(page.$('acts'))], [true, ['Send', 'Quick fix']]);
 
   // Ask for a change opens .crow with the focus in the box; Send is off while it is empty.
   assert.equal(page.$('ask-button').getAttribute('aria-expanded'), 'false');
@@ -1309,4 +1309,96 @@ test('job client (SF-308-3): a ready job Claude Code plans: More ▾ holds Discu
   // ChatGPT plans a ready job whose message is too long for its link: no Planning chat link….
   const chatgpt = await openJob(detail(planned('ready_for_human_review', { discuss: { message: 'm', url: null } })));
   assert.deepEqual([chatgpt.document.getElementById('chat-open-button'), plannerReads(chatgpt).length], [null, 0]);
+});
+
+// ---------- Quick fix on the job page (SF-313-3) ----------
+
+// The detail with its served job's availability.quickfix set to the reason (the server's answer for
+// a job it refuses).
+const quickFixOff = (shown: Detail, reason: string): Detail => {
+  const row = shown.job as unknown as { availability: Record<string, string> };
+  return { ...shown, job: { ...row, availability: { ...row.availability, quickfix: reason } } as unknown as Job };
+};
+
+test('job client (SF-313-3, QF3-1): a ready job with Ask for a change open shows Quick fix beside Send, not in More ▾; an empty box keeps it off and the reasons line never names it; a message is posted to quickfix and the box emptied', async () => {
+  const page = await openJob(detail(readyJob(), { mr: true }));
+  page.$('ask-button').click();
+  assert.deepEqual([crowOf(page).hidden, texts(page.$('acts'))], [false, ['Send', 'Quick fix']]);
+  assert.equal(page.$('quickfix-button').className, 'btn');
+  // More ▾ holds no Quick fix item.
+  moreOf(page).click();
+  assert.equal(readyMenu(page).children.some((node) => node.textContent.startsWith('Quick fix')), false);
+  assert.equal(readyOf(page).contains(page.$('quickfix-button')), false);
+  page.key('Escape');
+  // The empty box: off with its reason, and the reasons line does not name it (nor Send).
+  assert.deepEqual([page.$('quickfix-button').disabled, page.$('quickfix-button').getAttribute('title')], [true, 'write a message first.']);
+  assert.equal(whyText(page).some((line) => line.includes('Quick fix') || line.includes('Send')), false);
+  // A click on it posts nothing, "Go on." neither.
+  page.$('quickfix-button').click();
+  await page.flush();
+  assert.deepEqual([posts(page, 'quickfix').length, posts(page, 'say').length], [0, 0]);
+  // Whatever the reason: with a confirmation open it is off and still not named.
+  moreOf(page).click();
+  page.$('approve-button').click();
+  typeMessage(page, 'Rename the helper.');
+  assert.deepEqual([page.$('quickfix-button').disabled, page.$('quickfix-button').getAttribute('title')], [true, 'a confirmation is open: confirm or cancel it first.']);
+  assert.equal(whyText(page).length > 0, true);
+  assert.equal(whyText(page).some((line) => line.includes('Quick fix') || line.includes('Send')), false);
+  page.$('confirm-cancel').click();
+
+  // With a message: on; a click posts the box's text to quickfix, never to say.
+  assert.equal(page.$('quickfix-button').disabled, false);
+  page.$('quickfix-button').click();
+  await page.flush();
+  assert.deepEqual(posts(page, 'quickfix').map((request) => request.body), ['{"message":"Rename the helper."}']);
+  assert.equal(posts(page, 'say').length, 0);
+  // While it is out only Quick fix is off with its reason; the box keeps the text until the answer.
+  assert.deepEqual([page.$('quickfix-button').disabled, page.$('quickfix-button').getAttribute('title'), page.$('say-button').disabled], [true, 'the quick fix is being sent.', false]);
+  assert.deepEqual([page.$('action-status').textContent, page.$('msg').value], ['Sending the quick fix…', 'Rename the helper.']);
+  posts(page, 'quickfix')[0]!.respond(200, { ok: true, result: { state: 'working' } });
+  await page.flush();
+  assert.deepEqual([page.$('msg').value, page.$('action-status').textContent, page.$('toast-text').textContent], ['', 'Sent: the Implementer is working on it (state working).', 'Quick fix sent']);
+});
+
+test('job client (SF-313-3, QF3-2): a handed-over job\'s panel row holds Ask for changes, Quick fix and its line; Quick fix posts quickfix with the message, Ask for changes still posts say', async () => {
+  const page = await openJob(detail(handedOver()));
+  const row = panelOf(page).querySelector('.ho-askrow')!;
+  assert.deepEqual(texts(row), ['Ask for changes', 'Quick fix', 'Ask for changes: the full loop. Quick fix: one turn and the checks, no review while the change stays small.']);
+  assert.deepEqual([page.$('quickfix-button').disabled, page.$('quickfix-button').getAttribute('title')], [true, 'write a message first.']);
+  typeMessage(page, 'Fix the typo.');
+  inPanel(page, 'Quick fix').click();
+  await page.flush();
+  assert.deepEqual(posts(page, 'quickfix').map((request) => request.body), ['{"message":"Fix the typo."}']);
+  assert.equal(posts(page, 'say').length, 0);
+  posts(page, 'quickfix')[0]!.respond(200, { ok: true, result: { state: 'working' } });
+  await page.flush();
+  assert.equal(page.$('msg').value, '');
+
+  // Ask for changes posts say as before, not quickfix.
+  await show(page, detail(handedOver()));
+  typeMessage(page, 'Rename the helper.');
+  inPanel(page, 'Ask for changes').click();
+  await page.flush();
+  assert.deepEqual(posts(page, 'say').map((request) => request.body), ['{"message":"Rename the helper."}']);
+  assert.equal(posts(page, 'quickfix').length, 1);
+});
+
+test('job client (SF-313-3, QF3-3): a job whose availability.quickfix is a reason shows Quick fix off with that reason, and a click posts nothing', async () => {
+  const reason = 'a quick fix needs a job ready for review or handed over; it is working.';
+  // The hand-over panel's button.
+  const page = await openJob(quickFixOff(detail(handedOver()), reason));
+  typeMessage(page, 'Fix the typo.');
+  assert.deepEqual([page.$('quickfix-button').disabled, page.$('quickfix-button').getAttribute('title'), page.$('say-button').disabled], [true, reason, false]);
+  page.$('quickfix-button').click();
+  await page.flush();
+  assert.equal(posts(page, 'quickfix').length, 0);
+
+  // The ready job's button beside Send.
+  const ready = await openJob(quickFixOff(detail(readyJob(), { mr: true }), reason));
+  ready.$('ask-button').click();
+  typeMessage(ready, 'Fix the typo.');
+  assert.deepEqual([ready.$('quickfix-button').disabled, ready.$('quickfix-button').getAttribute('title'), ready.$('say-button').disabled], [true, reason, false]);
+  ready.$('quickfix-button').click();
+  await ready.flush();
+  assert.equal(posts(ready, 'quickfix').length, 0);
 });

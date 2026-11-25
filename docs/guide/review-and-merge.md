@@ -56,7 +56,7 @@ It is read when the job is ready, so a change applies to running jobs too.
 | let the factory push | **Approve…** | `sf approve my-app APP-12` | Without a commit of yours, the factory pushes its own commit and moves your branch to it ("Pushed the factory's commit …"); your uncommitted edits stay local and are not pushed. With your own commits on top of the base, it pushes the branch as it is ("Pushed your commit …"). |
 | have the factory push and open the MR | **Create merge request** | `sf mr create my-app APP-12` | The push, then the merge request on GitHub or GitLab (below). |
 | ask the Implementer for changes | **Ask for changes** (the composer's Send) | `sf say my-app APP-12 "<message>"` | Your edits go back into the job (below), and a new turn starts. |
-| have a small fix made quickly | (none yet) | `sf quickfix my-app APP-12 "<message>"` | Ask for changes, one turn, then MR preparation with no review round while the change stays small; the job comes back to your checkout (Quick fix, below). |
+| have a small fix made quickly | **Quick fix** (beside Send on a ready job; beside Ask for changes in the hand-over panel) | `sf quickfix my-app APP-12 "<message>"` | Ask for changes, one turn, then MR preparation with no review round while the change stays small; the job comes back to your checkout (Quick fix, below). |
 | give the job back to the factory | **Take it back** | `sf takeback my-app APP-12` | Your checkout returns to the branch it was on, the job goes back to `ready_for_human_review` with its worktree. Only while your checkout is as the factory left it (`takeback_changed` otherwise). |
 | drop it | **Abort…** | `sf abort my-app APP-12` | The job ends; your checkout and the branch stay as they are (`--discard` is refused here). |
 
@@ -74,7 +74,10 @@ the next ready hands it over again.
 
 A small fix to a change you are reviewing (a CSS line, a typo) need not cost a review round:
 `sf quickfix my-app APP-12 "<message>"` on a job in `ready_for_human_review` or `handed_over`
-(refused in any other state: use `sf say`). On a handed-over job it is Ask for changes first. The
+(refused in any other state: use `sf say`). On a handed-over job it is Ask for changes first. On
+the job's page it is the **Quick fix** button: on a ready job beside Send, once *Ask for a change*
+opens the message box; on a handed-over job beside **Ask for changes** in the hand-over panel. It
+sends the message box's text, and is off while the box is empty. The
 Implementer gets your message and is told to make only that change and to run only the fast checks
 of the files it touches. When the turn ends, the factory measures the change since the tree you
 had (your checkout's edits count too):

@@ -4115,6 +4115,7 @@ action, the same on the board and in the CLI:
 |---|---|---|
 | Hand over to my checkout | `sf handover <ws> <ticket>` | `ready_for_human_review` |
 | Ask for changes | `sf say <ws> <ticket> <message>` | `handed_over` (and today's states) |
+| Quick fix | `sf quickfix <ws> <ticket> <message>` | `ready_for_human_review`, `handed_over` |
 | Take it back | `sf takeback <ws> <ticket>` | `handed_over` |
 | I opened the MR myself | `sf handed-done <ws> <ticket>` | `handed_over` |
 | Merged — archive | `sf handed-done <ws> <ticket> --merged` | `handed_over`, `pushed` |
@@ -4140,7 +4141,9 @@ same actions, confirmations and availability rules as before:
   and open the MR…** (Create merge request, with its confirmation) when the workspace's Git host
   takes merge requests, else **Push…** (Approve, with its confirmation).
 - **Ask for changes** under the paths: the message box and its button (off while the box is empty);
-  the job takes your checkout's edits back with the message.
+  the job takes your checkout's edits back with the message. **Quick fix** beside it (`sf quickfix`,
+  off while the box is empty) sends the same message for one turn and the checks, with no review
+  while the change stays small; the muted line beside the two buttons says so.
 - **More ▾**: **Take it back** (your checkout returns to how it was; the job stays ready) and
   **Abort the job…**. It opens with Enter or Space, the arrow keys move between its items, and a
   choice, a click outside or Esc closes it (Esc only closes it; the focus goes back to More).
@@ -5261,7 +5264,8 @@ a header, then the Stream with the composer pinned at the bottom.
   the automatic hand-over did not happen, when it did not; then one row: *Hand over to my checkout*
   (SF-073) first when the workspace's hand-over is on (its `handoff`, else `SF_HANDOFF`), else
   *Review the MR and push* (SF-080: the Merge request screen); *Ask for a change*, which opens the
-  message box with Send under the row and closes it again; *More ▾*; and *Abort…*, quiet, at the
+  message box with Send and *Quick fix* (SF-313-3: `sf quickfix` with the box's text, off while it
+  is empty) under the row and closes it again; *More ▾*; and *Abort…*, quiet, at the
   far right. More ▾ holds the other of the two, *Approve without review…*, Create merge request
   (when it can be created), Refresh MR status (SF-200), *Discuss the result ↗* (or *Copy the
   message for the planner*; for a ticket Claude Code plans, SF-308-3, the items of the planner
@@ -5272,7 +5276,8 @@ a header, then the Stream with the composer pinned at the bottom.
   opens the field under the row; an item that is off says why under its label. It
   opens upward, below 768 px as a sheet across the bottom of the screen; the arrows move through
   it and Esc closes it, the focus back on More ▾; `handed_over` (SF-073): Approve… (primary), *Ask for changes*
-  (the message, with the edits in the user's checkout), *I opened the MR myself*, *Merged — archive* (confirmed in place by a second click), *Take it back*,
+  (the message, with the edits in the user's checkout), *Quick fix* beside it (SF-313-3: the same
+  message as `sf quickfix`), *I opened the MR myself*, *Merged — archive* (confirmed in place by a second click), *Take it back*,
   Refresh MR status (in the hand-over panel's More ▾, SF-200), Create merge request, Abort…;
   `needs_human`: the stop table; `pushed`: no message box, the merge request (`#N`, its
   state and link) and its status last read, Create merge request (no merge request yet, or a closed

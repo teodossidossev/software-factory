@@ -315,7 +315,7 @@ function describeOutcome(action: string, result: unknown): Outcome {
 
 // The short words of a success, for the toast of the job page.
 const DONE_TEXT: Readonly<Record<string, string>> = {
-  say: 'Message sent', approve: 'Pushed', abort: 'Aborted', review: 'The review runs again', accept: 'The MR is being prepared', settle: 'Settled',
+  say: 'Message sent', quickfix: 'Quick fix sent', approve: 'Pushed', abort: 'Aborted', review: 'The review runs again', accept: 'The MR is being prepared', settle: 'Settled',
   simplify: 'Simplify sent to the Implementer', archive: 'Archived', 'mr-create': 'Merge request opened', 'mr-merge': 'Merged', 'mr-status': 'MR status read',
   pause: 'Paused', resume: 'Resumed', restart: 'Restarted', handover: 'Handed over to your checkout', takeback: 'Taken back', 'handed-done': 'Your push is recorded',
   'merged-archive': 'Merged and archived',
@@ -499,7 +499,7 @@ async function run(action: string, key: string, body: Readonly<Record<string, un
       noteMrRead(key, actionResult(result));
     }
     // The sent draft goes; text edited meanwhile stays.
-    if ((action === 'say' || action === 'resume') && typeof body.message === 'string' && state.drafts.get(key) === body.message) {
+    if ((MESSAGE_ACTIONS.includes(action) || action === 'resume') && typeof body.message === 'string' && state.drafts.get(key) === body.message) {
       state.drafts.delete(key);
       if (key === state.key) {
         byIdAs('msg', 'textarea').value = '';
@@ -768,12 +768,22 @@ function sendSay(goOn = false): void {
   void run('say', key, { message: text.trim() === '' ? 'Go on.' : text });
 }
 
+// Quick fix: the message box's text, once, as Send; an empty box sends nothing (never "Go on.").
+function sendQuickFix(): void {
+  const key = state.key;
+  const text = byIdAs('msg', 'textarea').value;
+  if (key === null || text.trim() === '' || availability('quickfix', state.detail?.job ?? null) !== '') {
+    return;
+  }
+  void run('quickfix', key, { message: text });
+}
+
 // The composer's actions posted without a dialog: Pause, Retry review, Retry, Refresh MR status and the
 // hand-over's at once; Merged — archive on a second click, confirmed in place (armOrRun).
 const POSTED_AT_ONCE: readonly string[] = ['pause', 'review', 'retry', 'mr-status', 'handover', 'takeback', 'handed-done', 'merged-archive'];
 
 // A button of the composer (the prototype's act): the ones that ask first (Archive too) open their
-// confirmation; Send, Tell it to go on, Resume and POSTED_AT_ONCE post without one.
+// confirmation; Send, Tell it to go on, Quick fix, Resume and POSTED_AT_ONCE post without one.
 function act(action: string): void {
   const job = state.detail?.job ?? null;
   if (job === null) {
@@ -782,6 +792,8 @@ function act(action: string): void {
   const key = keyOf(job);
   if (action === 'say' || action === 'goon') {
     sendSay(action === 'goon');
+  } else if (action === 'quickfix') {
+    sendQuickFix();
   } else if (COMPOSER_ACTS.includes(action)) {
     // The composer's own buttons go to composerAct (composer.js).
     composerAct(action, job);

@@ -94,6 +94,10 @@ export interface Config {
   gate: Gate;
   // The model of the gate (SF_CODEX_MODEL, passed as --model); undefined uses Codex's default.
   codexModel: string | undefined;
+  // The reasoning effort of the Codex gate and the Codex Task check (SF_CODEX_EFFORT, passed as
+  // -c model_reasoning_effort); undefined leaves it to Codex's own config. A Config without it (the
+  // tests' literals) passes none.
+  codexEffort?: CodexEffort;
   // The gate's fix rounds without progress per job, its first fix not counted; the one that reaches
   // it is not applied (SF_GATE_MAX_ROUNDS).
   gateMaxRounds: number;
@@ -409,6 +413,18 @@ export function reviewEffortSetting(env: NodeJS.ProcessEnv = process.env): Revie
   return effort;
 }
 
+export type CodexEffort = 'low' | 'medium' | 'high' | 'xhigh';
+
+// SF_CODEX_EFFORT: low, medium, high or xhigh; unset or empty gives none (Codex's own config decides).
+export function codexEffortSetting(env: NodeJS.ProcessEnv = process.env): CodexEffort | undefined {
+  const effort = env.SF_CODEX_EFFORT;
+  if (!effort) return undefined;
+  if (effort !== 'low' && effort !== 'medium' && effort !== 'high' && effort !== 'xhigh') {
+    throw new FactoryError('invalid_config', `SF_CODEX_EFFORT must be low, medium, high or xhigh, got "${effort}".`);
+  }
+  return effort;
+}
+
 // The session of a job's fix rounds, decided at Start from the Task file's fix_session
 // (taskFixSession), which wins, and SF_FIX_SESSION (absent: resume), with the reason for the job's
 // fix_session_setup event. alternate is fresh when the first byte of sha256("<workspace>/<ticket>")
@@ -582,6 +598,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     findingsChecklist: findingsChecklistSetting(env),
     gate: gateConfig(env),
     codexModel: env.SF_CODEX_MODEL || undefined,
+    codexEffort: codexEffortSetting(env),
     gateMaxRounds: positiveInteger(env, 'SF_GATE_MAX_ROUNDS', 5),
     gateMaxTokens: positiveInteger(env, 'SF_GATE_MAX_TOKENS', 5_000_000, 1_000_000_000),
     gateTimeoutMs: positiveInteger(env, 'SF_GATE_TIMEOUT_MS', 900_000, 86_400_000),

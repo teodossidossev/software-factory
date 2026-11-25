@@ -782,7 +782,7 @@ export function checkSettings(config: Config, configDir: string): Omit<CheckOpti
   return {
     claudePath: config.claudePath, sandbox: config.sandbox, model: config.reviewModel, effort: config.reviewEffort, maxTurns: config.taskCheckMaxTurns, rulesMaxBytes: config.rulesMaxBytes,
     stateDir: config.stateDir, configDir, worktreeRoot: config.worktreeRoot, followUp: config.taskCheckFollowUp === true,
-    ...(config.taskCheckCodex === 'auto' ? { codex: { gate: config.gate, model: config.codexModel, timeoutMs: config.gateTimeoutMs, maxTokens: config.gateMaxTokens } } : {}),
+    ...(config.taskCheckCodex === 'auto' ? { codex: { gate: config.gate, model: config.codexModel, effort: config.codexEffort, timeoutMs: config.gateTimeoutMs, maxTokens: config.gateMaxTokens } } : {}),
   };
 }
 

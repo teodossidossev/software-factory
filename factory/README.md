@@ -727,6 +727,7 @@ relative one is one warning at start, and the dashboard then shows none.
 | `SF_GATE` | `codex` | The gate (SF-039), in the same round as the Claude review (the joint round, SF-214) or alone on a job without it: `codex` runs the Codex CLI, `off` lets the Claude verdict decide. With `codex` and no executable found the gate is off, and `sf serve` prints one line saying so. |
 | `SF_CODEX` | `codex` on `PATH` | Absolute path of the Codex CLI executable. Pointing at nothing turns the gate off; it is not looked for on `PATH` then. |
 | `SF_CODEX_MODEL` | unset | Model of the gate, passed as `--model`; unset uses Codex's default (the user's `~/.codex/config.toml`). |
+| `SF_CODEX_EFFORT` | unset | Reasoning effort of the Codex gate and the Codex Task check, passed as `-c model_reasoning_effort=<value>`. One of `low`, `medium`, `high`, `xhigh`; unset or empty: Codex's own config (the user's `~/.codex/config.toml`); any other value stops the factory at start. |
 | `SF_GATE_MAX_ROUNDS` | `5` | Review rounds without progress (as for `SF_MAX_ITERATIONS`) whose Fix the gate asked for, per job with the Claude review, the gate's first fix never counted (the job's `gate_stalled`; a joint round's Fix counts only when the gate's verdict is a fix); the gate fix of the round that reaches the limit is not applied (`gate_rounds`, job `needs_human`), unless the Claude review of the same round gives a fix, whose Fix section then applies alone. A job that makes no progress so stops after as many gate fixes as before. The job's `gate_fixes` still counts every gate fix (the light gate level reads it). A job whose Task says `important: true` is never stopped by it. |
 | `SF_GATE_MAX_TOKENS` | `5000000` | The gate's token budget for every started 2,000 changed lines of the job's change at the reviewed iteration (its `meta.json` files; at least once; once when they cannot be read): input plus output tokens of all its gate runs (the job's `gate_tokens`). A change of up to 2,000 lines gets this, one of 2,001 to 4,000 twice this. A gate does not start at the budget, and a run that goes over it is not applied (`gate_budget`, job `needs_human`). A message at the stop starts the count again from the tokens used so far. A job whose Task says `important: true` is never stopped by it. |
 | `SF_GATE_TIMEOUT_MS` | `900000` | How long one gate run may take; then SIGTERM, and SIGKILL 5 s later (`gate_failed`). |
@@ -1371,8 +1372,8 @@ runs it by itself after each change of a Task file (below); the user can always 
   as none. Codex gets the Claude check's prompt, its tools sentence replaced (it has a shell and
   works read-only), at the same time and in the same check worktree, through the gate's runner:
   `codex exec --ephemeral --sandbox read-only --disable memories -c memories.use_memories=false
-  [--image <path>]… --cd <worktree> --output-schema <check folder>/codex/codex-check-schema.json
-  --output-last-message <check folder>/codex/codex-check-output.json --json [--model
+  [-c model_reasoning_effort=SF_CODEX_EFFORT] [--image <path>]… --cd <worktree>
+  --output-schema <check folder>/codex/codex-check-schema.json --output-last-message <check folder>/codex/codex-check-output.json --json [--model
   <SF_CODEX_MODEL>] -`, the schema the check's in strict form without `minLength`, inside the
   gate's wrapper (`gateWrapper`, section Jobs) over a job session's denials in that worktree with the work
   checkout's `.software-factory/` hidden too; Codex is found as for the gate (`SF_GATE`,
@@ -2158,7 +2159,8 @@ ended. A restart of `sf serve` therefore leaves a working job working.
   the iteration is clean only when both verdicts are; without the Claude review it is the job's
   only reviewer. The factory runs the Codex CLI on the user's ChatGPT sign-in (it must
   be signed in: `codex login`; no API key), without a shell: `codex exec --ephemeral --sandbox
-  read-only --disable memories -c memories.use_memories=false --cd <worktree> --output-schema
+  read-only --disable memories -c memories.use_memories=false [-c model_reasoning_effort=SF_CODEX_EFFORT]
+  --cd <worktree> --output-schema
   <schema file> --output-last-message <out file> --json [--model SF_CODEX_MODEL] -`, the prompt on
   stdin. The schema and out files are `gate-schema.json` and `gate-output.json` in the iteration's
   directory; `gate-output.json` is deleted once read, after a failed run too (SF-125), so only the

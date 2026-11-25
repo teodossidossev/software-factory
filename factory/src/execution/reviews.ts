@@ -694,7 +694,7 @@ export class ReviewsPart {
         worktree: job.worktree, codexPath: gate.codexPath, codexHome: process.env.CODEX_HOME || join(homedir(), '.codex'), iterationDir: dir, images, tmp: tmpdir(),
       });
       outcome = await runGate(gatePrompt({ ...input, baseCommit: job.base_commit, onlyReviewer: !claudeReviews(job) }), {
-        codexPath: gate.codexPath, cwd: job.worktree, dir, model: this.#settings.config.codexModel, images, wrapper, bwrapPath: findBwrap(),
+        codexPath: gate.codexPath, cwd: job.worktree, dir, model: this.#settings.config.codexModel, effort: this.#settings.config.codexEffort, images, wrapper, bwrapPath: findBwrap(),
         timeoutMs: this.#settings.config.gateTimeoutMs, signal: running.controller.signal,
         // The run live in events.jsonl.
         onEvent: (event) => this.#sessions.appendLive(job, 'gate_event', redactor.codexEvent(event)),

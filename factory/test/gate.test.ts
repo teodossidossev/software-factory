@@ -83,6 +83,16 @@ test('the gate level settings (SF-092): SF_GATE_LEVEL auto (default, also empty)
   assert.deepEqual(gateFullPaths({}), []);
 });
 
+test('gateArgs (SF-320-2): an effort puts -c model_reasoning_effort=<effort> right after the memories pair; without it the argv is unchanged', () => {
+  const plain = gateArgs({ cwd: '/w', dir: '/d', model: 'm' });
+  assert.deepEqual(gateArgs({ cwd: '/w', dir: '/d', model: 'm', effort: undefined }), plain);
+  assert.ok(!plain.some((arg) => arg.startsWith('model_reasoning_effort')), plain.join(' '));
+  const args = gateArgs({ cwd: '/w', dir: '/d', model: 'm', effort: 'high' });
+  const memories = args.indexOf('memories.use_memories=false');
+  assert.deepEqual(args.slice(memories - 1, memories + 3), ['-c', 'memories.use_memories=false', '-c', 'model_reasoning_effort=high']);
+  assert.deepEqual([...args.slice(0, memories + 1), ...args.slice(memories + 3)], plain);
+});
+
 test('the gate runs without the user\'s Codex memories: the feature off and no memories injected', () => {
   const args = gateArgs({ cwd: '/w', dir: '/d', model: undefined });
   const pairs = args.slice(0, -1).map((arg, index) => `${arg} ${args[index + 1]}`);
@@ -371,8 +381,8 @@ test('after a read of ~/.codex marks the run, no free-text field of any later Co
   }
 });
 
-test('fix: the joint round\'s Fix section, the next iteration, Claude and the gate again, Clean; --model with SF_CODEX_MODEL', async () => {
-  const env = await newEnv('gate-fix', gateEnv({ SF_CODEX_MODEL: 'fake-gpt' }));
+test('fix: the joint round\'s Fix section, the next iteration, Claude and the gate again, Clean; --model with SF_CODEX_MODEL, model_reasoning_effort with SF_CODEX_EFFORT', async () => {
+  const env = await newEnv('gate-fix', gateEnv({ SF_CODEX_MODEL: 'fake-gpt', SF_CODEX_EFFORT: 'high' }));
   const repo = await newRepo(env, 'gate-fix-repo', false);
   await putTask(env, repo, 'G-2', 'Greet the reader');
   await script(env, [
@@ -398,6 +408,7 @@ test('fix: the joint round\'s Fix section, the next iteration, Claude and the ga
     assert.equal(runs.length, 2);
     for (const run of runs) {
       assert.equal(option(run.argv, 'model'), 'fake-gpt');
+      assert.ok(run.argv.some((arg, index) => arg === '-c' && run.argv[index + 1] === 'model_reasoning_effort=high'), run.argv.join(' '));
       assert.equal(run.argv.at(-1), '-');
     }
     assert.ok(runs[1]!.prompt.includes(`${FIX_SECTION.trimEnd()}\n</task_file>`));

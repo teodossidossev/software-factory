@@ -13,7 +13,7 @@ import { mkdir, readFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type * as z from 'zod/v4';
-import type { Gate } from './config.js';
+import type { CodexEffort, Gate } from './config.js';
 import { ownerOf } from './conversation.js';
 import { type CodexTask, findBwrap, noTokens, redactedGateOutcome, runCodex, strictSchema } from './gate.js';
 import type { GateTokens } from './jobs.js';
@@ -42,10 +42,12 @@ export interface CodexCheck {
 }
 
 // The Codex check's settings, from the gate's: the executable (or why it is off), SF_CODEX_MODEL,
-// SF_GATE_TIMEOUT_MS and SF_GATE_MAX_TOKENS.
+// SF_CODEX_EFFORT, SF_GATE_TIMEOUT_MS and SF_GATE_MAX_TOKENS.
 export interface CodexCheckSettings {
   gate: Gate;
   model: string | undefined;
+  // undefined: Codex's own config decides.
+  effort?: CodexEffort | undefined;
   timeoutMs: number;
   maxTokens: number;
 }
@@ -187,7 +189,7 @@ export async function runCodexCheck(prompt: string, settings: CodexCheckSettings
   };
   try {
     const raw = await runCodex(codexCheckPrompt(prompt), {
-      codexPath: gate.codexPath, cwd: run.root, dir, model: settings.model, timeoutMs: settings.timeoutMs, signal: run.signal, images: run.images, wrapper, bwrapPath: findBwrap(),
+      codexPath: gate.codexPath, cwd: run.root, dir, model: settings.model, effort: settings.effort, timeoutMs: settings.timeoutMs, signal: run.signal, images: run.images, wrapper, bwrapPath: findBwrap(),
     }, task);
     const outcome = redactedGateOutcome(raw, new Redactor({ cwd: run.root, secrets: await factoryTokens({ stateDir: run.stateDir }) }));
     const times = { tokens: outcome.tokens, started_at: outcome.startedAt, ended_at: outcome.endedAt };

@@ -305,6 +305,9 @@ test('parallel jobs: three jobs of a workspace run at once in their own worktree
   const served = await serve(env);
   const worktree = (ticket: string): string => join(env.state, 'worktrees', 'app', ticket);
   await call(served, 'start', { workspace: 'app', ticket: 'P-1' });
+  // Runs take their turn script in the order they start, and sf start answers before the runner
+  // starts: P-1 must have taken the slow turn before P-2 starts, or a loaded machine hands it to P-2.
+  await turnsStarted(env, 1);
   await call(served, 'start', { workspace: 'app', ticket: 'P-2' });
   await call(served, 'start', { workspace: 'app', ticket: 'P-3' });
   // The three first turns have their scripted turn before P-1's say takes the fourth.

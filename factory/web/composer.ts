@@ -34,7 +34,7 @@ const READY_NOTES: Readonly<Record<string, string>> = {
 // confirmation, the message box and the actions; a disabled action has its reason as its title. A
 // handed-over job has its hand-over panel instead of the message box and the actions; a job ready
 // for review the chip "Ready to push" in place of the bold sentence and the ready panel, its
-// message box and Send shown only while Ask for a change is open.
+// message box, Send and Quick fix shown only while Ask for a change is open.
 function renderComposer(): void {
   const job = state.detail?.job ?? null;
   // A confirmation opened before the doubt is not one the user could open now.
@@ -90,8 +90,8 @@ function renderComposer(): void {
   msg.placeholder = job.availability?.resume === '' ? (pausedTurn(job) ? `${resumeWord} sends this to the Implementer, if you write one` : `${resumeWord}, then message the Implementer`)
     : PLACEHOLDER[job.state] ?? 'Message';
   // The actions the server lists for the job, in its order; a ready job's are in its panel, Send
-  // aside.
-  const buttons = listedActions(job).filter((shown) => !ready || shown.action === 'say')
+  // and Quick fix aside.
+  const buttons = listedActions(job).filter((shown) => !ready || MESSAGE_ACTIONS.includes(shown.action))
     .map((shown) => actionButton(job, shown.action, shown.label, `btn${shown.primary ? ' primary' : ''}${shown.danger ? ' danger' : ''}`));
   keepFocus(byId('acts'), () => byId('acts').replaceChildren(...buttons));
   // The ready panel first: the More ▾ menu of a panel it removes is closed before a hand-over
@@ -196,13 +196,13 @@ function renderPlanner(job: JobRow | null): void {
 
 // The reasons of the disabled buttons (their titles), as text for a phone or a device
 // without hover (app.css shows .why only there): one line per reason, in the buttons' order,
-// "Off: <labels> (<reason>)". Only .btn buttons with a title; Send (data-act "say", its reason
-// the empty box) is left out.
+// "Off: <labels> (<reason>)". Only .btn buttons with a title; Send and Quick fix (data-act "say"
+// and "quickfix", the message box's actions) are left out, whatever the reason.
 function whyLines(buttons: readonly HTMLElement[]): HTMLElement[] {
   const byReason = new Map<string, string[]>();
   for (const node of buttons) {
     const reason = node.getAttribute('title') ?? '';
-    if ('disabled' in node && node.disabled === true && reason !== '' && node.classList.contains('btn') && node.dataset.act !== 'say') {
+    if ('disabled' in node && node.disabled === true && reason !== '' && node.classList.contains('btn') && !MESSAGE_ACTIONS.includes(node.dataset.act ?? '')) {
       byReason.set(reason, [...(byReason.get(reason) ?? []), node.textContent.trim()]);
     }
   }
@@ -219,6 +219,10 @@ function composerRow(): HTMLElement {
   return crow;
 }
 
+// The actions that send the message box's text: Send and Quick fix. An empty box disables them, the
+// reasons line leaves them out, and a ready job shows them beside the box, not in More ▾.
+const MESSAGE_ACTIONS: readonly string[] = ['say', 'quickfix'];
+
 // The actions the server lists for the job, in its order.
 const listedActions = (job: JobRow): readonly ShownAction[] => (Array.isArray(job.actions) ? job.actions : []);
 
@@ -231,7 +235,7 @@ function actionButton(job: JobRow, action: string, label: string, className: str
   if (reason === '' && state.confirm !== null) {
     reason = 'a confirmation is open: confirm or cancel it first.';
   }
-  if (reason === '' && action === 'say' && byIdAs('msg', 'textarea').value.trim() === '') {
+  if (reason === '' && MESSAGE_ACTIONS.includes(action) && byIdAs('msg', 'textarea').value.trim() === '') {
     reason = 'write a message first.';
   }
   node.disabled = reason !== '';
@@ -321,7 +325,8 @@ function renderHandoverPanel(job: JobRow, detail: JobDetail | null): void {
   );
   parts.push(paths);
   keepFocus(top, () => top.replaceChildren(...parts));
-  keepFocus(row, () => row.replaceChildren(actionButton(job, 'say', 'Ask for changes', 'btn'), el('span', 'muted', "The job takes your checkout's edits back and works on your message.")));
+  keepFocus(row, () => row.replaceChildren(actionButton(job, 'say', 'Ask for changes', 'btn'), actionButton(job, 'quickfix', 'Quick fix', 'btn'),
+    el('span', 'muted', 'Ask for changes: the full loop. Quick fix: one turn and the checks, no review while the change stays small.')));
 }
 
 // One path of the panel: its title, its steps and its buttons.
@@ -501,7 +506,7 @@ function renderReadyPanel(job: JobRow | null): void {
   withChatFocus(() => keepFocus(drawn, () => drawn.replaceChildren(...parts)));
 }
 
-// The ready panel's More ▾ items: each listed action but the primary, Send and the dangerous one,
+// The ready panel's More ▾ items: each listed action but the primary, Send, Quick fix and the dangerous one,
 // in the server's order, with its second line (why it is off, else READY_NOTES'), a separator
 // before Refresh MR status; then Discuss the result ↗ (the ChatGPT link, else Copy the message for
 // the planner; for a ticket Claude Code plans, jobPlannerControls' items) while the job has a
@@ -509,7 +514,7 @@ function renderReadyPanel(job: JobRow | null): void {
 function readyMenuItems(job: JobRow): HTMLElement[] {
   const items: HTMLElement[] = [];
   for (const shown of listedActions(job)) {
-    if (shown.primary || shown.danger || shown.action === 'say') {
+    if (shown.primary || shown.danger || MESSAGE_ACTIONS.includes(shown.action)) {
       continue;
     }
     if (shown.action === 'mr-status') {

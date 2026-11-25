@@ -69,11 +69,12 @@ test('jobActions per state: the shown list in order, the first non-dangerous one
   assert.deepEqual(shown(job('waiting_limit')), ['*resume:Resume now', '!abort:Abort…']);
   // ready_for_human_review: the workspace's way to finish first (its hand-over setting).
   const ready = job('ready_for_human_review', { prepared_commit: 'a'.repeat(40) });
-  const readyTail = ['approve:Approve without review…', 'mr-create:Create merge request', 'mr-status:Refresh MR status', 'say:Send', '!abort:Abort…'];
+  const readyTail = ['approve:Approve without review…', 'mr-create:Create merge request', 'mr-status:Refresh MR status', 'say:Send', 'quickfix:Quick fix', '!abort:Abort…'];
   for (const facts of [{}, { handsOver: false }]) {
     assert.deepEqual(shown(ready, facts), ['*review-mr:Review the MR and push', 'handover:Hand over to my checkout', ...readyTail], JSON.stringify(facts));
   }
   assert.deepEqual(shown(ready, { handsOver: true }), ['*handover:Hand over to my checkout', 'review-mr:Review the MR and push', ...readyTail]);
+  // handed_over: its panel draws Ask for changes and Quick fix itself.
   assert.deepEqual(shown(job('handed_over')), []);
   assert.deepEqual(shown(job('aborted')), ['restart:Restart…', 'archive:Archive']);
   assert.deepEqual(shown(job('failed')), ['restart:Restart…', 'archive:Archive']);

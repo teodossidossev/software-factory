@@ -365,7 +365,7 @@ function shownActions(job: Job, facts: JobFacts, now: Date): { list: Listed[]; p
       const handover = listed('handover', 'Hand over to my checkout');
       const review = listed('review-mr', 'Review the MR and push');
       return {
-        list: [...(facts.handsOver === true ? [handover, review] : [review, handover]), listed('approve', 'Approve without review…'), ...mrCreate, MR_STATUS, toListed(SEND), toListed(ABORT)],
+        list: [...(facts.handsOver === true ? [handover, review] : [review, handover]), listed('approve', 'Approve without review…'), ...mrCreate, MR_STATUS, toListed(SEND), listed('quickfix', 'Quick fix'), toListed(ABORT)],
         primary: true,
       };
     }

@@ -38,7 +38,7 @@ const ON_LIMIT_RULES: readonly OnLimitRule[] = ['resume-then-queue', 'resume-onl
 // The labels and pending texts are looked up by the action names the server's payloads carry, so a
 // name without an entry reads as undefined.
 const ACTION_LABELS: Readonly<Record<string, string>> = {
-  approve: 'Approve', abort: 'Abort', say: 'Send', review: 'Retry review', retry: 'Retry', accept: 'Accept and prepare MR', settle: 'Settle', simplify: 'Simplify', archive: 'Archive',
+  approve: 'Approve', abort: 'Abort', say: 'Send', quickfix: 'Quick fix', review: 'Retry review', retry: 'Retry', accept: 'Accept and prepare MR', settle: 'Settle', simplify: 'Simplify', archive: 'Archive',
   'mr-create': 'Create merge request', 'mr-merge': 'Merge', 'mr-status': 'Refresh MR status', pause: 'Pause', resume: 'Resume', restart: 'Restart',
   handover: 'Hand over to my checkout', takeback: 'Take it back', 'handed-done': 'I opened the MR myself',
   'merged-archive': 'Merged — archive',
@@ -52,6 +52,7 @@ const PENDING_REASONS: Readonly<Record<string, string>> = {
   approve: 'the push was requested; waiting for its outcome.',
   abort: 'abort was requested; waiting for its outcome.',
   say: 'the message is being sent.',
+  quickfix: 'the quick fix is being sent.',
   review: 'the review is being restarted.',
   retry: 'the MR preparation is being started again.',
   archive: 'the job is being archived.',
@@ -75,6 +76,7 @@ const PENDING_TEXT: Readonly<Record<string, string>> = {
   approve: 'Pushing the branch…',
   abort: 'Abort requested; waiting for the job to end.',
   say: 'Sending the message…',
+  quickfix: 'Sending the quick fix…',
   review: 'Restarting the review…',
   retry: 'Preparing the MR again…',
   archive: 'Archiving the job…',

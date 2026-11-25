@@ -730,7 +730,7 @@ interface DigestDaily {
 
 // The Stats page's payload, api/stats: src/stats.ts StatsPayload and its rows (named Stats* here, as
 // JobRow and WorkspaceRow are the board's).
-type StatsRole = 'implementer' | 'claude_review' | 'simplify' | 'codex_gate' | 'task_check' | 'digest' | 'explanation';
+type StatsRole = 'implementer' | 'claude_review' | 'simplify' | 'last_review' | 'codex_gate' | 'task_check' | 'digest' | 'explanation';
 // The roles with a cost in USD: src/stats.ts CostRole.
 type StatsCostRole = Exclude<StatsRole, 'codex_gate'>;
 // src/stats.ts Findings.

@@ -114,9 +114,9 @@ test('costs and tokens by role on their record\'s local day, every day of the pe
   assert.equal(payload.days, 7);
   assert.deepEqual(payload.period, { from: '2026-11-01', to: '2026-11-07' });
   assert.deepEqual(payload.days_rows.map((row) => row.day), ['2026-11-01', '2026-11-02', '2026-11-03', '2026-11-04', '2026-11-05', '2026-11-06', '2026-11-07']);
-  assert.deepEqual(dayRow(payload, '2026-11-01'), { day: '2026-11-01', cost: { implementer: 0, claude_review: 0, simplify: 0, task_check: 0, digest: 0, explanation: 0 }, codex_tokens: NO_TOKENS, started: 0, finished: 0 });
-  assert.deepEqual(dayRow(payload, '2026-11-05').cost, { implementer: 1.5, claude_review: 0.5, simplify: 0, task_check: 0, digest: 0, explanation: 0 });
-  assert.deepEqual(dayRow(payload, '2026-11-06').cost, { implementer: 0, claude_review: 0.25, simplify: 0.125, task_check: 0, digest: 0, explanation: 0.75 });
+  assert.deepEqual(dayRow(payload, '2026-11-01'), { day: '2026-11-01', cost: { implementer: 0, claude_review: 0, simplify: 0, last_review: 0, task_check: 0, digest: 0, explanation: 0 }, codex_tokens: NO_TOKENS, started: 0, finished: 0 });
+  assert.deepEqual(dayRow(payload, '2026-11-05').cost, { implementer: 1.5, claude_review: 0.5, simplify: 0, last_review: 0, task_check: 0, digest: 0, explanation: 0 });
+  assert.deepEqual(dayRow(payload, '2026-11-06').cost, { implementer: 0, claude_review: 0.25, simplify: 0.125, last_review: 0, task_check: 0, digest: 0, explanation: 0.75 });
   assert.deepEqual(dayRow(payload, '2026-11-06').codex_tokens, { input: 1000, cached_input: 200, output: 100 });
   assert.equal(dayRow(payload, '2026-11-04').cost.task_check, 0.375);
   assert.equal(dayRow(payload, '2026-11-03').cost.digest, 0.0625);
@@ -131,9 +131,9 @@ test('costs and tokens by role on their record\'s local day, every day of the pe
   assert.deepEqual(role(payload, 'task_check'), { role: 'task_check', cost_usd: 0.375, complete: true, tokens: null, runs: 1 });
   assert.deepEqual(role(payload, 'digest'), { role: 'digest', cost_usd: 0.0625, complete: true, tokens: null, runs: 1 });
   assert.deepEqual(role(payload, 'explanation'), { role: 'explanation', cost_usd: 0.75, complete: true, tokens: null, runs: 1 });
-  assert.deepEqual(payload.roles.map((row) => row.role), ['implementer', 'claude_review', 'simplify', 'codex_gate', 'task_check', 'digest', 'explanation']);
+  assert.deepEqual(payload.roles.map((row) => row.role), ['implementer', 'claude_review', 'simplify', 'last_review', 'codex_gate', 'task_check', 'digest', 'explanation']);
   assert.deepEqual(payload.by_workspace, [{
-    workspace: 'app', cost: { implementer: 1.5, claude_review: 0.75, simplify: 0.125, task_check: 0.375, explanation: 0.75 }, total_usd: 3.5, codex_tokens: 1100, jobs_started: 1, median_time_to_ready_s: null,
+    workspace: 'app', cost: { implementer: 1.5, claude_review: 0.75, simplify: 0.125, last_review: 0, task_check: 0.375, explanation: 0.75 }, total_usd: 3.5, codex_tokens: 1100, jobs_started: 1, median_time_to_ready_s: null,
   }]);
   assert.deepEqual(payload.workspaces, ['app']);
   // A-1 of all time: 1.5 + null + 0.5 + 0.25 + 0.125 + 0.75; A-0 is not in the period.
@@ -731,4 +731,65 @@ test('simplify (SF-132): offered counts the period\'s simplification records wit
   assert.deepEqual(payload.simplify, { offered: 2, taken: 1, skipped: 1 });
   const month = await stats(env.state, jobs).compute({ days: 30, workspace: null });
   assert.deepEqual(month.simplify, { offered: 3, taken: 1, skipped: 2 });
+});
+
+const SKILL = { path: 'skills/review', sha256: 'a'.repeat(64), files: 1 };
+const lastReview = (ended: string, cost: number | null) =>
+  ({ reviewer: 'last_review', summary: 'L.', comments: [], dropped: 0, skill: SKILL, cost_usd: cost, model: 'm', started_at: ended, ended_at: ended });
+const lastReviewFailed = (ended: string) => ({ reviewer: 'last_review', error: 'exit 1', timed_out: false, skill: null, started_at: ended, ended_at: ended });
+
+test('LR7-1 last review (SF-309-7): its own role row with the cost and runs of each successful last-review.json, tokens null whatever the events hold; the day, the workspace and the job hold its cost; never the Claude review\'s row or stage; a failed one adds no cost, a malformed one is unreadable', async () => {
+  const env = await newEnv('stats-last-review');
+  const jobs = new JobStore(env.state);
+  await makeJob(jobs, 'app', 'L-1', [{ ended: on('2026-11-05'), cost: 1 }, { ended: on('2026-11-06'), cost: 0.5 }]);
+  await jobs.writeReview('app', 'L-1', 1, review([], on('2026-11-05'), 0.25));
+  await jobs.writeLastReview('app', 'L-1', 1, lastReviewFailed(on('2026-11-05', '13:00')));
+  await jobs.writeLastReview('app', 'L-1', 2, lastReview(on('2026-11-06', '13:00'), 0.05));
+  // A job without a last review: its row as before.
+  await makeJob(jobs, 'app', 'L-2', [{ ended: on('2026-11-06'), cost: 2 }]);
+  // A malformed record: no ended_at.
+  await makeJob(jobs, 'app', 'L-3', [{ ended: on('2026-11-06'), cost: 3 }]);
+  await writeFile(join(jobs.iterationDir('app', 'L-3', 1), 'last-review.json'), '{"reviewer":"last_review","cost_usd":7}');
+  // Result messages of the last review on the events add no tokens to any row.
+  await event(jobs, 'app', 'L-1', { ts: on('2026-11-06'), type: 'review_message', reviewer: 'last_review', message: result(100, 10) });
+
+  const payload = await stats(env.state, jobs).compute({ days: 7, workspace: null });
+  assert.deepEqual(role(payload, 'last_review'), { role: 'last_review', cost_usd: 0.05, complete: true, tokens: null, runs: 1 });
+  assert.deepEqual(role(payload, 'claude_review'), { role: 'claude_review', cost_usd: 0.25, complete: true, tokens: { input: 0, output: 0 }, runs: 1 });
+  assert.equal(stage(payload, 'claude_review').cost_usd, 0.25);
+  assert.equal(payload.stages.some((row) => (row.stage as string) === 'last_review'), false);
+  assert.deepEqual(dayRow(payload, '2026-11-06').cost, { implementer: 5.5, claude_review: 0, simplify: 0, last_review: 0.05, task_check: 0, digest: 0, explanation: 0 });
+  assert.equal(dayRow(payload, '2026-11-05').cost.last_review, 0);
+  assert.equal(payload.by_workspace[0]!.cost.last_review, 0.05);
+  assert.equal(payload.by_workspace[0]!.total_usd, 1 + 0.5 + 0.25 + 0.05 + 2 + 3);
+  assert.equal(payload.totals.cost_usd, 1 + 0.5 + 0.25 + 0.05 + 2 + 3);
+  assert.deepEqual(payload.jobs.map((row) => [row.ticket, row.cost_usd, row.cost_complete]).sort(), [['L-1', 1 + 0.5 + 0.25 + 0.05, true], ['L-2', 2, true], ['L-3', 3, true]]);
+  assert.equal(payload.notes.unreadable, 1);
+
+  // An unknown cost: a run, the row incomplete.
+  await jobs.writeLastReview('app', 'L-2', 1, lastReview(on('2026-11-06', '15:00'), null));
+  const unknown = await stats(env.state, jobs).compute({ days: 7, workspace: null });
+  assert.deepEqual(role(unknown, 'last_review'), { role: 'last_review', cost_usd: 0.05, complete: false, tokens: null, runs: 2 });
+});
+
+test('LR7-2 last review (SF-309-7): three failed last reviews in a row give the stage warning; a success after them clears it', async () => {
+  const env = await newEnv('stats-last-review-failing');
+  const jobs = new JobStore(env.state);
+  await makeJob(jobs, 'app', 'L-1', [{ ended: on('2026-11-05'), cost: 1 }, { ended: on('2026-11-06'), cost: 1 }, { ended: on('2026-11-06'), cost: 1 }]);
+  await jobs.writeLastReview('app', 'L-1', 1, lastReviewFailed(on('2026-11-05', '14:00')));
+  await jobs.writeLastReview('app', 'L-1', 2, lastReviewFailed(on('2026-11-06', '10:00')));
+  await jobs.writeLastReview('app', 'L-1', 3, lastReviewFailed(on('2026-11-06', '14:02')));
+
+  const payload = await stats(env.state, jobs).compute({ days: 7, workspace: null });
+  assert.deepEqual(payload.warnings.filter((warning) => warning.kind === 'stage_failing'), [{
+    kind: 'stage_failing', text: 'The last review failed 3 times in a row, last on L-1 on 2026-11-06 at 14:02.', at: on('2026-11-06', '14:02'),
+    target: { kind: 'job', workspace: 'app', ticket: 'L-1', archived: false },
+  }]);
+  // Failed runs add no cost.
+  assert.deepEqual(role(payload, 'last_review'), { role: 'last_review', cost_usd: 0, complete: true, tokens: null, runs: 0 });
+
+  await makeJob(jobs, 'app', 'L-2', [{ ended: on('2026-11-06'), cost: 1 }]);
+  await jobs.writeLastReview('app', 'L-2', 1, lastReview(on('2026-11-06', '15:00'), 0.05));
+  const after = await stats(env.state, jobs).compute({ days: 7, workspace: null });
+  assert.deepEqual(after.warnings.filter((warning) => warning.kind === 'stage_failing'), []);
 });

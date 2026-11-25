@@ -465,8 +465,8 @@ const st: {
   warningsAll: boolean;
 } = { days: 30, workspace: null, data: null, error: null, load: 0, tables: new Set(), warningsAll: false };
 const SVG_NS = 'http://www.w3.org/2000/svg';
-const ST_ROLES: Readonly<Record<StatsRole, string>> = { implementer: 'Implementer', claude_review: 'Claude review', simplify: 'Simplification', codex_gate: 'Codex gate', task_check: 'Plan check', digest: 'Digest', explanation: 'Explanations' };
-const ST_COST_ROLES: readonly StatsCostRole[] = ['implementer', 'claude_review', 'simplify', 'task_check', 'digest', 'explanation'];
+const ST_ROLES: Readonly<Record<StatsRole, string>> = { implementer: 'Implementer', claude_review: 'Claude review', simplify: 'Simplification', last_review: 'Last review', codex_gate: 'Codex gate', task_check: 'Plan check', digest: 'Digest', explanation: 'Explanations' };
+const ST_COST_ROLES: readonly StatsCostRole[] = ['implementer', 'claude_review', 'simplify', 'last_review', 'task_check', 'digest', 'explanation'];
 const ST_STAGES: Readonly<Record<string, string>> = { claude_review: 'Claude review', codex_gate: 'Codex gate', task_check: 'Plan check' };
 const ST_SEVERITIES: ReadonlyArray<{ key: keyof StatsFindings; name: string }> = [{ key: 'blocker', name: 'Blocker' }, { key: 'major', name: 'Major' }, { key: 'nit', name: 'Nit' }];
 const ST_DAY_CHARTS: readonly string[] = ['cost-day', 'tokens-day', 'started-day'];
@@ -480,7 +480,7 @@ const ST_RULES = [
   'A job gives one line, which lists each of these measures it is unusual on.',
   'A finding of a job was reopened twice or more, or the job stopped with review churn or a disputed review.',
   'The job and review-churn warnings are only of the jobs updated in the last 7 days, whatever the period.',
-  'The last 3 runs of a stage (Claude review, Codex gate, simplification, plan check, digest, explanation) all failed.',
+  'The last 3 runs of a stage (Claude review, Codex gate, simplification, last review, plan check, digest, explanation) all failed.',
   'A day costs more than twice the median of the days with a cost among the 30 days before (with at least 7 such days), and at least $5.',
 ];
 

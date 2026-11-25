@@ -14,7 +14,7 @@ const STATIC_DIR = new URL('../../static/', import.meta.url);
 process.env.TZ = 'Europe/Sofia';
 const SVG = 'http://www.w3.org/2000/svg';
 
-const ZERO_COST = { implementer: 0, claude_review: 0, simplify: 0, task_check: 0, digest: 0, explanation: 0 };
+const ZERO_COST = { implementer: 0, claude_review: 0, simplify: 0, last_review: 0, task_check: 0, digest: 0, explanation: 0 };
 const ZERO_TOKENS = { input: 0, cached_input: 0, output: 0 };
 const outcomes = { fixed: 1, contested: 0, accepted: 0, nit: 3, open: 2 };
 
@@ -34,12 +34,13 @@ function payload(extra: Record<string, unknown> = {}) {
       { role: 'implementer', cost_usd: 1.2, complete: false, tokens: { input: 340_000, output: 950 }, runs: 3 },
       { role: 'claude_review', cost_usd: 0.3, complete: true, tokens: { input: 1000, output: 10 }, runs: 2 },
       { role: 'simplify', cost_usd: 0, complete: true, tokens: { input: 0, output: 0 }, runs: 0 },
+      { role: 'last_review', cost_usd: 0, complete: true, tokens: null, runs: 0 },
       { role: 'codex_gate', cost_usd: null, complete: true, tokens: { input: 1000, cached_input: 0, output: 100 }, runs: 1 },
       { role: 'task_check', cost_usd: 0.5, complete: true, tokens: null, runs: 1 },
       { role: 'digest', cost_usd: 0, complete: true, tokens: null, runs: 0 },
       { role: 'explanation', cost_usd: 0, complete: true, tokens: null, runs: 0 },
     ],
-    by_workspace: [{ workspace: 'app', cost: { implementer: 1.2, claude_review: 0.3, simplify: 0, task_check: 0.5, explanation: 0 }, total_usd: 2, codex_tokens: 1100, jobs_started: 1, median_time_to_ready_s: 5400 }],
+    by_workspace: [{ workspace: 'app', cost: { implementer: 1.2, claude_review: 0.3, simplify: 0, last_review: 0, task_check: 0.5, explanation: 0 }, total_usd: 2, codex_tokens: 1100, jobs_started: 1, median_time_to_ready_s: 5400 }],
     stages: [
       { stage: 'claude_review', runs: 2, failed: 1, findings: { blocker: 1, major: 2, nit: 3 }, outcomes, revised: null, fixed: 1, tickets: null, cost_usd: 0.3, tokens: { input: 1000, output: 10 } },
       { stage: 'codex_gate', runs: 1, failed: 0, findings: { blocker: 0, major: 1, nit: 0 }, outcomes, revised: null, fixed: 1, tickets: null, cost_usd: null, tokens: { input: 1000, cached_input: 0, output: 100 } },
@@ -315,16 +316,18 @@ test('stats client: the stage table, the by-role table with "not recorded" and "
   ]);
   const spend = sectionOf(page, /^Spend$/);
   assert.deepEqual(spend.querySelectorAll('.st-tile').map((tile) => tile.textContent), ['Cost$12.50Codex gate in tokens only', 'Codex gate tokens2.1M2.1M in (1.0M cached) · 40k out']);
-  assert.deepEqual(rowTexts(tableAfter(spend)).slice(0, 5), [
+  assert.deepEqual(rowTexts(tableAfter(spend)).slice(0, 6), [
     ['Role', 'Cost', 'Tokens', 'Runs'],
     ['Implementer', 'at least $1.20', '340k in · 950 out', '3'],
     ['Claude review', '$0.30', '1k in · 10 out', '2'],
     // SF-132: the simplification's offers and the user's choices.
     ['Simplification', '$0.00', '0 in · 0 out', '0 · offered 2 · taken 1 · skipped 1'],
+    // SF-309-7: the last review, cost only.
+    ['Last review', '$0.00', 'not recorded', '0'],
     ['Codex gate', 'tokens only', '1k in (0 cached) · 100 out', '1'],
   ]);
-  assert.deepEqual(rowTexts(tableAfter(spend)).slice(5).map((row) => row[2]), ['not recorded', 'not recorded', 'not recorded']);
-  assert.deepEqual(rowTexts(tableAfter(spend, 1))[1], ['app', '$1.20', '$0.30', '$0.00', '$0.50', '$0.00', '$2.00', '1.1k', '1', '1.5h']);
+  assert.deepEqual(rowTexts(tableAfter(spend)).slice(6).map((row) => row[2]), ['not recorded', 'not recorded', 'not recorded']);
+  assert.deepEqual(rowTexts(tableAfter(spend, 1))[1], ['app', '$1.20', '$0.30', '$0.00', '$0.00', '$0.50', '$0.00', '$2.00', '1.1k', '1', '1.5h']);
   // SF-130: the Plan column, the job's plan-check rounds and cost, one unknown.
   assert.deepEqual(rowTexts(tableAfter(sectionOf(page, /^Jobs/)))[0], ['Workspace', 'Ticket', 'Title', 'State', 'Started', 'Iterations', 'Cost', 'Plan', 'Codex tokens', 'Claude B/M/N', 'Codex B/M/N', 'Time to ready']);
   assert.deepEqual(rowTexts(tableAfter(sectionOf(page, /^Jobs/)))[1], ['app', 'T-1', 'Demo', 'needs human', '2026-11-06 10:00', '2', 'at least $1.50', '3 rounds · at least $0.75', '1.1k', '1 / 2 / 3', '0 / 1 / 0', '—']);
@@ -338,21 +341,46 @@ test('stats client: the stage table, the by-role table with "not recorded" and "
   const toggle = box.querySelector('button')!;
   assert.deepEqual([toggle.textContent, toggle.getAttribute('aria-pressed'), box.querySelector('table')], ['Table', 'false', null]);
   assert.ok(box.querySelector('svg') !== null);
-  assert.deepEqual(box.querySelectorAll('.st-legend .st-key').map((key) => key.textContent), ['Implementer', 'Claude review', 'Simplification', 'Plan check', 'Digest', 'Explanations']);
+  assert.deepEqual(box.querySelectorAll('.st-legend .st-key').map((key) => key.textContent), ['Implementer', 'Claude review', 'Simplification', 'Last review', 'Plan check', 'Digest', 'Explanations']);
   toggle.click();
   await page.flush();
   const tabled = chart(page, 'cost-day');
   assert.equal(tabled.querySelector('svg'), null);
   assert.deepEqual([tabled.querySelector('button')!.textContent, tabled.querySelector('button')!.getAttribute('aria-pressed')], ['Chart', 'true']);
   assert.deepEqual(rowTexts(tabled.querySelector('table')!), [
-    ['Day', 'Implementer', 'Claude review', 'Simplification', 'Plan check', 'Digest', 'Explanations', 'Total'],
-    ['2026-11-06', '$1.20', '$0.30', '$0.00', '$0.00', '$0.00', '$0.00', '$1.50'],
-    ['2026-11-07', '$0.00', '$0.00', '$0.00', '$0.00', '$0.00', '$0.00', '$0.00'],
+    ['Day', 'Implementer', 'Claude review', 'Simplification', 'Last review', 'Plan check', 'Digest', 'Explanations', 'Total'],
+    ['2026-11-06', '$1.20', '$0.30', '$0.00', '$0.00', '$0.00', '$0.00', '$0.00', '$1.50'],
+    ['2026-11-07', '$0.00', '$0.00', '$0.00', '$0.00', '$0.00', '$0.00', '$0.00', '$0.00'],
   ]);
   tabled.querySelector('button')!.click();
   await page.flush();
   assert.ok(chart(page, 'cost-day').querySelector('svg') !== null);
   assert.equal(chart(page, 'cost-day').querySelector('table'), null);
+});
+
+test('stats client LR7-3 (SF-309-7): the role row "Last review" with its cost and no tokens, its column in the cost per day and by workspace with its own series class, the stage rule naming it', async () => {
+  const data = payload();
+  const page = await openStats({
+    ...data,
+    days_rows: [{ ...data.days_rows[0], cost: { ...data.days_rows[0]!.cost, last_review: 0.05 } }, data.days_rows[1]],
+    roles: data.roles.map((row) => (row.role === 'last_review' ? { ...row, cost_usd: 0.05, runs: 1 } : row)),
+    by_workspace: [{ ...data.by_workspace[0], cost: { ...data.by_workspace[0]!.cost, last_review: 0.05 }, total_usd: 2.05 }],
+  });
+  const spend = sectionOf(page, /^Spend$/);
+  assert.deepEqual(rowTexts(tableAfter(spend))[4], ['Last review', '$0.05', 'not recorded', '1']);
+  assert.deepEqual(rowTexts(tableAfter(spend, 1)).map((row) => row.slice(0, 6)), [
+    ['Workspace', 'Implementer', 'Claude review', 'Simplification', 'Last review', 'Plan check'],
+    ['app', '$1.20', '$0.30', '$0.00', '$0.05', '$0.50'],
+  ]);
+  assert.ok(chart(page, 'by-workspace').querySelectorAll('rect').some((rect) => rect.getAttribute('class') === 'st-c-last_review'));
+  const columns = chart(page, 'cost-day').querySelector('svg')!;
+  const rect = columns.querySelectorAll('rect').find((one) => one.getAttribute('class') === 'st-c-last_review')!;
+  assert.equal(rect.querySelector('title')!.textContent, '2026-11-06 · Last review: $0.05');
+  chart(page, 'cost-day').querySelector('button')!.click();
+  await page.flush();
+  assert.deepEqual(rowTexts(chart(page, 'cost-day').querySelector('table')!).slice(0, 2).map((row) => row.slice(3, 5)), [['Simplification', 'Last review'], ['$0.00', '$0.05']]);
+  assert.ok(sections(page)[0]!.querySelectorAll('details li').some((rule) =>
+    rule.textContent === 'The last 3 runs of a stage (Claude review, Codex gate, simplification, last review, plan check, digest, explanation) all failed.'));
 });
 
 test('stats client: the charts are SVG made with createElementNS and class attributes, each rect titled; no element of the page has a style attribute', async () => {

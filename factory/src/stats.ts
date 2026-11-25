@@ -53,13 +53,13 @@ export const WARN_RECENT_DAYS = 7;
 export const FAILING_RUNS = 3;
 
 // The roles whose cost or tokens are counted, in the order of the page's rows.
-export const ROLES = ['implementer', 'claude_review', 'simplify', 'codex_gate', 'task_check', 'digest', 'explanation'] as const;
+export const ROLES = ['implementer', 'claude_review', 'simplify', 'last_review', 'codex_gate', 'task_check', 'digest', 'explanation'] as const;
 export type Role = (typeof ROLES)[number];
 // The roles with a cost in USD (the Codex gate has tokens only).
 export type CostRole = Exclude<Role, 'codex_gate'>;
-const COST_ROLES: readonly CostRole[] = ['implementer', 'claude_review', 'simplify', 'task_check', 'digest', 'explanation'];
+const COST_ROLES: readonly CostRole[] = ['implementer', 'claude_review', 'simplify', 'last_review', 'task_check', 'digest', 'explanation'];
 // The roles of a job directory.
-type JobCostRole = 'implementer' | 'claude_review' | 'simplify' | 'explanation';
+type JobCostRole = 'implementer' | 'claude_review' | 'simplify' | 'last_review' | 'explanation';
 
 export type Findings = Record<Severity, number>;
 // The tokens of a Claude session: input with the cache reads and writes, and output.
@@ -350,6 +350,8 @@ interface JobSummary {
   gates: Map<number, VerdictSummary>;
   // Every simplify.json: failed, or how many suggestions it offered.
   simplifies: Array<{ at: string; failed: boolean; suggestions: number }>;
+  // Every last-review.json: failed or not.
+  lastReviews: Array<{ at: string; failed: boolean }>;
   explanation: { at: string; failed: boolean } | null;
   // The ledger entry reopened most (at least twice), or null.
   churn: { id: string; reopened: number } | null;
@@ -613,7 +615,7 @@ export class Stats {
       }
     };
     const summary: JobSummary = {
-      signature, title: null, costs: [], fixRounds: [], gateRuns: [], reviews: new Map(), gates: new Map(), simplifies: [], explanation: null, churn: null, unreadable: 0,
+      signature, title: null, costs: [], fixRounds: [], gateRuns: [], reviews: new Map(), gates: new Map(), simplifies: [], lastReviews: [], explanation: null, churn: null, unreadable: 0,
     };
     const ledger = await attempt(() => jobs.readLedger(workspace, name));
     for (let number = 1; number <= job.iteration; number += 1) {
@@ -656,6 +658,18 @@ export class Stats {
           summary.simplifies.push({ at: simplify.ended_at, failed: !succeeded, suggestions });
           if (succeeded) {
             summary.costs.push({ role: 'simplify', at: simplify.ended_at, cost: costOf((simplify as { cost_usd?: unknown }).cost_usd) });
+          }
+        } else {
+          unreadable += 1;
+        }
+      }
+      const lastReview = await attempt(() => jobs.readLastReview(workspace, name, number));
+      if (lastReview !== undefined) {
+        if (isObject(lastReview) && typeof lastReview.ended_at === 'string') {
+          const failed = 'error' in lastReview;
+          summary.lastReviews.push({ at: lastReview.ended_at, failed });
+          if (!failed) {
+            summary.costs.push({ role: 'last_review', at: lastReview.ended_at, cost: costOf((lastReview as { cost_usd?: unknown }).cost_usd) });
           }
         } else {
           unreadable += 1;
@@ -885,7 +899,7 @@ export class Stats {
 
     // The sums: cost and tokens by day, role and workspace.
     const rows = new Map<string, DayRow>(periodDays.map((day) => [day, {
-      day, cost: { implementer: 0, claude_review: 0, simplify: 0, task_check: 0, digest: 0, explanation: 0 }, codex_tokens: noGateTokens(), started: 0, finished: 0,
+      day, cost: { implementer: 0, claude_review: 0, simplify: 0, last_review: 0, task_check: 0, digest: 0, explanation: 0 }, codex_tokens: noGateTokens(), started: 0, finished: 0,
     }]));
     const roles = new Map<Role, RoleRow>(ROLES.map((role) => [role, {
       role, cost_usd: role === 'codex_gate' ? null : 0, complete: true,
@@ -893,7 +907,7 @@ export class Stats {
     }]));
     const workspaceNames = await this.#jobs.workspaceNames();
     const byWorkspace = new Map<string, WorkspaceRow & { ready: number[] }>((workspace === null ? workspaceNames : [workspace]).map((name) => [name, {
-      workspace: name, cost: { implementer: 0, claude_review: 0, simplify: 0, task_check: 0, explanation: 0 }, total_usd: 0, codex_tokens: 0, jobs_started: 0,
+      workspace: name, cost: { implementer: 0, claude_review: 0, simplify: 0, last_review: 0, task_check: 0, explanation: 0 }, total_usd: 0, codex_tokens: 0, jobs_started: 0,
       median_time_to_ready_s: null, ready: [],
     }]));
     // The cost of every day of the window (the cost-spike rule) and of each job on each day of the period.
@@ -1304,6 +1318,7 @@ function stageWarnings(
     ['The Claude review', reviewerRuns(REVIEWER)],
     ['The Codex gate', reviewerRuns(GATE_REVIEWER)],
     ['The simplification', read.flatMap((data) => data.summary.simplifies.map((run) => ({ at: run.at, failed: run.failed, ...onJob(data, run.at) })))],
+    ['The last review', read.flatMap((data) => data.summary.lastReviews.map((run) => ({ at: run.at, failed: run.failed, ...onJob(data, run.at) })))],
     ['The plan check', checks.map((check) => ({
       at: check.ended_at, failed: check.status === 'failed', target: { kind: 'ticket', workspace: check.workspace, ticket: check.ticket }, last: `last on ${check.ticket} ${onAt(check.ended_at)}`,
     }))],

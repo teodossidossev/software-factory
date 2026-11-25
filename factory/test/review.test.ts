@@ -93,6 +93,13 @@ test('the options of runStructuredSession: without tools and settingSources, REV
   assert.deepEqual(none.outputFormat, { type: 'json_schema', schema: REVIEW_SCHEMA });
 });
 
+test('the options of runStructuredSession carry options.effort as effort (SF-320); without it, no effort key', () => {
+  const base = { cwd: '/srv/app', claudePath: undefined, sandbox: undefined, model: undefined, maxTurns: 3 };
+  assert.equal(readOnlySessionOptions({ ...base, effort: 'high' }, new AbortController(), REVIEW_SCHEMA).effort, 'high');
+  assert.ok(!('effort' in readOnlySessionOptions(base, new AbortController(), REVIEW_SCHEMA)));
+  assert.ok(!('effort' in readOnlySessionOptions({ ...base, effort: undefined }, new AbortController(), REVIEW_SCHEMA)));
+});
+
 test('every read-only session loads no MCP server: strictMcpConfig, no mcpServers, and \'mcp__*\' denied (SF-164)', () => {
   const base = { cwd: '/srv/app', claudePath: undefined, sandbox: undefined, model: undefined, maxTurns: 3 };
   for (const options of [
@@ -223,6 +230,8 @@ test('fix, then clean: the Fix section from the items, the next iteration, Clean
       assertPathDenials(entry.argv, env, worktreeOf(env, 'R-1'), REVIEW_DENIED_TOOLS);
       assert.deepEqual(JSON.parse(option(entry.argv, 'json-schema')!), REVIEW_SCHEMA);
       assert.deepEqual([option(entry.argv, 'max-turns'), option(entry.argv, 'model'), option(entry.argv, 'permission-mode')], ['7', 'fake-reviewer', 'auto']);
+      // SF_REVIEW_EFFORT unset: high (SF-320).
+      assert.equal(option(entry.argv, 'effort'), 'high');
       assert.ok(!entry.argv.some((arg) => arg.startsWith('--resume')), entry.argv.join(' '));
       assert.ok(!turns.some((turn) => turn.sessionId === entry.sessionId));
       assert.ok(!entry.env.some((name) => name.startsWith('SF_')));
@@ -232,8 +241,9 @@ test('fix, then clean: the Fix section from the items, the next iteration, Clean
       const settings = JSON.parse(entry.argv[entry.argv.indexOf('--settings') + 1] ?? '{}') as { claudeMdExcludes?: string[] };
       assert.ok(settings.claudeMdExcludes?.includes(join(dirname(entry.cwd), 'CLAUDE.md')), entry.argv.join(' '));
     }
-    // The Implementer's session keeps the user's settings.
+    // The Implementer's session keeps the user's settings, and gets no effort (SF-320).
     assert.ok(turns.every((turn) => option(turn.argv, 'setting-sources') === 'user,project'));
+    assert.ok(turns.every((turn) => !turn.argv.some((arg) => arg.startsWith('--effort'))));
     assert.equal(REVIEW_DENIED_TOOLS.filter((tool) => ['Bash', 'Edit', 'Write', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Task', 'Agent', 'Read(**/.env)'].includes(tool)).length, 9);
     const [first, second] = reviews.map((entry) => entry.prompt);
     assert.match(first!, /^Code review of iteration 1 of ticket R-1\. /);
@@ -341,6 +351,29 @@ test('coding rules (SF-059): every review prompt gives the job\'s <rules> block 
     const turns = await fakeLog(env);
     assert.ok(turns[0]!.prompt.startsWith(`/implement .software-factory/R-9.md\n\n${block}\n`));
     assert.ok(!turns[1]!.prompt.includes('<rules>'));
+  } finally {
+    await stop(served);
+  }
+});
+
+test('SF_REVIEW_EFFORT=max (SF-320): the review session runs at effort max; the Implementer\'s turns get no effort', async () => {
+  const env = await newEnv('review-effort', { SF_REVIEW: 'on', SF_REVIEW_EFFORT: 'max' });
+  const repo = await newRepo(env, 'review-effort-repo', false);
+  await putTask(env, repo, 'R-5', 'Think hard');
+  await script(env, [
+    { write: { 'README.md': 'hello world\n' }, text: 'Report of iteration 1' },
+    { write: { '.software-factory/R-5.mr.md': mrText('feat(R-5): Think hard') }, text: 'prepared' },
+  ]);
+  await reviewScript(env, [{ output: CLEAN }]);
+  const served = await serve(env);
+  try {
+    await call(served, 'start', { workspace: 'app', ticket: 'R-5' });
+    await waitFor(served, 'R-5', 'ready_for_human_review', 1);
+    const reviews = await reviewLog(env);
+    assert.equal(reviews.length, 1);
+    assert.equal(option(reviews[0]!.argv, 'effort'), 'max');
+    const turns = await fakeLog(env);
+    assert.ok(turns.length > 0 && turns.every((turn) => !turn.argv.some((arg) => arg.startsWith('--effort'))), turns.map((turn) => turn.argv.join(' ')).join('\n'));
   } finally {
     await stop(served);
   }

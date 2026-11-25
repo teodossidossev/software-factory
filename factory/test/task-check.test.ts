@@ -163,6 +163,8 @@ test('the session is the review\'s, read-only, and may not read the .software-fa
   assert.deepEqual(options.settingSources, ['project']);
   assert.deepEqual(options.outputFormat, { type: 'json_schema', schema: CHECK_SCHEMA });
   assert.equal(options.env?.CLAUDE_CODE_DISABLE_AUTO_MEMORY, '1');
+  // No effort given, no effort key (SF-320).
+  assert.ok(!('effort' in options));
 });
 
 test('one check per ticket: a second start while the first is still being set up is check_running, and the reservation goes when the setup fails', async () => {
@@ -249,14 +251,23 @@ test('TaskChecks.summary (SF-130): a Task that needs no check and has none of it
 });
 
 // A workspace with a Task file; the check's record directory.
-async function checkEnv(name: string, ticket: string, content: string): Promise<{ env: Env; repo: string }> {
-  const env = await newEnv(name, { SF_REVIEW_MODEL: 'fake-checker', SF_TASK_CHECK_MAX_TURNS: '9' });
+async function checkEnv(name: string, ticket: string, content: string, envOverrides: Record<string, string> = {}): Promise<{ env: Env; repo: string }> {
+  const env = await newEnv(name, { SF_REVIEW_MODEL: 'fake-checker', SF_TASK_CHECK_MAX_TURNS: '9', ...envOverrides });
   const repo = await newRepo(env, `${name}-repo`, false);
   await writeTask({ name: 'app', readCheckout: repo, workCheckout: repo }, ticket, content, new JobStore(env.state));
   return { env, repo };
 }
 
 const option = (argv: string[], name: string): string | undefined => argv.find((arg) => arg.startsWith(`--${name}=`))?.slice(name.length + 3);
+
+test('SF_REVIEW_EFFORT=xhigh (SF-320): sf check-task runs the check session at effort xhigh', async () => {
+  const { env } = await checkEnv('check-effort', 'C-2', taskText('C-2'), { SF_REVIEW_EFFORT: 'xhigh' });
+  await reviewScript(env, [{ output: OUTPUT }]);
+  const run = await runCli(env, ['check-task', 'app', 'C-2']);
+  assert.equal(run.code, 0, run.stderr);
+  const [entry] = await reviewLog(env);
+  assert.equal(option(entry!.argv, 'effort'), 'xhigh');
+});
 
 test('the guard: Read, Grep and Glob stay inside the check\'s worktree, symlinks resolved; no other tool, no climbing pattern', async () => {
   const root = await realpath(join(temp));
@@ -368,6 +379,8 @@ test('sf check-task: the read-only session in the work checkout, its prompt the 
   assert.ok(!extra.some((rule) => rule.includes('sf-task-checks-')), extra.join(', '));
   assert.deepEqual(JSON.parse(option(entry!.argv, 'json-schema')!), CHECK_SCHEMA);
   assert.deepEqual([option(entry!.argv, 'max-turns'), option(entry!.argv, 'model'), option(entry!.argv, 'setting-sources')], ['9', 'fake-checker', 'project']);
+  // SF_REVIEW_EFFORT unset: high (SF-320).
+  assert.equal(option(entry!.argv, 'effort'), 'high');
 
   // The output: the paraphrase, then the findings by severity, the files, the verdict.
   const out = run.stdout;

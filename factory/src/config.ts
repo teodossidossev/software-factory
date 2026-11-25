@@ -57,6 +57,10 @@ export interface Config {
   fixSession?: FixSessionSetting;
   // The model of the review (SF_REVIEW_MODEL, passed as is); undefined uses the user's default.
   reviewModel: string | undefined;
+  // The reasoning effort of the Claude sessions that judge a job's code (SF_REVIEW_EFFORT, high by
+  // default): the review, the simplification pass, the last review and the Task check. A Config
+  // without it (the tests' literals) passes no effort.
+  reviewEffort?: ReviewEffort;
   // maxTurns of the review (SF_REVIEW_MAX_TURNS).
   reviewMaxTurns: number;
   // The code-review skill file whose method both reviewers follow (SF_REVIEW_SKILL, reviewSkillPath);
@@ -394,6 +398,17 @@ export function fixSessionSetting(env: NodeJS.ProcessEnv = process.env): FixSess
   return mode;
 }
 
+export type ReviewEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+// SF_REVIEW_EFFORT: low, medium, high (the default, also when empty), xhigh or max.
+export function reviewEffortSetting(env: NodeJS.ProcessEnv = process.env): ReviewEffort {
+  const effort = env.SF_REVIEW_EFFORT || 'high';
+  if (effort !== 'low' && effort !== 'medium' && effort !== 'high' && effort !== 'xhigh' && effort !== 'max') {
+    throw new FactoryError('invalid_config', `SF_REVIEW_EFFORT must be low, medium, high, xhigh or max, got "${effort}".`);
+  }
+  return effort;
+}
+
 // The session of a job's fix rounds, decided at Start from the Task file's fix_session
 // (taskFixSession), which wins, and SF_FIX_SESSION (absent: resume), with the reason for the job's
 // fix_session_setup event. alternate is fresh when the first byte of sha256("<workspace>/<ticket>")
@@ -553,6 +568,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     claudeReview: claudeReviewSetting(env),
     fixSession: fixSessionSetting(env),
     reviewModel: env.SF_REVIEW_MODEL || undefined,
+    reviewEffort: reviewEffortSetting(env),
     reviewMaxTurns: positiveInteger(env, 'SF_REVIEW_MAX_TURNS', 60),
     reviewSkill: reviewSkillPath(env),
     reviewSkillSet: env.SF_REVIEW_SKILL !== undefined,

@@ -199,6 +199,13 @@ export class Redactor {
     return copy as T;
   }
 
+  // One free text from outside the factory (an imported issue's), redacted as a reviewer's output's
+  // free text: every key text() knows, every environment value of OUTPUT_MIN_VALUE characters or
+  // more and every given secret, each as [redacted].
+  freeText(text: string): string {
+    return this.#outputText(text);
+  }
+
   // One free-text string of a reviewer's output, redacted (output).
   #outputText(text: string): string {
     let result = this.#outputPattern !== undefined ? text.replace(this.#outputPattern, REDACTED) : text;

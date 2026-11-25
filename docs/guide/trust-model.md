@@ -25,7 +25,7 @@ denied to every job's turns.
 
 A job's sessions also run no hook from a settings file: each passes `disableAllHooks: true` in its
 settings (and so does every other read-only session: the Task check, a stop's explanation, the
-morning digest). Hooks run outside the sandbox, and a
+morning digest, the issue read). Hooks run outside the sandbox, and a
 `.claude/settings.json` in the worktree (one a job wrote included) would otherwise give them to the
 next session there. `disableAllHooks` leaves the hooks the factory passes to the session itself,
 the file-tool guard among them, running; `sf smoke`'s Sandbox step shows that on the real Claude
@@ -94,7 +94,11 @@ explanation, the morning digest) load no MCP server at all: they start with `str
 no `mcpServers`, so neither a server you added in the `user` scope nor the repository's `.mcp.json`
 loads, and their `disallowedTools` deny `mcp__*` as well. The SDK's `tools` option covers the
 built-in tools only, so without this a server of yours would load into the morning digest, which
-reads other people's commit messages. None of them is given a server on purpose.
+reads other people's commit messages. The issue read (`src/issue-import.ts`) is the one read-only
+session given a server on purpose: the Atlassian server alone, with the permission mode `dontAsk`,
+`allowedTools` its three read tools and the answer tool, no built-in tool and no setting sources;
+every call first goes through the factory's hook, which runs your allowlist hook
+(`issue_import.hook`) and refuses the read on any refusal, failure or rewrite of it.
 
 Denied for writing (the global config for reading too, above): Claude Code's user settings and
 global config (`~/.claude/settings.json`, `~/.claude.json`), which the next session would load and which could switch the sandbox's

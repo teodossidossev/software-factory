@@ -39,6 +39,9 @@ const COMPUTED: readonly string[] = [
   'keep-awake.ts: this.#options.command',
   // The bwrap of the Implementer's wrapper (SF-181: findBwrap, bwrap on PATH), Claude Code after its "--".
   'session-wrapper.ts: this.#bwrap',
+  // The user's Atlassian allowlist hook of the issue read (SF-311: issue_import.hook, an absolute
+  // path the user sets), never git.
+  'issue-import.ts: hook',
 ];
 
 const git = (cwd: string, ...args: string[]): string => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();

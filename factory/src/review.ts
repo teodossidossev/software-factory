@@ -5,7 +5,7 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
-import { type Options, query, type SandboxSettings, type SDKMessage, type SDKResultMessage, type SettingSource } from '@anthropic-ai/claude-agent-sdk';
+import { type McpServerConfig, type Options, query, type SandboxSettings, type SDKMessage, type SDKResultMessage, type SettingSource } from '@anthropic-ai/claude-agent-sdk';
 import * as z from 'zod/v4';
 import { type ImageRef, promptInput } from './attachments.js';
 import { type DecisionDocs, reviewDecisionLines } from './decisions.js';
@@ -27,7 +27,7 @@ export const MAX_REVIEW_PATCH_BYTES = 256 * 1024;
 // The only tools of the review session.
 export const REVIEW_TOOLS = ['Read', 'Grep', 'Glob'];
 // Denied as well, should a tool outside REVIEW_TOOLS still be offered.
-// 'mcp__*': every MCP server's tools, though readOnlySessionOptions loads none (strictMcpConfig).
+// 'mcp__*': every MCP server's tools; only a session given its own servers (ReviewOptions.mcp) loads any (strictMcpConfig).
 export const REVIEW_DENIED_TOOLS = ['Bash', 'Edit', 'Write', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Task', 'Agent', 'mcp__*', ...ENV_FILE_RULES];
 
 // The weight of a review item. Only blocker and major items make a fix; nits never block.
@@ -314,6 +314,11 @@ export interface ReviewOptions {
   // The settings and instruction files loaded; ['project'] by default. [] (the morning digest):
   // none, so no CLAUDE.md, AGENTS.md or user settings.
   settingSources?: SettingSource[];
+  // The session's own MCP servers and the tools of them it may call (the issue read,
+  // src/issue-import.ts). With it: mcpServers is these servers, allowedTools these tools, the
+  // permission mode dontAsk (every call not allowed is denied, no classifier), and 'mcp__*' is
+  // left out of the denied tools. Without it no MCP server loads.
+  mcp?: { servers: Record<string, McpServerConfig>; allowedTools: string[] } | undefined;
 }
 
 // The instruction files the CLI loads as project instructions from a directory, with
@@ -351,7 +356,8 @@ export function reviewSessionOptions(options: Omit<ReviewOptions, 'onMessage' | 
 // guard) merged with the options' hooks (the file-tool guard); the environment's credentials
 // denied to sandboxed commands. No MCP server: strictMcpConfig with no mcpServers leaves out the
 // user's, the project's .mcp.json and the plugins' servers (tools covers built-in tools only), and
-// REVIEW_DENIED_TOOLS denies 'mcp__*'. No caller gives a read-only session a server of its own.
+// REVIEW_DENIED_TOOLS denies 'mcp__*'. Only the issue read gives a read-only session a server of
+// its own (ReviewOptions.mcp).
 export function readOnlySessionOptions(
   options: Omit<ReviewOptions, 'onMessage' | 'signal' | 'pathDenials'>, abortController: AbortController, schema: Record<string, unknown>, deny: readonly string[] = [],
   sessionHooks?: Options['hooks'],
@@ -364,13 +370,14 @@ export function readOnlySessionOptions(
   return {
     abortController,
     cwd: options.cwd,
-    permissionMode: 'auto',
+    permissionMode: options.mcp !== undefined ? 'dontAsk' : 'auto',
     settingSources: options.settingSources ?? ['project'],
     settings: { claudeMdExcludes: outsideInstructionFiles(options.cwd), ...JOB_SESSION_SETTINGS },
     tools: options.tools ?? REVIEW_TOOLS,
-    disallowedTools: [...REVIEW_DENIED_TOOLS, ...deny, ...(options.deny ?? [])],
+    disallowedTools: [...(options.mcp !== undefined ? REVIEW_DENIED_TOOLS.filter((rule) => rule !== 'mcp__*') : REVIEW_DENIED_TOOLS), ...deny, ...(options.deny ?? [])],
     strictMcpConfig: true,
-    mcpServers: {},
+    mcpServers: options.mcp?.servers ?? {},
+    ...(options.mcp !== undefined ? { allowedTools: options.mcp.allowedTools } : {}),
     outputFormat: { type: 'json_schema', schema },
     maxTurns: options.maxTurns,
     // A known startup failure (such as an unavailable sandbox) then ends with a result message.

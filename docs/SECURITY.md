@@ -186,9 +186,19 @@ refused), and the factory's test command passed in a sandbox without network on 
   that configuration, and only by answering the dialog in a terminal of their own as you would,
   so Claude Code saves the answer itself; the factory never writes Claude Code's global config.
   With the default, `ask`, you accept the dialog yourself (`sf planner trust`).
-- **The read-only sessions load no MCP server.** The morning digest, which reads other people's
+- **The read-only sessions load no MCP server but the issue read's.** The morning digest, which reads other people's
   commit messages, the reviews and the Task check start without your MCP servers and deny every
-  MCP tool, so nothing they read can drive one.
+  MCP tool, so nothing they read can drive one. The issue read loads the Atlassian server alone
+  (below).
+- **The issue read reads one issue, through your allowlist hook.** In a workspace whose
+  `issue_import` is on, the factory reads one Jira issue by its key through Claude Code's Atlassian
+  MCP server, signed in by you in Claude Code: it stores no Jira token and no other secret. A key
+  whose prefix the workspace does not list is refused before any session starts. The session has
+  no built-in tool, no settings and no other server; it may call only `getJiraIssue`,
+  `listJiraIssueComments` and `executeRead` for `getJiraIssue`, each for that key on the workspace's site (its `cloudId`), and every other
+  call is denied (`dontAsk`, never `bypassPermissions`). Every call first goes through the hook
+  `issue_import.hook` names: its refusal, failure or rewrite, or a missing hook, refuses the read.
+  The text is redacted and comes in the request marked as the issue's own content.
 - **Code from a repository never runs as you through Git.** The factory's Git commands run no hooks
   and no fsmonitor.
 - **A change to files your IDE or tools run is handed over only by you.** An automatic hand-over
@@ -303,6 +313,10 @@ refused), and the factory's test command passed in a sandbox without network on 
 - **A planner's other tools ask you first.** Your claude.ai connectors load in the planner's
   sessions; one that can publish (a document, a page, a message) asks before each call, like every
   tool outside the planner's list. For a company ticket, answer no.
+- **An imported issue is other people's words.** Its text becomes the ticket's request, which
+  the planner reads. It is marked as the issue's content, to be read as data, not instructions,
+  but a planner can still be swayed by what an issue says: read a filled request before you
+  create the ticket.
 - **A prototype's script runs in your browser.** It is the planner's, written from what it read.
   Its policy keeps it from loading or sending anything over the network and from navigating away,
   but a browser has channels a page's policy does not close everywhere (a WebRTC connection where

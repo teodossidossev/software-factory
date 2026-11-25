@@ -89,11 +89,16 @@ when the branch exists already (`branch_exists`), a worktree of the ticket is le
 7. **Clean**: no blocker or major left. For a job that had fix rounds, the simplification pass may
    offer to remove what the fixes added that the Task does not need (`needs_human`,
    `simplify_offered`: Simplify or Skip).
+   **The last review**: in a workspace with a `last_review_skill`, as MR preparation starts, a
+   read-only Claude session reviews the clean change the way your skill says and leaves comments,
+   each on a file and line. It blocks nothing; MR preparation commits once it ended. Its comments
+   wait in the panel at the top of the job's Stream ([Review and merge](review-and-merge.md#the-last-reviews-comments)).
 8. **MR preparation** (`preparing_mr`): the Implementer writes the MR text; the factory checks it,
    commits the whole change as one commit with it as the message, and rebases onto the base (a
    conflict goes to the Implementer, and the resolved change back to review).
 9. **Ready**: the factory hands the job over to your checkout (`handed_over`), or leaves it in
-   `ready_for_human_review`; you are notified. See [Review and merge](review-and-merge.md).
+   `ready_for_human_review`; you are notified. The notification names the last review's comments
+   ("last review: 3 comments", or "last review failed"). See [Review and merge](review-and-merge.md).
 
 **How far a running job is.** At the start of every turn the Implementer writes its steps as a
 checklist in `.software-factory/APP-12.steps.md` of the worktree (in a Fix turn, the fixes) and
@@ -136,9 +141,13 @@ that copies `git checkout <branch>`.
   verdicts with their findings (ledger id, severity, path, problem, what is expected), the state
   changes, the end of each iteration with its files and its *Report*, and the factory's notes. New
   entries come in live. While the job waits on a stop, its **stop block** says what it waits on.
+  While the job waits for you after a last review, the **last review's panel** is at the top of the
+  Stream with its comments, Send and Dismiss; in the list the last review is one line ("Last
+  review: 3 comments") that brings the panel into view, and the job's card says "Review: 3
+  comments".
 - **Changes** (`c`): the changed files as a tree (or flat list) on the left, the diff of the selected
   file on the right, per iteration; modified blue, added green, deleted grey. Every path in the
-  Stream links here.
+  Stream links here, and a last review comment's `file:line` links to its line.
 - **Merge request** (`m`): the branch, the base, the MR title and description, editable before the
   push; available once Clean wrote the MR text ([Review and merge](review-and-merge.md#editing-the-mr-text)).
 

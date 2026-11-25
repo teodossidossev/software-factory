@@ -293,6 +293,15 @@ preparation, the suggestions shown on the job's Merge request screen, never in t
 at most once per Job.
 _Avoid_: cleanup review, zoom-out, third reviewer
 
+**Last review**:
+One read-only Claude session per Iteration whose Round is Clean, as MR preparation starts, in a
+Workspace whose `last_review_skill` names a review skill: it reads the change the way that skill
+says and leaves comments, each on a file and line, and one note. It is advisory: it blocks nothing
+and starts no Fix section; MR preparation commits once it ended. While the Job waits for the User at
+that Iteration, the User sends the comments they choose to the Implementer as their own message, or
+dismisses them. Its comments never go into the MR text.
+_Avoid_: human review (that is the User's)
+
 **Human review**:
 The User reading the Branch in the IDE after Clean. It ends with approve, a further fix, or abort.
 

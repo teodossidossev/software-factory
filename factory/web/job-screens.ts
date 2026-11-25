@@ -510,8 +510,10 @@ function wordHl(a: string, b: string): [CellParts, CellParts] {
 type DiffSeg = { t: 'eq'; rows: DiffOp[] } | { t: 'chg'; dels: number[]; adds: number[] };
 // The diff of a file as rows (the prototype's diffHtml, built as nodes): side-by-side or unified,
 // unchanged runs folded to "⋯ N unchanged lines" with 3 lines of context, none at the file's edges.
-// The indexes into ops, A, B and a change's lines are in range: the ?? fallbacks never apply and only
-// give the reads their types.
+// The line a last review comment's link opened (ui.cx.line, of this file): the row with that
+// new-side number is marked (class target, id cx-line) and its unchanged run is not folded in this
+// draw (ui.cx.unfolded stays as it is). The indexes into ops, A, B and a change's lines are in
+// range: the ?? fallbacks never apply and only give the reads their types.
 function diffHtml(f: DiffFile): HTMLElement {
   const d = getDiff(f); const { A, B, ops } = d;
   const side = diffLayout() === 'side', C = 3;
@@ -525,15 +527,20 @@ function diffHtml(f: DiffFile): HTMLElement {
   }
   const ln = (n: number | null): HTMLElement => el('span', 'ln', n === null ? '' : String(n));
   const cell = (cls: string, parts: CellParts): HTMLElement => { const c = el('span', cls); c.append(...parts); return c; };
+  const target = ui.cx.line !== null && ui.cx.line.path === f.path ? ui.cx.line.line : null;
+  // Whether the new-side index bi is the target line; a row whose new-side index is bi, marked when it is.
+  const isTarget = (bi: number | null | undefined): boolean => target !== null && bi != null && bi + 1 === target;
+  const mark = (r: HTMLElement, bi: number | null | undefined): HTMLElement => { if (isTarget(bi)) { r.classList.add('target'); r.id = 'cx-line'; } return r; };
   const rowOf = (cls: string, ...cells: HTMLElement[]): HTMLElement => { const r = el('div', cls); r.append(...cells); return r; };
-  const eq = (o: DiffOp): HTMLElement => side ? rowOf('r', ln(o[1] + 1), el('span', 'c', A[o[1]]), ln(o[2] + 1), el('span', 'c', B[o[2]]))
-    : rowOf('r', ln(o[1] + 1), ln(o[2] + 1), el('span', 'sg'), el('span', 'c', A[o[1]]));
+  const eq = (o: DiffOp): HTMLElement => mark(side ? rowOf('r', ln(o[1] + 1), el('span', 'c', A[o[1]]), ln(o[2] + 1), el('span', 'c', B[o[2]]))
+    : rowOf('r', ln(o[1] + 1), ln(o[2] + 1), el('span', 'sg'), el('span', 'c', A[o[1]])), o[2]);
   const rows: HTMLElement[] = [];
   segs.forEach((s, si) => {
     if (s.t === 'eq') {
       const fid = `${f.path}|${ui.cx.view}|${si}`;
       const head = si === 0 ? 0 : C, tail = si === segs.length - 1 ? 0 : C;
-      if (ui.cx.collapse && !ui.cx.unfolded.has(fid) && s.rows.length > head + tail + 2) {
+      const holdsTarget = s.rows.some((o) => isTarget(o[2]));
+      if (ui.cx.collapse && !ui.cx.unfolded.has(fid) && !holdsTarget && s.rows.length > head + tail + 2) {
         rows.push(...s.rows.slice(0, head).map(eq), button('fold', `⋯ ${s.rows.length - head - tail} unchanged lines`, { fold: fid }), ...s.rows.slice(s.rows.length - tail).map(eq));
       } else rows.push(...s.rows.map(eq));
       return;
@@ -542,11 +549,11 @@ function diffHtml(f: DiffFile): HTMLElement {
     const pair = (k: number): [CellParts, CellParts] => { const ai = s.dels[k], bi = s.adds[k]; return ai != null && bi != null && s.dels.length === s.adds.length ? wordHl(A[ai] ?? '', B[bi] ?? '') : [ai != null ? [A[ai] ?? ''] : [], bi != null ? [B[bi] ?? ''] : []]; };
     if (side) {
       for (let k = 0; k < n; k++) { const ai = s.dels[k], bi = s.adds[k]; const [ah, bh] = pair(k);
-        rows.push(rowOf('r', ln(ai != null ? ai + 1 : null), cell(`c ${ai != null ? 'del' : 'void'}`, ah), ln(bi != null ? bi + 1 : null), cell(`c ${bi != null ? 'add' : 'void'}`, bh))); }
+        rows.push(mark(rowOf('r', ln(ai != null ? ai + 1 : null), cell(`c ${ai != null ? 'del' : 'void'}`, ah), ln(bi != null ? bi + 1 : null), cell(`c ${bi != null ? 'add' : 'void'}`, bh)), bi)); }
     } else {
       const hs = Array.from({ length: n }, (_, k) => pair(k));
       s.dels.forEach((ai, k) => { rows.push(rowOf('r del', ln(ai + 1), ln(null), el('span', 'sg', '−'), cell('c', hs[k]?.[0] ?? []))); });
-      s.adds.forEach((bi, k) => { rows.push(rowOf('r add', ln(null), ln(bi + 1), el('span', 'sg', '+'), cell('c', hs[k]?.[1] ?? []))); });
+      s.adds.forEach((bi, k) => { rows.push(mark(rowOf('r add', ln(null), ln(bi + 1), el('span', 'sg', '+'), cell('c', hs[k]?.[1] ?? [])), bi)); });
     }
   });
   const node = el('div', `dfile${side ? '' : ' uni'}`);
@@ -693,16 +700,19 @@ function renderDiffPane(): void {
   const [a, b] = sidesOf(ui.cx.view);
   const versions = [sideOf(a, f.path), sideOf(b, f.path)];
   const message = (text: string): void => { body.replaceChildren(...notes, el('div', 'dempty', text)); body.scrollTop = 0; };
+  // The line a comment's link opened (ui.cx.line) waits while the file loads; any other draw of a
+  // file uses it up, so a later draw is at the top without a mark.
   if (versions.includes('loading')) return message('Loading…');
+  const messageUsingLine = (text: string): void => { ui.cx.line = null; message(text); };
   const failed = versions.find(isCxError);
-  if (failed) return message(`Could not load the file: ${failed.error}`);
+  if (failed) return messageUsingLine(`Could not load the file: ${failed.error}`);
   // Neither side is loading or failed: both are the file's versions.
   const read = versions.filter((v): v is FileVersion => v !== 'loading' && !isCxError(v));
   const unavailable = read.find((v): v is Extract<FileVersion, { kind: 'unavailable' }> => v.kind === 'unavailable');
-  if (unavailable) return message(unavailable.reason);
-  if (f.binary || read.some((v) => v.kind === 'binary')) return message('Binary file: not shown.');
-  if (read.some((v) => v.kind === 'too_large')) return message('Larger than 1 MiB: not shown.');
-  if (f.unavailable) return message('This file is not available.');
+  if (unavailable) return messageUsingLine(unavailable.reason);
+  if (f.binary || read.some((v) => v.kind === 'binary')) return messageUsingLine('Binary file: not shown.');
+  if (read.some((v) => v.kind === 'too_large')) return messageUsingLine('Larger than 1 MiB: not shown.');
+  if (f.unavailable) return messageUsingLine('This file is not available.');
   if (f.status === 'modified' && diffLayout() === 'side') {
     // A file is shown only once the index has an iteration.
     const index = cxIndexOf(state.cx);
@@ -713,7 +723,10 @@ function renderDiffPane(): void {
     notes.push(split);
   }
   body.replaceChildren(...notes, diffHtml({ path: f.path, a: `${a}|${f.path}`, b: `${b}|${f.path}` }));
-  body.scrollTop = 0;
+  ui.cx.line = null;
+  const marked = body.querySelector('#cx-line');
+  if (marked) marked.scrollIntoView({ block: 'center' });
+  else body.scrollTop = 0;
 }
 // The Changes screen: the empty states, else the tree, the divider and the diff pane, built once
 // and redrawn in place.
@@ -822,8 +835,9 @@ function fileStep(d: number): void {
   selectRow('f:' + n.path, false);
 }
 // Open the Changes screen on a file, at an iteration when that file changed in it (All changes
-// otherwise, decided once that iteration's list is read), the folders on the way opened.
-function openChanges(path: string | null | undefined, it: string | null | undefined): void {
+// otherwise, decided once that iteration's list is read), the folders on the way opened; with a
+// line (a last review comment's, of the new side), that file's next draw marks it and shows it.
+function openChanges(path: string | null | undefined, it: string | null | undefined, line: number | null = null): void {
   if (ui.job === null) return;
   ui.cx.q = '';
   let view: CxView = it ? Number(it) : 'all';
@@ -831,6 +845,7 @@ function openChanges(path: string | null | undefined, it: string | null | undefi
   if (state.cx.index !== null && !itersOf().some((x) => x.n === view)) view = 'all';
   ui.cx.view = view;
   ui.cx.check = path && view !== 'all' ? path : null;
+  ui.cx.line = path && line !== null ? { path, line } : null;
   if (path) { ui.cx.sel = path; for (const p of [...ui.cx.collapsed]) if (path.startsWith(p + '/')) ui.cx.collapsed.delete(p); }
   go(ui.job, 'changes');
 }
@@ -1579,12 +1594,13 @@ const splitPath = (path: string): [string, string] => {
   return at < 0 ? ['', path] : [path.slice(0, at), path.slice(at + 1)];
 };
 
-// A path that opens the Changes screen at that file and iteration (the prototype's pathLink).
-function pathLink(path: unknown, it: unknown): HTMLElement {
+// A path that opens the Changes screen at that file and iteration (the prototype's pathLink), and
+// with a line (a last review comment's) at that line.
+function pathLink(path: unknown, it: unknown, line?: number): HTMLElement {
   const text = String(path ?? '');
   const [dir, name] = splitPath(text);
-  const node = button('pathlink', '', { cfile: text, cit: it ? String(it) : '' });
-  node.setAttribute('title', `Open ${text} in Changes${it ? ` at iteration ${it}` : ''}`);
+  const node = button('pathlink', '', { cfile: text, cit: it ? String(it) : '', ...(line === undefined ? {} : { cline: String(line) }) });
+  node.setAttribute('title', `Open ${text} in Changes${it ? ` at iteration ${it}` : ''}${line === undefined ? '' : ` at line ${line}`}`);
   if (dir !== '') {
     node.append(el('span', 'd', `${dir}/`));
   }

@@ -31,8 +31,9 @@ const FIRST_VIEW: MainView = 'board';
 // Changes, cx as the prototype's: the view ('all' or an iteration), the selected file, the
 // tree's cursor and rows, the filter, the flat list, the closed folders, the diff layout ('side' or
 // 'uni', kept in localStorage), Collapse unchanged, the folds opened, the path a path link
-// opened, checked against its iteration's list once it is read, and whether the tree is open
-// (a phone folds it above the diff).
+// opened, checked against its iteration's list once it is read, whether the tree is open
+// (a phone folds it above the diff), and the file and new-side line a last review comment's link
+// opened, used by that file's next draw only.
 interface UiState {
   screen: string;
   job: string | null;
@@ -55,11 +56,12 @@ interface UiState {
     unfolded: Set<string>;
     check: string | null;
     tree: boolean;
+    line: { path: string; line: number } | null;
   };
 }
 const ui: UiState = {
   screen: FIRST_VIEW, job: null, ticket: null, opener: null, pending: false, sel: -1, open: new Set(), related: null,
-  cx: { view: 'all', sel: null, cursor: null, rows: [], q: '', flat: false, collapsed: new Set(), mode: 'side', collapse: true, unfolded: new Set(), check: null, tree: true },
+  cx: { view: 'all', sel: null, cursor: null, rows: [], q: '', flat: false, collapsed: new Set(), mode: 'side', collapse: true, unfolded: new Set(), check: null, tree: true, line: null },
 };
 
 // The URL hash of the view: none for FIRST_VIEW, #home or #board for the other main view,
@@ -110,7 +112,7 @@ function go(key: string, screen = 'stream', focus: 'composer' | 'stop' | undefin
   if (fresh) {
     ui.sel = -1;
     ui.open.clear();
-    ui.cx = { ...ui.cx, view: screen === 'changes' ? ui.cx.view : 'all', sel: screen === 'changes' ? ui.cx.sel : null, q: '', collapsed: new Set(), unfolded: new Set(), cursor: null, check: screen === 'changes' ? ui.cx.check : null, tree: true };
+    ui.cx = { ...ui.cx, view: screen === 'changes' ? ui.cx.view : 'all', sel: screen === 'changes' ? ui.cx.sel : null, q: '', collapsed: new Set(), unfolded: new Set(), cursor: null, check: screen === 'changes' ? ui.cx.check : null, tree: true, line: null };
   }
   if (screen !== 'changes') {
     byId('scrChanges').replaceChildren();
@@ -388,7 +390,8 @@ function onClick(event: MouseEvent): void {
       go(ui.job, target.dataset.goto);
     }
   } else if (target.dataset.cfile !== undefined) {
-    openChanges(target.dataset.cfile, target.dataset.cit || null);
+    const line = Number(target.dataset.cline);
+    openChanges(target.dataset.cfile, target.dataset.cit || null, Number.isInteger(line) && line >= 1 ? line : null);
   } else if (target.dataset.changes !== undefined) {
     ui.cx.sel = null;
     openChanges(null, target.dataset.changes);

@@ -370,6 +370,19 @@ test('changes client: a path link opens its file at its iteration, or at All cha
   assert.deepEqual([page.$('cxview').value, dpath(page)], ['2', 'src/app/main.ts']);
 });
 
+test('changes client (LR6-3): a path link without a line opens its file at the top, nothing marked', async () => {
+  const entries = [{ k: '1', ts: '2026-11-01T10:01:00.000Z', it: 3, who: 'factory', t: 'changes', files: 1, paths: ['src/app/main.ts'] }];
+  const page = await openChanges(job('awaiting_review'), (path) => (path === 'api/jobs/app/T-1/stream?from=0' ? { entries, next: 1, end: true } : api(path)), '');
+  const link = page.$('stream').querySelector('.pathlink')!;
+  assert.deepEqual([link.dataset.cline, link.getAttribute('title')], [undefined, 'Open src/app/main.ts in Changes at iteration 3']);
+  link.click();
+  await page.flush();
+  assert.deepEqual([page.$('cxview').value, dpath(page)], ['3', 'src/app/main.ts']);
+  const body = page.$('dbody');
+  assert.deepEqual([body.querySelectorAll('.dfile .r.target').length, body.querySelector('#cx-line'), body.scrollTop], [0, null, 0]);
+  assert.deepEqual([diffRows(page).length > 0, diffRows(page).filter((row) => row.scrolledIntoView > 0).length], [true, 0]);
+});
+
 test('changes client: no iteration yet says when the changes come; the divider resizes the tree with the pointer and the keyboard', async () => {
   const waiting = await openChanges(job('working', { iteration: 0, files: 0 }), (path) => (path === 'api/jobs/app/T-1/changes' ? { base: { ref: 'main', commit: null }, iterations: [] } : api(path)));
   assert.deepEqual([waiting.$('scrChanges').textContent, waiting.$('scrChanges').children.map((child) => (child as FakeElement).className)], [

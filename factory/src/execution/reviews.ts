@@ -492,7 +492,7 @@ export class ReviewsPart {
       const input = await this.#reviewInput(job, worktree, 'claude_review');
       method = input.recorded;
       outcome = await runReview(reviewPrompt(input), {
-        cwd: worktree, claudePath: this.#settings.config.claudePath, sandbox: this.#settings.config.sandbox, model: this.#settings.config.reviewModel,
+        cwd: worktree, claudePath: this.#settings.config.claudePath, sandbox: this.#settings.config.sandbox, model: this.#settings.config.reviewModel, effort: this.#settings.config.reviewEffort,
         pathDenials: (sessionTmp) => this.#pathDenials(job, worktree, sessionTmp),
         maxTurns: this.#settings.config.reviewMaxTurns, signal: running.controller.signal, images: this.imageRefs(job, input.task),
         // The session live in events.jsonl.
@@ -860,7 +860,7 @@ export class ReviewsPart {
       const worktree = job.worktree;
       const input = await this.#simplifyInput(job);
       outcome = await runSimplify(simplifyPrompt(input), {
-        cwd: worktree, claudePath: this.#settings.config.claudePath, sandbox: this.#settings.config.sandbox, model: this.#settings.config.reviewModel,
+        cwd: worktree, claudePath: this.#settings.config.claudePath, sandbox: this.#settings.config.sandbox, model: this.#settings.config.reviewModel, effort: this.#settings.config.reviewEffort,
         pathDenials: (sessionTmp) => this.#pathDenials(job, worktree, sessionTmp),
         maxTurns: this.#settings.config.reviewMaxTurns, signal: running.controller.signal, images: this.imageRefs(job, input.task),
         onMessage: (message) => this.#sessions.appendLive(job, 'review_message', redactor.reviewMessage(message), SIMPLIFIER),

@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { createHash } from 'node:crypto';
-import { claudeReviewDecision, fixSessionDecision, fixSessionSetting, loadConfig, smokeProbeAllow, stateDir } from '../src/config.js';
+import { claudeReviewDecision, fixSessionDecision, fixSessionSetting, loadConfig, reviewEffortSetting, smokeProbeAllow, stateDir } from '../src/config.js';
 import { FactoryError } from '../src/errors.js';
 
 const COMMAND = "node probe.mjs --canary '/t/sf-smoke-x/config/auth.env' > probe.json";
@@ -140,6 +140,24 @@ test('SF_FIX_SESSION (SF-316): default resume; resume, fresh and alternate are r
       assert.ok(error instanceof FactoryError);
       assert.equal(error.code, 'invalid_config');
       assert.equal(error.message, `SF_FIX_SESSION must be resume, fresh or alternate, got "${value}".`);
+      return true;
+    });
+  }
+});
+
+test('SF_REVIEW_EFFORT (SF-320): unset or empty gives high; low, medium, high, xhigh and max are kept; any other value is invalid_config at start, naming the setting', () => {
+  const base = { HOME: '/home/u', SF_STATE_DIR: '/tmp/sf-config-test-state' };
+  assert.equal(loadConfig(base).reviewEffort, 'high');
+  assert.equal(loadConfig({ ...base, SF_REVIEW_EFFORT: '' }).reviewEffort, 'high');
+  for (const value of ['low', 'medium', 'high', 'xhigh', 'max'] as const) {
+    assert.equal(loadConfig({ ...base, SF_REVIEW_EFFORT: value }).reviewEffort, value);
+    assert.equal(reviewEffortSetting({ SF_REVIEW_EFFORT: value }), value);
+  }
+  for (const value of ['extreme', 'High', ' high', '3']) {
+    assert.throws(() => loadConfig({ ...base, SF_REVIEW_EFFORT: value }), (error: unknown) => {
+      assert.ok(error instanceof FactoryError);
+      assert.equal(error.code, 'invalid_config');
+      assert.equal(error.message, `SF_REVIEW_EFFORT must be low, medium, high, xhigh or max, got "${value}".`);
       return true;
     });
   }

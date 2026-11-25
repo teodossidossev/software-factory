@@ -22,7 +22,7 @@ import * as z from 'zod/v4';
 import { writeFileAtomic } from './atomic.js';
 import { type BuildsOnRecord, buildsOnChain, buildsOnHolds, buildsOnTarget, chainLines, checkChain, type PreparedPoint, preparedPoint } from './builds-on.js';
 import { attachmentReferences, imageHashes, type ImageRef, type ResolvedImage, resolveImages, writeImages } from './attachments.js';
-import type { Config } from './config.js';
+import type { Config, ReviewEffort } from './config.js';
 import { taskStartBranch } from './continues.js';
 import { workspaceDecisionDocs } from './decisions.js';
 import { FactoryError } from './errors.js';
@@ -477,6 +477,8 @@ export interface CheckOptions {
   sandbox: SandboxSettings | undefined;
   // The review's model (SF_REVIEW_MODEL); undefined uses the user's default.
   model: string | undefined;
+  // The review's reasoning effort (SF_REVIEW_EFFORT); undefined passes none.
+  effort?: ReviewEffort | undefined;
   // SF_TASK_CHECK_MAX_TURNS.
   maxTurns: number;
   // SF_RULES_MAX_BYTES.
@@ -714,7 +716,7 @@ async function checkRecordOf(workspace: Workspace, ticket: string, task: string,
         });
       }
       outcome = await runStructuredSession(prompt, {
-        cwd, claudePath: options.claudePath, sandbox: options.sandbox, model: options.model, maxTurns: options.maxTurns,
+        cwd, claudePath: options.claudePath, sandbox: options.sandbox, model: options.model, effort: options.effort, maxTurns: options.maxTurns,
         pathDenials: async (sessionTmp) => ({ ...(await pathDenials({ session: 'task_check', workspace: workspace.name, checkout: workspace.workCheckout, sessionTmp,
           checkFolder: dirname(cwd), stateDir: options.stateDir, worktreeRoot: options.worktreeRoot, configDir: options.configDir })), hooks: undefined }),
         signal, images: refs,
@@ -773,12 +775,12 @@ export interface CheckView {
   check_reason: string | null;
 }
 
-// The check settings of a loaded Config: the review's executable, sandbox and model, the check's
+// The check settings of a loaded Config: the review's executable, sandbox, model and effort, the check's
 // turn limit and the directories off limits; with SF_TASK_CHECK_CODEX=auto, the Codex check's from
 // the gate's; followUp: SF_TASK_CHECK_FOLLOW_UP (TaskChecks uses it for its automatic checks only).
 export function checkSettings(config: Config, configDir: string): Omit<CheckOptions, 'signal' | 'onMessage'> {
   return {
-    claudePath: config.claudePath, sandbox: config.sandbox, model: config.reviewModel, maxTurns: config.taskCheckMaxTurns, rulesMaxBytes: config.rulesMaxBytes,
+    claudePath: config.claudePath, sandbox: config.sandbox, model: config.reviewModel, effort: config.reviewEffort, maxTurns: config.taskCheckMaxTurns, rulesMaxBytes: config.rulesMaxBytes,
     stateDir: config.stateDir, configDir, worktreeRoot: config.worktreeRoot, followUp: config.taskCheckFollowUp === true,
     ...(config.taskCheckCodex === 'auto' ? { codex: { gate: config.gate, model: config.codexModel, timeoutMs: config.gateTimeoutMs, maxTokens: config.gateMaxTokens } } : {}),
   };

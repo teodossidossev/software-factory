@@ -157,7 +157,7 @@ export class LastReviewStep {
       const [{ patch }, meta] = await Promise.all([this.#store.jobs.readIteration(workspace, ticket, iteration), this.#store.jobs.readMeta(workspace, ticket, iteration)]);
       const method = await skillMethod(this.#store.jobs.lastReviewSkillDir(workspace, ticket));
       outcome = await runLastReview(lastReviewPrompt({ ticket, iteration, task, patch, patchTruncated: meta.patch_truncated, method }), {
-        cwd: worktree, claudePath: config.claudePath, sandbox: config.sandbox, model: config.reviewModel, maxTurns: config.reviewMaxTurns, signal: run.controller.signal,
+        cwd: worktree, claudePath: config.claudePath, sandbox: config.sandbox, model: config.reviewModel, effort: config.reviewEffort, maxTurns: config.reviewMaxTurns, signal: run.controller.signal,
         pathDenials: (sessionTmp) => pathDenials({ session: 'job', workspace, checkout, worktree, stateDir: config.stateDir, worktreeRoot: config.worktreeRoot, sessionTmp }),
       });
     } catch (error) {

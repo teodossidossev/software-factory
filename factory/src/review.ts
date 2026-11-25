@@ -8,6 +8,7 @@ import { dirname, join, resolve } from 'node:path';
 import { type Options, query, type SandboxSettings, type SDKMessage, type SDKResultMessage, type SettingSource } from '@anthropic-ai/claude-agent-sdk';
 import * as z from 'zod/v4';
 import { type ImageRef, promptInput } from './attachments.js';
+import type { ReviewEffort } from './config.js';
 import { type DecisionDocs, reviewDecisionLines } from './decisions.js';
 import { type ClaudeTmp, makeSessionTmp, removeSessionTmp } from './host-tmp.js';
 import type { UserMessage } from './job-stream.js';
@@ -286,6 +287,9 @@ export interface ReviewOptions {
   claudePath: string | undefined;
   sandbox: SandboxSettings | undefined;
   model: string | undefined;
+  // The session's reasoning effort (SF_REVIEW_EFFORT for the sessions that judge code); undefined
+  // passes none: the model's default.
+  effort?: ReviewEffort | undefined;
   maxTurns: number;
   // Aborts the session (abort, reset, a newer review).
   signal: AbortSignal;
@@ -380,6 +384,7 @@ export function readOnlySessionOptions(
     },
     ...(sandbox !== undefined ? { sandbox } : {}),
     ...(options.model !== undefined ? { model: options.model } : {}),
+    ...(options.effort !== undefined ? { effort: options.effort } : {}),
     ...(options.claudePath !== undefined ? { pathToClaudeCodeExecutable: options.claudePath } : {}),
     ...(hooks !== undefined ? { hooks } : {}),
   };

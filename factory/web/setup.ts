@@ -194,8 +194,9 @@ function renderWorkspaces(): void {
   }));
   select.value = chosen;
   select.disabled = rows.length === 0;
-  byIdAs('ticket-create', 'button').disabled = rows.length === 0 || state.setupPending.has('ticket') || state.setupPending.has('ticket-images');
+  byIdAs('ticket-create', 'button').disabled = rows.length === 0 || state.setupPending.has('ticket') || state.setupPending.has('ticket-images') || state.setupPending.has('ticket-fill');
   byIdAs('ticket-plan', 'button').disabled = byIdAs('ticket-create', 'button').disabled;
+  byIdAs('ticket-fill', 'button').disabled = rows.length === 0 || state.setupPending.has('ticket-fill') || state.setupPending.has('ticket') || state.setupPending.has('ticket-images');
 }
 
 function renderArchived(): void {
@@ -518,6 +519,10 @@ async function removeWorkspace(name: string): Promise<void> {
 // plan: Create & plan, which then opens the planning conversation (main.ts) and the ticket's page;
 // Create too, for Claude Code in a workspace with auto_planner.
 async function submitTicket(plan = false): Promise<void> {
+  // A fill is out: nothing is checked or sent, and its Sending… stays.
+  if (state.setupPending.has('ticket-fill')) {
+    return;
+  }
   const workspace = byIdAs('ticket-workspace', 'select').value;
   const ticket = byIdAs('ticket-key', 'input').value.trim();
   const title = byIdAs('ticket-title', 'input').value.trim();
@@ -592,6 +597,39 @@ async function submitTicket(plan = false): Promise<void> {
   const outcome = describe(result);
   toast({ ...outcome, text: `${outcome.text}${uploaded.count > 0 ? ` ${counted(uploaded.count, 'image')} attached.` : ''}${note}` });
   finishTicketForm(submission, planned ? key : null);
+}
+
+// Fill from the issue: the issue read of the typed key (POST api/tickets/<ws>/<key>/import,
+// once at a time). An empty title gets the issue's; the request gets the issue's text, after
+// the words already typed with a blank line between. Only Create creates the ticket.
+async function fillTicketFromIssue(): Promise<void> {
+  const workspace = byIdAs('ticket-workspace', 'select').value;
+  const key = byIdAs('ticket-key', 'input').value.trim();
+  if (workspace === '' || key === '') {
+    setSetupStatus('ticket-status', { level: 'error', text: 'Type the issue key first (such as ABC-123), then press Fill from the issue.' });
+    return;
+  }
+  const result = await setupRequest('ticket-fill', `api/tickets/${jobPath(`${workspace}/${key}`)}/import`, {}, 'ticket-status', (data) => {
+    const images = fieldOf(data, 'images');
+    const count = Array.isArray(images) ? images.length : 0;
+    const them = count === 1 ? 'it' : 'them';
+    const note = count > 0 ? ` The issue has ${counted(count, 'image')} the factory cannot attach: the request lists ${them}; paste ${them} into this form or on the ticket's page.` : '';
+    return { level: 'ok', text: `Filled from ${key}: read the title and the request, then create the ticket.${note}` };
+  });
+  if (result === undefined) {
+    return;
+  }
+  // The fields as they are now: words typed while the issue was read stay.
+  const title = byIdAs('ticket-title', 'input');
+  const request = byIdAs('ticket-request', 'textarea');
+  const issueTitle = fieldOf(result, 'title');
+  const issueRequest = fieldOf(result, 'request');
+  if (typeof issueTitle === 'string' && title.value.trim() === '') {
+    title.value = issueTitle;
+  }
+  if (typeof issueRequest === 'string') {
+    request.value = request.value.trim() === '' ? issueRequest : `${request.value.trimEnd()}\n\n${issueRequest}`;
+  }
 }
 
 // Archive, restore or delete one ticket; one request per ticket at a time, the outcome in the

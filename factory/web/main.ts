@@ -312,6 +312,8 @@ function init(): void {
   });
   // Create & plan: the same create, then the planning conversation; Enter stays Create.
   byId('ticket-plan').addEventListener('click', () => void submitTicket(true));
+  // Fill from the issue: the typed key's issue fills the title and the request (setup.js).
+  byId('ticket-fill').addEventListener('click', () => void fillTicketFromIssue());
   // The Morning digest section: typed values stay until saved.
   byId('digest-form').addEventListener('submit', (event) => {
     event.preventDefault();

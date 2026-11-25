@@ -43,6 +43,7 @@ import { FactoryError } from './errors.js';
 import type { Digests } from './digest-run.js';
 import type { Execution } from './execution.js';
 import type { HealthMonitor } from './health.js';
+import type { ImportedIssue } from './issue-import.js';
 import type { RunQueue } from './queue.js';
 import { listen, LOOPBACK_HOST, sameSecret, sendJson, statusOf } from './http.js';
 import type { Job, JobState, JobStore } from './jobs.js';
@@ -172,6 +173,12 @@ export type DashboardChecks = Pick<TaskChecks, 'start' | 'view' | 'summary' | 's
 // rule: the rule at a usage limit's reset. force: the card's Start anyway;
 // withTicket: Save writes under the queue's lock of the ticket.
 export type DashboardQueue = Pick<RunQueue, 'view' | 'add' | 'remove' | 'move' | 'limit' | 'hold' | 'release' | 'rule' | 'force' | 'withTicket'>;
+
+// The issue read of New ticket (src/issue-import.ts importIssue): one Jira issue by the
+// workspace and its key, as the ticket's title, request and images.
+export interface DashboardIssues {
+  import(workspace: string, ticket: string): Promise<ImportedIssue>;
+}
 
 // A dashboard without a start screen (in-process tests of the endpoints that need none): the
 // lists are empty, every other call is refused with setup_unavailable.
@@ -331,12 +338,13 @@ function printableLogin(login: string): string {
 // event); planner: the planned ticket page's planner session, none without (the planner routes
 // answer an empty 404 and the page payload's planner_session is null); prototypes: the planners'
 // prototypes folder (src/prototypes.ts prototypesRoot), none without (the prototype routes answer
-// an empty 404 and a ticket's lists are empty).
+// an empty 404 and a ticket's lists are empty); issues: the issue read of New ticket, none without
+// (POST api/tickets/<ws>/<ticket>/import answers an empty 404).
 export async function startDashboard(
   port: number, stateDir: string, jobs: JobStore, actions: DashboardActions, setup: DashboardSetup = NO_SETUP,
-  { gate: gateOn = true, checks, queue, onWorkspacesChanged, digests, health, planner, prototypes, remoteOrigins = [], remoteLogins = [], remotePort = DEFAULT_DASHBOARD_REMOTE_PORT }: {
+  { gate: gateOn = true, checks, queue, onWorkspacesChanged, digests, health, planner, prototypes, issues, remoteOrigins = [], remoteLogins = [], remotePort = DEFAULT_DASHBOARD_REMOTE_PORT }: {
     gate?: boolean; checks?: DashboardChecks; queue?: DashboardQueue; onWorkspacesChanged?: () => void; digests?: DashboardDigests; health?: DashboardHealth; planner?: DashboardPlanner;
-    prototypes?: string;
+    prototypes?: string; issues?: DashboardIssues;
     remoteOrigins?: readonly string[]; remoteLogins?: readonly string[]; remotePort?: number;
   } = {},
 ): Promise<RunningDashboard> {
@@ -431,7 +439,7 @@ export async function startDashboard(
 
   // origin, the exact origin of the page, is known once the listener has its port.
   const ctx: DashboardContext = {
-    stateDir, gateOn, remoteOrigins, onWorkspacesChanged, jobs, actions, setup, checks, queue, digests, health, planner, prototypes, tokenText, cookies, files, streams,
+    stateDir, gateOn, remoteOrigins, onWorkspacesChanged, jobs, actions, setup, checks, queue, digests, health, planner, issues, prototypes, tokenText, cookies, files, streams,
     toolCalls, changes, history, stats, send, empty, body, refuseRead, jobsOf, origin: '',
   };
   const feed = changeFeed(ctx);
@@ -491,7 +499,7 @@ export async function startDashboard(
       }
     };
     const what = targetOf(path);
-    if (what.kind === 'action' || what.kind === 'workspace-remove' || what.kind === 'ticket-action' || what.kind === 'ticket-owner' || what.kind === 'ticket-chat' || what.kind === 'workspace-edit' || what.kind === 'digest-settings' || what.kind === 'digest-run' || what.kind === 'mr-job' || what.kind === 'pin' || what.kind === 'coordinator-request') {
+    if (what.kind === 'action' || what.kind === 'workspace-remove' || what.kind === 'ticket-action' || what.kind === 'ticket-owner' || what.kind === 'ticket-chat' || what.kind === 'workspace-edit' || what.kind === 'digest-settings' || what.kind === 'digest-run' || what.kind === 'mr-job' || what.kind === 'pin' || what.kind === 'coordinator-request' || what.kind === 'ticket-import') {
       if (req.method !== 'POST') {
         empty(res, 405, { allow: 'POST' });
         return;

@@ -7,7 +7,7 @@
 // context.
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Changes } from './changes.js';
-import type { DashboardActions, DashboardChecks, DashboardDigests, DashboardHealth, DashboardPlanner, DashboardQueue, DashboardSetup } from './dashboard.js';
+import type { DashboardActions, DashboardChecks, DashboardDigests, DashboardHealth, DashboardIssues, DashboardPlanner, DashboardQueue, DashboardSetup } from './dashboard.js';
 import type { jobsPayload, ToolCallCounter } from './dashboard-payloads.js';
 import { type JobKey, type JobRoute, postRoute, type QueueRoute } from './dashboard-routes.js';
 import { sameSecret } from './http.js';
@@ -27,9 +27,9 @@ export interface DashboardCookie {
 
 // Everything the dashboard's modules share for as long as it runs, built once by startDashboard.
 // The options: stateDir, gateOn (SF_GATE), remoteOrigins and onWorkspacesChanged; jobs, actions,
-// setup, checks, queue, digests, health, planner and prototypes as startDashboard got them (the
-// last six undefined without). tokenText and cookies: the token and the cookie of a token visit on each
-// side (the local name set once the listener has its port). files: the page's static files and
+// setup, checks, queue, digests, health, planner, issues and prototypes as startDashboard got them
+// (the last seven undefined without). tokenText and cookies: the token and the cookie of a token
+// visit on each side (the local name set once the listener has its port). files: the page's static files and
 // scripts by path. streams: the open event streams. toolCalls, changes, history and stats: the
 // readers with their caches. send, empty, body and refuseRead: the answers every module writes. jobsOf: the
 // jobs as api/jobs and the jobs events send them. origin: the exact origin of the page, set once
@@ -47,6 +47,7 @@ export interface DashboardContext {
   readonly digests: DashboardDigests | undefined;
   readonly health: DashboardHealth | undefined;
   readonly planner: DashboardPlanner | undefined;
+  readonly issues: DashboardIssues | undefined;
   readonly prototypes: string | undefined;
   readonly tokenText: string;
   readonly cookies: { local: DashboardCookie; remote: DashboardCookie };
@@ -146,6 +147,8 @@ export type Target =
   // (start); POST .../planner/stop (stop) ends it and POST .../planner/discuss (discuss) starts it
   // on the result of the ticket's job, both POST only.
   | { kind: 'ticket-planner'; workspace: string | undefined; ticket: string | undefined; action: 'start' | 'stop' | 'discuss' }
+  // The issue read of New ticket: POST api/tickets/<ws>/<ticket>/import, POST only.
+  | { kind: 'ticket-import'; workspace: string | undefined; ticket: string | undefined }
   // A request for the coordinator's status (a click on Zen's screen): POST
   // api/coordinator/request, POST only.
   | { kind: 'coordinator-request' }
@@ -189,6 +192,9 @@ export function targetOf(path: string[]): Target {
   }
   if (kind === 'tickets' && path.length === 5 && c === 'chat') {
     return { kind: 'ticket-chat', workspace: a, ticket: b };
+  }
+  if (kind === 'tickets' && path.length === 5 && c === 'import') {
+    return { kind: 'ticket-import', workspace: a, ticket: b };
   }
   if (kind === 'tickets' && path.length === 5 && c === 'check') {
     return { kind: 'ticket-check', workspace: a, ticket: b };

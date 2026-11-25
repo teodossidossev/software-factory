@@ -5,7 +5,8 @@
 // the drawer, and the Start of a ticket whose Task file is written, on its Queue card (SF-040);
 // New ticket's images (SF-064): paste and drop, the thumbnails and ×, the uploads after Create and
 // a failed one; the planner session of a ticket Claude Code plans (planner.js): Create & plan's
-// start, Start the planner, its lines and link, its read every 10 s, End.
+// start, Start the planner, its lines and link, its read every 10 s, End; New ticket's Fill from
+// the issue (SF-311-3).
 // Script checks, not browser acceptance: the manual steps are in factory/README.md.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
@@ -393,6 +394,83 @@ test('setup client: the new-ticket form posts the exact fields, clears on succes
   posts(page)[2]!.respond(200, created('web', 'W-8'));
   await page.flush();
   assert.equal(posts(page).length, 3);
+});
+
+test('setup client (SF-311-3): Fill from the issue posts the key once, keeps Create off meanwhile, fills an empty title and the request after the typed words; a refusal changes no field', async () => {
+  const page = await openPage([], [workspace('app'), workspace('web')], []);
+  const status = (): string => page.$('ticket-status').textContent;
+  const fields = (): string[] => [page.$('ticket-title').value, page.$('ticket-request').value];
+  const busy = (): boolean[] => [page.$('ticket-fill').disabled, page.$('ticket-create').disabled, page.$('ticket-plan').disabled];
+  const imported = 'Imported by the factory from ABC-123 (https://example.atlassian.net/browse/ABC-123).\n';
+  const answer = (images: unknown[], title = 'Export the report as CSV') => ({ ok: true, result: { ticket: 'ABC-123', title, request: imported, images } });
+  page.$('open-new-ticket').click();
+  page.$('ticket-workspace').value = 'web';
+  // II3-1: no key, nothing sent.
+  page.$('ticket-key').value = '  ';
+  page.$('ticket-fill').click();
+  await page.flush();
+  assert.equal(posts(page).length, 0);
+  assert.equal(status(), 'Type the issue key first (such as ABC-123), then press Fill from the issue.');
+  // II3-2: one read; while it runs the buttons are off, a second click and a submit send nothing.
+  page.$('ticket-key').value = ' ABC-123 ';
+  page.$('ticket-request').value = 'My words.';
+  page.$('ticket-fill').click();
+  await page.flush();
+  assert.equal(posts(page).length, 1);
+  assert.deepEqual([posts(page)[0]!.path, JSON.parse(posts(page)[0]!.body!)], ['api/tickets/web/ABC-123/import', {}]);
+  assert.deepEqual(busy(), [true, true, true]);
+  page.$('ticket-fill').click();
+  page.$('ticket-fill').dispatch('click');
+  page.$('ticket-form').dispatch('submit');
+  page.$('ticket-plan').dispatch('click');
+  await page.flush();
+  assert.equal(posts(page).length, 1);
+  assert.equal(status(), 'Sending…');
+  posts(page)[0]!.respond(200, answer([{ name: 'mockup.png', url: 'https://example.atlassian.net/x' }]));
+  await page.flush();
+  assert.deepEqual(fields(), ['Export the report as CSV', `My words.\n\n${imported}`]);
+  assert.equal(status(), 'Filled from ABC-123: read the title and the request, then create the ticket. The issue has 1 image the factory cannot attach: the request lists it; paste it into this form or on the ticket\'s page.');
+  assert.deepEqual(busy(), [false, false, false]);
+  assert.deepEqual([page.$('ticket-key').value, page.$('ticket-workspace').value, page.$('owner-chatgpt').checked], [' ABC-123 ', 'web', true]);
+  // II3-3: a typed title stays, an empty request becomes the issue's; no images, no images sentence.
+  page.$('ticket-title').value = 'Mine';
+  page.$('ticket-request').value = ' \n ';
+  page.$('ticket-fill').click();
+  await page.flush();
+  posts(page)[1]!.respond(200, answer([]));
+  await page.flush();
+  assert.deepEqual(fields(), ['Mine', imported]);
+  assert.equal(status(), 'Filled from ABC-123: read the title and the request, then create the ticket.');
+  // Words typed while the issue is read stay: the fields are read when the answer comes.
+  page.$('ticket-title').value = '';
+  page.$('ticket-request').value = '';
+  page.$('ticket-fill').click();
+  await page.flush();
+  page.$('ticket-title').value = 'Typed meanwhile';
+  page.$('ticket-request').value = 'Mine too.  \n';
+  posts(page)[2]!.respond(200, answer([{ name: 'a.png', url: 'https://example.atlassian.net/a' }, { name: 'b.png', url: 'https://example.atlassian.net/b' }], 'Not this'));
+  await page.flush();
+  assert.deepEqual(fields(), ['Typed meanwhile', `Mine too.\n\n${imported}`]);
+  assert.equal(status(), 'Filled from ABC-123: read the title and the request, then create the ticket. The issue has 2 images the factory cannot attach: the request lists them; paste them into this form or on the ticket\'s page.');
+  // II3-4: a refusal shows its code and message, and no field changes.
+  const before = fields();
+  page.$('ticket-fill').click();
+  await page.flush();
+  posts(page)[3]!.respond(403, { ok: false, error: { code: 'issue_import_refused', message: 'Not allowed by your Atlassian allowlist: issueIdOrKey=\'ABC-123\': project ABC is not allowed.' } });
+  await page.flush();
+  assert.equal(status(), 'issue_import_refused: Not allowed by your Atlassian allowlist: issueIdOrKey=\'ABC-123\': project ABC is not allowed.');
+  assert.deepEqual(fields(), before);
+  assert.deepEqual(busy(), [false, false, false]);
+  // II3-5: Create posts the filled title and request as the form holds them.
+  page.$('ticket-form').dispatch('submit');
+  await page.flush();
+  assert.equal(posts(page).length, 5);
+  assert.deepEqual([posts(page)[4]!.path, JSON.parse(posts(page)[4]!.body!)], ['api/tickets', { workspace: 'web', ticket: 'ABC-123', title: 'Typed meanwhile', request: `Mine too.\n\n${imported}`, owner: 'chatgpt' }]);
+  assert.equal(page.$('ticket-fill').disabled, true);
+  posts(page)[4]!.respond(200, created('web', 'ABC-123'));
+  await page.flush();
+  assert.equal(page.$('ticket-fill').disabled, false);
+  assert.deepEqual(page.requests.filter((request) => request.path.startsWith('http')), []);
 });
 
 // A ticket's planner session as the server shows it (planner_session, GET .../planner).

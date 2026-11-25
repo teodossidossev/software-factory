@@ -5125,7 +5125,10 @@ own words and the Context owner (*ChatGPT, in the browser*, the default, or *Cla
 **ticket skeleton** (SF-028), `.software-factory/<ticket>.md` in the checkout, through the Task
 file writer: the front matter (`ticket`, `title`, `base` = the branch `origin/HEAD` points at, else
 `main`), `# <ticket>: <title>` and `## Status: waiting for the Context owner` with one line of
-explanation. The user's words are **not** written into it: they are kept in the state directory
+explanation. *Fill from the issue* next to the ticket key posts `api/tickets/<ws>/<key>/import`
+(section Issue import) and fills an empty title and the request (after the words already typed, a
+blank line between); it creates nothing, a refusal changes no field, and Create is off while it
+runs. The user's words are **not** written into it: they are kept in the state directory
 (`<state dir>/requests/<workspace>/<ticket>.md`) and become the first message of the ticket's
 conversation. The Context owner is kept next to them, in `<state dir>/requests/<workspace>/<ticket>.owner`
 (`chatgpt` or `claude_code`); a missing file, or one with anything else in it, reads as `chatgpt`

@@ -100,13 +100,19 @@ Then, for every ticket:
    `tunnel | `.
 2. On the dashboard press **New ticket**: the workspace (`my-app`; the form starts on the one you
    last created a ticket in), the ticket key (`APP-12`), a one-line title, and what you want in
-   your own words; paste screenshots into the form if they help (Ctrl+V, or drop the files). The
-   Context owner is "ChatGPT, in the browser" (for Claude Code, see section 2). The short way:
-   press **Create & plan**. It creates the ticket (step 3) and does step 4 for you: a new tab opens
-   the ChatGPT conversation with the first message filled in, and the dashboard shows the ticket's
-   page. (When the message is too long for a link, or the browser blocks the tab, the dashboard
-   says so: open the conversation on the ticket's page, as in step 4.) The long way: press
-   *Create the ticket*, then steps 3 and 4.
+   your own words; paste screenshots into the form if they help (Ctrl+V, or drop the files). In a
+   workspace whose `issue_import` is on ([Configuration](configuration.md)), you may type only the
+   issue key and press **Fill from the issue**: the factory reads the issue from Jira through
+   Claude Code and your Atlassian allowlist hook (up to two minutes) and fills an empty title and
+   the request with the issue's title, its description and the comments that matter, marked as the
+   issue's own text. The issue's images are listed in the request by name with their links: paste
+   them into the form yourself. Read what was filled, then create the ticket. A key your hook or
+   the workspace does not allow is refused with the reason. The Context owner is "ChatGPT, in the
+   browser" (for Claude Code, see section 2). The short way: press **Create & plan**. It creates
+   the ticket (step 3) and does step 4 for you: a new tab opens the ChatGPT conversation with the
+   first message filled in, and the dashboard shows the ticket's page. (When the message is too
+   long for a link, or the browser blocks the tab, the dashboard says so: open the conversation on
+   the ticket's page, as in step 4.) The long way: press *Create the ticket*, then steps 3 and 4.
 3. The factory writes a **skeleton**: `.software-factory/APP-12.md` with the front matter
    (`ticket`, `title`, `base`: the branch `origin/HEAD` points at, else `main`), a heading and
    `## Status: waiting for the Context owner`. Your words are kept apart (in the state directory)

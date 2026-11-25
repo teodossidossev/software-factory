@@ -8,8 +8,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { type Job, type JobMr, type JobState, statesWith } from '../src/jobs.js';
+import type { LastReviewRecord } from '../src/last-review.js';
 import {
-  briefJobBody, type ChannelResult, digestNotification, healthNotification, jobNotification, jobPriority, limitResetNotification, type Notification, type NotifyConfig, NOTIFIED_STATES,
+  briefJobBody, type ChannelResult, digestNotification, healthNotification, jobNotification, jobPriority, lastReviewNote, limitResetNotification, type Notification, type NotifyConfig, NOTIFIED_STATES,
   NTFY_RETRY_MS, plannerNotification, sendNotification, stateNotifier, taskCheckNotification, testNotification,
 } from '../src/notify.js';
 import { type NotifyMode, saveRegistry, workspaceNotifyMode } from '../src/registry.js';
@@ -30,7 +31,7 @@ function job(state: JobState, extra: Partial<Job> = {}): Job {
 }
 
 const CONFIG: NotifyConfig = { desktop: true, iterations: true, ntfyUrl: undefined, ntfyToken: undefined };
-const NO_EVENTS = { appendEvent: async (): Promise<void> => undefined };
+const NO_EVENTS = { appendEvent: async (): Promise<void> => undefined, readLastReview: async () => undefined };
 
 // Records what was sent instead of sending it.
 function recorder(): { sent: Notification[]; send: (notification: Notification) => Promise<ChannelResult[]> } {
@@ -153,6 +154,66 @@ test('a part on its base that waits for the user is titled ready to submit, with
   await notify(job('ready_for_human_review', onBase), 'preparing_mr');
   assert.equal(sent.length, 1);
   assert.deepEqual([sent[0]!.title, sent[0]!.ntfyBody], ['T-1: ready to submit', 'app']);
+});
+
+const SKILL = { path: 'skill', sha256: 'f'.repeat(64), files: 1 };
+const reviewed = (count: number): LastReviewRecord => ({
+  reviewer: 'last_review', summary: 'Fine.', comments: Array.from({ length: count }, (_, index) => ({ id: `C${index + 1}`, path: 'src/a.ts', line: index + 1, text: 'Secret comment', kind: 'change' as const })),
+  dropped: 0, skill: SKILL, cost_usd: 0.1, model: 'opus', started_at: CREATED, ended_at: CREATED,
+});
+const FAILED: LastReviewRecord = { reviewer: 'last_review', error: 'The session ended: /home/me/app', timed_out: false, skill: null, started_at: CREATED, ended_at: CREATED };
+
+// A store whose iterations hold the given last reviews; a record of 'unreadable' fails to read.
+function reviews(records: Record<number, LastReviewRecord | 'unreadable'>, reads: number[] = []) {
+  return {
+    appendEvent: async (): Promise<void> => undefined,
+    readLastReview: async (_workspace: string, _ticket: string, number: number): Promise<LastReviewRecord | undefined> => {
+      reads.push(number);
+      const record = records[number];
+      if (record === 'unreadable') {
+        throw new SyntaxError('Unexpected token');
+      }
+      return record;
+    },
+  };
+}
+
+test('lastReviewNote: the count of comments, one comment, a failure, nothing without a record', () => {
+  assert.equal(lastReviewNote(reviewed(3)), 'last review: 3 comments');
+  assert.equal(lastReviewNote(reviewed(1)), 'last review: 1 comment');
+  assert.equal(lastReviewNote(reviewed(0)), 'last review: 0 comments');
+  assert.equal(lastReviewNote(FAILED), 'last review failed');
+  assert.equal(lastReviewNote(undefined), undefined);
+});
+
+test('stateNotifier (LR5-4): handed_over and ready_for_human_review end their first line with the iteration\'s last review, keeping three lines; without a record, unreadable or in another state the body is as before; brief ntfy stays the brief one; off reads and sends nothing', async () => {
+  const lines = ['feat(T-1): Title', '2 files changed', 'a fourth line'];
+  const reads: number[] = [];
+  const { sent, send } = recorder();
+  const notify = stateNotifier(CONFIG, reviews({ 2: reviewed(3), 3: FAILED, 5: 'unreadable', 6: reviewed(1) }, reads), async (workspace) => (workspace === 'brief' ? 'brief' : workspace === 'quiet' ? 'off' : 'full'), send);
+  // Off: nothing sent, and the record is not read.
+  await notify(job('handed_over', { workspace: 'quiet', iteration: 7 }), 'preparing_mr', lines);
+  await notify(job('handed_over'), 'preparing_mr', lines);
+  await notify(job('ready_for_human_review', { iteration: 3 }), 'preparing_mr', lines);
+  await notify(job('handed_over', { iteration: 4 }), 'preparing_mr', lines);
+  await notify(job('handed_over', { iteration: 5 }), 'preparing_mr', lines);
+  await notify(job('needs_human', { iteration: 6 }), 'working');
+  await notify(job('handed_over', { workspace: 'brief', iteration: 6 }), 'preparing_mr', lines);
+  assert.deepEqual(reads, [2, 3, 4, 5, 6]);
+  assert.deepEqual(sent.map((note) => note.body.split('\n')), [
+    [`in your checkout on ${BRANCH} · last review: 3 comments`, 'feat(T-1): Title', '2 files changed'],
+    [`branch: ${BRANCH} · last review failed`, 'feat(T-1): Title', '2 files changed'],
+    jobNotification(job('handed_over'), lines).body.split('\n'),
+    jobNotification(job('handed_over'), lines).body.split('\n'),
+    jobNotification(job('needs_human', { iteration: 6 })).body.split('\n'),
+    [`in your checkout on ${BRANCH} · last review: 1 comment`, 'feat(T-1): Title', '2 files changed'],
+  ]);
+  // Neither the comments' text nor the error goes out.
+  for (const note of sent) {
+    assert.equal(note.body.includes('Secret comment') || note.body.includes('/home/me'), false);
+  }
+  assert.equal(sent[5]!.ntfyBody, 'brief');
+  assert.equal(sent.slice(0, 5).every((note) => note.ntfyBody === undefined), true);
 });
 
 test('sendNotification: ntfy sends ntfyBody with the title, priority and tags; the desktop shows the full body', async () => {

@@ -352,6 +352,18 @@ test('lineEntries: changes after a publish (working or preparing_mr to awaiting_
   assert.deepEqual((await build({ iteration: 4, state: { from: 'working', to: 'awaiting_review' } }, files)).map((entry) => entry.t), ['state']);
 });
 
+test('lineEntries (LR5-2): a last review is one entry with its count of comments or its error, never their text; an ignored one is a factory note', async () => {
+  assert.deepEqual(await one({ type: 'last_review', comments: 2 }), { t: 'last_review', who: 'claude', comments: 2, error: null, k: '7', ts: TS, it: 2 });
+  assert.deepEqual(await one({ type: 'last_review', comments: 0, error: 'The session ended: no answer.', timed_out: true }), {
+    t: 'last_review', who: 'claude', comments: 0, error: 'The session ended: no answer.', k: '7', ts: TS, it: 2,
+  });
+  // A count or an error of another type: 0 and null.
+  assert.deepEqual(await one({ type: 'last_review', comments: '3', error: 5 }), { t: 'last_review', who: 'claude', comments: 0, error: null, k: '7', ts: TS, it: 2 });
+  assert.deepEqual(await one({ type: 'last_review', comments: 2, ignored: true }), {
+    t: 'note', who: 'factory', text: 'last review: 2 comments (ignored: the job had moved on)', k: '7', ts: TS, it: 2,
+  });
+});
+
 test('lineEntries: simplify with its suggestions and saves; notes with their who; it from the record, at least 1; a line not JSON gives nothing', async () => {
   const simplify: SimplifyRecord = {
     reviewer: 'simplify', summary: 'S.', dropped: [], cost_usd: null, model: null, started_at: TS, ended_at: TS,

@@ -3,7 +3,8 @@
 // Stream screen (#last-review): the review's note, then the comments neither sent nor dismissed by
 // kind (changes, questions, follow-ups), each with its id, its file:line, its text, Send and
 // Dismiss, with Send chosen and Dismiss all for several at once; a failed review its error. It is
-// drawn again only when what it shows changed. A classic script, loaded in order with defer,
+// drawn again only when what it shows changed. Also the job card's count of the comments and the
+// Stream line's jump to the panel. A classic script, loaded in order with defer,
 // sharing the page's globals with the others. This file has no import or export on purpose: the
 // compiler keeps it a script, so its top-level names stay the page's globals.
 'use strict';
@@ -212,6 +213,8 @@ function renderLastReview(): void {
   const focused = active !== null && panel.contains(active) && hasDataset(active) ? active.dataset : {};
   const top = panel.scrollTop;
   panel.replaceChildren(lastReviewBlock(shown.key, shown.job, shown.view));
+  // Focusable, for the Stream's line that leads here (lastReviewJump).
+  panel.setAttribute('tabindex', '-1');
   panel.hidden = false;
   panel.scrollTop = top;
   lrDrawn = signature;
@@ -221,10 +224,38 @@ function renderLastReview(): void {
     .find((node) => (lr !== undefined && node.dataset.lr === lr) || (lrpick !== undefined && node.dataset.lrpick === lrpick))?.focus();
 }
 
+// The job card's count of the last review's comments still shown (the row's last_review), while
+// the job waits for the user and there is at least one: "Review: N comment(s)". A click on it
+// opens the job, as any click on the card does.
+function lastReviewCardLine(job: JobRow): HTMLElement[] {
+  const comments = job.last_review?.comments;
+  if (!WAITING_STATES.includes(job.state) || typeof comments !== 'number' || comments < 1) {
+    return [];
+  }
+  return [el('div', 'meta note', `Review: ${counted(comments, 'comment')}`)];
+}
+
+// The Stream's line of a last review (data-lr panel:<iteration>): the panel into view and focused
+// when it shows that iteration's review (a failed one too), else a toast that it is gone.
+function lastReviewJump(iteration: string): void {
+  const shown = lastReviewShown();
+  const panel = byId('last-review');
+  if (shown === null || panel.hidden || String(shown.view.iteration) !== iteration) {
+    toast({ level: 'info', text: "The last review's comments are no longer shown: the job moved on." });
+    return;
+  }
+  panel.scrollIntoView({ block: 'nearest' });
+  panel.focus();
+}
+
 // A click on Send, Send chosen, Dismiss or Dismiss all (data-lr: send:<id>, send-chosen,
 // dismiss:<id>, dismiss-all): posts the ids it names, among those shown, with the iteration of the
-// view shown, when its button is on.
+// view shown, when its button is on; or on the Stream's line of a last review (panel:<iteration>).
 function lastReviewAct(value: string): void {
+  if (value.startsWith('panel:')) {
+    lastReviewJump(value.slice('panel:'.length));
+    return;
+  }
   const shown = lastReviewShown();
   if (shown === null || shown.view.error !== null) {
     return;

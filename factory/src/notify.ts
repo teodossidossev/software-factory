@@ -12,6 +12,7 @@ import { pushedBranch } from './continues.js';
 import { withoutHostTokens } from './forge.js';
 import type { Job, JobState, JobStore } from './jobs.js';
 import { now, statesWith } from './jobs.js';
+import type { LastReviewRecord } from './last-review.js';
 import { localTime } from './local-time.js';
 import { HANDOFF_OFF_CODE, type NotifyMode } from './registry.js';
 import { type CheckRecord, recordCounts, recordVerdict } from './task-check.js';
@@ -102,8 +103,11 @@ export function notifiedStates(config: NotifyConfig): readonly JobState[] {
 // The notification for a job that reached state (or whose merge request was opened or merged);
 // extra: the MR title and link (or the merge request's) when pushed, the
 // sensitive, out-of-scope and deleted paths of the iteration. A part whose change is on its base
-// and that waits for the user is titled ready to submit (src/builds-on.ts sitsOnPart).
-export function jobNotification(job: Job, extra: string[] = []): Notification {
+// and that waits for the user is titled ready to submit (src/builds-on.ts sitsOnPart); lastReview:
+// the note of the iteration's last review (lastReviewNote), appended to the first body line of
+// handed_over and ready_for_human_review as " · <note>".
+export function jobNotification(job: Job, extra: string[] = [], lastReview?: string): Notification {
+  const withNote = (line: string): string => (lastReview === undefined ? line : `${line} · ${lastReview}`);
   // A chain that went on by itself after a turn limit says so in one line.
   const turnLimit = turnLimitLine(job);
   const lines = turnLimit !== undefined ? [turnLimit, ...extra] : extra;
@@ -141,7 +145,7 @@ export function jobNotification(job: Job, extra: string[] = []): Notification {
     // The changes wait in the user's checkout; extra holds the MR title and the file lines.
     return {
       title: readyToSubmit ? `${job.ticket}: ready to submit` : `${job.ticket}: in your checkout`,
-      body: [`in your checkout on ${job.branch}`, ...(job.error !== undefined ? [`${job.error.code}: ${job.error.message}`] : []), ...lines].slice(0, 3).join('\n'),
+      body: [withNote(`in your checkout on ${job.branch}`), ...(job.error !== undefined ? [`${job.error.code}: ${job.error.message}`] : []), ...lines].slice(0, 3).join('\n'),
       priority: jobPriority(job.state),
       tags: 'eyes',
     };
@@ -150,7 +154,8 @@ export function jobNotification(job: Job, extra: string[] = []): Notification {
   // setting the user chose is not news, and the files line stays in the body.
   const skipped = job.state === 'ready_for_human_review' && job.handoff_skipped !== undefined && job.handoff_skipped.code !== HANDOFF_OFF_CODE ? [job.handoff_skipped.message] : [];
   // A pushed job names the branch it pushed (src/continues.ts).
-  const body = [`branch: ${job.state === 'pushed' ? pushedBranch(job) : job.branch}`, ...(job.error !== undefined ? [`${job.error.code}: ${job.error.message}`] : []), ...skipped, ...lines].slice(0, 3);
+  const branch = `branch: ${job.state === 'pushed' ? pushedBranch(job) : job.branch}`;
+  const body = [job.state === 'ready_for_human_review' ? withNote(branch) : branch, ...(job.error !== undefined ? [`${job.error.code}: ${job.error.message}`] : []), ...skipped, ...lines].slice(0, 3);
   // A pushed job's merge request on the Git host names the title once it is opened or merged.
   const mr = job.state === 'pushed' && job.mr !== null && job.mr !== undefined ? job.mr : undefined;
   return {
@@ -340,13 +345,27 @@ export async function sendNotification(notification: Notification, config: Notif
   return Promise.all([desktop(notification, config), ntfy(notification, config)]);
 }
 
+// The notification's note of a last review (iterations/NNN/last-review.json): its count of
+// comments, or that it failed; undefined without a record.
+export function lastReviewNote(record: LastReviewRecord | undefined): string | undefined {
+  if (record === undefined) {
+    return undefined;
+  }
+  return 'error' in record ? 'last review failed' : `last review: ${record.comments.length} comment${record.comments.length === 1 ? '' : 's'}`;
+}
+
+// The states whose notification carries the last review's note.
+const LAST_REVIEW_STATES: readonly JobState[] = ['handed_over', 'ready_for_human_review'];
+
 // The listener behind Execution's onStateChange: notifies for the user's states and records each
 // failed channel in the job's events.jsonl. Iterations (awaiting_review) are silent unless
-// SF_NOTIFY_ITERATIONS=on. The workspace's notify setting is asked for each notification: off sends
-// nothing, brief sends ntfy one line (briefJobBody). The promise settles when every channel is done
-// (a job's runner waits for it before it exits); it never rejects.
+// SF_NOTIFY_ITERATIONS=on. A job reaching handed_over or ready_for_human_review has its iteration's
+// last review counted on the body's first line (lastReviewNote; a record that cannot be read counts
+// as none, as the notification is best-effort). The workspace's notify setting is asked for each
+// notification: off sends nothing, brief sends ntfy one line (briefJobBody). The promise settles
+// when every channel is done (a job's runner waits for it before it exits); it never rejects.
 export function stateNotifier(
-  config: NotifyConfig, jobs: Pick<JobStore, 'appendEvent'>, notifyModeOf: NotifyModeOf, send: typeof sendNotification = sendNotification,
+  config: NotifyConfig, jobs: Pick<JobStore, 'appendEvent' | 'readLastReview'>, notifyModeOf: NotifyModeOf, send: typeof sendNotification = sendNotification,
 ): (job: Job, from: JobState | null, lines?: string[]) => Promise<void> {
   const states = notifiedStates(config);
   return (job, _from, lines) => {
@@ -354,7 +373,11 @@ export function stateNotifier(
       return Promise.resolve();
     }
     return (async () => {
-      const notification = withNotifyMode(jobNotification(job, lines), await notifyModeOf(job.workspace), briefJobBody(job));
+      const mode = await notifyModeOf(job.workspace);
+      // Off sends nothing: the record is not read.
+      const record = mode !== 'off' && LAST_REVIEW_STATES.includes(job.state)
+        ? await jobs.readLastReview(job.workspace, job.ticket, job.iteration).catch(() => undefined) : undefined;
+      const notification = withNotifyMode(jobNotification(job, lines, lastReviewNote(record)), mode, briefJobBody(job));
       if (notification === undefined) {
         return;
       }

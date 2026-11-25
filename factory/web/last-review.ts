@@ -113,7 +113,7 @@ function lastReviewSendChosen(node: HTMLButtonElement, sendOff: string, chosen: 
   lastReviewOff(node, sendOff !== '' ? sendOff : chosen === 0 ? LR_NONE_CHOSEN : '');
 }
 
-// One comment: its box, id, file:line (opening Changes at the file), text, Send and Dismiss.
+// One comment: its box, id, file:line (opening Changes at that line), text, Send and Dismiss.
 function lastReviewItem(comment: LastReviewComment, chosen: readonly string[], sendOff: string, dismissOff: string): HTMLElement {
   const node = el('li', 'finding');
   node.dataset.id = comment.id;
@@ -122,7 +122,7 @@ function lastReviewItem(comment: LastReviewComment, chosen: readonly string[], s
   pick.checked = chosen.includes(comment.id);
   pick.dataset.lrpick = comment.id;
   pick.setAttribute('aria-label', `Choose ${comment.id}`);
-  const path = pathLink(comment.path, null);
+  const path = pathLink(comment.path, null, comment.line);
   path.append(el('span', 'lrline', `:${comment.line}`));
   const problem = el('div', 'problem');
   problem.append(...prose(comment.text));

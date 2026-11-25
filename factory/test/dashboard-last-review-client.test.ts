@@ -4,8 +4,9 @@
 // (the ids and the iteration they post), when their buttons are off and why, a failed review and
 // one with no comment left, the dismiss outcome, and that a jobs event that changes nothing the
 // panel shows leaves it as it is (its node, its scroll, the focus on a box); and (SF-309-5) the job
-// card's count of the comments and the Stream's one line that leads to the panel. Script checks,
-// not browser acceptance.
+// card's count of the comments and the Stream's one line that leads to the panel; and (SF-309-6) a
+// comment's file:line that opens the Changes screen at that line, once. Script checks, not
+// browser acceptance.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { served, servedDetail } from './support/dashboard-client.js';
@@ -55,8 +56,9 @@ function detail(row: Job, lastReview: unknown, omit = false) {
 type Detail = ReturnType<typeof detail>;
 
 // The page with the job open on its Stream; hold.detail set leaves the next detail reads pending;
-// entries: the Stream's one page (none: its read stays pending).
-async function openJob(shown: Detail, hold = { detail: false }, entries?: unknown[]): Promise<Page> {
+// entries: the Stream's one page (none: its read stays pending); more: the other routes (the
+// Changes screen's).
+async function openJob(shown: Detail, hold = { detail: false }, entries?: unknown[], more: (path: string) => unknown = () => undefined): Promise<Page> {
   const page = await loadPage(STATIC_DIR, (path) => {
     if (path === 'api/jobs') {
       return { jobs: [shown.job] };
@@ -67,7 +69,7 @@ async function openJob(shown: Detail, hold = { detail: false }, entries?: unknow
     if (entries !== undefined && path === 'api/jobs/app/T-1/stream?from=0') {
       return { entries, next: entries.length, end: true };
     }
-    return undefined;
+    return more(path);
   });
   page.location.hash = '#app/T-1';
   page.document.dispatch('DOMContentLoaded');
@@ -355,4 +357,119 @@ test('Stream (LR5-3): a failed last review\'s line names the error\'s first line
   button.click();
   await page.flush();
   assert.deepEqual([panel(page).scrolledIntoView, page.document.activeElement === panel(page), page.$('toast').hidden], [1, true, true]);
+});
+
+// The change of iteration 1 as the Changes routes serve it. src/app.ts has 60 lines, 5
+// and 55 changed: its unchanged lines 6 to 54 fold to "⋯ 43 unchanged lines". src/other.ts has 3.
+const numbered = (count: number, change: Record<number, string> = {}): string => Array.from({ length: count }, (_, at) => change[at + 1] ?? `line ${at + 1}`).join('\n') + '\n';
+const changed = (path: string) => ({ path, status: 'modified', additions: 1, deletions: 1, binary: false, unavailable: false });
+const SIDES: Record<string, string> = {
+  'base|src/app.ts': numbered(60), '1|src/app.ts': numbered(60, { 5: 'five', 55: 'fifty-five' }),
+  'base|src/other.ts': numbered(3), '1|src/other.ts': numbered(3, { 2: 'two' }),
+};
+// held: the paths left pending (the test answers them).
+function changesRoute(path: string, held: ReadonlySet<string> = new Set()): unknown {
+  if (held.has(path)) {
+    return undefined;
+  }
+  if (path === 'api/jobs/app/T-1/changes') {
+    return { base: { ref: 'main', commit: 'a1'.repeat(20) }, iterations: [{ n: 1, ended_at: 'x', truncated: false, base_commit: 'a1'.repeat(20) }] };
+  }
+  if (path === 'api/jobs/app/T-1/changes?from=base&to=1') {
+    return { files: [changed('src/app.ts'), changed('src/other.ts')], more: false };
+  }
+  const side = /^api\/jobs\/app\/T-1\/file\?at=(\w+)(?:&of=\d+)?&path=(.*)$/.exec(path);
+  const text = side === null ? undefined : SIDES[`${side[1]}|${decodeURIComponent(side[2]!)}`];
+  return text === undefined ? undefined : { kind: 'text', text };
+}
+const AT_LINES = [
+  comment('C1', 'change', 'src/app.ts', 40, 'Guard null'),
+  comment('C2', 'change', 'src/app.ts', 55, 'Rename'),
+  comment('C3', 'change', 'src/app.ts', 61, 'Past the end'),
+  comment('C4', 'question', 'README.md', 1, 'Not in the change'),
+];
+const openAtLines = (held?: ReadonlySet<string>): Promise<Page> => openJob(detail(job(), view({ comments: AT_LINES })), { detail: false }, [], (path) => changesRoute(path, held));
+const linkOf = (page: Page, id: string): FakeElement => panel(page).querySelectorAll('li.finding').find((item) => item.dataset.id === id)!.querySelector('.pathlink')!;
+const dbody = (page: Page): FakeElement => page.$('dbody');
+const marked = (page: Page): FakeElement[] => dbody(page).querySelectorAll('.dfile .r.target');
+const folds = (page: Page): string[] => dbody(page).querySelectorAll('.fold').map((node) => node.textContent);
+const dpath = (page: Page): string => page.$('dtool').querySelector('.dpath')!.textContent;
+const treeRow = (page: Page, id: string): FakeElement => page.$('tlist').querySelectorAll('.trow').find((row) => row.dataset.trow === id)!;
+
+async function follow(page: Page, id: string): Promise<void> {
+  linkOf(page, id).click();
+  await page.flush();
+}
+
+test('last review panel (LR6-1): a comment\'s file:line opens Changes at All changes, its file selected, the new side\'s line marked and in view, its unchanged run unfolded, in both layouts', async () => {
+  const page = await openAtLines();
+  const link = linkOf(page, 'C1');
+  assert.deepEqual([link.textContent, link.dataset.cfile, link.dataset.cit, link.dataset.cline, link.getAttribute('title')], ['src/app.ts:40', 'src/app.ts', '', '40', 'Open src/app.ts in Changes at line 40']);
+  await follow(page, 'C1');
+  assert.deepEqual([page.location.hash, page.$('cxview').value, dpath(page)], ['#app/T-1/changes', 'all', 'src/app.ts']);
+  const [row, ...more] = marked(page);
+  assert.equal(more.length, 0);
+  // Side by side: the new side's number is the row's third cell; the run 6 to 54 is not folded.
+  assert.deepEqual([row!.id, (row!.children[2] as FakeElement).textContent, row!.textContent, row!.scrolledIntoView], ['cx-line', '40', '40line 4040line 40', 1]);
+  assert.deepEqual(folds(page), []);
+  // Side by side, a changed line: its row's third cell, the new side's number.
+  page.key('s');
+  await follow(page, 'C2');
+  assert.deepEqual(marked(page).map((node) => [node.id, (node.children[2] as FakeElement).textContent, node.textContent, node.scrolledIntoView]), [['cx-line', '55', '55line 5555fifty-five', 1]]);
+  // Unified: a changed line, its added row marked (its second cell), the run 6 to 54 folded again.
+  page.$('dtool').querySelector('[data-mode="uni"]')!.click();
+  await page.flush();
+  assert.deepEqual([marked(page).length, folds(page)], [0, ['⋯ 43 unchanged lines']]);
+  page.key('s');
+  await follow(page, 'C2');
+  const added = marked(page);
+  assert.deepEqual(added.map((node) => [node.className, node.id, (node.children[1] as FakeElement).textContent, node.textContent, node.scrolledIntoView]), [['r add target', 'cx-line', '55', '55+fifty-five', 1]]);
+  // An unchanged line in unified: its second cell.
+  page.key('s');
+  await follow(page, 'C1');
+  assert.deepEqual(marked(page).map((node) => [(node.children[1] as FakeElement).textContent, node.textContent]), [['40', '4040line 40']]);
+  assert.deepEqual(folds(page), []);
+});
+
+test('last review panel (LR6-2): the line is used once: another file, coming back, or the layout switch draws at the top without a mark, the run folded as before', async () => {
+  const page = await openAtLines();
+  await follow(page, 'C1');
+  assert.equal(marked(page).length, 1);
+  dbody(page).scrollTop = 500;
+  treeRow(page, 'f:src/other.ts').click();
+  await page.flush();
+  assert.deepEqual([dpath(page), marked(page).length, dbody(page).scrollTop], ['src/other.ts', 0, 0]);
+  dbody(page).scrollTop = 500;
+  treeRow(page, 'f:src/app.ts').click();
+  await page.flush();
+  assert.deepEqual([dpath(page), marked(page).length, dbody(page).querySelector('#cx-line'), folds(page), dbody(page).scrollTop], ['src/app.ts', 0, null, ['⋯ 43 unchanged lines'], 0]);
+  page.$('dtool').querySelector('[data-mode="uni"]')!.click();
+  await page.flush();
+  assert.deepEqual([marked(page).length, dbody(page).scrollTop], [0, 0]);
+
+  // Another file chosen while the line's file loads: it is drawn without a mark, and so is the
+  // line's file once its sides come.
+  const held = new Set(['api/jobs/app/T-1/file?at=base&of=1&path=src%2Fapp.ts', 'api/jobs/app/T-1/file?at=1&path=src%2Fapp.ts']);
+  const slow = await openAtLines(held);
+  await follow(slow, 'C1');
+  assert.deepEqual([dpath(slow), dbody(slow).textContent], ['src/app.ts', 'Loading…']);
+  treeRow(slow, 'f:src/other.ts').click();
+  await slow.flush();
+  assert.deepEqual([dpath(slow), marked(slow).length], ['src/other.ts', 0]);
+  for (const request of slow.requests.filter((sent) => held.has(sent.path))) {
+    request.respond(200, changesRoute(request.path));
+  }
+  await slow.flush();
+  treeRow(slow, 'f:src/app.ts').click();
+  await slow.flush();
+  assert.deepEqual([dpath(slow), marked(slow).length, folds(slow)], ['src/app.ts', 0, ['⋯ 43 unchanged lines']]);
+});
+
+test('last review panel (LR6-4): a line past the file\'s end selects the file and marks nothing; a path not in the change marks nothing; both at the top', async () => {
+  const page = await openAtLines();
+  await follow(page, 'C3');
+  assert.deepEqual([page.$('cxview').value, dpath(page), marked(page).length, dbody(page).querySelector('#cx-line'), folds(page), dbody(page).scrollTop], ['all', 'src/app.ts', 0, null, ['⋯ 43 unchanged lines'], 0]);
+  page.key('s');
+  await follow(page, 'C4');
+  assert.deepEqual([page.$('cxview').value, dpath(page), marked(page).length, dbody(page).querySelector('#cx-line'), dbody(page).scrollTop], ['all', 'src/app.ts', 0, null, 0]);
 });

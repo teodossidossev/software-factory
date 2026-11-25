@@ -9,6 +9,26 @@ onto the base, with the MR text as its message. Nothing is pushed yet. You get a
 the job is either **handed over** to your checkout (`handed_over`, the default) or waits in
 **`ready_for_human_review`** (hand-over off, or refused).
 
+## The last review's comments
+
+In a workspace with a [`last_review_skill`](configuration.md#the-workspace-registry-workspacesjson),
+a last, advisory review reads the clean change the way your skill says and leaves comments, each on
+a file and line, and one note.
+
+- **Where they wait.** While the job waits for you at the iteration it reviewed, its comments are
+  in the panel at the top of the job's Stream: the note first, then the comments grouped by kind
+  (changes, questions, follow-ups), each with its id, its `file:line` and its text.
+- **`file:line`** opens the Changes screen at *All changes*, at that file, with that line marked and
+  in view (its unchanged lines unfolded). The mark is for that one view: another file, or coming
+  back to it, shows the file from its top.
+- **Send** (one comment, or **Send chosen** for the ticked ones) sends them to the Implementer as
+  your own message; on a handed-over job it is [Ask for changes](#ask-for-changes). The usual rounds
+  follow: a turn, then the reviews.
+- **Dismiss** (one, or **Dismiss all**) drops them; nothing is sent.
+- Nothing of the last review goes into the MR text.
+- A last review that failed or ran out of time shows as such in the panel, without buttons, and
+  changes nothing: the job goes on as without it.
+
 ## 1. The hand-over to your checkout
 
 With hand-over on, the factory puts the job's result into the workspace's checkout, the one open in

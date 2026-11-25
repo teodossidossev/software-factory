@@ -121,11 +121,43 @@ rule changes, change it here, through a pull request like any other change.
   handover) gets a follower in the background at once:
   `~/.local/share/sf-coordinator/follow-job.sh -w <ws> <ticket> -- '<verification>'`. It waits for
   the job's next stop, runs the verification in the checkout when the job is handed over (for a
-  product repository: the changed Cypress specs against the local backend, a flaky one three
-  times), and tells the user on the Coordinator card and the desktop. Never leave a job waiting
+  product repository: the e2e specs of the changed area against the local backend, as "Product
+  tickets" below says, a flaky one three times), and tells the user on the Coordinator card and
+  the desktop. Never leave a job waiting
   for the user's next message: a nightly fix sent back at 22:00 sat unverified all night
   (2026-11-18). Say in the reply that the follower runs and what it will check.
 - Stop the queue when the user says so; start nothing new until the user says to go on.
+
+## Product tickets
+
+From a retrospective of 20 product-frontend jobs (2026-11-25): most of what people had to redo
+came from the Task itself or from e2e specs nobody ran.
+
+- **Read the rules first.** Before writing a Task, read the repository's `AGENTS.md` and the
+  convention of the area at the Task's base, and the workspace rules. A Task never prescribes
+  what they forbid: held or delayed backend answers, look or API checks in e2e specs, a spec for a
+  model or a helper with one tested caller, a Markdown edit.
+- **Root cause first.** A Task that prescribes a guard, a stub, a cache, a new shared component or
+  any workaround names the root cause and the existing piece it does not reuse. A fix away from
+  the root cause is the user's decision, asked before the Task is written.
+- **Conventions are not a notebook.** No Task edits the repository's shared conventions or
+  `AGENTS.md` to record project state. A convention change is its own ticket that the user
+  approves.
+- **Messages follow the same rules.** What you send into a running job (`sf say`, `sf quickfix`)
+  is held to the rules a Task file is. Before you tell a job that its change broke a spec, run the
+  spec on the base as well (`baseline-on-master.sh`).
+- **Run the e2e specs of the changed area before the hand-over** (`cy-on-checkout.sh`, one run at
+  a time): the changed specs, every spec that uses a changed steps, stubs or support file, and the
+  whole `forms` group when a form's template, styles or layout change. The results go into the MR
+  text's Testing section, in place of "Not checked".
+- **Clean the MR text at the hand-over**: no process talk ("the user decided", review findings,
+  the coordinator, iterations).
+- **One merge request per ticket in review at a time.** The reviewer dislikes several at once: the
+  next one opens after the first merges. A change over 30 files is split before its job starts.
+- **Work by hand gets the same reviews.** A change you make in the checkout yourself goes through
+  the Codex gate and the last-review skill before the user commits it.
+- **A CI fix starts from origin.** Fetch first, then list origin's new commits and the open merge
+  requests that touch the failing spec: a colleague may already be fixing it.
 
 ## Reviewing a job locally
 

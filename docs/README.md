@@ -5,6 +5,7 @@ The index of `docs/`. Start with the [user guide](guide/README.md).
 | Location | Contents |
 | --- | --- |
 | [guide/](guide/README.md) | The user guide: concepts, install, configuration, planning, running jobs, review and merge, stops, operations, ways of working |
+| [architecture/](architecture/README.md) | The architectural map: the parts and roles, the workflows, the job lifecycle, security, data flows, how the tests are guaranteed |
 | [adr/](adr/) | Architecture decision records since SF-011; each one's `status` says whether it still holds |
 | [design/SF-011-factory.md](design/SF-011-factory.md) | The SF-011 design of the factory (historical) |
 | [design/SF-036-reviewers.md](design/SF-036-reviewers.md) | The SF-036 design of the reviewers and factory-owned Git (historical) |
